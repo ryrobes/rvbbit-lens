@@ -1,0 +1,521 @@
+"use client"
+
+import { useEffect, useState } from "react"
+import { Activity, CaretRight, ChevronDown, Database, Plug, Plus } from "@/lib/icons"
+import { cn } from "@/lib/utils"
+import {
+  FONT_SCALE_LABELS,
+  MONO_OPTIONS,
+  SANS_OPTIONS,
+  type FontScale,
+  type MonoFont,
+  type SansFont,
+} from "@/lib/desktop/fonts"
+import type { WorkspaceId } from "@/lib/desktop/types"
+import { WORKSPACE_IDS } from "@/lib/desktop/state-store"
+
+interface ConnectionSummary {
+  id: string
+  label: string
+  database: string
+  hasRvbbit: boolean
+}
+
+interface DesktopMenuBarProps {
+  connections: ConnectionSummary[]
+  activeConnectionId: string | null
+  onSelectConnection: (id: string) => void
+  onOpenConnections: () => void
+  onOpenFinder: () => void
+  onOpenSqlScratch: () => void
+  onOpenSystemObjects: () => void
+  onOpenPgMonitor: () => void
+  onOpenNotifications: () => void
+  onOpenExtensions: () => void
+  onOpenRvbbitCache: () => void
+  onOpenOperators: () => void
+  onOpenSpecialists: () => void
+  onOpenRouting: () => void
+  onOpenMcpServers: () => void
+  onOpenCapabilities: () => void
+  onOpenCosts: () => void
+  onOpenWarren: () => void
+  onOpenQueryLens: () => void
+  onOpenKgBrowser: () => void
+  onOpenKgExtractionRuns: () => void
+  onOpenKgMergeReview: () => void
+  onOpenKgExplorer: () => void
+  onOpenViewApps: () => void
+  onPickWallpaper: () => void
+  onClearWallpaper: () => void
+  onOpenPalette: () => void
+  onSetTheme: (mode: "dark" | "light") => void
+  themeMode: "dark" | "light"
+  onToggleLineage: () => void
+  lineageVisible: boolean
+  onUndo: () => void
+  onRedo: () => void
+  canUndo: boolean
+  canRedo: boolean
+  sansFont: SansFont
+  monoFont: MonoFont
+  fontScale: FontScale
+  onSetSansFont: (font: SansFont) => void
+  onSetMonoFont: (font: MonoFont) => void
+  onSetFontScale: (scale: FontScale) => void
+  hasWallpaper: boolean
+  hasRvbbit: boolean
+  busy?: boolean
+  activeWorkspace: WorkspaceId
+  /** Ids of workspaces that currently hold at least one window. */
+  workspaceOccupancy: Set<WorkspaceId>
+  onSwitchWorkspace: (id: WorkspaceId) => void
+}
+
+// ── Entry / Submenu shape ───────────────────────────────────────────
+
+interface MenuEntryAction {
+  kind?: "action"
+  label: string
+  onClick: () => void
+  disabled?: boolean
+  /** Optional right-aligned hint like "⌘Z" */
+  shortcut?: string
+  /** Optional check mark for radio-style menus. */
+  selected?: boolean
+}
+
+interface MenuEntrySubmenu {
+  kind: "submenu"
+  label: string
+  /** Optional right-aligned label, e.g. the currently-selected value. */
+  value?: string
+  items: MenuEntry[]
+}
+
+interface MenuEntrySeparator {
+  kind: "separator"
+}
+
+type MenuEntry = MenuEntryAction | MenuEntrySubmenu | MenuEntrySeparator
+
+export function DesktopMenuBar({
+  connections,
+  activeConnectionId,
+  onSelectConnection,
+  onOpenConnections,
+  onOpenFinder,
+  onOpenSqlScratch,
+  onOpenSystemObjects,
+  onOpenPgMonitor,
+  onOpenNotifications,
+  onOpenExtensions,
+  onOpenRvbbitCache,
+  onOpenOperators,
+  onOpenSpecialists,
+  onOpenRouting,
+  onOpenMcpServers,
+  onOpenCapabilities,
+  onOpenCosts,
+  onOpenWarren,
+  onOpenQueryLens,
+  onOpenKgBrowser,
+  onOpenKgExtractionRuns,
+  onOpenKgMergeReview,
+  onOpenKgExplorer,
+  onOpenViewApps,
+  onPickWallpaper,
+  onClearWallpaper,
+  onOpenPalette,
+  onSetTheme,
+  themeMode,
+  onToggleLineage,
+  lineageVisible,
+  onUndo,
+  onRedo,
+  canUndo,
+  canRedo,
+  sansFont,
+  monoFont,
+  fontScale,
+  onSetSansFont,
+  onSetMonoFont,
+  onSetFontScale,
+  hasWallpaper,
+  hasRvbbit,
+  busy,
+  activeWorkspace,
+  workspaceOccupancy,
+  onSwitchWorkspace,
+}: DesktopMenuBarProps) {
+  const active = connections.find((c) => c.id === activeConnectionId) ?? null
+
+  // Auto-dismiss any open <details> dropdown when the user clicks
+  // outside of it — matches every other desktop menu bar, and stops
+  // left-behind menus from blocking other clicks.
+  useEffect(() => {
+    function close(e: MouseEvent) {
+      const target = e.target as HTMLElement | null
+      if (!target) return
+      if (target.closest("details[open]")) return
+      document.querySelectorAll("details[open]").forEach((d) => d.removeAttribute("open"))
+    }
+    document.addEventListener("mousedown", close, true)
+    return () => document.removeEventListener("mousedown", close, true)
+  }, [])
+
+  // ── File menu ────────────────────────────────────────────────────
+  const fileItems: MenuEntry[] = [
+    { label: "New SQL window", onClick: onOpenSqlScratch, shortcut: "⌘N" },
+    { label: "Open Finder", onClick: onOpenFinder, shortcut: "⌘F" },
+    { label: "View Apps", onClick: onOpenViewApps },
+  ]
+
+  // ── Edit menu ────────────────────────────────────────────────────
+  const editItems: MenuEntry[] = [
+    { label: "Undo", onClick: onUndo, disabled: !canUndo, shortcut: "⌘Z" },
+    { label: "Redo", onClick: onRedo, disabled: !canRedo, shortcut: "⇧⌘Z" },
+  ]
+
+  // ── Database menu ────────────────────────────────────────────────
+  const databaseItems: MenuEntry[] = [
+    { label: "Connections...", onClick: onOpenConnections },
+    { label: "Postgres Monitor", onClick: onOpenPgMonitor },
+    { label: "Notification Center", onClick: onOpenNotifications },
+    { label: "System Objects", onClick: onOpenSystemObjects },
+    { label: "Extensions", onClick: onOpenExtensions },
+    ...(hasRvbbit
+      ? [
+          { label: "Rvbbit Cache", onClick: onOpenRvbbitCache },
+          { label: "Costs", onClick: onOpenCosts },
+          { label: "Operator Studio", onClick: onOpenOperators },
+          { label: "Specialists", onClick: onOpenSpecialists },
+          { label: "Adaptive Routing", onClick: onOpenRouting },
+          { label: "MCP Servers", onClick: onOpenMcpServers },
+          { label: "Capabilities", onClick: onOpenCapabilities },
+          { label: "Warren", onClick: onOpenWarren },
+          { label: "Query Lens", onClick: onOpenQueryLens },
+          { label: "Knowledge Graph", onClick: onOpenKgBrowser },
+          { label: "KG · Extraction Runs", onClick: onOpenKgExtractionRuns },
+          { label: "KG · Merge Review", onClick: onOpenKgMergeReview },
+          { label: "KG · Graph Explorer", onClick: onOpenKgExplorer },
+        ]
+      : []),
+  ]
+
+  // ── Desktop menu ─────────────────────────────────────────────────
+  const desktopItems: MenuEntry[] = [
+    { label: "Set wallpaper...", onClick: onPickWallpaper },
+    ...(hasWallpaper ? [{ kind: "action" as const, label: "Clear wallpaper", onClick: onClearWallpaper }] : []),
+    { label: "Palette...", onClick: onOpenPalette },
+    {
+      label: themeMode === "dark" ? "Switch to light theme" : "Switch to dark theme",
+      onClick: () => onSetTheme(themeMode === "dark" ? "light" : "dark"),
+    },
+    {
+      label: lineageVisible ? "Hide dependency lines" : "Show dependency lines",
+      onClick: onToggleLineage,
+    },
+    { kind: "separator" },
+    {
+      kind: "submenu",
+      label: "Font",
+      items: [
+        {
+          kind: "submenu",
+          label: "Sans family",
+          value: SANS_OPTIONS[sansFont].label,
+          items: (Object.keys(SANS_OPTIONS) as SansFont[]).map((key) => ({
+            label: SANS_OPTIONS[key].label,
+            onClick: () => onSetSansFont(key),
+            selected: key === sansFont,
+          })),
+        },
+        {
+          kind: "submenu",
+          label: "Mono family",
+          value: MONO_OPTIONS[monoFont].label,
+          items: (Object.keys(MONO_OPTIONS) as MonoFont[]).map((key) => ({
+            label: MONO_OPTIONS[key].label,
+            onClick: () => onSetMonoFont(key),
+            selected: key === monoFont,
+          })),
+        },
+        {
+          kind: "submenu",
+          label: "Size",
+          value: FONT_SCALE_LABELS[fontScale],
+          items: (Object.keys(FONT_SCALE_LABELS) as FontScale[]).map((key) => ({
+            label: FONT_SCALE_LABELS[key],
+            onClick: () => onSetFontScale(key),
+            selected: key === fontScale,
+          })),
+        },
+      ],
+    },
+  ]
+
+  return (
+    <header
+      className="pointer-events-auto fixed top-0 left-0 right-0 z-50 flex h-8 items-center justify-between border-b border-chrome-border bg-chrome-bg/90 px-3 text-[12px] text-chrome-text backdrop-blur"
+      style={{ WebkitAppRegion: "drag" } as React.CSSProperties}
+    >
+      <div className="flex items-center gap-3" style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}>
+        <span className="font-semibold tracking-tight text-foreground">rvbbit-lens</span>
+        <span className="text-chrome-text/60">·</span>
+        <MenuPane label="File" items={fileItems} />
+        <MenuPane label="Edit" items={editItems} />
+        <MenuPane label="Database" items={databaseItems} />
+        <MenuPane label="Desktop" items={desktopItems} />
+      </div>
+
+      <div className="flex items-center gap-2" style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}>
+        {busy ? <Activity className="h-3.5 w-3.5 animate-pulse text-main" /> : null}
+        <WorkspaceSwitcher
+          activeWorkspace={activeWorkspace}
+          occupancy={workspaceOccupancy}
+          onSwitch={onSwitchWorkspace}
+        />
+        <span className="text-chrome-text/30">·</span>
+        {hasRvbbit ? (
+          <span className="rounded-full border border-rvbbit-accent/60 bg-rvbbit-bg/40 px-2 py-0.5 text-[10px] uppercase tracking-wide text-rvbbit-accent">
+            rvbbit
+          </span>
+        ) : null}
+        <ConnectionPicker
+          connections={connections}
+          active={active}
+          onSelect={onSelectConnection}
+          onManage={onOpenConnections}
+        />
+      </div>
+    </header>
+  )
+}
+
+// ── Top-level dropdown ─────────────────────────────────────────────
+
+function MenuPane({ label, items }: { label: string; items: MenuEntry[] }) {
+  return (
+    <details className="group relative">
+      <summary className="cursor-pointer list-none rounded px-2 py-0.5 text-chrome-text hover:bg-foreground/[0.05] hover:text-foreground">
+        {label}
+      </summary>
+      <div className="absolute left-0 top-full z-50 mt-1 w-56 rounded-md border border-chrome-border bg-chrome-bg p-1 shadow-xl">
+        <MenuEntryList items={items} closeAncestor={(el) => {
+          const root = el.closest("details")
+          if (root) (root as HTMLDetailsElement).open = false
+        }} />
+      </div>
+    </details>
+  )
+}
+
+// ── Recursive entry list (handles separators + submenus) ───────────
+
+function MenuEntryList({
+  items,
+  closeAncestor,
+}: {
+  items: MenuEntry[]
+  closeAncestor: (el: HTMLElement) => void
+}) {
+  return (
+    <>
+      {items.map((item, i) => {
+        if ((item as MenuEntrySeparator).kind === "separator") {
+          return <div key={`sep-${i}`} className="my-1 border-t border-chrome-border/60" />
+        }
+        if ((item as MenuEntrySubmenu).kind === "submenu") {
+          const sub = item as MenuEntrySubmenu
+          return (
+            <SubmenuEntry key={sub.label} entry={sub} closeAncestor={closeAncestor} />
+          )
+        }
+        const a = item as MenuEntryAction
+        return (
+          <button
+            key={a.label}
+            type="button"
+            disabled={a.disabled}
+            className={cn(
+              "flex w-full items-center justify-between gap-3 rounded px-2 py-1.5 text-left text-[12px] text-chrome-text",
+              a.disabled
+                ? "cursor-not-allowed opacity-40"
+                : "hover:bg-foreground/[0.06] hover:text-foreground",
+            )}
+            onClick={(e) => {
+              if (a.disabled) return
+              a.onClick()
+              closeAncestor(e.currentTarget)
+            }}
+          >
+            <span className="flex items-center gap-2 truncate">
+              {a.selected ? <span className="text-main">✓</span> : <span className="w-2" />}
+              <span className="truncate">{a.label}</span>
+            </span>
+            {a.shortcut ? (
+              <span className="text-[10px] text-chrome-text/70">{a.shortcut}</span>
+            ) : null}
+          </button>
+        )
+      })}
+    </>
+  )
+}
+
+function SubmenuEntry({
+  entry,
+  closeAncestor,
+}: {
+  entry: MenuEntrySubmenu
+  closeAncestor: (el: HTMLElement) => void
+}) {
+  // Explicit hover state per entry. The earlier CSS approach used a
+  // named `group/sub` shared across nesting levels — Tailwind's
+  // group-hover matches *any* same-named ancestor, so hovering the
+  // parent "Font" row opened all three child popovers at once. A
+  // local useState keyed to this exact wrapper has no such collision.
+  const [open, setOpen] = useState(false)
+  return (
+    <div
+      className="relative"
+      onMouseEnter={() => setOpen(true)}
+      onMouseLeave={() => setOpen(false)}
+    >
+      <button
+        type="button"
+        className={cn(
+          "flex w-full items-center justify-between rounded px-2 py-1.5 text-left text-[12px]",
+          open ? "bg-foreground/[0.06] text-foreground" : "text-chrome-text hover:bg-foreground/[0.06] hover:text-foreground",
+        )}
+      >
+        <span className="flex items-center gap-2 truncate">
+          <span className="w-2" />
+          <span className="truncate">{entry.label}</span>
+        </span>
+        <span className="flex items-center gap-1">
+          {entry.value ? (
+            <span className="max-w-[100px] truncate text-[10px] text-chrome-text/70">{entry.value}</span>
+          ) : null}
+          <CaretRight className="h-3 w-3 opacity-60" />
+        </span>
+      </button>
+      {/* Side popover. left-full sits it flush to the right edge; the
+          -4px margin overlaps slightly so the cursor never crosses a
+          dead gap between row and popover. */}
+      {open ? (
+        <div className="absolute left-full top-0 z-50 ml-[-4px] w-52 rounded-md border border-chrome-border bg-chrome-bg p-1 shadow-xl">
+          <MenuEntryList items={entry.items} closeAncestor={closeAncestor} />
+        </div>
+      ) : null}
+    </div>
+  )
+}
+
+// ── Workspace switcher (5 desktops) ────────────────────────────────
+
+function WorkspaceSwitcher({
+  activeWorkspace,
+  occupancy,
+  onSwitch,
+}: {
+  activeWorkspace: WorkspaceId
+  occupancy: Set<WorkspaceId>
+  onSwitch: (id: WorkspaceId) => void
+}) {
+  return (
+    <div
+      className="flex items-center gap-0.5 rounded border border-chrome-border bg-secondary-background/60 p-0.5"
+      title="Workspaces — Alt+1…5"
+    >
+      {WORKSPACE_IDS.map((id) => {
+        const isActive = id === activeWorkspace
+        const occupied = occupancy.has(id)
+        return (
+          <button
+            key={id}
+            type="button"
+            onClick={() => onSwitch(id)}
+            aria-pressed={isActive}
+            title={`Workspace ${id}${occupied ? "" : " (empty)"}`}
+            className={cn(
+              "relative h-5 w-5 rounded text-[11px] font-medium tabular-nums transition-colors",
+              isActive
+                ? "bg-main text-main-foreground"
+                : occupied
+                  ? "text-foreground hover:bg-foreground/[0.08]"
+                  : "text-chrome-text/45 hover:bg-foreground/[0.06] hover:text-chrome-text",
+            )}
+          >
+            {id}
+            {occupied && !isActive ? (
+              <span className="absolute bottom-0.5 left-1/2 h-[3px] w-[3px] -translate-x-1/2 rounded-full bg-main" />
+            ) : null}
+          </button>
+        )
+      })}
+    </div>
+  )
+}
+
+function ConnectionPicker({
+  connections,
+  active,
+  onSelect,
+  onManage,
+}: {
+  connections: ConnectionSummary[]
+  active: ConnectionSummary | null
+  onSelect: (id: string) => void
+  onManage: () => void
+}) {
+  return (
+    <details className="group relative">
+      <summary className="flex cursor-pointer list-none items-center gap-1.5 rounded border border-chrome-border bg-secondary-background px-2 py-0.5 text-foreground hover:bg-foreground/[0.06]">
+        <Plug className="h-3.5 w-3.5 text-main" />
+        <span className="max-w-[200px] truncate">
+          {active ? `${active.label} · ${active.database}` : "No connection"}
+        </span>
+        <ChevronDown className="h-3 w-3 opacity-70" />
+      </summary>
+      <div className="absolute right-0 top-full z-50 mt-1 w-72 rounded-md border border-chrome-border bg-chrome-bg p-1 shadow-xl">
+        {connections.length === 0 ? (
+          <div className="px-2 py-2 text-[11px] text-chrome-text/70">No saved connections.</div>
+        ) : null}
+        {connections.map((c) => (
+          <button
+            key={c.id}
+            type="button"
+            className={cn(
+              "flex w-full items-center justify-between rounded px-2 py-1.5 text-left text-[12px] hover:bg-foreground/[0.06]",
+              c.id === active?.id ? "text-foreground bg-foreground/[0.04]" : "text-chrome-text",
+            )}
+            onClick={() => onSelect(c.id)}
+          >
+            <span className="flex items-center gap-1.5">
+              <Database className="h-3.5 w-3.5" />
+              <span className="truncate">{c.label}</span>
+              <span className="text-chrome-text/60">·</span>
+              <span className="truncate text-chrome-text/80">{c.database}</span>
+            </span>
+            {c.hasRvbbit ? (
+              <span className="rounded-full bg-rvbbit-accent/20 px-1.5 py-0.5 text-[9px] uppercase tracking-wide text-rvbbit-accent">
+                ae
+              </span>
+            ) : null}
+          </button>
+        ))}
+        <div className="my-1 border-t border-chrome-border" />
+        <button
+          type="button"
+          onClick={onManage}
+          className="flex w-full items-center gap-1.5 rounded px-2 py-1.5 text-left text-[12px] text-main hover:bg-foreground/[0.06]"
+        >
+          <Plus className="h-3.5 w-3.5" />
+          Manage connections...
+        </button>
+      </div>
+    </details>
+  )
+}

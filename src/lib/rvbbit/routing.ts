@@ -1,0 +1,660 @@
+"use client"
+
+/**
+ * Client-side model for rvbbit's adaptive query router — the system that
+ * picks one of six execution engines for a SELECT against an rvbbit
+ * columnar table, based on the query's shape and a trained profile.
+ *
+ * Surfaces (see rvbbit docs/RVBBIT_ROUTING_UI.md):
+ *   - route_decisions / route_executions — online telemetry (paths taken)
+ *   - route_observations                 — forced benchmark timings (training input)
+ *   - route_profiles / route_profile_entries / route_profile_points — the trained model
+ *   - route_*_summary views              — pre-rolled aggregates
+ *   - route_explain(sql)                 — explain a route without running the query
+ */
+
+// ── Engines ─────────────────────────────────────────────────────────
+
+export type EngineId =
+  | "rvbbit_native"
+  | "duck_vector"
+  | "duck_hive"
+  | "datafusion_vector"
+  | "datafusion_hive"
+  | "pg_rowstore"
+
+export interface EngineMeta {
+  id: EngineId
+  label: string
+  color: string
+  blurb: string
+}
+
+/** The six candidate engines, in router-display order. */
+export const ENGINES: EngineMeta[] = [
+  {
+    id: "rvbbit_native",
+    label: "native",
+    color: "var(--chart-5)",
+    blurb: "PostgreSQL executor over rvbbit native rewrites & custom scans",
+  },
+  {
+    id: "duck_vector",
+    label: "duck",
+    color: "var(--chart-3)",
+    blurb: "DuckDB over authoritative rvbbit parquet row groups",
+  },
+  {
+    id: "duck_hive",
+    label: "duck hive",
+    color: "var(--chart-2)",
+    blurb: "DuckDB over hive-partitioned parquet variants",
+  },
+  {
+    id: "datafusion_vector",
+    label: "datafusion",
+    color: "var(--chart-1)",
+    blurb: "DataFusion over authoritative rvbbit parquet row groups",
+  },
+  {
+    id: "datafusion_hive",
+    label: "datafusion hive",
+    color: "var(--info)",
+    blurb: "DataFusion over hive-partitioned parquet variants",
+  },
+  {
+    id: "pg_rowstore",
+    label: "pg rowstore",
+    color: "var(--chart-4)",
+    blurb: "PostgreSQL rowstore over a retained shadow heap",
+  },
+]
+
+export function engineMeta(id: string): EngineMeta {
+  return (
+    ENGINES.find((e) => e.id === id) ?? {
+      id: id as EngineId,
+      label: id || "unknown",
+      color: "var(--chrome-text)",
+      blurb: "",
+    }
+  )
+}
+
+/**
+ * Older candidate aliases (`duck`, `datafusion`, `native`, `df_hive`,
+ * `pg_heap`) may surface in legacy profile JSON or scripts. Normalize
+ * to the canonical six before storing in UI state.
+ */
+const CANDIDATE_ALIASES: Record<string, EngineId> = {
+  duck: "duck_vector",
+  datafusion: "datafusion_vector",
+  native: "rvbbit_native",
+  df_hive: "datafusion_hive",
+  pg_heap: "pg_rowstore",
+}
+
+export function normalizeCandidate(s: string | null | undefined): string {
+  if (!s) return ""
+  return CANDIDATE_ALIASES[s] ?? s
+}
+
+/** A per-engine timing map. `null` = not measured / unsupported / failed. */
+export type EngineMs = Record<EngineId, number | null>
+
+function engineMsFromRow(r: Record<string, unknown>): EngineMs {
+  return {
+    rvbbit_native: numOrNull(r.native_ms),
+    duck_vector: numOrNull(r.duck_ms),
+    duck_hive: numOrNull(r.duck_hive_ms),
+    datafusion_vector: numOrNull(r.datafusion_ms),
+    datafusion_hive: numOrNull(r.datafusion_hive_ms),
+    pg_rowstore: numOrNull(r.pg_ms),
+  }
+}
+
+function engineMediansFromRow(r: Record<string, unknown>): EngineMs {
+  return {
+    rvbbit_native: numOrNull(r.native_median_ms),
+    duck_vector: numOrNull(r.duck_median_ms),
+    duck_hive: numOrNull(r.duck_hive_median_ms),
+    datafusion_vector: numOrNull(r.datafusion_median_ms),
+    datafusion_hive: numOrNull(r.datafusion_hive_median_ms),
+    pg_rowstore: numOrNull(r.pg_median_ms),
+  }
+}
+
+function engineObservationsFromRow(r: Record<string, unknown>): Record<EngineId, number | null> {
+  return {
+    rvbbit_native: numOrNull(r.native_observations),
+    duck_vector: numOrNull(r.duck_observations),
+    duck_hive: numOrNull(r.duck_hive_observations),
+    datafusion_vector: numOrNull(r.datafusion_observations),
+    datafusion_hive: numOrNull(r.datafusion_hive_observations),
+    pg_rowstore: numOrNull(r.pg_observations),
+  }
+}
+
+// ── Row types ───────────────────────────────────────────────────────
+
+export interface RouteDecision {
+  decidedAt: number
+  candidate: string
+  route: string
+  routeSource: string
+  reason: string
+  confidence: number | null
+  cacheHit: boolean
+  rewritten: boolean
+  shapeFamily: string
+}
+
+export interface RouteExecution {
+  executedAt: number
+  candidate: string
+  routeSource: string
+  elapsedMs: number
+  rowsReturned: number
+  cacheHit: boolean
+  status: string
+  shapeFamily: string
+  reason: string
+}
+
+export interface DecisionSummaryRow {
+  candidate: string
+  routeSource: string
+  decisions: number
+  cacheHits: number
+  rewritten: number
+}
+
+export interface RuntimeSummaryRow {
+  shapeFamily: string
+  candidate: string
+  executions: number
+  medianMs: number
+  p95Ms: number
+  okCount: number
+  errorCount: number
+  lastReason: string
+}
+
+export interface LogStatus {
+  enabled: boolean
+  started: boolean
+  scope: string
+  backendPid: number
+  queueLen: number
+  queueCapacity: number | null
+  enqueued: number | null
+  dropped: number | null
+  written: number | null
+  writeErrors: number | null
+  connectErrors: number | null
+}
+
+export interface RouteProfile {
+  name: string
+  active: boolean
+  createdAt: string | null
+  updatedAt: string | null
+  version: string | null
+  suite: string | null
+  generatedAt: string | null
+  minObservations: number | null
+  minGainPct: number | null
+  entryCount: number | null
+  observationCount: number | null
+  pointCount: number | null
+  importedBy: string | null
+}
+
+export interface ProfileEntry {
+  shapeKey: string
+  choice: string
+  confidence: number
+  observations: number
+  engineTimes: EngineMs
+  reason: string
+}
+
+export interface ShapeSummaryRow {
+  shapeFamily: string
+  observations: number
+  bestCandidate: string
+  bestMedianMs: number | null
+  observedGain: number | null
+  needsExploration: boolean
+  medianByEngine: EngineMs
+  observationsByEngine: Record<EngineId, number | null>
+}
+
+export interface ProfilePoint {
+  shapeFamily: string
+  tableRows: number
+  engineTimes: EngineMs
+}
+
+export interface ObservationGroup {
+  source: string
+  candidate: string
+  count: number
+  avgMs: number
+}
+
+export interface ColumnarTable {
+  schema: string
+  name: string
+  estRows: number
+}
+
+export interface RouteExplainCandidate {
+  name: string
+  route: string
+  reason: string
+  selected: boolean
+  available: boolean
+}
+
+export interface RouteExplainTable {
+  table: string
+  schema: string
+  rows: number
+  bytes: number
+  rowGroups: number
+  deleteCount: number
+}
+
+export interface RouteExplain {
+  route: string
+  reason: string
+  routeSource: string
+  chosenCandidate: string
+  confidence: number | null
+  safeSelect: boolean
+  candidates: RouteExplainCandidate[]
+  features: Record<string, unknown>
+  tables: RouteExplainTable[]
+  postgresExplain: string
+}
+
+// ── Query plumbing ──────────────────────────────────────────────────
+
+interface QueryOk {
+  ok: true
+  columns: { name: string }[]
+  rows: Array<Record<string, unknown>>
+}
+interface QueryErr {
+  ok: false
+  error: string
+}
+
+async function runQuery(connectionId: string, sql: string): Promise<QueryOk | QueryErr> {
+  try {
+    const res = await fetch("/api/db/query", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ connectionId, sql, rowLimit: 5000 }),
+    })
+    return (await res.json()) as QueryOk | QueryErr
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) }
+  }
+}
+
+function num(v: unknown): number {
+  return v == null ? 0 : Number(v)
+}
+function numOrNull(v: unknown): number | null {
+  return v == null ? null : Number(v)
+}
+function bool(v: unknown): boolean {
+  return v === true || v === "t"
+}
+function epoch(v: unknown): number {
+  return v ? new Date(String(v)).getTime() : 0
+}
+function sqlStr(s: string): string {
+  return `'${String(s).replace(/'/g, "''")}'`
+}
+
+const ACTIVE_PROFILE_SUBQUERY =
+  "(SELECT name FROM rvbbit.route_profiles ORDER BY active DESC, updated_at DESC LIMIT 1)"
+
+// ── Live telemetry ──────────────────────────────────────────────────
+
+export async function fetchRouteDecisions(
+  connectionId: string,
+): Promise<{ rows: RouteDecision[]; error?: string }> {
+  const res = await runQuery(
+    connectionId,
+    "SELECT decided_at, candidate, route, route_source, reason, confidence, " +
+      "cache_hit, rewritten, shape_family FROM rvbbit.route_decisions " +
+      "ORDER BY decided_at DESC LIMIT 500",
+  )
+  if (!res.ok) return { rows: [], error: res.error }
+  return {
+    rows: res.rows.map((r) => ({
+      decidedAt: epoch(r.decided_at),
+      candidate: normalizeCandidate(String(r.candidate ?? "")),
+      route: String(r.route ?? ""),
+      routeSource: String(r.route_source ?? ""),
+      reason: String(r.reason ?? ""),
+      confidence: numOrNull(r.confidence),
+      cacheHit: bool(r.cache_hit),
+      rewritten: bool(r.rewritten),
+      shapeFamily: String(r.shape_family ?? ""),
+    })),
+  }
+}
+
+export async function fetchRouteExecutions(
+  connectionId: string,
+): Promise<{ rows: RouteExecution[]; error?: string }> {
+  const res = await runQuery(
+    connectionId,
+    "SELECT executed_at, candidate, route_source, elapsed_ms, rows_returned, " +
+      "cache_hit, status, shape_family, reason FROM rvbbit.route_executions " +
+      "ORDER BY executed_at DESC LIMIT 500",
+  )
+  if (!res.ok) return { rows: [], error: res.error }
+  return {
+    rows: res.rows.map((r) => ({
+      executedAt: epoch(r.executed_at),
+      candidate: normalizeCandidate(String(r.candidate ?? "")),
+      routeSource: String(r.route_source ?? ""),
+      elapsedMs: num(r.elapsed_ms),
+      rowsReturned: num(r.rows_returned),
+      cacheHit: bool(r.cache_hit),
+      status: String(r.status ?? ""),
+      shapeFamily: String(r.shape_family ?? ""),
+      reason: String(r.reason ?? ""),
+    })),
+  }
+}
+
+export async function fetchDecisionSummary(
+  connectionId: string,
+): Promise<DecisionSummaryRow[]> {
+  const res = await runQuery(
+    connectionId,
+    "SELECT candidate, route_source, sum(decisions) AS decisions, " +
+      "sum(cache_hits) AS cache_hits, sum(rewritten_count) AS rewritten " +
+      "FROM rvbbit.route_decision_summary GROUP BY candidate, route_source",
+  )
+  if (!res.ok) return []
+  return res.rows.map((r) => ({
+    candidate: normalizeCandidate(String(r.candidate ?? "")),
+    routeSource: String(r.route_source ?? "unknown"),
+    decisions: num(r.decisions),
+    cacheHits: num(r.cache_hits),
+    rewritten: num(r.rewritten),
+  }))
+}
+
+export async function fetchRuntimeSummary(
+  connectionId: string,
+): Promise<RuntimeSummaryRow[]> {
+  const res = await runQuery(
+    connectionId,
+    "SELECT shape_family, candidate, executions, median_ms, p95_ms, ok_count, " +
+      "error_count, last_reason FROM rvbbit.route_runtime_summary " +
+      "ORDER BY p95_ms DESC NULLS LAST LIMIT 200",
+  )
+  if (!res.ok) return []
+  return res.rows.map((r) => ({
+    shapeFamily: String(r.shape_family ?? ""),
+    candidate: normalizeCandidate(String(r.candidate ?? "")),
+    executions: num(r.executions),
+    medianMs: num(r.median_ms),
+    p95Ms: num(r.p95_ms),
+    okCount: num(r.ok_count),
+    errorCount: num(r.error_count),
+    lastReason: String(r.last_reason ?? ""),
+  }))
+}
+
+export async function fetchLogStatus(connectionId: string): Promise<LogStatus | null> {
+  const res = await runQuery(connectionId, "SELECT rvbbit.route_decision_log_status() AS s")
+  if (!res.ok || res.rows.length === 0) return null
+  const s = (res.rows[0].s ?? {}) as Record<string, unknown>
+  return {
+    enabled: bool(s.enabled),
+    started: bool(s.started),
+    scope: String(s.scope ?? "backend"),
+    backendPid: num(s.backend_pid),
+    queueLen: num(s.queue_len),
+    queueCapacity: numOrNull(s.queue_capacity),
+    enqueued: numOrNull(s.enqueued),
+    dropped: numOrNull(s.dropped),
+    written: numOrNull(s.written),
+    writeErrors: numOrNull(s.write_errors),
+    connectErrors: numOrNull(s.connect_errors),
+  }
+}
+
+// ── Trained profile ─────────────────────────────────────────────────
+
+export async function fetchRouteProfile(connectionId: string): Promise<RouteProfile | null> {
+  const res = await runQuery(
+    connectionId,
+    "SELECT name, active, created_at, updated_at, " +
+      "profile->>'version' AS version, profile->>'suite' AS suite, " +
+      "profile->>'generated_at' AS generated_at, " +
+      "profile->>'min_observations' AS min_observations, " +
+      "profile->>'min_gain_pct' AS min_gain_pct, " +
+      "profile->>'entry_count' AS entry_count, " +
+      "profile->>'observation_count' AS observation_count, " +
+      "profile->>'profile_point_count' AS point_count, " +
+      "profile->>'imported_by' AS imported_by " +
+      "FROM rvbbit.route_profiles ORDER BY active DESC, updated_at DESC LIMIT 1",
+  )
+  if (!res.ok || res.rows.length === 0) return null
+  const r = res.rows[0]
+  return {
+    name: String(r.name ?? ""),
+    active: bool(r.active),
+    createdAt: r.created_at ? String(r.created_at) : null,
+    updatedAt: r.updated_at ? String(r.updated_at) : null,
+    version: r.version ? String(r.version) : null,
+    suite: r.suite ? String(r.suite) : null,
+    generatedAt: r.generated_at ? String(r.generated_at) : null,
+    minObservations: numOrNull(r.min_observations),
+    minGainPct: numOrNull(r.min_gain_pct),
+    entryCount: numOrNull(r.entry_count),
+    observationCount: numOrNull(r.observation_count),
+    pointCount: numOrNull(r.point_count),
+    importedBy: r.imported_by ? String(r.imported_by) : null,
+  }
+}
+
+export async function fetchProfileEntries(connectionId: string): Promise<ProfileEntry[]> {
+  const res = await runQuery(
+    connectionId,
+    "SELECT shape_key, choice, confidence, observations, native_ms, duck_ms, " +
+      "duck_hive_ms, datafusion_ms, datafusion_hive_ms, pg_ms, reason " +
+      "FROM rvbbit.route_profile_entries " +
+      `WHERE profile_name = ${ACTIVE_PROFILE_SUBQUERY} ` +
+      "ORDER BY confidence DESC NULLS LAST",
+  )
+  if (!res.ok) return []
+  return res.rows.map((r) => ({
+    shapeKey: String(r.shape_key ?? ""),
+    choice: normalizeCandidate(String(r.choice ?? "")),
+    confidence: num(r.confidence),
+    observations: num(r.observations),
+    engineTimes: engineMsFromRow(r),
+    reason: String(r.reason ?? ""),
+  }))
+}
+
+export async function fetchShapeSummary(connectionId: string): Promise<ShapeSummaryRow[]> {
+  const res = await runQuery(
+    connectionId,
+    "SELECT shape_family, observations, best_candidate, best_median_ms, " +
+      "native_median_ms, duck_median_ms, duck_hive_median_ms, " +
+      "datafusion_median_ms, datafusion_hive_median_ms, pg_median_ms, " +
+      "native_observations, duck_observations, duck_hive_observations, " +
+      "datafusion_observations, datafusion_hive_observations, pg_observations, " +
+      "observed_gain, needs_exploration FROM rvbbit.route_shape_summary " +
+      "ORDER BY observations DESC",
+  )
+  if (!res.ok) return []
+  return res.rows.map((r) => ({
+    shapeFamily: String(r.shape_family ?? ""),
+    observations: num(r.observations),
+    bestCandidate: normalizeCandidate(String(r.best_candidate ?? "")),
+    bestMedianMs: numOrNull(r.best_median_ms),
+    observedGain: numOrNull(r.observed_gain),
+    needsExploration: bool(r.needs_exploration),
+    medianByEngine: engineMediansFromRow(r),
+    observationsByEngine: engineObservationsFromRow(r),
+  }))
+}
+
+export async function fetchProfilePoints(connectionId: string): Promise<ProfilePoint[]> {
+  const res = await runQuery(
+    connectionId,
+    "SELECT shape_family, table_rows, native_ms, duck_ms, duck_hive_ms, " +
+      "datafusion_ms, datafusion_hive_ms, pg_ms " +
+      `FROM rvbbit.route_profile_points WHERE profile_name = ${ACTIVE_PROFILE_SUBQUERY}`,
+  )
+  if (!res.ok) return []
+  return res.rows.map((r) => ({
+    shapeFamily: String(r.shape_family ?? ""),
+    tableRows: num(r.table_rows),
+    engineTimes: engineMsFromRow(r),
+  }))
+}
+
+export async function fetchObservationGroups(
+  connectionId: string,
+): Promise<ObservationGroup[]> {
+  const res = await runQuery(
+    connectionId,
+    "SELECT source, candidate, count(*) AS n, avg(elapsed_ms) AS avg_ms " +
+      "FROM rvbbit.route_observations GROUP BY source, candidate ORDER BY n DESC",
+  )
+  if (!res.ok) return []
+  return res.rows.map((r) => ({
+    source: String(r.source ?? ""),
+    candidate: normalizeCandidate(String(r.candidate ?? "")),
+    count: num(r.n),
+    avgMs: num(r.avg_ms),
+  }))
+}
+
+export async function fetchColumnarTables(connectionId: string): Promise<ColumnarTable[]> {
+  const res = await runQuery(
+    connectionId,
+    "SELECT n.nspname AS schema, c.relname AS name, c.reltuples::bigint AS est_rows " +
+      "FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace " +
+      "JOIN pg_am am ON am.oid = c.relam " +
+      "WHERE c.relkind = 'r' AND am.amname = 'rvbbit' ORDER BY n.nspname, c.relname",
+  )
+  if (!res.ok) return []
+  return res.rows.map((r) => ({
+    schema: String(r.schema ?? ""),
+    name: String(r.name ?? ""),
+    estRows: num(r.est_rows),
+  }))
+}
+
+// ── Aggregate bundles (one per window data-load) ────────────────────
+
+export interface FlowData {
+  decisions: RouteDecision[]
+  executions: RouteExecution[]
+  decisionSummary: DecisionSummaryRow[]
+  runtimeSummary: RuntimeSummaryRow[]
+  logStatus: LogStatus | null
+}
+
+export interface ProfileData {
+  profile: RouteProfile | null
+  entries: ProfileEntry[]
+  shapeSummary: ShapeSummaryRow[]
+  points: ProfilePoint[]
+  observations: ObservationGroup[]
+}
+
+// ── route_explain ───────────────────────────────────────────────────
+
+/** Explain a query's route without executing it. Safe — plan only. */
+export async function routeExplain(
+  connectionId: string,
+  sql: string,
+): Promise<{ explain: RouteExplain | null; error?: string }> {
+  const res = await runQuery(connectionId, `SELECT rvbbit.route_explain(${sqlStr(sql)}) AS r`)
+  if (!res.ok) return { explain: null, error: res.error }
+  if (res.rows.length === 0) return { explain: null, error: "route_explain returned nothing" }
+  const r = (res.rows[0].r ?? {}) as Record<string, unknown>
+  const cands = Array.isArray(r.candidates) ? (r.candidates as Record<string, unknown>[]) : []
+  const tables = Array.isArray(r.rvbbit_tables)
+    ? (r.rvbbit_tables as Record<string, unknown>[])
+    : []
+  return {
+    explain: {
+      route: String(r.route ?? ""),
+      reason: String(r.reason ?? ""),
+      routeSource: String(r.route_source ?? ""),
+      chosenCandidate: normalizeCandidate(String(r.chosen_candidate ?? "")),
+      confidence: numOrNull(r.confidence),
+      safeSelect: bool(r.safe_select),
+      candidates: cands.map((c) => ({
+        name: normalizeCandidate(String(c.name ?? "")),
+        route: String(c.route ?? ""),
+        reason: String(c.reason ?? ""),
+        selected: bool(c.selected),
+        available: bool(c.available),
+      })),
+      features: (r.features as Record<string, unknown>) ?? {},
+      tables: tables.map((t) => ({
+        table: String(t.table ?? ""),
+        schema: String(t.schema ?? ""),
+        rows: num(t.rows),
+        bytes: num(t.bytes),
+        rowGroups: num(t.row_groups),
+        deleteCount: num(t.delete_count),
+      })),
+      postgresExplain: String(r.postgres_explain ?? ""),
+    },
+  }
+}
+
+// ── Shape-string helpers ────────────────────────────────────────────
+
+/** Split a `k=v|k=v|…` shape string into tokens. */
+export function parseShapeTokens(shape: string): { k: string; v: string }[] {
+  if (!shape) return []
+  return shape.split("|").map((t) => {
+    const i = t.indexOf("=")
+    return i < 0 ? { k: t, v: "" } : { k: t.slice(0, i), v: t.slice(i + 1) }
+  })
+}
+
+const BORING_SHAPE_VALUES = new Set(["<=0", "0", "none", "", "unknown"])
+
+/**
+ * The non-default tokens of a shape — what actually distinguishes it.
+ * Drops empty/zero buckets and opaque expression-signature hashes.
+ */
+export function shapeHighlights(shape: string): { k: string; v: string }[] {
+  return parseShapeTokens(shape).filter(
+    (t) => !BORING_SHAPE_VALUES.has(t.v) && !t.k.endsWith("_sig"),
+  )
+}
+
+/** Human-friendly single token, e.g. `tables ≤2`. */
+export function prettyToken(k: string, v: string): string {
+  return `${k} ${v.replace("<=", "≤")}`
+}
+
+/** Pull the "Nx faster" multiplier out of a route reason, if present. */
+export function routeSpeedup(reason: string | null | undefined): number | null {
+  if (!reason) return null
+  const m = reason.match(/([\d.]+)x faster/)
+  return m ? Number(m[1]) : null
+}

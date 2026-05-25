@@ -1,0 +1,109 @@
+import { NextResponse } from "next/server"
+import { promises as fs } from "fs"
+import path from "path"
+import yaml from "js-yaml"
+
+export const runtime = "nodejs"
+
+/**
+ * Read-only bridge to the on-disk capabilities directory in the
+ * rvbbit repo. Resolves the repo root from $RVBBIT_REPO_PATH and
+ * (in dev) falls back to a co-checked-out sibling path. Phase 1
+ * supports two reads: the catalog index and individual manifests.
+ *
+ * GET ?action=catalog
+ *   → { ok: true, doc: <catalog.json shape> }
+ *
+ * GET ?action=manifest&path=capabilities/manifests/extract/...yaml
+ *   → { ok: true, manifest: <parsed YAML> }
+ *
+ * Manifest paths are constrained to live under <root>/capabilities/manifests
+ * so this route can't be coerced into reading arbitrary files.
+ */
+
+function repoRoot(): string {
+  return (
+    process.env.RVBBIT_REPO_PATH ??
+    process.env.HOME
+      ? path.join(process.env.HOME ?? "", "repos2026", "rvbbit")
+      : "/home/ryanr/repos2026/rvbbit"
+  )
+}
+
+async function readCatalog(): Promise<{ ok: true; doc: unknown } | { ok: false; status: number; error: string }> {
+  const root = repoRoot()
+  const file = path.join(root, "capabilities", "catalog.json")
+  try {
+    const text = await fs.readFile(file, "utf8")
+    const doc = JSON.parse(text) as unknown
+    return { ok: true, doc }
+  } catch (e) {
+    const code = (e as NodeJS.ErrnoException).code
+    if (code === "ENOENT") {
+      return {
+        ok: false,
+        status: 404,
+        error:
+          `catalog.json not found at ${file}. Set RVBBIT_REPO_PATH to your rvbbit repo, ` +
+          `or rebuild via \`capabilities/tools/rvbbit-capability catalog build --output capabilities/catalog.json\`.`,
+      }
+    }
+    return { ok: false, status: 500, error: e instanceof Error ? e.message : String(e) }
+  }
+}
+
+async function readManifest(
+  relPath: string,
+): Promise<{ ok: true; manifest: unknown } | { ok: false; status: number; error: string }> {
+  const root = repoRoot()
+  const manifestRoot = path.resolve(path.join(root, "capabilities", "manifests"))
+
+  // Accept either a full `capabilities/manifests/...` path (catalog shape)
+  // or a bare `extract/gliner.yaml`. Either way, resolve under manifestRoot.
+  const stripped = relPath.replace(/^capabilities\/manifests\//, "").replace(/^\/+/, "")
+  const resolved = path.resolve(path.join(manifestRoot, stripped))
+  if (!resolved.startsWith(manifestRoot + path.sep) && resolved !== manifestRoot) {
+    return { ok: false, status: 400, error: "manifest path escapes manifests root" }
+  }
+
+  try {
+    const text = await fs.readFile(resolved, "utf8")
+    const parsed = yaml.load(text) as unknown
+    if (parsed == null || typeof parsed !== "object") {
+      return { ok: false, status: 400, error: `manifest at ${relPath} is not an object` }
+    }
+    return { ok: true, manifest: parsed }
+  } catch (e) {
+    const code = (e as NodeJS.ErrnoException).code
+    if (code === "ENOENT") {
+      return { ok: false, status: 404, error: `manifest not found: ${relPath}` }
+    }
+    return { ok: false, status: 500, error: e instanceof Error ? e.message : String(e) }
+  }
+}
+
+export async function GET(req: Request) {
+  const url = new URL(req.url)
+  const action = url.searchParams.get("action")
+
+  if (action === "catalog") {
+    const r = await readCatalog()
+    if (!r.ok) return NextResponse.json({ ok: false, error: r.error }, { status: r.status })
+    return NextResponse.json({ ok: true, doc: r.doc })
+  }
+
+  if (action === "manifest") {
+    const p = url.searchParams.get("path")
+    if (!p) {
+      return NextResponse.json({ ok: false, error: "path query param required" }, { status: 400 })
+    }
+    const r = await readManifest(p)
+    if (!r.ok) return NextResponse.json({ ok: false, error: r.error }, { status: r.status })
+    return NextResponse.json({ ok: true, manifest: r.manifest })
+  }
+
+  return NextResponse.json(
+    { ok: false, error: "unknown action — try ?action=catalog or ?action=manifest&path=…" },
+    { status: 400 },
+  )
+}

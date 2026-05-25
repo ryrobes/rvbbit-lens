@@ -1,0 +1,1250 @@
+"use client"
+
+import { useCallback, useEffect, useMemo, useState } from "react"
+import {
+  Activity,
+  AlertTriangle,
+  Brain,
+  CheckCircle2,
+  Clock,
+  FileCode2,
+  FlowArrow,
+  Layers,
+  Package,
+  Play,
+  Plug,
+  RefreshCw,
+  Settings,
+  Sparkles,
+  Trash2,
+  X,
+} from "@/lib/icons"
+import { cn } from "@/lib/utils"
+import { Button } from "@/components/ui/button"
+import {
+  defaultKnobs,
+  fetchCatalog,
+  fetchInstalledBackends,
+  fetchManifest,
+  flagsToStates,
+  joinCatalogToInstalled,
+  probeBackend,
+  renderManifest,
+  type CatalogEntry,
+  type InstallKnobs,
+  type InstalledBackend,
+  type JoinedCatalogEntry,
+  type Manifest,
+  type ProbeResult,
+  type RenderedArtifacts,
+} from "@/lib/rvbbit/capabilities"
+import {
+  fmtAgo,
+  fmtCount,
+  fmtMs,
+  Histogram,
+  InstallStateBadgeGroup,
+  Metric,
+  Panel,
+  percentile,
+} from "./instruments"
+import type { CapabilityDetailPayload } from "@/lib/desktop/types"
+import { CodePreview, type CodeLang } from "./code-preview"
+import { CapabilityInstallGraph } from "./capability-install-graph"
+import { WarrenDeployPanel } from "./warren-deploy-panel"
+import { fetchWarrenAvailability, type WarrenAvailability } from "@/lib/rvbbit/warren"
+
+interface CapabilityDetailWindowProps {
+  payload: CapabilityDetailPayload
+  activeConnectionId: string | null
+  hasRvbbit: boolean
+  onOpenSpecialist: (specialistName: string) => void
+  onOpenOperator: (operatorName: string) => void
+  onOpenWarrenJob: (jobId: string, jobName: string | null) => void
+}
+
+type TabKey = "overview" | "generated-sql" | "probe" | "install"
+const TABS: { key: TabKey; label: string }[] = [
+  { key: "overview", label: "Overview" },
+  { key: "generated-sql", label: "Generated SQL" },
+  { key: "probe", label: "Probe" },
+  { key: "install", label: "Install" },
+]
+
+export function CapabilityDetailWindow({
+  payload,
+  activeConnectionId,
+  hasRvbbit,
+  onOpenSpecialist,
+  onOpenOperator,
+  onOpenWarrenJob,
+}: CapabilityDetailWindowProps) {
+  const [catalog, setCatalog] = useState<CatalogEntry | null>(null)
+  const [manifest, setManifest] = useState<Manifest | null>(null)
+  const [installed, setInstalled] = useState<InstalledBackend | null>(null)
+  const [knobs, setKnobs] = useState<InstallKnobs | null>(null)
+  const [tab, setTab] = useState<TabKey>(payload.initialTab ?? "overview")
+  const [loadError, setLoadError] = useState<string | null>(null)
+  const [updatedAt, setUpdatedAt] = useState(0)
+  const [warrenAvail, setWarrenAvail] = useState<WarrenAvailability | null>(null)
+  /**
+   * When `null`, the install pathway is chosen by warren availability:
+   *   readyNodes > 0 ⇒ "warren", else "local".
+   * As soon as the user toggles, we lock to their choice for the life
+   * of the window so a node going offline doesn't yank them mid-task.
+   */
+  const [installMode, setInstallMode] = useState<"warren" | "local" | null>(null)
+  const loading = catalog == null || manifest == null
+
+  // ── load catalog entry + manifest on mount / when id changes ──
+  useEffect(() => {
+    let cancelled = false
+    const run = async () => {
+      const cat = await fetchCatalog()
+      if (cancelled) return
+      const entry =
+        cat.doc?.capabilities.find((c) => c.id === payload.catalogId) ?? null
+      if (!entry) {
+        setLoadError(cat.error ?? `no catalog entry for ${payload.catalogId}`)
+        return
+      }
+      setCatalog(entry)
+      const m = await fetchManifest(entry.manifest_path)
+      if (cancelled) return
+      if (m.error || !m.manifest) {
+        setLoadError(m.error ?? "manifest load failed")
+        return
+      }
+      setManifest(m.manifest)
+      setKnobs(defaultKnobs(m.manifest))
+    }
+    void run()
+    return () => {
+      cancelled = true
+    }
+  }, [payload.catalogId])
+
+  // ── poll installed-backend row to keep the join fresh ──
+  const pollInstalled = useCallback(async () => {
+    if (!activeConnectionId || !hasRvbbit || !catalog) return
+    const r = await fetchInstalledBackends(activeConnectionId)
+    const join = joinCatalogToInstalled([catalog], r.backends)
+    setInstalled(join.entries[0]?.installed ?? null)
+    setUpdatedAt(Date.now())
+  }, [activeConnectionId, hasRvbbit, catalog])
+
+  useEffect(() => {
+    let cancelled = false
+    const run = async () => {
+      if (cancelled) return
+      await pollInstalled()
+    }
+    void run()
+    if (!activeConnectionId || !hasRvbbit) return () => { cancelled = true }
+    const id = setInterval(() => void pollInstalled(), 5000)
+    return () => {
+      cancelled = true
+      clearInterval(id)
+    }
+  }, [activeConnectionId, hasRvbbit, pollInstalled])
+
+  // ── poll warren availability so the Install tab can default-route ──
+  useEffect(() => {
+    if (!activeConnectionId || !hasRvbbit) return
+    let cancelled = false
+    const probe = async () => {
+      const r = await fetchWarrenAvailability(activeConnectionId)
+      if (cancelled) return
+      setWarrenAvail(r)
+    }
+    void probe()
+    const id = setInterval(() => void probe(), 10_000)
+    return () => {
+      cancelled = true
+      clearInterval(id)
+    }
+  }, [activeConnectionId, hasRvbbit])
+
+  /** Effective install mode — explicit user choice wins, else availability decides. */
+  const effectiveInstallMode: "warren" | "local" =
+    installMode ??
+    (warrenAvail?.available && warrenAvail.readyNodes > 0 ? "warren" : "local")
+
+  // ── live render (the Bret Victor lever) ──
+  const rendered: RenderedArtifacts | null = useMemo(() => {
+    if (!manifest || !knobs) return null
+    return renderManifest(manifest, knobs)
+  }, [manifest, knobs])
+
+  const join: JoinedCatalogEntry | null = useMemo(() => {
+    if (!catalog) return null
+    const j = joinCatalogToInstalled(
+      [catalog],
+      installed ? [installed] : [],
+    )
+    return j.entries[0] ?? null
+  }, [catalog, installed])
+
+  if (!hasRvbbit) {
+    return (
+      <div className="grid h-full place-items-center bg-doc-bg text-[12px] text-chrome-text/70">
+        No pg_rvbbit extension on this connection.
+      </div>
+    )
+  }
+  if (loadError) {
+    return (
+      <div className="grid h-full place-items-center bg-doc-bg p-6 text-center text-[12px] text-danger">
+        <div>
+          <AlertTriangle className="mx-auto mb-2 h-6 w-6" />
+          {loadError}
+        </div>
+      </div>
+    )
+  }
+  if (loading) {
+    return (
+      <div className="grid h-full place-items-center bg-doc-bg text-[12px] text-chrome-text">
+        <span className="inline-flex items-center gap-1.5">
+          <Clock className="h-3 w-3 animate-pulse" />
+          Loading {payload.catalogId}…
+        </span>
+      </div>
+    )
+  }
+
+  const states = join ? flagsToStates(join.flags) : []
+
+  return (
+    <div className="flex h-full flex-col bg-doc-bg text-[12px] text-chrome-text">
+      {/* header */}
+      <div className="flex flex-wrap items-center gap-2 border-b border-chrome-border bg-chrome-bg/40 px-3 py-1.5">
+        <Package className="h-4 w-4 text-brand-capability" />
+        <span className="text-[13px] font-medium text-foreground">{catalog!.title}</span>
+        <span className="font-mono text-[10px] text-chrome-text/55">{catalog!.name}</span>
+        {catalog!.license ? (
+          <span className="rounded bg-foreground/[0.05] px-1 text-[9px] uppercase tracking-wider text-chrome-text/65">
+            {catalog!.license}
+          </span>
+        ) : null}
+        <InstallStateBadgeGroup states={states} size="xs" />
+        {join?.installed ? (
+          <button
+            type="button"
+            onClick={() => onOpenSpecialist(catalog!.backend_name)}
+            className="inline-flex items-center gap-1 rounded-full border border-brand-specialists/40 bg-brand-specialists/10 px-2 py-0.5 text-[10px] text-brand-specialists hover:bg-brand-specialists/15"
+            title="Open the registered backend in the Specialist Detail window"
+          >
+            <Brain className="h-3 w-3" />
+            backend
+          </button>
+        ) : null}
+        {catalog!.operators.map((opName) => (
+          <button
+            key={opName}
+            type="button"
+            onClick={() => onOpenOperator(opName)}
+            className="inline-flex items-center gap-1 rounded-full border border-brand-operators/40 bg-brand-operators/10 px-2 py-0.5 text-[10px] text-brand-operators hover:bg-brand-operators/15"
+            title={`Open rvbbit.${opName} in Operator Flow`}
+          >
+            <FlowArrow className="h-3 w-3" />
+            {opName}
+          </button>
+        ))}
+        <div className="ml-auto flex items-center gap-1.5">
+          {updatedAt > 0 ? (
+            <span className="text-[10px] text-chrome-text/45">{fmtAgo(updatedAt)}</span>
+          ) : null}
+          <button
+            type="button"
+            onClick={() => void pollInstalled()}
+            title="Reload"
+            className="grid h-6 w-6 place-items-center rounded text-chrome-text/70 hover:bg-foreground/[0.08] hover:text-foreground"
+          >
+            <RefreshCw className="h-3.5 w-3.5" />
+          </button>
+        </div>
+      </div>
+
+      {/* tab bar */}
+      <div className="flex items-center gap-px border-b border-chrome-border bg-chrome-bg/20 px-2">
+        {TABS.map((t) => (
+          <button
+            key={t.key}
+            type="button"
+            onClick={() => setTab(t.key)}
+            className={cn(
+              "border-b-2 px-3 py-1.5 text-[11px] font-medium uppercase tracking-wider transition",
+              tab === t.key
+                ? "border-brand-capability text-brand-capability"
+                : "border-transparent text-chrome-text/65 hover:text-foreground",
+            )}
+          >
+            {t.label}
+          </button>
+        ))}
+      </div>
+
+      {/* body */}
+      <div className="min-h-0 flex-1 overflow-hidden">
+        {tab === "overview" ? (
+          <OverviewTab
+            catalog={catalog!}
+            manifest={manifest!}
+            installed={installed}
+            knobs={knobs!}
+            onChangeKnobs={setKnobs}
+          />
+        ) : null}
+        {tab === "generated-sql" ? (
+          <GeneratedSqlTab rendered={rendered!} />
+        ) : null}
+        {tab === "probe" ? (
+          <ProbeTab
+            activeConnectionId={activeConnectionId}
+            manifest={manifest!}
+            registered={!!installed}
+          />
+        ) : null}
+        {tab === "install" ? (
+          <InstallTabDispatcher
+            mode={effectiveInstallMode}
+            warrenAvail={warrenAvail}
+            setMode={setInstallMode}
+            activeConnectionId={activeConnectionId}
+            manifestPath={catalog!.manifest_path}
+            manifest={manifest!}
+            knobs={knobs!}
+            rendered={rendered!}
+            onInstalledChanged={() => void pollInstalled()}
+            onOpenWarrenJob={onOpenWarrenJob}
+          />
+        ) : null}
+      </div>
+    </div>
+  )
+}
+
+// ── Overview tab ────────────────────────────────────────────────────
+
+function OverviewTab({
+  catalog,
+  manifest,
+  installed,
+  knobs,
+  onChangeKnobs,
+}: {
+  catalog: CatalogEntry
+  manifest: Manifest
+  installed: InstalledBackend | null
+  knobs: InstallKnobs
+  onChangeKnobs: (next: InstallKnobs) => void
+}) {
+  const source = manifest.source ?? {}
+  const runtime = manifest.runtime ?? {}
+
+  const reset = () => onChangeKnobs(defaultKnobs(manifest))
+  const knobsDirty =
+    JSON.stringify(knobs) !== JSON.stringify(defaultKnobs(manifest))
+
+  return (
+    <div className="grid h-full grid-cols-2 gap-0 overflow-hidden">
+      {/* left — manifest spec sheet */}
+      <div className="space-y-2.5 overflow-auto border-r border-chrome-border p-3">
+        {catalog.description ? (
+          <p className="text-[12px] leading-snug text-foreground/85">
+            {catalog.description}
+          </p>
+        ) : null}
+
+        <Panel icon={Sparkles} title="Source">
+          <div className="space-y-1.5">
+            <KV k="provider" v={source.provider ?? "—"} mono />
+            <KV
+              k="model"
+              v={
+                source.url ? (
+                  <a
+                    href={source.url}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="text-brand-capability hover:underline"
+                  >
+                    {source.model ?? "—"}
+                  </a>
+                ) : (
+                  source.model ?? "—"
+                )
+              }
+              mono
+            />
+            <KV k="revision" v={source.revision ?? "(latest)"} mono />
+          </div>
+        </Panel>
+
+        <Panel icon={Layers} title="Runtime">
+          <div className="space-y-1.5">
+            <KV k="template" v={runtime.template ?? "—"} mono />
+            <KV k="handler" v={runtime.handler ?? "—"} mono />
+            <div className="grid grid-cols-3 gap-2 pt-0.5">
+              <Metric label="manifest device" value={runtime.device ?? "—"} />
+              <Metric label="tags" value={(catalog.tags ?? []).length} />
+              <Metric label="operators" value={(manifest.operators ?? []).length} />
+            </div>
+            {runtime.extra_requirements && runtime.extra_requirements.length > 0 ? (
+              <div className="pt-0.5">
+                <div className="mb-0.5 text-[9px] uppercase tracking-wider text-chrome-text/50">
+                  extra requirements
+                </div>
+                <div className="flex flex-wrap gap-1">
+                  {runtime.extra_requirements.map((r) => (
+                    <span
+                      key={r}
+                      className="rounded bg-foreground/[0.05] px-1.5 py-px font-mono text-[10px] text-chrome-text/75"
+                    >
+                      {r}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            ) : null}
+          </div>
+        </Panel>
+
+        <Panel icon={FlowArrow} title="Operators">
+          {(manifest.operators ?? []).length === 0 ? (
+            <p className="text-[11px] text-chrome-text/55">
+              This pack registers a backend but defines no operators.
+            </p>
+          ) : (
+            <div className="space-y-2">
+              {(manifest.operators ?? []).map((op) => (
+                <div
+                  key={op.name}
+                  className="rounded border border-chrome-border/40 bg-foreground/[0.025] p-1.5"
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="font-mono text-[11px] text-brand-operators">
+                      rvbbit.{op.name}
+                    </span>
+                    <span className="font-mono text-[9px] text-chrome-text/55">
+                      → {op.return_type}
+                      {op.parser ? ` · ${op.parser}` : ""}
+                    </span>
+                  </div>
+                  <div className="mt-0.5 flex flex-wrap items-center gap-1">
+                    {op.arg_names.map((n, i) => (
+                      <span
+                        key={n}
+                        className="font-mono text-[10px] text-chrome-text/70"
+                      >
+                        {n}
+                        <span className="text-chrome-text/40">
+                          {": "}
+                          {(op.arg_types ?? [])[i] ?? "text"}
+                        </span>
+                      </span>
+                    ))}
+                  </div>
+                  {op.description ? (
+                    <p className="mt-1 text-[10px] leading-snug text-chrome-text/65">
+                      {op.description}
+                    </p>
+                  ) : null}
+                </div>
+              ))}
+            </div>
+          )}
+        </Panel>
+
+        {installed ? (
+          <Panel icon={Activity} title="Live usage">
+            <div className="grid grid-cols-3 gap-2">
+              <Metric label="calls" value={fmtCount(installed.n_calls)} />
+              <Metric
+                label="errors"
+                value={installed.n_errors}
+                tone={installed.n_errors > 0 ? "danger" : undefined}
+              />
+              <Metric
+                label="p95"
+                value={
+                  installed.p95_latency_ms == null
+                    ? "—"
+                    : fmtMs(installed.p95_latency_ms)
+                }
+              />
+              <Metric
+                label="endpoint"
+                value={installed.endpoint_url ?? "—"}
+              />
+              <Metric
+                label="last call"
+                value={
+                  installed.last_call_at ? fmtAgo(installed.last_call_at) : "—"
+                }
+              />
+              <Metric
+                label="installed"
+                value={installed.created_at ? fmtAgo(installed.created_at) : "—"}
+              />
+            </div>
+          </Panel>
+        ) : null}
+      </div>
+
+      {/* right — install knobs (the Bret Victor lever) */}
+      <div className="flex h-full flex-col overflow-hidden">
+        <div className="flex items-center gap-2 border-b border-chrome-border bg-chrome-bg/40 px-3 py-1.5">
+          <Settings className="h-3.5 w-3.5 text-brand-capability" />
+          <span className="text-[11px] uppercase tracking-wider text-chrome-text">
+            Install knobs
+          </span>
+          {knobsDirty ? (
+            <span
+              className="ml-1 rounded-full bg-brand-capability/15 px-1.5 py-px text-[9px] uppercase tracking-wider text-brand-capability"
+              title="Knobs differ from the manifest defaults — Generated SQL and Compose previews are using these overrides"
+            >
+              edited
+            </span>
+          ) : null}
+          {knobsDirty ? (
+            <button
+              type="button"
+              onClick={reset}
+              className="ml-auto inline-flex items-center gap-1 text-[10px] text-chrome-text/55 hover:text-foreground"
+            >
+              <X className="h-3 w-3" />
+              reset
+            </button>
+          ) : null}
+        </div>
+        <div className="space-y-2 overflow-auto p-3">
+          <p className="text-[11px] leading-snug text-chrome-text/70">
+            Edits apply only to the previewed install plan — no files are written
+            and no SQL is executed. Switch to{" "}
+            <span className="font-mono text-foreground/80">Generated SQL</span>{" "}
+            to see the rendered output update live.
+          </p>
+
+          <Knob
+            label="Device"
+            value={knobs.device}
+            onChange={(v) => onChangeKnobs({ ...knobs, device: v })}
+            options={["auto", "cpu", "cuda"]}
+            help={`Manifest preference is ${runtime.device ?? "auto"}`}
+          />
+          <NumberKnob
+            label="Batch size"
+            value={knobs.batchSize}
+            onChange={(v) => onChangeKnobs({ ...knobs, batchSize: v })}
+            min={1}
+            max={1024}
+            step={1}
+            help={`Manifest default: ${manifest.backend.batch_size ?? 32}`}
+          />
+          <NumberKnob
+            label="Max concurrent"
+            value={knobs.maxConcurrent}
+            onChange={(v) => onChangeKnobs({ ...knobs, maxConcurrent: v })}
+            min={1}
+            max={64}
+            step={1}
+            help={`Manifest default: ${manifest.backend.max_concurrent ?? 4}`}
+          />
+          <NumberKnob
+            label="Timeout (ms)"
+            value={knobs.timeoutMs}
+            onChange={(v) => onChangeKnobs({ ...knobs, timeoutMs: v })}
+            min={1000}
+            max={600000}
+            step={1000}
+            help={`Manifest default: ${manifest.backend.timeout_ms ?? 60000}`}
+          />
+          <NumberKnob
+            label="Host port"
+            value={knobs.hostPort}
+            onChange={(v) => onChangeKnobs({ ...knobs, hostPort: v })}
+            min={1}
+            max={65535}
+            step={1}
+            help="Maps to container port 8080 in compose.yaml"
+          />
+          <TextKnob
+            label="Docker network"
+            value={knobs.dockerNetwork}
+            onChange={(v) => onChangeKnobs({ ...knobs, dockerNetwork: v })}
+            help="Compose attaches the sidecar to this network so Postgres can reach it"
+          />
+          <TextKnob
+            label="Output directory"
+            value={knobs.outputDir}
+            onChange={(v) => onChangeKnobs({ ...knobs, outputDir: v })}
+            help="Where scaffold writes register.sql / operator.sql / compose.yaml / Dockerfile / main.py"
+          />
+          <label className="flex items-center gap-2 pt-1">
+            <input
+              type="checkbox"
+              checked={knobs.gpu}
+              onChange={(e) =>
+                onChangeKnobs({ ...knobs, gpu: e.target.checked })
+              }
+              className="h-3.5 w-3.5 accent-brand-capability"
+            />
+            <span className="text-[11px] text-foreground">
+              Use GPU overlay (compose.gpu.yaml)
+            </span>
+          </label>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function Knob({
+  label,
+  value,
+  onChange,
+  options,
+  help,
+}: {
+  label: string
+  value: string
+  onChange: (v: string) => void
+  options: string[]
+  help?: string
+}) {
+  return (
+    <div>
+      <div className="mb-0.5 text-[9px] uppercase tracking-wider text-chrome-text/55">
+        {label}
+      </div>
+      <div className="inline-flex overflow-hidden rounded border border-chrome-border bg-secondary-background">
+        {options.map((opt) => (
+          <button
+            key={opt}
+            type="button"
+            onClick={() => onChange(opt)}
+            className={cn(
+              "px-2 py-1 text-[11px] font-mono",
+              value === opt
+                ? "bg-brand-capability/15 text-brand-capability"
+                : "text-chrome-text hover:text-foreground",
+            )}
+          >
+            {opt}
+          </button>
+        ))}
+      </div>
+      {help ? (
+        <div className="mt-0.5 text-[10px] text-chrome-text/45">{help}</div>
+      ) : null}
+    </div>
+  )
+}
+
+function NumberKnob({
+  label,
+  value,
+  onChange,
+  min,
+  max,
+  step,
+  help,
+}: {
+  label: string
+  value: number
+  onChange: (v: number) => void
+  min: number
+  max: number
+  step: number
+  help?: string
+}) {
+  return (
+    <div>
+      <div className="mb-0.5 flex items-baseline justify-between gap-2 text-[9px] uppercase tracking-wider text-chrome-text/55">
+        <span>{label}</span>
+        <span className="font-mono text-[11px] tabular-nums normal-case tracking-normal text-foreground">
+          {value}
+        </span>
+      </div>
+      <input
+        type="range"
+        value={value}
+        min={min}
+        max={max}
+        step={step}
+        onChange={(e) => onChange(Number(e.target.value))}
+        className="h-1.5 w-full accent-brand-capability"
+      />
+      {help ? (
+        <div className="mt-0.5 text-[10px] text-chrome-text/45">{help}</div>
+      ) : null}
+    </div>
+  )
+}
+
+function TextKnob({
+  label,
+  value,
+  onChange,
+  help,
+}: {
+  label: string
+  value: string
+  onChange: (v: string) => void
+  help?: string
+}) {
+  return (
+    <div>
+      <div className="mb-0.5 text-[9px] uppercase tracking-wider text-chrome-text/55">
+        {label}
+      </div>
+      <input
+        type="text"
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        className="h-7 w-full rounded border border-chrome-border bg-secondary-background px-2 font-mono text-[11px] text-foreground outline-none focus:ring-2 focus:ring-ring"
+      />
+      {help ? (
+        <div className="mt-0.5 text-[10px] text-chrome-text/45">{help}</div>
+      ) : null}
+    </div>
+  )
+}
+
+function KV({ k, v, mono }: { k: string; v: React.ReactNode; mono?: boolean }) {
+  return (
+    <div className="flex items-baseline gap-2">
+      <span className="w-24 shrink-0 text-[10px] uppercase tracking-wider text-chrome-text/50">
+        {k}
+      </span>
+      <span
+        className={cn(
+          "min-w-0 flex-1 truncate text-[11px] text-foreground",
+          mono ? "font-mono" : "",
+        )}
+      >
+        {v}
+      </span>
+    </div>
+  )
+}
+
+// ── Generated SQL tab ───────────────────────────────────────────────
+
+function GeneratedSqlTab({ rendered }: { rendered: RenderedArtifacts }) {
+  const files: { name: string; lang: CodeLang; body: string }[] = [
+    { name: "rvbbit.backend.yaml", lang: "yaml", body: rendered.manifestYaml },
+    { name: "register.sql", lang: "sql", body: rendered.registerSql },
+    { name: "operator.sql", lang: "sql", body: rendered.operatorSql },
+    { name: "smoke.sql", lang: "sql", body: rendered.smokeSql },
+    { name: "compose.yaml", lang: "yaml", body: rendered.composeYaml },
+    { name: "compose.gpu.yaml", lang: "yaml", body: rendered.composeGpuYaml },
+  ]
+  const [active, setActive] = useState(files[0].name)
+  const activeFile = files.find((f) => f.name === active) ?? files[0]
+
+  return (
+    <div className="grid h-full grid-cols-[180px_minmax(0,1fr)] overflow-hidden">
+      {/* file list */}
+      <aside className="overflow-auto border-r border-chrome-border bg-chrome-bg/20 py-2">
+        {files.map((f) => (
+          <button
+            key={f.name}
+            type="button"
+            onClick={() => setActive(f.name)}
+            className={cn(
+              "flex w-full items-center gap-1.5 px-3 py-1 text-left text-[11px] transition",
+              active === f.name
+                ? "bg-brand-capability/15 text-brand-capability"
+                : "text-chrome-text hover:bg-foreground/[0.04] hover:text-foreground",
+            )}
+          >
+            <FileCode2 className="h-3 w-3 shrink-0" />
+            <span className="truncate font-mono">{f.name}</span>
+            <span className="ml-auto font-mono text-[9px] tabular-nums text-chrome-text/50">
+              {byteLabel(f.body)}
+            </span>
+          </button>
+        ))}
+        <div className="mx-3 my-2 rounded border border-dashed border-chrome-border/40 p-2 text-[10px] leading-snug text-chrome-text/55">
+          Edits in Overview &middot; <span className="font-mono">Install knobs</span>{" "}
+          re-render these previews live.
+        </div>
+      </aside>
+
+      {/* preview */}
+      <div className="flex h-full flex-col overflow-hidden">
+        <div className="flex items-center gap-2 border-b border-chrome-border bg-chrome-bg/40 px-3 py-1.5">
+          <FileCode2 className="h-3.5 w-3.5 text-brand-capability" />
+          <span className="font-mono text-[11px] text-foreground">
+            {activeFile.name}
+          </span>
+          <span className="rounded bg-foreground/[0.05] px-1 text-[9px] uppercase tracking-wider text-chrome-text/55">
+            {activeFile.lang}
+          </span>
+          <span className="ml-1 font-mono text-[9px] text-chrome-text/55">
+            {lineLabel(activeFile.body)}
+          </span>
+          <div className="ml-auto flex items-center gap-1.5">
+            <button
+              type="button"
+              onClick={() => copyToClipboard(activeFile.body)}
+              className="grid h-6 px-2 place-items-center rounded text-[10px] uppercase tracking-wider text-chrome-text/70 hover:bg-foreground/[0.08] hover:text-foreground"
+              title="Copy to clipboard"
+            >
+              copy
+            </button>
+          </div>
+        </div>
+        <CodePreview
+          code={activeFile.body}
+          lang={activeFile.lang}
+          className="min-h-0 flex-1"
+        />
+      </div>
+    </div>
+  )
+}
+
+function byteLabel(s: string): string {
+  const n = new TextEncoder().encode(s).length
+  if (n < 1024) return `${n} B`
+  return `${(n / 1024).toFixed(1)} kB`
+}
+
+function lineLabel(s: string): string {
+  const n = s.split("\n").length
+  return `${n} lines`
+}
+
+async function copyToClipboard(s: string) {
+  try {
+    await navigator.clipboard.writeText(s)
+  } catch {
+    // best-effort
+  }
+}
+
+// ── Probe tab ───────────────────────────────────────────────────────
+
+interface HistoryEntry {
+  at: number
+  result: ProbeResult
+  input: Record<string, unknown> | null
+}
+
+function ProbeTab({
+  activeConnectionId,
+  manifest,
+  registered,
+}: {
+  activeConnectionId: string | null
+  manifest: Manifest
+  registered: boolean
+}) {
+  const sampleInputs = manifest.smoke?.inputs?.[0] ?? null
+  const fieldNames = useMemo(() => {
+    const set = new Set<string>()
+    for (const op of manifest.operators ?? []) {
+      for (const k of Object.keys(op.inputs ?? {})) set.add(k)
+      // also include arg_names with the templated placeholder form
+      for (const n of op.arg_names) set.add(n)
+    }
+    if (sampleInputs) for (const k of Object.keys(sampleInputs)) set.add(k)
+    return [...set]
+  }, [manifest, sampleInputs])
+
+  const [inputs, setInputs] = useState<Record<string, string>>(() => {
+    const seed: Record<string, string> = {}
+    for (const k of fieldNames) seed[k] = sampleInputs?.[k] ?? ""
+    return seed
+  })
+  const [useCustomInput, setUseCustomInput] = useState(false)
+  const [running, setRunning] = useState(false)
+  const [history, setHistory] = useState<HistoryEntry[]>([])
+
+  const runOnce = useCallback(async () => {
+    if (!activeConnectionId) return
+    setRunning(true)
+    const filled = useCustomInput
+      ? Object.fromEntries(
+          Object.entries(inputs).filter(([, v]) => v.length > 0),
+        )
+      : null
+    const result = await probeBackend(
+      activeConnectionId,
+      manifest.backend.name,
+      filled,
+    )
+    setHistory((prev) => [
+      ...prev,
+      { at: Date.now(), result, input: filled },
+    ])
+    setRunning(false)
+  }, [activeConnectionId, manifest.backend.name, inputs, useCustomInput])
+
+  const okLatencies = history.filter((h) => h.result.ok).map((h) => h.result.latency_ms)
+  const sorted = [...okLatencies].sort((a, b) => a - b)
+  const p50 = percentile(sorted, 0.5)
+  const p95 = percentile(sorted, 0.95)
+  const okCount = okLatencies.length
+  const errCount = history.length - okCount
+
+  if (!registered) {
+    return (
+      <div className="grid h-full place-items-center bg-doc-bg p-6 text-center text-[12px] text-chrome-text">
+        <div className="max-w-md space-y-2">
+          <Plug className="mx-auto h-6 w-6 text-chrome-text/40" />
+          <div className="text-foreground">Backend not registered yet</div>
+          <p className="text-[11px] leading-snug text-chrome-text/65">
+            Probing calls <span className="font-mono">rvbbit.backend_probe</span>{" "}
+            on <span className="font-mono">{manifest.backend.name}</span>. Run the
+            install pipeline first (Phase 2) or apply the generated SQL manually.
+          </p>
+        </div>
+      </div>
+    )
+  }
+
+  return (
+    <div className="grid h-full grid-cols-[300px_minmax(0,1fr)] overflow-hidden">
+      {/* left — input form */}
+      <aside className="flex h-full flex-col overflow-hidden border-r border-chrome-border">
+        <div className="flex items-center gap-2 border-b border-chrome-border bg-chrome-bg/40 px-3 py-1.5">
+          <Play className="h-3.5 w-3.5 text-brand-capability" />
+          <span className="text-[11px] uppercase tracking-wider text-chrome-text">
+            Probe input
+          </span>
+        </div>
+        <div className="space-y-2 overflow-auto p-3">
+          <p className="text-[10px] leading-snug text-chrome-text/65">
+            <span className="text-warning">Active call:</span> runs the model
+            through the same transport path your operators use. Each click is
+            one billable round-trip.
+          </p>
+          <label className="flex items-center gap-2">
+            <input
+              type="checkbox"
+              checked={useCustomInput}
+              onChange={(e) => setUseCustomInput(e.target.checked)}
+              className="h-3.5 w-3.5 accent-brand-capability"
+            />
+            <span className="text-[11px] text-foreground">
+              Use custom input
+            </span>
+          </label>
+          <div className="text-[10px] text-chrome-text/55">
+            {useCustomInput
+              ? "Sends backend_probe_with_input(name, jsonb)."
+              : "Sends backend_probe(name) — handler-default sample input."}
+          </div>
+          {useCustomInput ? (
+            <div className="space-y-1.5">
+              {fieldNames.length === 0 ? (
+                <p className="text-[10px] italic text-chrome-text/45">
+                  No input fields derived from the manifest. Probing with an
+                  empty object.
+                </p>
+              ) : (
+                fieldNames.map((field) => (
+                  <div key={field}>
+                    <div className="mb-0.5 text-[9px] uppercase tracking-wider text-chrome-text/55">
+                      {field}
+                    </div>
+                    <textarea
+                      value={inputs[field] ?? ""}
+                      onChange={(e) =>
+                        setInputs((prev) => ({
+                          ...prev,
+                          [field]: e.target.value,
+                        }))
+                      }
+                      rows={2}
+                      className="w-full resize-y rounded border border-chrome-border bg-secondary-background p-1.5 font-mono text-[11px] text-foreground outline-none focus:ring-2 focus:ring-ring"
+                    />
+                  </div>
+                ))
+              )}
+            </div>
+          ) : null}
+          <Button
+            size="sm"
+            onClick={() => void runOnce()}
+            disabled={running || !activeConnectionId}
+            className="mt-2 w-full"
+          >
+            <Play className="h-3 w-3" />
+            {running ? "Probing…" : "Run probe"}
+          </Button>
+          {history.length > 0 ? (
+            <button
+              type="button"
+              onClick={() => setHistory([])}
+              className="inline-flex items-center gap-1 text-[10px] text-chrome-text/55 hover:text-foreground"
+            >
+              <Trash2 className="h-3 w-3" />
+              clear {history.length} runs
+            </button>
+          ) : null}
+        </div>
+      </aside>
+
+      {/* right — accumulating REPL with histogram */}
+      <div className="flex h-full min-w-0 flex-col overflow-hidden">
+        {/* hero — running latency stats */}
+        <div className="border-b border-chrome-border p-3">
+          <Panel
+            icon={Activity}
+            title="Recent probe latencies"
+            right={
+              <span>
+                {okCount} ok
+                {errCount > 0 ? (
+                  <span className="ml-1 text-danger">· {errCount} err</span>
+                ) : null}
+              </span>
+            }
+          >
+            {okLatencies.length === 0 ? (
+              <p className="text-[11px] text-chrome-text/55">
+                Run a probe to populate the histogram.
+              </p>
+            ) : (
+              <>
+                <div className="mb-1 grid grid-cols-3 gap-3 text-[10px] text-chrome-text/65">
+                  <span>
+                    <span className="font-mono tabular-nums text-foreground">
+                      {fmtMs(p50)}
+                    </span>{" "}
+                    p50
+                  </span>
+                  <span>
+                    <span className="font-mono tabular-nums text-warning">
+                      {fmtMs(p95)}
+                    </span>{" "}
+                    p95
+                  </span>
+                  <span>
+                    <span className="font-mono tabular-nums text-foreground">
+                      {fmtMs(Math.max(...okLatencies))}
+                    </span>{" "}
+                    max
+                  </span>
+                </div>
+                <Histogram
+                  values={okLatencies}
+                  height={56}
+                  markers={[
+                    { value: p50, label: "p50" },
+                    { value: p95, label: "p95", color: "var(--warning)" },
+                  ]}
+                  barColor="var(--brand-capability)"
+                />
+              </>
+            )}
+          </Panel>
+        </div>
+
+        {/* per-call timeline */}
+        <div className="min-h-0 flex-1 overflow-auto p-3">
+          {history.length === 0 ? (
+            <div className="grid h-full place-items-center text-[11px] text-chrome-text/45">
+              No probes run yet — output and full JSON appear here as you go.
+            </div>
+          ) : (
+            <div className="space-y-1.5">
+              {[...history].reverse().map((h, i) => (
+                <ProbeRow key={history.length - i} entry={h} />
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function ProbeRow({ entry }: { entry: HistoryEntry }) {
+  const [expanded, setExpanded] = useState(false)
+  const r = entry.result
+  return (
+    <div
+      className={cn(
+        "rounded border bg-secondary-background/40",
+        r.ok ? "border-chrome-border/60" : "border-danger/40",
+      )}
+    >
+      <button
+        type="button"
+        onClick={() => setExpanded((x) => !x)}
+        className="flex w-full items-center gap-2 px-2 py-1.5 text-left"
+      >
+        <span
+          className={cn(
+            "inline-flex items-center gap-1 rounded-full px-1.5 py-px text-[9px] uppercase tracking-wider",
+            r.ok
+              ? "bg-success/15 text-success"
+              : "bg-danger/15 text-danger",
+          )}
+        >
+          {r.ok ? <CheckCircle2 className="h-2.5 w-2.5" /> : <X className="h-2.5 w-2.5" />}
+          {r.ok ? "ok" : "fail"}
+        </span>
+        <span className="font-mono text-[10px] tabular-nums text-chrome-text/65">
+          {new Date(entry.at).toLocaleTimeString([], { hour12: false })}
+        </span>
+        <span className="font-mono text-[11px] tabular-nums text-foreground">
+          {fmtMs(r.latency_ms)}
+        </span>
+        {r.ok ? (
+          <span className="text-[10px] text-chrome-text/55">
+            output: <span className="font-mono">{r.outputType}</span>
+            {(r.outputSize ?? 0) > 0 ? (
+              <span className="font-mono text-chrome-text/45">[{r.outputSize}]</span>
+            ) : null}
+          </span>
+        ) : (
+          <span className="truncate text-[10px] text-danger">{r.error}</span>
+        )}
+        <span className="ml-auto text-[10px] text-chrome-text/45">
+          {expanded ? "hide" : "show"} json
+        </span>
+      </button>
+      {expanded ? (
+        <pre className="max-h-64 overflow-auto border-t border-chrome-border/40 bg-doc-bg p-2 font-mono text-[10px] leading-relaxed text-foreground/85">
+          {JSON.stringify(
+            {
+              input: entry.input ?? "(default)",
+              ...r,
+            },
+            null,
+            2,
+          )}
+        </pre>
+      ) : null}
+    </div>
+  )
+}
+
+
+// ── Install tab dispatcher ──────────────────────────────────────────
+
+function InstallTabDispatcher({
+  mode,
+  warrenAvail,
+  setMode,
+  activeConnectionId,
+  manifestPath,
+  manifest,
+  knobs,
+  rendered,
+  onInstalledChanged,
+  onOpenWarrenJob,
+}: {
+  mode: "warren" | "local"
+  warrenAvail: WarrenAvailability | null
+  setMode: (m: "warren" | "local") => void
+  activeConnectionId: string | null
+  manifestPath: string
+  manifest: Manifest
+  knobs: InstallKnobs
+  rendered: RenderedArtifacts
+  onInstalledChanged: () => void
+  onOpenWarrenJob: (jobId: string, jobName: string | null) => void
+}) {
+  // No warren tables on this DB → never show the toggle; only local
+  // install. Preserves the pre-Phase-3 UX exactly.
+  const warrenAvailable = warrenAvail?.available === true
+  const readyCount = warrenAvail?.readyNodes ?? 0
+  const showToggle = warrenAvailable
+
+  return (
+    <div className="flex h-full min-h-0 flex-col">
+      {showToggle ? (
+        <div className="flex items-center gap-1 border-b border-chrome-border/40 bg-chrome-bg/30 px-3 py-1.5">
+          <span className="text-[10px] uppercase tracking-wider text-chrome-text/55">
+            install via
+          </span>
+          <ModeChip
+            active={mode === "warren"}
+            onClick={() => setMode("warren")}
+            label="Warren"
+            color="brand-warren"
+            disabled={readyCount === 0}
+            hint={
+              readyCount > 0
+                ? `${readyCount} of ${warrenAvail?.totalNodes ?? 0} warren node(s) ready`
+                : warrenAvail?.totalNodes
+                  ? `${warrenAvail.totalNodes} warren node(s) registered, none ready`
+                  : "no warren nodes registered"
+            }
+          />
+          <ModeChip
+            active={mode === "local"}
+            onClick={() => setMode("local")}
+            label="Local"
+            color="brand-capability"
+            hint="scaffold + docker compose up on this machine"
+          />
+        </div>
+      ) : null}
+      <div className="min-h-0 flex-1 overflow-hidden">
+        {mode === "warren" && warrenAvailable ? (
+          <WarrenDeployPanel
+            activeConnectionId={activeConnectionId}
+            manifest={manifest}
+            knobs={knobs}
+            onUseLocalInstead={() => setMode("local")}
+            onOpenJob={onOpenWarrenJob}
+          />
+        ) : (
+          <CapabilityInstallGraph
+            activeConnectionId={activeConnectionId}
+            manifestPath={manifestPath}
+            manifest={manifest}
+            knobs={knobs}
+            rendered={rendered}
+            onInstalledChanged={onInstalledChanged}
+          />
+        )}
+      </div>
+    </div>
+  )
+}
+
+function ModeChip({
+  active,
+  onClick,
+  label,
+  color,
+  disabled,
+  hint,
+}: {
+  active: boolean
+  onClick: () => void
+  label: string
+  color: "brand-warren" | "brand-capability"
+  disabled?: boolean
+  hint?: string
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      title={hint}
+      className={cn(
+        "rounded-full px-2 py-0.5 text-[10px] uppercase tracking-wider transition disabled:opacity-40",
+        active
+          ? color === "brand-warren"
+            ? "bg-brand-warren/15 text-brand-warren ring-1 ring-brand-warren/30"
+            : "bg-brand-capability/15 text-brand-capability ring-1 ring-brand-capability/30"
+          : "text-chrome-text hover:text-foreground",
+      )}
+    >
+      {label}
+    </button>
+  )
+}
