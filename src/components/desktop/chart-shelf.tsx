@@ -33,7 +33,9 @@ import {
   countPill,
   defaultVegaType,
   filterCaption,
+  isDimPill,
   MARK_TYPES,
+  MULTI_DIM_JOIN_SEP,
   pillCaption,
   pillFromColumn,
   shelfFromSpec,
@@ -98,8 +100,13 @@ export function ChartShelf({
     [apply],
   )
   const setSingle = useCallback(
-    (channel: Exclude<ShelfChannel, "tooltip">, pill: ChannelPill | null) =>
+    (channel: "color" | "size" | "shape", pill: ChannelPill | null) =>
       apply((s) => ({ ...s, [channel]: pill })),
+    [apply],
+  )
+  const setPositional = useCallback(
+    (channel: "x" | "y", pills: ChannelPill[]) =>
+      apply((s) => ({ ...s, [channel]: pills })),
     [apply],
   )
   const setTooltip = useCallback(
@@ -111,7 +118,13 @@ export function ChartShelf({
     [apply],
   )
 
-  // Drop a field column onto a channel — replace single, append multi.
+  // Drop a field column onto a channel.
+  //
+  // For x/y the multi-pill invariant is: every pill is a dim, or there is
+  // exactly one measure/temporal pill. Drops that violate that rewrite the
+  // shelf to a single pill (the user's most recent intent wins). This keeps
+  // the shelf state always emittable as legal Vega-Lite — no half-built
+  // calc-concat where one of the joined fields needs an aggregate.
   const dropFieldOn = useCallback(
     (channel: ShelfChannel | "filter", colName: string) => {
       const col = columns.find((c) => c.name === colName)
@@ -137,6 +150,20 @@ export function ChartShelf({
             ? s
             : { ...s, tooltip: [...s.tooltip, pill] },
         )
+        return
+      }
+      if (channel === "x" || channel === "y") {
+        apply((s) => {
+          const current = s[channel]
+          if (current.length === 0) return { ...s, [channel]: [pill] }
+          const allDimsNow = current.every(isDimPill)
+          const newIsDim = isDimPill(pill)
+          if (allDimsNow && newIsDim) {
+            if (current.some((p) => p.field === pill.field)) return s
+            return { ...s, [channel]: [...current, pill] }
+          }
+          return { ...s, [channel]: [pill] }
+        })
         return
       }
       setSingle(channel, pill)
@@ -191,6 +218,7 @@ export function ChartShelf({
           onDrop={handleDrop}
           onDragLeave={handleDragLeave}
           onSetMark={setMark}
+          onSetPositional={setPositional}
           onSetSingle={setSingle}
           onSetTooltip={setTooltip}
           onSetFilters={setFilters}
@@ -356,7 +384,8 @@ interface ShelvesProps {
   onDrop: (e: React.DragEvent, channel: ShelfChannel | "filter") => void
   onDragLeave: () => void
   onSetMark: (mark: ShelfState["mark"]) => void
-  onSetSingle: (channel: Exclude<ShelfChannel, "tooltip">, pill: ChannelPill | null) => void
+  onSetPositional: (channel: "x" | "y", pills: ChannelPill[]) => void
+  onSetSingle: (channel: "color" | "size" | "shape", pill: ChannelPill | null) => void
   onSetTooltip: (pills: ChannelPill[]) => void
   onSetFilters: (filters: FilterPill[]) => void
 }
@@ -372,6 +401,7 @@ function ShelvesStrip(props: ShelvesProps) {
     onDrop,
     onDragLeave,
     onSetMark,
+    onSetPositional,
     onSetSingle,
     onSetTooltip,
     onSetFilters,
@@ -385,29 +415,29 @@ function ShelvesStrip(props: ShelvesProps) {
         canStack={state.color != null || state.mark.type === "bar" || state.mark.type === "area"}
         onChange={onSetMark}
       />
-      <SingleShelf
+      <PositionalShelf
         label="Columns"
         channel="x"
-        pill={state.x}
+        pills={state.x}
         hovered={hoverChannel === "x"}
         columns={columns}
         rows={rows}
         onDragOver={onDragOver}
         onDrop={onDrop}
         onDragLeave={onDragLeave}
-        onChange={(p) => onSetSingle("x", p)}
+        onChange={(pills) => onSetPositional("x", pills)}
       />
-      <SingleShelf
+      <PositionalShelf
         label="Rows"
         channel="y"
-        pill={state.y}
+        pills={state.y}
         hovered={hoverChannel === "y"}
         columns={columns}
         rows={rows}
         onDragOver={onDragOver}
         onDrop={onDrop}
         onDragLeave={onDragLeave}
-        onChange={(p) => onSetSingle("y", p)}
+        onChange={(pills) => onSetPositional("y", pills)}
         showCountShortcut
       />
       <div className="grid grid-cols-3 gap-0.5">
@@ -554,7 +584,7 @@ function MarkRow({
   )
 }
 
-// ── Single-pill shelf ──────────────────────────────────────────────
+// ── Single-pill shelf (color / size / shape) ───────────────────────
 
 function SingleShelf({
   label,
@@ -567,11 +597,10 @@ function SingleShelf({
   onDrop,
   onDragLeave,
   onChange,
-  showCountShortcut,
   compact,
 }: {
   label: string
-  channel: Exclude<ShelfChannel, "tooltip">
+  channel: "color" | "size" | "shape"
   pill: ChannelPill | null
   hovered: boolean
   columns: QueryResultColumn[]
@@ -580,7 +609,6 @@ function SingleShelf({
   onDrop: (e: React.DragEvent, channel: ShelfChannel | "filter") => void
   onDragLeave: () => void
   onChange: (pill: ChannelPill | null) => void
-  showCountShortcut?: boolean
   compact?: boolean
 }) {
   return (
@@ -613,22 +641,109 @@ function SingleShelf({
           onRemove={() => onChange(null)}
         />
       ) : (
-        <div className="flex items-center gap-1.5 text-[10px] text-chrome-text/45">
-          <span className="rounded border border-dashed border-chrome-border/40 px-1.5 py-0.5">
-            drop a field
-          </span>
-          {showCountShortcut ? (
-            <button
-              type="button"
-              onClick={() => onChange(countPill(channel))}
-              className="rounded border border-chrome-border/40 bg-doc-bg px-1.5 py-0.5 text-[10px] text-chrome-text/85 hover:border-rvbbit-accent/40 hover:text-foreground"
-              title="Use count(*) — no field needed"
-            >
-              count(*)
-            </button>
-          ) : null}
-        </div>
+        <span className="rounded border border-dashed border-chrome-border/40 px-1.5 py-0.5 text-[10px] text-chrome-text/45">
+          drop a field
+        </span>
       )}
+    </div>
+  )
+}
+
+// ── Positional shelf (Columns / Rows — multi-pill, Tableau-style) ───
+
+function PositionalShelf({
+  label,
+  channel,
+  pills,
+  hovered,
+  columns,
+  rows,
+  onDragOver,
+  onDrop,
+  onDragLeave,
+  onChange,
+  showCountShortcut,
+}: {
+  label: string
+  channel: "x" | "y"
+  pills: ChannelPill[]
+  hovered: boolean
+  columns: QueryResultColumn[]
+  rows: Record<string, unknown>[]
+  onDragOver: (e: React.DragEvent, channel: ShelfChannel | "filter") => void
+  onDrop: (e: React.DragEvent, channel: ShelfChannel | "filter") => void
+  onDragLeave: () => void
+  onChange: (pills: ChannelPill[]) => void
+  showCountShortcut?: boolean
+}) {
+  const isNested = pills.length >= 2
+  return (
+    <div
+      onDragOver={(e) => onDragOver(e, channel)}
+      onDrop={(e) => onDrop(e, channel)}
+      onDragLeave={onDragLeave}
+      className={cn(
+        "flex items-center gap-1.5 rounded border px-1.5 py-1 transition-colors",
+        hovered
+          ? "border-rvbbit-accent/60 bg-rvbbit-bg/40"
+          : "border-chrome-border/40 bg-secondary-background/30",
+      )}
+    >
+      <span className="w-[70px] shrink-0 text-[9px] uppercase tracking-wider text-chrome-text/55">
+        {label}
+      </span>
+      <div className="flex min-w-0 flex-1 flex-wrap items-center gap-1">
+        {pills.length === 0 ? (
+          <>
+            <span className="rounded border border-dashed border-chrome-border/40 px-1.5 py-0.5 text-[10px] text-chrome-text/45">
+              drop a field
+            </span>
+            {showCountShortcut ? (
+              <button
+                type="button"
+                onClick={() => onChange([countPill(channel)])}
+                className="rounded border border-chrome-border/40 bg-doc-bg px-1.5 py-0.5 text-[10px] text-chrome-text/85 hover:border-rvbbit-accent/40 hover:text-foreground"
+                title="Use count(*) — no field needed"
+              >
+                count(*)
+              </button>
+            ) : null}
+          </>
+        ) : (
+          pills.map((p, i) => (
+            <span key={`${p.field}/${i}`} className="inline-flex items-center gap-1">
+              {i > 0 ? (
+                <span
+                  className="font-mono text-[10px] text-chrome-text/50"
+                  title="nested dim — joined as a single axis"
+                >
+                  {MULTI_DIM_JOIN_SEP.trim()}
+                </span>
+              ) : null}
+              <Pill
+                pill={p}
+                columns={columns}
+                rows={rows}
+                channel={channel}
+                multiDim={isNested}
+                onChange={(next) => {
+                  const copy = [...pills]
+                  copy[i] = next
+                  // If user gave the edited pill an aggregate / quantitative /
+                  // temporal type, the multi-dim invariant breaks — collapse
+                  // to just this pill.
+                  if (isNested && !isDimPill(next)) {
+                    onChange([next])
+                    return
+                  }
+                  onChange(copy)
+                }}
+                onRemove={() => onChange(pills.filter((_, j) => j !== i))}
+              />
+            </span>
+          ))
+        )}
+      </div>
     </div>
   )
 }
@@ -769,6 +884,7 @@ function Pill({
   pill,
   columns,
   channel,
+  multiDim,
   onChange,
   onRemove,
 }: {
@@ -776,6 +892,8 @@ function Pill({
   columns: QueryResultColumn[]
   rows: Record<string, unknown>[]
   channel: ShelfChannel
+  /** True when this pill is one of multiple dim pills on a positional shelf. */
+  multiDim?: boolean
   onChange: (next: ChannelPill) => void
   onRemove: () => void
 }) {
@@ -827,7 +945,7 @@ function Pill({
         </span>
       </button>
       {open ? (
-        <PillPopover pill={pill} channel={channel} onChange={onChange} />
+        <PillPopover pill={pill} channel={channel} multiDim={multiDim} onChange={onChange} />
       ) : null}
     </div>
   )
@@ -836,10 +954,12 @@ function Pill({
 function PillPopover({
   pill,
   channel,
+  multiDim,
   onChange,
 }: {
   pill: ChannelPill
   channel: ShelfChannel
+  multiDim?: boolean
   onChange: (next: ChannelPill) => void
 }) {
   return (
@@ -880,6 +1000,7 @@ function PillPopover({
             })
           }}
           className="rounded border border-chrome-border bg-doc-bg px-1.5 py-0.5 font-mono text-[10px] text-foreground outline-none"
+          title={multiDim ? "aggregating collapses this nested-dim shelf to a single pill" : undefined}
         >
           <option value="">none</option>
           {AGGREGATE_OPS.map((a) => (
@@ -888,6 +1009,11 @@ function PillPopover({
             </option>
           ))}
         </select>
+        {multiDim ? (
+          <span className="text-[9px] text-chrome-text/55">
+            nested dim — adding an aggregate collapses the shelf
+          </span>
+        ) : null}
       </PopRow>
 
       {pill.type === "temporal" ? (
