@@ -1,9 +1,49 @@
 "use client"
 
-import { useRef } from "react"
-import { Grip, Maximize2, Minus, X, type LucideIcon } from "@/lib/icons"
-import type { DesktopWindowState } from "@/lib/desktop/types"
+import { useRef, useState } from "react"
+import {
+  Boxes,
+  Calculator,
+  ChevronDown,
+  Grip,
+  Hash,
+  Layers,
+  Maximize2,
+  Minus,
+  Sigma,
+  Table2,
+  TrendingUp,
+  X,
+  type LucideIcon,
+} from "@/lib/icons"
+import {
+  readColumnDragPayload,
+  useActiveColumnDragSource,
+} from "@/lib/desktop/column-drag"
+import { availableRollupOps, isNumericRef } from "@/lib/desktop/sql-builder"
+import type {
+  DesktopColumnDragPayload,
+  DesktopWindowState,
+  RollupOp,
+} from "@/lib/desktop/types"
 import { cn } from "@/lib/utils"
+
+function rollupOpKey(op: RollupOp): string {
+  return op.kind === "measure" ? `measure:${op.agg}` : op.kind
+}
+
+function rollupOpIcon(op: RollupOp): LucideIcon {
+  if (op.kind === "group-by") return Layers
+  if (op.kind === "order-by") return Table2
+  switch (op.agg) {
+    case "sum": return Sigma
+    case "avg": return Calculator
+    case "min": return ChevronDown
+    case "max": return TrendingUp
+    case "count": return Hash
+    case "count_distinct": return Boxes
+  }
+}
 
 interface DesktopWindowProps {
   window: DesktopWindowState
@@ -17,6 +57,18 @@ interface DesktopWindowProps {
   onMove: (id: string, x: number, y: number) => void
   onResize: (id: string, width: number, height: number) => void
   viewportScale?: number
+  /**
+   * When set, the window can receive column drags whose source matches
+   * this identity (same parent window + same source relation). A faint
+   * outer ring shows on every compatible window during a drag; a strong
+   * outer glow appears on the one the cursor is over.
+   */
+  columnDropAcceptsFrom?: { parentWindowId: string; relationKey: string } | null
+  /**
+   * Called when a compatible column drag is dropped on one of the
+   * type-aware operation tiles (or the fallback default zone).
+   */
+  onColumnMerge?: (payload: DesktopColumnDragPayload, op: RollupOp) => void
 }
 
 const MIN_WIDTH = 320
@@ -37,8 +89,27 @@ export function DesktopWindow({
   onMove,
   onResize,
   viewportScale = 1,
+  columnDropAcceptsFrom,
+  onColumnMerge,
 }: DesktopWindowProps) {
   const chrome = windowChrome(w.kind)
+  const activeColumnDrag = useActiveColumnDragSource()
+  const columnDragCompatible = !!columnDropAcceptsFrom
+    && !!activeColumnDrag
+    && activeColumnDrag.parentWindowId === columnDropAcceptsFrom.parentWindowId
+    && activeColumnDrag.relationKey === columnDropAcceptsFrom.relationKey
+  // `columnDragHover` → cursor is somewhere over the drop overlay (drives
+  // the strong outer glow). `hoveredOpKey` → which specific tile is hot.
+  const [columnDragHover, setColumnDragHover] = useState(false)
+  const [hoveredOpKey, setHoveredOpKey] = useState<string | null>(null)
+  const draggedColumns = activeColumnDrag?.columns ?? []
+  const rollupTiles = columnDragCompatible ? availableRollupOps(draggedColumns) : []
+  // Default op for a drop on the cluster backdrop (not a specific tile):
+  // sum for numeric drags, group-by otherwise — matches the old one-shot.
+  const defaultRollupOp: RollupOp = draggedColumns.some(isNumericRef)
+    ? { kind: "measure", agg: "sum" }
+    : { kind: "group-by" }
+  const resetColumnDragState = () => { setColumnDragHover(false); setHoveredOpKey(null) }
   const dragRef = useRef<{
     pointerId: number
     startX: number
@@ -119,6 +190,7 @@ export function DesktopWindow({
     <section
       data-rvbbit-window
       data-focused={focused ? "true" : "false"}
+      data-column-drop={columnDragCompatible ? (columnDragHover ? "hover" : "ready") : undefined}
       className={cn(
         "pointer-events-auto absolute overflow-hidden rounded-md border transition-[background-color,backdrop-filter,box-shadow] duration-150",
         focused
@@ -134,9 +206,13 @@ export function DesktopWindow({
         borderColor: chrome.border,
         // Unfocused windows get a shallower drop shadow and a half-strength
         // ring so the focused window sits visually forward.
-        boxShadow: focused
-          ? `0 24px 80px oklch(0% 0 0 / 0.62), 0 0 0 1px ${chrome.ring}`
-          : `0 12px 40px oklch(0% 0 0 / 0.32), 0 0 0 1px color-mix(in oklch, ${chrome.ring} 45%, transparent)`,
+        boxShadow: columnDragHover
+          ? `0 24px 80px oklch(0% 0 0 / 0.62), 0 0 0 2px oklch(var(--win-l-icon) var(--win-c) var(--win-${w.kind}-h) / 0.95), 0 0 56px 10px oklch(var(--win-l-icon) var(--win-c) var(--win-${w.kind}-h) / 0.55)`
+          : columnDragCompatible
+            ? `0 16px 56px oklch(0% 0 0 / 0.5), 0 0 0 2px oklch(var(--win-l-icon) var(--win-c) var(--win-${w.kind}-h) / 0.55), 0 0 24px 2px oklch(var(--win-l-icon) var(--win-c) var(--win-${w.kind}-h) / 0.25)`
+            : focused
+              ? `0 24px 80px oklch(0% 0 0 / 0.62), 0 0 0 1px ${chrome.ring}`
+              : `0 12px 40px oklch(0% 0 0 / 0.32), 0 0 0 1px color-mix(in oklch, ${chrome.ring} 45%, transparent)`,
       }}
       onMouseDown={() => onFocus(w.id)}
     >
@@ -187,6 +263,92 @@ export function DesktopWindow({
           glass blur is visible across the whole window when unfocused.
           When focused, the section is opaque enough to read as solid. */}
       <div className="h-[calc(100%-2.25rem)] overflow-hidden">{children}</div>
+
+      {columnDragCompatible && onColumnMerge && rollupTiles.length > 0 ? (
+        <div
+          // Capture layer that swallows a compatible column drag before it
+          // bubbles to the canvas. When the drag is *not* compatible the
+          // overlay isn't mounted, so the drop falls through to the canvas
+          // handler (which creates a fresh block). Dropping on the backdrop
+          // (not a tile) applies the default op.
+          className="absolute inset-0 z-[60] flex items-center justify-center"
+          onDragEnter={(e) => { e.preventDefault(); setColumnDragHover(true) }}
+          onDragOver={(e) => {
+            e.preventDefault()
+            e.dataTransfer.dropEffect = "copy"
+            // Tiles stopPropagation on their own dragover, so reaching here
+            // means the cursor is over the backdrop — clear the hot tile.
+            setHoveredOpKey(null)
+          }}
+          onDragLeave={(e) => {
+            // relatedTarget is the element being entered; if it's outside
+            // the overlay we've genuinely left (moving between tiles keeps
+            // it inside, avoiding flicker).
+            if (!e.currentTarget.contains(e.relatedTarget as Node | null)) {
+              resetColumnDragState()
+            }
+          }}
+          onDrop={(e) => {
+            e.preventDefault()
+            e.stopPropagation()
+            resetColumnDragState()
+            const payload = readColumnDragPayload(e.dataTransfer)
+            if (payload) onColumnMerge(payload, defaultRollupOp)
+          }}
+        >
+          <div
+            className="pointer-events-none absolute inset-0"
+            style={{ backgroundColor: `oklch(var(--win-l) var(--win-c) var(--win-${w.kind}-h) / 0.12)` }}
+          />
+          <div className="relative grid w-[min(78%,17rem)] grid-cols-2 gap-1.5 rounded-lg border border-chrome-border/60 bg-chrome-bg/80 p-2 backdrop-blur-[3px]">
+            <div className="col-span-2 truncate px-1 pb-0.5 text-center text-[10px] uppercase tracking-wider text-chrome-text/80">
+              {draggedColumns.length > 1
+                ? `${draggedColumns.length} columns →`
+                : `${draggedColumns[0]?.name ?? "column"} →`}
+            </div>
+            {rollupTiles.map((tile, i) => {
+              const key = rollupOpKey(tile.op)
+              const Icon = rollupOpIcon(tile.op)
+              const hot = hoveredOpKey === key
+              const lastOdd = rollupTiles.length % 2 === 1 && i === rollupTiles.length - 1
+              return (
+                <div
+                  key={key}
+                  title={tile.hint}
+                  onDragEnter={(e) => { e.preventDefault(); e.stopPropagation(); setHoveredOpKey(key) }}
+                  onDragOver={(e) => {
+                    e.preventDefault()
+                    e.stopPropagation()
+                    e.dataTransfer.dropEffect = "copy"
+                    setHoveredOpKey(key)
+                  }}
+                  onDrop={(e) => {
+                    e.preventDefault()
+                    e.stopPropagation()
+                    resetColumnDragState()
+                    const payload = readColumnDragPayload(e.dataTransfer)
+                    if (payload) onColumnMerge(payload, tile.op)
+                  }}
+                  className={cn(
+                    "flex cursor-copy select-none flex-col items-center justify-center gap-1 rounded-md border px-2 py-2.5 text-[11px] font-medium transition-colors",
+                    lastOdd && "col-span-2",
+                    hot
+                      ? "border-transparent text-foreground"
+                      : "border-chrome-border/50 bg-foreground/[0.03] text-chrome-text hover:bg-foreground/[0.06]",
+                  )}
+                  style={hot ? {
+                    backgroundColor: `oklch(var(--win-l-icon) var(--win-c) var(--win-${w.kind}-h) / 0.22)`,
+                    boxShadow: `inset 0 0 0 1.5px oklch(var(--win-l-icon) var(--win-c) var(--win-${w.kind}-h) / 0.9)`,
+                  } : undefined}
+                >
+                  <Icon className="h-4 w-4 shrink-0" style={{ color: `oklch(var(--win-l-icon) var(--win-c) var(--win-${w.kind}-h))` }} />
+                  <span className="truncate">{tile.label}</span>
+                </div>
+              )
+            })}
+          </div>
+        </div>
+      ) : null}
 
       <button
         type="button"

@@ -90,6 +90,7 @@ import type {
   DesktopBlockDragPayload,
   DesktopColumnDragPayload,
   DesktopParamOperator,
+  RollupOp,
   DesktopParamValue,
   DesktopViewportState,
   DesktopWindowState,
@@ -135,7 +136,14 @@ interface WorkspaceTransition {
 }
 import { randomUUID } from "@/lib/uuid"
 import { listViewApps } from "@/lib/desktop/view-apps"
-import { buildColumnAggregateQuery, previewSqlForTable, quoteSqlIdent } from "@/lib/desktop/sql-builder"
+import {
+  applyRollupOp,
+  buildRollupQuery,
+  previewSqlForTable,
+  quoteSqlIdent,
+  rollupSpecColumns,
+  rollupSpecFromColumns,
+} from "@/lib/desktop/sql-builder"
 import { fetchKgEvidenceBySource, fetchPrimaryKeyColumn } from "@/lib/rvbbit/kg"
 import { paramKey, sameParamValue, sourceSqlForPayload, uniqueBlockName } from "@/lib/desktop/reactive-sql"
 import {
@@ -1664,11 +1672,10 @@ export function DesktopShell() {
   }), [viewport.x, viewport.y, viewport.scale])
 
   const openColumnAggregate = useCallback((payload: DesktopColumnDragPayload, at: { x: number; y: number }) => {
-    const { sql, title } = buildColumnAggregateQuery({
+    const rollup = rollupSpecFromColumns(payload.columns)
+    const { sql, title } = buildRollupQuery(rollup, {
       parentBlockName: payload.parentBlockName,
       parentTitle: payload.parentTitle,
-      relationKey: payload.relationKey,
-      columns: payload.columns,
     })
     openWindow({
       id: randomUUID(),
@@ -1690,11 +1697,68 @@ export function DesktopShell() {
           parentTitle: payload.parentTitle,
           parentSql: payload.parentSql,
           relationKey: payload.relationKey,
-          columns: payload.columns,
+          parentBlockName: payload.parentBlockName,
+          columns: rollupSpecColumns(rollup),
+          rollup,
         },
       } satisfies DataPayload,
     })
   }, [openWindow])
+
+  // Drop a column onto an existing column-aggregate window via a chosen
+  // operation tile: fold it into the rollup spec, regenerate SQL/title.
+  // The target window's `payload.sql` change is what re-runs the query —
+  // its data-grid-window has an effect that adopts external SQL updates
+  // and triggers a fresh run, so we don't need to bump the run signal
+  // here (doing both would race two runSql() calls).
+  const mergeColumnIntoWindow = useCallback((targetWindowId: string, payload: DesktopColumnDragPayload, op: RollupOp) => {
+    setWindows((ws) => ws.map((w) => {
+      if (w.id !== targetWindowId || w.kind !== "data") return w
+      const p = w.payload as DataPayload | undefined
+      const lin = p?.lineage
+      if (!p || !lin || lin.kind !== "column-aggregate") return w
+      // Re-verify compatibility at drop time (the overlay should have
+      // gated this, but defense-in-depth).
+      if (lin.parentWindowId !== payload.parentWindowId) return w
+      if (lin.relationKey !== payload.relationKey) return w
+
+      // The rollup spec is the source of truth; derive one from the legacy
+      // flat column list for windows that pre-date the spec.
+      const baseSpec = lin.rollup ?? rollupSpecFromColumns(lin.columns ?? [])
+      const { spec: nextSpec, changed } = applyRollupOp(baseSpec, payload.columns, op)
+      if (!changed) return w
+
+      // Prefer the lineage's parentBlockName; fall back to the drag
+      // payload (covers older windows that pre-date the field).
+      const parentBlockName = lin.parentBlockName ?? payload.parentBlockName
+      const { sql, title } = buildRollupQuery(nextSpec, {
+        parentBlockName,
+        parentTitle: lin.parentTitle,
+      })
+
+      const nextReactive = p.reactive
+        ? {
+            ...p.reactive,
+            sourceSql: sql,
+            version: (p.reactive.version ?? 1) + 1,
+          }
+        : undefined
+      return {
+        ...w,
+        title,
+        payload: {
+          ...p,
+          title,
+          sql,
+          // Clear any user SQL edits in the editor draft so the rail
+          // doesn't show stale text after a merge.
+          view: p.view ? { ...p.view, sqlDraft: undefined } : p.view,
+          lineage: { ...lin, parentBlockName, columns: rollupSpecColumns(nextSpec), rollup: nextSpec },
+          reactive: nextReactive,
+        } satisfies DataPayload,
+      }
+    }))
+  }, [])
 
   const openBlockReference = useCallback((payload: DesktopBlockDragPayload, at: { x: number; y: number }) => {
     const title = `${payload.title} → ref`
@@ -1998,7 +2062,18 @@ export function DesktopShell() {
             )}
             aria-hidden={!isActive}
           >
-            {canvas.windows.map((w) => (
+            {canvas.windows.map((w) => {
+              // Column-aggregate windows are drop targets for additional
+              // columns from their *exact* parent (same parent window +
+              // same source relation). Anything else falls through to
+              // the canvas drop, which spawns a fresh block.
+              const columnDropAcceptsFrom = (() => {
+                if (w.kind !== "data") return null
+                const lin = (w.payload as DataPayload | undefined)?.lineage
+                if (!lin || lin.kind !== "column-aggregate") return null
+                return { parentWindowId: lin.parentWindowId, relationKey: lin.relationKey }
+              })()
+              return (
               <DesktopWindow
                 key={w.id}
                 window={w}
@@ -2010,6 +2085,8 @@ export function DesktopShell() {
                 onMove={move}
                 onResize={resize}
                 viewportScale={viewport.scale}
+                columnDropAcceptsFrom={columnDropAcceptsFrom}
+                onColumnMerge={(payload, op) => mergeColumnIntoWindow(w.id, payload, op)}
               >
                 {renderWindowContent(w, {
                   activeConnectionId,
@@ -2067,7 +2144,8 @@ export function DesktopShell() {
                   openWarrenJob,
                 })}
               </DesktopWindow>
-            ))}
+              )
+            })}
           </div>
         )
       })}

@@ -1,4 +1,5 @@
-import type { DesktopColumnDragPayload } from "./types"
+import { useSyncExternalStore } from "react"
+import type { DesktopColumnDragPayload, DesktopColumnRef } from "./types"
 
 const MIME = "application/x-rvbbit-lens-column"
 
@@ -24,4 +25,49 @@ export function readColumnDragPayload(dt: DataTransfer): DesktopColumnDragPayloa
   } catch {
     return null
   }
+}
+
+// ── Active column drag source ──────────────────────────────────────────
+//
+// During a column drag we publish a small identity record so other
+// windows can check, at dragover time, whether they're a compatible
+// drop target — DataTransfer.types lets us *detect* a column drag but
+// not *read* its parent identity until drop, and we need that identity
+// to decide which windows to glow.
+
+export interface ActiveColumnDragSource {
+  parentWindowId: string
+  parentBlockName: string
+  relationKey: string
+  /** The columns being dragged — drives which drop tiles a target shows. */
+  columns: DesktopColumnRef[]
+}
+
+let active: ActiveColumnDragSource | null = null
+const listeners = new Set<() => void>()
+
+export function setActiveColumnDragSource(source: ActiveColumnDragSource | null): void {
+  active = source
+  for (const l of listeners) l()
+}
+
+export function getActiveColumnDragSource(): ActiveColumnDragSource | null {
+  return active
+}
+
+function subscribe(listener: () => void): () => void {
+  listeners.add(listener)
+  return () => { listeners.delete(listener) }
+}
+
+function getSnapshot(): ActiveColumnDragSource | null {
+  return active
+}
+
+function getServerSnapshot(): ActiveColumnDragSource | null {
+  return null
+}
+
+export function useActiveColumnDragSource(): ActiveColumnDragSource | null {
+  return useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot)
 }

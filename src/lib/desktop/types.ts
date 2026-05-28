@@ -192,8 +192,85 @@ export interface DesktopQueryLineage {
   parentTitle: string
   parentSql: string
   relationKey: string
+  /**
+   * Parent window's reactive block name — what we write into `FROM {X}`
+   * when (re)building a column-aggregate query. Distinct from
+   * `relationKey`, which is a table/SQL-hash key used for matching.
+   * Optional for backwards compat with pre-merge saved windows; new
+   * column-aggregate windows always populate it.
+   */
+  parentBlockName?: string
+  /**
+   * Legacy flat column list. Superseded by `rollup`; still written as a
+   * flattened mirror for any reader that only needs the column names.
+   * New code should treat `rollup` as the source of truth and fall back
+   * to deriving a spec from `columns` only when `rollup` is absent.
+   */
   columns?: DesktopColumnRef[]
+  /**
+   * Declarative rollup spec — the source of truth for (re)building a
+   * column-aggregate query. Group-bys, measures, ordering, and (future)
+   * pivot all live here so the SQL is a pure function of the spec.
+   */
+  rollup?: RollupSpec
 }
+
+/**
+ * A declarative GROUP BY / aggregate spec. `buildRollupQuery` turns this
+ * into SQL deterministically; drop-zone interactions mutate it via
+ * `applyRollupOp`. Designed to be pivot-ready: the `pivot` term holds a
+ * dimension plus its resolved distinct values, so the (verbose,
+ * conditional-aggregation) pivot SQL stays a pure function of the spec.
+ */
+export interface RollupSpec {
+  /** Grouping dimensions → SELECT + GROUP BY. */
+  groupBy: DesktopColumnRef[]
+  /** Aggregate measures. */
+  measures: RollupMeasure[]
+  /** Optional explicit ordering; when absent a sensible default is used. */
+  orderBy?: RollupOrderTerm[]
+  /** Reserved for Tableau-style pivots (built later). */
+  pivot?: RollupPivot | null
+}
+
+export type RollupAgg = "sum" | "avg" | "min" | "max" | "count" | "count_distinct"
+
+export interface RollupMeasure {
+  /** Stable identity (`<agg>:<column|*>`) — dedupe key + pivot target. */
+  id: string
+  /** Source column; `null` means `count(*)` (row count). */
+  column: DesktopColumnRef | null
+  agg: RollupAgg
+  /** SELECT alias, unique within the spec. */
+  alias: string
+}
+
+export interface RollupOrderTerm {
+  /** A group-by column name or a measure alias. */
+  ref: string
+  dir: "asc" | "desc"
+}
+
+export interface RollupPivot {
+  /** Dimension whose distinct values fan out into columns. */
+  column: DesktopColumnRef
+  /** Resolved distinct values (capped); rendered as FILTER predicates. */
+  values: (string | number | null)[]
+  /** Which measures to pivot; default = all measures. */
+  measureIds?: string[]
+  /** True when more distinct values existed than the cap. */
+  truncated?: boolean
+}
+
+/**
+ * A drop-zone action. Each type-aware tile in the merge overlay maps to
+ * one of these; `applyRollupOp` folds it into a `RollupSpec`.
+ */
+export type RollupOp =
+  | { kind: "group-by" }
+  | { kind: "order-by" }
+  | { kind: "measure"; agg: RollupAgg }
+// future: | { kind: "pivot" }
 
 export interface DataWindowViewState {
   activeTab?: "rows" | "profile" | "chart" | "sql" | "explain"

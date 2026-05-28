@@ -136,28 +136,51 @@ export interface ResidualBag {
   other: Record<string, unknown>
 }
 
+export interface FacetState {
+  /** column = trellis across columns (Vega-Lite `encoding.column`). */
+  column: ChannelPill | null
+  /** row = trellis down rows (Vega-Lite `encoding.row`). */
+  row: ChannelPill | null
+}
+
 export interface ShelfState {
   mark: MarkConfig
   /**
-   * Positional shelves are multi-pill (Tableau-style). When N ≥ 2 and every
-   * pill is a dim, specFromShelf emits a `calculate` transform that joins
-   * the fields with " · ", and the encoding points at the synthesized field.
-   * Single-pill stays direct so existing specs round-trip unchanged.
+   * Positional shelves are multi-pill (Tableau-style). The emit path inspects
+   * the pill composition:
+   *   • 0 pills → channel omitted
+   *   • 1 pill → direct encoding
+   *   • N pills, all dims → `calculate`+`join` emits a single nested-label axis
+   *   • N pills, all measures → wraps the spec in vconcat / hconcat (one
+   *     small-multiple panel per measure, every other channel shared)
+   * Mixed composition cannot be produced by the editor's drop rules; if a
+   * hand-edited spec lands here, the last pill wins as a safe fallback.
    */
   x: ChannelPill[]
   y: ChannelPill[]
   color: ChannelPill | null
   size: ChannelPill | null
   shape: ChannelPill | null
+  /** Small-multiple facet — maps to `encoding.column` / `encoding.row`. */
+  facet: FacetState
   tooltip: ChannelPill[]
   filters: FilterPill[]
   residual: ResidualBag
 }
 
-export type ShelfChannel = "x" | "y" | "color" | "size" | "shape" | "tooltip"
+export type ShelfChannel = "x" | "y" | "color" | "size" | "shape" | "tooltip" | "column" | "row"
 
 /** Channels the editor manages — emitted to spec.encoding[channel]. */
-export const MANAGED_CHANNELS: ShelfChannel[] = ["x", "y", "color", "size", "shape", "tooltip"]
+export const MANAGED_CHANNELS: ShelfChannel[] = [
+  "x",
+  "y",
+  "color",
+  "size",
+  "shape",
+  "tooltip",
+  "column",
+  "row",
+]
 
 /**
  * A pill is "dim-style" when it neither carries an aggregate nor lives on
@@ -170,6 +193,11 @@ export function isDimPill(p: ChannelPill): boolean {
   if (p.type === "quantitative") return false
   if (p.type === "temporal") return false
   return true
+}
+
+/** A pill that carries an aggregate — composes into vconcat / hconcat panels. */
+export function isMeasurePill(p: ChannelPill): boolean {
+  return !!p.aggregate
 }
 
 /** Field name marker for the synthesized join field on x/y. */
@@ -200,6 +228,7 @@ export function emptyShelfState(): ShelfState {
     color: null,
     size: null,
     shape: null,
+    facet: { column: null, row: null },
     tooltip: [],
     filters: [],
     residual: { encoding: {}, transform: [], params: [], other: {} },
@@ -374,14 +403,28 @@ function applyPositional(
   encoding[channel] = pillToEncoding(pills[pills.length - 1])
 }
 
-export function specFromShelf(state: ShelfState): Record<string, unknown> {
+/**
+ * Build the body of a mark spec (mark + encoding + transform + params) from
+ * the shelf state, optionally narrowing one positional shelf to a single
+ * pill. Returns `{ body, perBodyTransforms }` so the caller can pull calc
+ * transforms up to the outer concat spec or keep them inside each subspec.
+ */
+function buildSpecBody(
+  state: ShelfState,
+  override?: { axis: "x" | "y"; pills: ChannelPill[] },
+): {
+  mark: unknown
+  encoding: Record<string, unknown>
+  transform: unknown[]
+  params: unknown[]
+} {
   const encoding: Record<string, unknown> = { ...state.residual.encoding }
   const transform: unknown[] = []
+  const xPills = override?.axis === "x" ? override.pills : state.x
+  const yPills = override?.axis === "y" ? override.pills : state.y
 
-  // Positional shelves — must run before filters so the calc fields exist
-  // when downstream filters or aggregations reference them.
-  applyPositional("x", state.x, encoding, transform)
-  applyPositional("y", state.y, encoding, transform)
+  applyPositional("x", xPills, encoding, transform)
+  applyPositional("y", yPills, encoding, transform)
 
   if (state.color) encoding.color = pillToEncoding(state.color)
   else delete encoding.color
@@ -389,15 +432,16 @@ export function specFromShelf(state: ShelfState): Record<string, unknown> {
   else delete encoding.size
   if (state.shape) encoding.shape = pillToEncoding(state.shape)
   else delete encoding.shape
+  if (state.facet.column) encoding.column = pillToEncoding(state.facet.column)
+  else delete encoding.column
+  if (state.facet.row) encoding.row = pillToEncoding(state.facet.row)
+  else delete encoding.row
   if (state.tooltip.length > 0) encoding.tooltip = state.tooltip.map(pillToEncoding)
   else delete encoding.tooltip
 
-  // Stack — applied to the quantitative axis. With multi-pill positional,
-  // the calc-concat shelf is always nominal so it never carries stack;
-  // the OTHER axis (where the measure lives) is the candidate.
   const stack = state.mark.stack
   if ((state.mark.type === "bar" || state.mark.type === "area") && stack !== undefined) {
-    const target = aggregateAxis(state) ?? "y"
+    const target = positionalAggregateAxis(xPills, yPills) ?? "y"
     const enc = encoding[target] as Record<string, unknown> | undefined
     if (enc) enc.stack = stack
   }
@@ -405,23 +449,95 @@ export function specFromShelf(state: ShelfState): Record<string, unknown> {
   for (const f of state.filters) transform.push(filterToTransform(f))
   for (const t of state.residual.transform) transform.push(t)
 
-  const spec: Record<string, unknown> = {
-    ...state.residual.other,
+  return {
     mark: markToVega(state.mark),
     encoding,
+    transform,
+    params: state.residual.params.slice(),
   }
-  if (transform.length > 0) spec.transform = transform
-  if (state.residual.params.length > 0) spec.params = state.residual.params
+}
+
+function positionalAggregateAxis(
+  xPills: ChannelPill[],
+  yPills: ChannelPill[],
+): "x" | "y" | null {
+  if (xPills.some((p) => p.aggregate)) return "x"
+  if (yPills.some((p) => p.aggregate)) return "y"
+  return null
+}
+
+/**
+ * Decide whether a positional shelf is in panel mode (multi-measure ⇒
+ * vconcat/hconcat). Pure single-pill and pure nested-dims stay flat.
+ */
+function inPanelMode(pills: ChannelPill[]): boolean {
+  return pills.length >= 2 && pills.every(isMeasurePill)
+}
+
+export function specFromShelf(state: ShelfState): Record<string, unknown> {
+  const xPanels = inPanelMode(state.x)
+  const yPanels = inPanelMode(state.y)
+
+  // Edge case — both axes are multi-measure. We pick rows (vconcat) so the
+  // panels stack vertically; users who want a grid can hand-edit YAML.
+  if (yPanels) {
+    return buildConcatSpec(state, "vconcat", "y", state.y)
+  }
+  if (xPanels) {
+    return buildConcatSpec(state, "hconcat", "x", state.x)
+  }
+
+  const body = buildSpecBody(state)
+  const spec: Record<string, unknown> = {
+    ...state.residual.other,
+    mark: body.mark,
+    encoding: body.encoding,
+  }
+  if (body.transform.length > 0) spec.transform = body.transform
+  if (body.params.length > 0) spec.params = body.params
   if (!("$schema" in spec)) {
     spec.$schema = "https://vega.github.io/schema/vega-lite/v6.json"
   }
   return spec
 }
 
-function aggregateAxis(state: ShelfState): "x" | "y" | null {
-  if (state.x.some((p) => p.aggregate)) return "x"
-  if (state.y.some((p) => p.aggregate)) return "y"
-  return null
+/**
+ * Wrap the chart in vconcat/hconcat — one subspec per measure pill on the
+ * target axis. Filters and other transforms are emitted once at the top
+ * level so the data flows through them before splitting into panels.
+ */
+function buildConcatSpec(
+  state: ShelfState,
+  kind: "vconcat" | "hconcat",
+  axis: "x" | "y",
+  pills: ChannelPill[],
+): Record<string, unknown> {
+  // Per-subspec body. We strip top-level transforms out and put them into
+  // the wrapper so they apply once.
+  const subspecs = pills.map((p) => {
+    const body = buildSpecBody(state, { axis, pills: [p] })
+    const sub: Record<string, unknown> = { mark: body.mark, encoding: body.encoding }
+    // Subspec params (e.g. selections) are duplicated per panel so each
+    // panel is independently interactive — same as Vega-Lite docs example.
+    if (body.params.length > 0) sub.params = body.params.map((q) => ({ ...(q as object) }))
+    return sub
+  })
+
+  // Wrapper-level transforms = the shared transforms (filters + residual).
+  // We use the FIRST subspec's transform list as the source — every subspec
+  // has the same since they only differ on the target axis pill.
+  const sharedTransform =
+    pills.length > 0 ? buildSpecBody(state, { axis, pills: [pills[0]] }).transform : []
+
+  const spec: Record<string, unknown> = {
+    ...state.residual.other,
+    [kind]: subspecs,
+  }
+  if (sharedTransform.length > 0) spec.transform = sharedTransform
+  if (!("$schema" in spec)) {
+    spec.$schema = "https://vega.github.io/schema/vega-lite/v6.json"
+  }
+  return spec
 }
 
 // ── Vega-Lite spec → ShelfState ─────────────────────────────────────
@@ -545,26 +661,20 @@ function tryParseMultiPositional(
 }
 
 /**
- * Parse a Vega-Lite spec into ShelfState. Anything the editor can't
- * round-trip (unknown channels, opaque transforms, params) is preserved
- * in `residual` so re-emitting matches the original byte-for-byte for
- * those parts.
+ * Parse a single mark spec (no concat) into the channel/encoding parts of
+ * ShelfState. The caller assembles the rest (residual.other and concat
+ * detection).
  */
-export function shelfFromSpec(
-  spec: Record<string, unknown> | null,
-): ShelfState {
-  const state = emptyShelfState()
-  if (!spec) return state
-
-  // Mark
+function parseMarkSpecBody(
+  state: ShelfState,
+  spec: Record<string, unknown>,
+): void {
   if ("mark" in spec) state.mark = parseMark(spec.mark)
 
-  // Encoding
   const enc = asObject(spec.encoding) ?? {}
   const transforms = Array.isArray(spec.transform) ? spec.transform : []
   const consumedTransforms = new Set<unknown>()
 
-  // x — try multi-pill, fall back to single
   if ("x" in enc) {
     const multi = tryParseMultiPositional("x", enc.x, transforms)
     if (multi) {
@@ -575,7 +685,6 @@ export function shelfFromSpec(
       state.x = p ? [p] : []
     }
   }
-  // y — same
   if ("y" in enc) {
     const multi = tryParseMultiPositional("y", enc.y, transforms)
     if (multi) {
@@ -589,9 +698,10 @@ export function shelfFromSpec(
   if ("color" in enc) state.color = parsePillFromEncoding(enc.color)
   if ("size" in enc) state.size = parsePillFromEncoding(enc.size)
   if ("shape" in enc) state.shape = parsePillFromEncoding(enc.shape)
+  if ("column" in enc) state.facet.column = parsePillFromEncoding(enc.column)
+  if ("row" in enc) state.facet.row = parsePillFromEncoding(enc.row)
   if ("tooltip" in enc) state.tooltip = parseTooltipPills(enc.tooltip)
 
-  // Stack from x/y encoding
   for (const ch of ["x", "y"] as const) {
     const o = asObject(enc[ch])
     if (o && "stack" in o) {
@@ -602,14 +712,12 @@ export function shelfFromSpec(
     }
   }
 
-  // Residual encoding — unknown channels
-  const residualEncoding: Record<string, unknown> = {}
+  const residualEncoding: Record<string, unknown> = { ...state.residual.encoding }
   for (const [k, v] of Object.entries(enc)) {
     if (!MANAGED_CHANNELS.includes(k as ShelfChannel)) residualEncoding[k] = v
   }
   state.residual.encoding = residualEncoding
 
-  // Filters + residual transforms (consumed calc transforms are skipped)
   for (const t of transforms) {
     if (consumedTransforms.has(t)) continue
     const f = parseFilterTransform(t)
@@ -617,15 +725,131 @@ export function shelfFromSpec(
     else state.residual.transform.push(t)
   }
 
-  // Params
-  if (Array.isArray(spec.params)) state.residual.params = [...spec.params]
+  if (Array.isArray(spec.params)) {
+    state.residual.params = [...state.residual.params, ...spec.params]
+  }
+}
 
-  // Other top-level keys
+/**
+ * Detect a uniform concat spec produced by the editor (or close to it) and
+ * fold it back into a multi-pill positional shelf. "Uniform" = every subspec
+ * has the same mark and the same encoding except for the target channel.
+ * If the subspecs don't line up, we keep the whole concat in `residual.other`
+ * so the YAML round-trips intact (the editor cannot recover the pills).
+ */
+function tryParseConcat(
+  spec: Record<string, unknown>,
+): { state: ShelfState; usedKey: "vconcat" | "hconcat" } | null {
+  const kind: "vconcat" | "hconcat" | null = Array.isArray(spec.vconcat)
+    ? "vconcat"
+    : Array.isArray(spec.hconcat)
+      ? "hconcat"
+      : null
+  if (!kind) return null
+  const subs = (spec[kind] as unknown[]).filter(
+    (s): s is Record<string, unknown> => s !== null && typeof s === "object",
+  )
+  if (subs.length < 2) return null
+  const axis: "x" | "y" = kind === "vconcat" ? "y" : "x"
+
+  // Parse each subspec into a temporary state, then check uniformity.
+  const subStates = subs.map((sub) => {
+    const s = emptyShelfState()
+    parseMarkSpecBody(s, sub)
+    return s
+  })
+
+  // Uniformity check — every subspec's body must match the first except on
+  // the target positional channel. We don't deep-compare residuals; the
+  // generated specs are deterministic.
+  const ref = subStates[0]
+  for (let i = 1; i < subStates.length; i++) {
+    const s = subStates[i]
+    if (JSON.stringify(s.mark) !== JSON.stringify(ref.mark)) return null
+    if (JSON.stringify(s.color) !== JSON.stringify(ref.color)) return null
+    if (JSON.stringify(s.size) !== JSON.stringify(ref.size)) return null
+    if (JSON.stringify(s.shape) !== JSON.stringify(ref.shape)) return null
+    if (JSON.stringify(s.facet) !== JSON.stringify(ref.facet)) return null
+    if (JSON.stringify(s.tooltip) !== JSON.stringify(ref.tooltip)) return null
+    if (axis === "y") {
+      if (JSON.stringify(s.x) !== JSON.stringify(ref.x)) return null
+    } else {
+      if (JSON.stringify(s.y) !== JSON.stringify(ref.y)) return null
+    }
+  }
+
+  // Assemble the merged state from the reference, then accumulate the pills.
+  const out = emptyShelfState()
+  out.mark = ref.mark
+  out.color = ref.color
+  out.size = ref.size
+  out.shape = ref.shape
+  out.facet = ref.facet
+  out.tooltip = ref.tooltip
+  out.x = axis === "y" ? ref.x : []
+  out.y = axis === "x" ? ref.y : []
+  out.residual.encoding = ref.residual.encoding
+  out.residual.params = ref.residual.params
+  // Note: per-subspec residual.transform we drop here — wrapper transform
+  // is the source of truth.
+
+  for (const s of subStates) {
+    const pill = axis === "y" ? s.y[0] : s.x[0]
+    if (!pill) return null
+    if (axis === "y") out.y.push(pill)
+    else out.x.push(pill)
+  }
+
+  return { state: out, usedKey: kind }
+}
+
+/**
+ * Parse a Vega-Lite spec into ShelfState. Anything the editor can't
+ * round-trip (unknown channels, opaque transforms, params) is preserved
+ * in `residual` so re-emitting matches the original byte-for-byte for
+ * those parts.
+ */
+export function shelfFromSpec(
+  spec: Record<string, unknown> | null,
+): ShelfState {
+  if (!spec) return emptyShelfState()
+
+  const concat = tryParseConcat(spec)
+  if (concat) {
+    // Filters/transforms live on the wrapper; parse them once.
+    if (Array.isArray(spec.transform)) {
+      for (const t of spec.transform) {
+        const f = parseFilterTransform(t)
+        if (f) concat.state.filters.push(f)
+        else concat.state.residual.transform.push(t)
+      }
+    }
+    if (Array.isArray(spec.params)) {
+      concat.state.residual.params = [
+        ...concat.state.residual.params,
+        ...spec.params,
+      ]
+    }
+    // Other top-level keys (skip the consumed concat array + the things
+    // ChartView injects at render time + everything we already parsed).
+    const other: Record<string, unknown> = {}
+    for (const [k, v] of Object.entries(spec)) {
+      if (k === concat.usedKey) continue
+      if (k === "mark" || k === "encoding" || k === "transform" || k === "params") continue
+      if (k === "data" || k === "width" || k === "height" || k === "autosize" || k === "config") continue
+      other[k] = v
+    }
+    concat.state.residual.other = other
+    return concat.state
+  }
+
+  const state = emptyShelfState()
+  parseMarkSpecBody(state, spec)
+
   const other: Record<string, unknown> = {}
   for (const [k, v] of Object.entries(spec)) {
     if (k === "mark" || k === "encoding" || k === "transform" || k === "params") continue
-    if (k === "data" || k === "width" || k === "height" || k === "autosize" || k === "config")
-      continue // chart-view applies these
+    if (k === "data" || k === "width" || k === "height" || k === "autosize" || k === "config") continue
     other[k] = v
   }
   state.residual.other = other

@@ -109,6 +109,11 @@ export function ChartShelf({
       apply((s) => ({ ...s, [channel]: pills })),
     [apply],
   )
+  const setFacet = useCallback(
+    (slot: "column" | "row", pill: ChannelPill | null) =>
+      apply((s) => ({ ...s, facet: { ...s.facet, [slot]: pill } })),
+    [apply],
+  )
   const setTooltip = useCallback(
     (pills: ChannelPill[]) => apply((s) => ({ ...s, tooltip: pills })),
     [apply],
@@ -157,18 +162,46 @@ export function ChartShelf({
           const current = s[channel]
           if (current.length === 0) return { ...s, [channel]: [pill] }
           const allDimsNow = current.every(isDimPill)
-          const newIsDim = isDimPill(pill)
-          if (allDimsNow && newIsDim) {
-            if (current.some((p) => p.field === pill.field)) return s
-            return { ...s, [channel]: [...current, pill] }
+          const allMeasuresNow = current.every((p) => !!p.aggregate)
+          let candidate = pill
+          // If the shelf is in measure-mode and the dropped pill is a
+          // bare quantitative field, promote it to a measure so the user
+          // doesn't have to open the popover just to set sum().
+          if (
+            allMeasuresNow &&
+            candidate.type === "quantitative" &&
+            !candidate.aggregate &&
+            !isDimPill(candidate)
+          ) {
+            candidate = { ...candidate, aggregate: "sum" }
           }
-          return { ...s, [channel]: [pill] }
+          const newIsDim = isDimPill(candidate)
+          const newIsMeasure = !!candidate.aggregate
+          if (allDimsNow && newIsDim) {
+            if (current.some((p) => p.field === candidate.field)) return s
+            return { ...s, [channel]: [...current, candidate] }
+          }
+          if (allMeasuresNow && newIsMeasure) {
+            if (
+              current.some(
+                (p) => p.field === candidate.field && p.aggregate === candidate.aggregate,
+              )
+            ) {
+              return s
+            }
+            return { ...s, [channel]: [...current, candidate] }
+          }
+          return { ...s, [channel]: [candidate] }
         })
+        return
+      }
+      if (channel === "column" || channel === "row") {
+        setFacet(channel, pill)
         return
       }
       setSingle(channel, pill)
     },
-    [apply, columns, setSingle],
+    [apply, columns, setFacet, setSingle],
   )
 
   // Native-DnD handlers — encode the field as a custom MIME so other
@@ -220,6 +253,7 @@ export function ChartShelf({
           onSetMark={setMark}
           onSetPositional={setPositional}
           onSetSingle={setSingle}
+          onSetFacet={setFacet}
           onSetTooltip={setTooltip}
           onSetFilters={setFilters}
         />
@@ -386,6 +420,7 @@ interface ShelvesProps {
   onSetMark: (mark: ShelfState["mark"]) => void
   onSetPositional: (channel: "x" | "y", pills: ChannelPill[]) => void
   onSetSingle: (channel: "color" | "size" | "shape", pill: ChannelPill | null) => void
+  onSetFacet: (slot: "column" | "row", pill: ChannelPill | null) => void
   onSetTooltip: (pills: ChannelPill[]) => void
   onSetFilters: (filters: FilterPill[]) => void
 }
@@ -403,6 +438,7 @@ function ShelvesStrip(props: ShelvesProps) {
     onSetMark,
     onSetPositional,
     onSetSingle,
+    onSetFacet,
     onSetTooltip,
     onSetFilters,
   } = props
@@ -492,6 +528,16 @@ function ShelvesStrip(props: ShelvesProps) {
         onDrop={onDrop}
         onDragLeave={onDragLeave}
         onChange={onSetTooltip}
+      />
+      <FacetShelf
+        facet={state.facet}
+        hoverChannel={hoverChannel}
+        columns={columns}
+        rows={rows}
+        onDragOver={onDragOver}
+        onDrop={onDrop}
+        onDragLeave={onDragLeave}
+        onChange={onSetFacet}
       />
       <FilterShelf
         filters={state.filters}
@@ -676,7 +722,9 @@ function PositionalShelf({
   onChange: (pills: ChannelPill[]) => void
   showCountShortcut?: boolean
 }) {
-  const isNested = pills.length >= 2
+  const allDims = pills.length >= 2 && pills.every(isDimPill)
+  const allMeasures = pills.length >= 2 && pills.every((p) => !!p.aggregate)
+  const isMulti = pills.length >= 2
   return (
     <div
       onDragOver={(e) => onDragOver(e, channel)}
@@ -711,13 +759,19 @@ function PositionalShelf({
           </>
         ) : (
           pills.map((p, i) => (
-            <span key={`${p.field}/${i}`} className="inline-flex items-center gap-1">
+            <span key={`${p.field}/${p.aggregate ?? "_"}/${i}`} className="inline-flex items-center gap-1">
               {i > 0 ? (
                 <span
                   className="font-mono text-[10px] text-chrome-text/50"
-                  title="nested dim — joined as a single axis"
+                  title={
+                    allMeasures
+                      ? channel === "y"
+                        ? "stacked panels — vconcat"
+                        : "side-by-side panels — hconcat"
+                      : "nested dim — joined as a single axis"
+                  }
                 >
-                  {MULTI_DIM_JOIN_SEP.trim()}
+                  {allMeasures ? (channel === "y" ? "↧" : "↦") : MULTI_DIM_JOIN_SEP.trim()}
                 </span>
               ) : null}
               <Pill
@@ -725,14 +779,18 @@ function PositionalShelf({
                 columns={columns}
                 rows={rows}
                 channel={channel}
-                multiDim={isNested}
+                multiDim={isMulti && allDims}
                 onChange={(next) => {
                   const copy = [...pills]
                   copy[i] = next
-                  // If user gave the edited pill an aggregate / quantitative /
-                  // temporal type, the multi-dim invariant breaks — collapse
-                  // to just this pill.
-                  if (isNested && !isDimPill(next)) {
+                  // If user toggles aggregate so the shelf is no longer all-dims
+                  // AND no longer all-measures, the invariant breaks — collapse
+                  // to just this pill so the spec stays emittable.
+                  if (
+                    isMulti &&
+                    !copy.every(isDimPill) &&
+                    !copy.every((q) => !!q.aggregate)
+                  ) {
                     onChange([next])
                     return
                   }
@@ -743,6 +801,14 @@ function PositionalShelf({
             </span>
           ))
         )}
+        {allMeasures ? (
+          <span
+            className="ml-1 rounded-full border border-rvbbit-accent/40 bg-rvbbit-accent/10 px-1.5 py-px text-[9px] uppercase tracking-wider text-rvbbit-accent"
+            title={`${channel === "y" ? "vconcat" : "hconcat"} — one panel per measure`}
+          >
+            {channel === "y" ? "vconcat" : "hconcat"} · {pills.length} panels
+          </span>
+        ) : null}
       </div>
     </div>
   )
@@ -811,6 +877,127 @@ function MultiShelf({
           ))
         )}
       </div>
+    </div>
+  )
+}
+
+// ── Facet shelf (column / row small-multiples) ──────────────────────
+
+function FacetShelf({
+  facet,
+  hoverChannel,
+  columns,
+  rows,
+  onDragOver,
+  onDrop,
+  onDragLeave,
+  onChange,
+}: {
+  facet: { column: ChannelPill | null; row: ChannelPill | null }
+  hoverChannel: ShelfChannel | "filter" | null
+  columns: QueryResultColumn[]
+  rows: Record<string, unknown>[]
+  onDragOver: (e: React.DragEvent, channel: ShelfChannel | "filter") => void
+  onDrop: (e: React.DragEvent, channel: ShelfChannel | "filter") => void
+  onDragLeave: () => void
+  onChange: (slot: "column" | "row", pill: ChannelPill | null) => void
+}) {
+  return (
+    <div className="flex items-stretch gap-1.5 rounded border border-chrome-border/40 bg-secondary-background/30 px-1.5 py-1">
+      <span className="flex w-[70px] shrink-0 items-center text-[9px] uppercase tracking-wider text-chrome-text/55">
+        Facets
+      </span>
+      <FacetSlot
+        glyph="↔"
+        title="trellis across columns"
+        slot="column"
+        pill={facet.column}
+        hovered={hoverChannel === "column"}
+        columns={columns}
+        rows={rows}
+        onDragOver={onDragOver}
+        onDrop={onDrop}
+        onDragLeave={onDragLeave}
+        onChange={(p) => onChange("column", p)}
+      />
+      <FacetSlot
+        glyph="↕"
+        title="trellis down rows"
+        slot="row"
+        pill={facet.row}
+        hovered={hoverChannel === "row"}
+        columns={columns}
+        rows={rows}
+        onDragOver={onDragOver}
+        onDrop={onDrop}
+        onDragLeave={onDragLeave}
+        onChange={(p) => onChange("row", p)}
+      />
+    </div>
+  )
+}
+
+function FacetSlot({
+  glyph,
+  title,
+  slot,
+  pill,
+  hovered,
+  columns,
+  rows,
+  onDragOver,
+  onDrop,
+  onDragLeave,
+  onChange,
+}: {
+  glyph: string
+  title: string
+  slot: "column" | "row"
+  pill: ChannelPill | null
+  hovered: boolean
+  columns: QueryResultColumn[]
+  rows: Record<string, unknown>[]
+  onDragOver: (e: React.DragEvent, channel: ShelfChannel | "filter") => void
+  onDrop: (e: React.DragEvent, channel: ShelfChannel | "filter") => void
+  onDragLeave: () => void
+  onChange: (pill: ChannelPill | null) => void
+}) {
+  return (
+    <div
+      onDragOver={(e) => onDragOver(e, slot)}
+      onDrop={(e) => onDrop(e, slot)}
+      onDragLeave={onDragLeave}
+      title={title}
+      className={cn(
+        "flex min-w-0 flex-1 items-center gap-1 rounded border px-1 py-0.5 transition-colors",
+        hovered
+          ? "border-rvbbit-accent/60 bg-rvbbit-bg/40"
+          : "border-chrome-border/40 bg-doc-bg/60",
+      )}
+    >
+      <span
+        className="shrink-0 font-mono text-[10px] text-chrome-text/55"
+        aria-hidden
+      >
+        {glyph}
+      </span>
+      <span className="shrink-0 text-[9px] uppercase tracking-wider text-chrome-text/45">
+        {slot}
+      </span>
+      {pill ? (
+        <Pill
+          pill={pill}
+          columns={columns}
+          rows={rows}
+          channel={slot}
+          onChange={onChange}
+          onRemove={() => onChange(null)}
+        />
+      ) : (
+        <span className="rounded border border-dashed border-chrome-border/40 px-1.5 py-px text-[10px] text-chrome-text/45">
+          drop a dim
+        </span>
+      )}
     </div>
   )
 }

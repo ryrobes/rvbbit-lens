@@ -74,18 +74,125 @@ export function ChartView({ result, userSpec, onChangeUserSpec, onEmitParam }: C
 
   const baseSpec = userSpec ?? inferred?.spec ?? null
 
-  const finalSpec = useMemo(() => {
+  // Container-driven sizing for facet/concat. Plain single-mark specs use
+  // Vega-Lite's `width: "container"` + signal-driven resize (smooth during
+  // drag). Faceted / concat specs need numeric per-cell sizes computed from
+  // the measured container; the size state is debounced so a continuous
+  // drag-resize doesn't thrash re-embeds.
+  const [containerSize, setContainerSize] = useState<{ w: number; h: number } | null>(null)
+
+  // Vega-Lite's actual rendered chrome (axes, headers, legend, etc.) depends
+  // on data and label widths in ways our static padding numbers can't
+  // predict — a 5×5 facet ends up with much more chrome than a 1×1. After
+  // the first render we measure SVG dimensions vs. the computed cell sizes
+  // to derive an additional "chrome bump" that's fed into the next sizing
+  // pass. This is a single feedback step: estimated → measured → corrected.
+  // A ref + tick state so the post-embed callback can update without going
+  // through React state in the hot path.
+
+  /**
+   * Mode the spec wants to render in. Drives the sizing strategy below.
+   *   plain  — single mark, no facet ⇒ width/height: "container" works directly.
+   *   facet  — single mark with column/row facet encoding ⇒ Vega-Lite reads
+   *            width/height as per-cell sizes; compute from container.
+   *   concat — top-level vconcat/hconcat ⇒ per-subspec width/height,
+   *            recursing on nested facets.
+   */
+  const layoutMode = useMemo<"plain" | "facet" | "concat">(() => {
+    if (!baseSpec) return "plain"
+    if ("vconcat" in baseSpec || "hconcat" in baseSpec) return "concat"
+    const enc = (baseSpec.encoding as Record<string, unknown> | undefined) ?? {}
+    if ("column" in enc || "row" in enc) return "facet"
+    return "plain"
+  }, [baseSpec])
+
+
+  // Plain spec — never depends on containerSize so its identity is stable
+  // across resizes, keeping VegaEmbed from re-mounting.
+  const plainSpec = useMemo(() => {
     if (!baseSpec) return null
-    const merged = {
+    return {
       ...baseSpec,
-      config: { ...(themeConfig as Record<string, unknown>), ...(baseSpec.config as Record<string, unknown> | undefined ?? {}) },
+      config: {
+        ...(themeConfig as Record<string, unknown>),
+        ...((baseSpec.config as Record<string, unknown> | undefined) ?? {}),
+      },
       data: { values: result.rows },
       width: "container",
       height: "container",
       autosize: { type: "fit", contains: "padding", resize: true },
-    }
-    return merged as Record<string, unknown>
+    } as Record<string, unknown>
   }, [baseSpec, themeConfig, result.rows])
+
+  // Sized spec for facet / concat layouts.
+  const sizedSpec = useMemo(() => {
+    if (!baseSpec) return null
+    if (layoutMode === "plain") return plainSpec
+    const cs = containerSize ?? { w: 600, h: 400 }
+    const themed: Record<string, unknown> = {
+      ...baseSpec,
+      config: {
+        ...(themeConfig as Record<string, unknown>),
+        ...((baseSpec.config as Record<string, unknown> | undefined) ?? {}),
+      },
+      data: { values: result.rows },
+    }
+    if (layoutMode === "facet") {
+      const enc = (baseSpec.encoding as Record<string, unknown> | undefined) ?? {}
+      const { width, height } = computeFacetCellSize(enc, result.rows, cs.w, cs.h)
+      themed.width = width
+      themed.height = height
+      // Force shared axes so each row of cells reuses the same x-axis strip
+      // (and each column the same y-axis), instead of Vega-Lite drawing
+      // per-cell chrome that bloats total height/width unpredictably.
+      themed.resolve = {
+        ...(themed.resolve as Record<string, unknown> | undefined),
+        axis: { x: "shared", y: "shared" },
+      }
+      return themed
+    }
+    // concat
+    const kind: "vconcat" | "hconcat" = "vconcat" in baseSpec ? "vconcat" : "hconcat"
+    const inner = (baseSpec[kind] as Array<Record<string, unknown>> | undefined) ?? []
+    const nSubs = Math.max(1, inner.length)
+    const spacing = 24
+    // Each subspec carries its own view padding (config.padding ≈ 8 each
+    // side), so for vconcat we lose VIEW_PAD × nSubs of vertical height
+    // before any cell math; mirror for hconcat horizontally.
+    const perSubW =
+      kind === "vconcat"
+        ? cs.w
+        : Math.max(
+            160,
+            Math.floor((cs.w - spacing * (nSubs - 1) - VIEW_PAD * nSubs) / nSubs),
+          )
+    const perSubH =
+      kind === "hconcat"
+        ? cs.h
+        : Math.max(
+            140,
+            Math.floor((cs.h - spacing * (nSubs - 1) - VIEW_PAD * nSubs) / nSubs),
+          )
+    const sized = inner.map((sub) => {
+      const subEnc = (sub.encoding as Record<string, unknown> | undefined) ?? {}
+      const subHasFacet = "column" in subEnc || "row" in subEnc
+      if (subHasFacet) {
+        const cell = computeFacetCellSize(subEnc, result.rows, perSubW, perSubH)
+        return { width: cell.width, height: cell.height, ...sub }
+      }
+      // Subspecs without inner facet — give them numeric sizes so layout is
+      // deterministic. "container" inside concat can race with our debounced
+      // size state in ways that produce flickers during the first paint.
+      const w = Math.max(160, perSubW - 80)
+      const h = Math.max(120, perSubH - 60)
+      return { width: w, height: h, ...sub }
+    })
+    themed[kind] = sized
+    themed.spacing = spacing
+    return themed
+  }, [baseSpec, layoutMode, plainSpec, themeConfig, result.rows, containerSize])
+
+  const finalSpec = layoutMode === "plain" ? plainSpec : sizedSpec
 
   // Track current Result so we can detach listeners on re-embed.
   const viewRef = useRef<VegaEmbedResult | null>(null)
@@ -104,6 +211,12 @@ export function ChartView({ result, userSpec, onChangeUserSpec, onEmitParam }: C
   // explicitly. rAF-debounced so a corner-drag doesn't queue a
   // re-render per pointer event.
   const resizeObserverRef = useRef<ResizeObserver | null>(null)
+  // Layout mode lives in a ref so the observer can read the *current* mode
+  // without having to be re-created when the mode changes.
+  const layoutModeRef = useRef(layoutMode)
+  useEffect(() => {
+    layoutModeRef.current = layoutMode
+  }, [layoutMode])
   const containerRefCallback = useCallback((el: HTMLDivElement | null) => {
     if (resizeObserverRef.current) {
       resizeObserverRef.current.disconnect()
@@ -111,31 +224,44 @@ export function ChartView({ result, userSpec, onChangeUserSpec, onEmitParam }: C
     }
     if (!el || typeof ResizeObserver === "undefined") return
     let rafId = 0
+    let debounceId: ReturnType<typeof setTimeout> | null = null
+    const pushSize = () => {
+      const w = el.clientWidth
+      const h = el.clientHeight
+      if (w <= 0 || h <= 0) return
+      setContainerSize((prev) => (prev && prev.w === w && prev.h === h ? prev : { w, h }))
+    }
     const observer = new ResizeObserver(() => {
       cancelAnimationFrame(rafId)
       rafId = requestAnimationFrame(() => {
         const view = viewRef.current?.view
-        if (!view) return
-        try {
-          const host = (view.container?.() ?? null) as HTMLElement | null
-          if (host) {
-            view
-              .signal("width", host.clientWidth)
-              .signal("height", host.clientHeight)
+        if (view) {
+          try {
+            const host = (view.container?.() ?? null) as HTMLElement | null
+            if (host) {
+              view
+                .signal("width", host.clientWidth)
+                .signal("height", host.clientHeight)
+            }
+            view.resize()
+            void view.runAsync()
+          } catch {
+            // Spec has no width/height signals — facet/concat takes the
+            // path below instead. Either way, the debounce updates state.
           }
-          view.resize()
-          void view.runAsync()
-        } catch {
-          // Either the view was disposed mid-resize, or this spec
-          // doesn't have width/height signals (rare with our
-          // inferrer; spec authors who edit YAML and remove them
-          // are responsible for their own sizing). Next embed
-          // reattaches the listener cleanly.
         }
       })
+      // Re-spec for facet/concat — debounced so dragging the window doesn't
+      // queue a re-embed per frame.
+      if (layoutModeRef.current !== "plain") {
+        if (debounceId) clearTimeout(debounceId)
+        debounceId = setTimeout(pushSize, 120)
+      }
     })
     observer.observe(el)
     resizeObserverRef.current = observer
+    // Seed an initial size so the first paint already has real numbers.
+    pushSize()
   }, [])
   const dataTypeMap = useMemo(() => {
     const m = new Map<string, number>()
@@ -415,4 +541,85 @@ function stripSchemaComment(text: string): string {
   let i = 0
   while (i < lines.length && (lines[i].startsWith("#") || lines[i].trim() === "")) i += 1
   return lines.slice(i).join("\n")
+}
+
+// ── Sizing helpers ──────────────────────────────────────────────────
+
+function fieldOfEnc(enc: unknown): string | null {
+  if (!enc || typeof enc !== "object") return null
+  const f = (enc as Record<string, unknown>).field
+  return typeof f === "string" ? f : null
+}
+
+function countDistinct(rows: Record<string, unknown>[], field: string): number {
+  const s = new Set<unknown>()
+  for (const r of rows) {
+    s.add(r[field])
+    if (s.size >= 200) break
+  }
+  return Math.max(1, s.size)
+}
+
+/**
+ * Given a Vega-Lite spec's encoding + the available container box, compute
+ * the per-facet-cell `width`/`height` so the whole grid (Ncols × Nrows) fills
+ * the box. Vega-Lite reads `width`/`height` on a faceted spec as the inner
+ * cell, so we have to do the division ourselves.
+ *
+ * Padding accounts for axis titles, tick labels, the legend, and the facet
+ * header strip. The numbers are empirical — too generous and the chart looks
+ * cramped; too tight and content overflows.
+ */
+/**
+ * Vega-Lite renders each view (spec or concat-subspec) with its own padding
+ * around the encoding box — the theme config sets `padding: 8`, so total
+ * extra around each view ≈ 16px on each axis. The cell-size math has to
+ * subtract this once per *view*, otherwise the rendered chart is taller
+ * (or wider) than the container and the bottom clips.
+ */
+const VIEW_PAD = 16
+
+function computeFacetCellSize(
+  enc: Record<string, unknown>,
+  rows: Record<string, unknown>[],
+  outerW: number,
+  outerH: number,
+): { width: number; height: number } {
+  const colField = fieldOfEnc(enc.column)
+  const rowField = fieldOfEnc(enc.row)
+  const nCols = colField ? countDistinct(rows, colField) : 1
+  const nRows = rowField ? countDistinct(rows, rowField) : 1
+  // Chrome budgets are deliberately generous — Vega-Lite's actual axis label
+  // and legend widths depend on data (long category names, multi-row label
+  // strips, legend entry counts) and clipping on the bottom is much more
+  // visible than a few px of underfill, so we err on the cautious side.
+  //
+  // Width:
+  //   y-axis title + tick labels ............ ~80 px
+  //   right-side legend (color etc, variable) ~120 px
+  //   row-facet header (label strip + title)  ~55 px (added below)
+  const axisPadW = 220
+  // Height:
+  //   bottom axis title + rotated tick labels ~ 90 px (more with long labels)
+  //   top column-facet header (labels+title) ~ 55 px (added below)
+  //   stretch buffer for spec-level "title" / "subtitle" overflows ~ 30 px
+  const axisPadH = 120
+  // A column-facet adds: one strip of value labels + the field title above.
+  // Each line ≈ 20 px tall plus padding.
+  const headerPadH = colField ? 55 : 0
+  const headerPadW = rowField ? 55 : 0
+  const cellGapW = 14
+  const cellGapH = 14
+  const availW = Math.max(
+    120,
+    outerW - axisPadW - headerPadW - VIEW_PAD - cellGapW * (nCols - 1),
+  )
+  const availH = Math.max(
+    100,
+    outerH - axisPadH - headerPadH - VIEW_PAD - cellGapH * (nRows - 1),
+  )
+  return {
+    width: Math.max(80, Math.floor(availW / nCols)),
+    height: Math.max(60, Math.floor(availH / nRows)),
+  }
 }

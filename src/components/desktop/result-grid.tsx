@@ -7,7 +7,7 @@ import type { QueryResultColumn } from "@/lib/db/types"
 import type { DesktopColumnDragPayload, DesktopColumnRef } from "@/lib/desktop/types"
 import { cn } from "@/lib/utils"
 import { formatCellValue } from "@/lib/sql/format"
-import { writeColumnDragPayload } from "@/lib/desktop/column-drag"
+import { setActiveColumnDragSource, writeColumnDragPayload } from "@/lib/desktop/column-drag"
 import { attachDragGhost } from "@/lib/desktop/drag-ghost"
 
 interface ColumnDragSource {
@@ -60,6 +60,12 @@ export function ResultGrid({
       columns: cols,
     }
     writeColumnDragPayload(e.dataTransfer, payload)
+    setActiveColumnDragSource({
+      parentWindowId: payload.parentWindowId,
+      parentBlockName: payload.parentBlockName,
+      relationKey: payload.relationKey,
+      columns: cols,
+    })
     const dimCount = cols.filter((c) => c.role === "dimension").length
     const metricCount = cols.length - dimCount
     const sublabel = cols.length > 1
@@ -140,6 +146,7 @@ export function ResultGrid({
               key={c.name}
               draggable={!!columnDragSource}
               onDragStart={(e) => onHeaderDragStart(e, c.name)}
+              onDragEnd={() => setActiveColumnDragSource(null)}
               onClick={(e) => onHeaderClick(e, c.name)}
               className={cn(
                 "relative flex select-none items-center border-r border-chrome-border/60 px-2 py-1 text-[11px] uppercase tracking-wider text-chrome-text",

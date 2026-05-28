@@ -23,6 +23,7 @@ import { ChartView } from "./chart-view"
 import { ResultGrid } from "./result-grid"
 import { SingleCellCallout } from "./single-cell-callout"
 import { SqlEditor } from "./sql-editor"
+import { TimeTravelStrip } from "./time-travel-strip"
 import { ExplainGraph, parseExplainResult, type ExplainRoot } from "./explain-graph"
 import { Button } from "@/components/ui/button"
 import type {
@@ -106,6 +107,18 @@ export function DataGridWindow({
 }: DataGridWindowProps) {
   const view = payload.view ?? {}
   const [draftSql, setDraftSql] = useState<string>(view.sqlDraft ?? payload.sql ?? "")
+  // Tracks the last `payload.sql` we've reconciled with the local draft.
+  // The sync-and-rerun effect lives further down so it can call runSql.
+  const lastSyncedSqlRef = useRef<string>(payload.sql ?? "")
+  // Run nonce — every runSql call grabs a fresh number. When two runs
+  // overlap (e.g. user drops two columns into a rollup before the first
+  // network round-trip returns), only the latest call's resolution is
+  // allowed to write payload.sql back; older resolutions would otherwise
+  // revert the most recent merge.
+  const runNonceRef = useRef(0)
+  // Baseline for the rerun-on-compiled-SQL effect. Lives up here (rather
+  // than next to that effect) so the external-SQL sync effect can pin it.
+  const prevCompiledRef = useRef<string | null>(null)
   const [runState, setRunState] = useState<RunState>({ kind: "idle" })
   const [explainState, setExplainState] = useState<ExplainState>({ kind: "idle" })
   const [explainBusy, setExplainBusy] = useState(false)
@@ -177,6 +190,7 @@ export function DataGridWindow({
     if (!activeConnectionId) return
     const trimmedSource = sourceSql.trim()
     if (!trimmedSource) return
+    const myNonce = ++runNonceRef.current
     // Compile *this draft* against the runtime graph by patching the
     // window's source SQL into the graph build. The simpler path: build
     // the graph against the live windows array, swap the active window's
@@ -215,6 +229,9 @@ export function DataGridWindow({
       const body = (await res.json()) as
         | (QueryResult & { ok: true })
         | { ok: false; error: string; code?: string; detail?: string; hint?: string }
+      // A newer run started while this fetch was in flight — drop the
+      // result so it doesn't overwrite state owned by the later run.
+      if (runNonceRef.current !== myNonce) return
       if (body.ok === false) {
         setRunState({ kind: "error", error: body.error, code: body.code, detail: body.detail, hint: body.hint })
       } else {
@@ -236,11 +253,32 @@ export function DataGridWindow({
         if (activeTab === "sql") setActiveTab("rows")
       }
     } catch (e) {
+      if (runNonceRef.current !== myNonce) return
       setRunState({ kind: "error", error: e instanceof Error ? e.message : String(e) })
     }
   }, [activeConnectionId, activeTab, allWindows, blockName, onChangePayload, params, subscriptions, w.id])
 
   const onRun = useCallback(() => { void runSql(draftSql || payload.sql) }, [draftSql, payload.sql, runSql])
+
+  // When `payload.sql` changes from outside this window — e.g. another
+  // window merged a dragged column into this rollup's lineage — adopt
+  // it as the draft (only if the user hasn't drifted from the last
+  // synced value) and re-run, so the grid reflects the new aggregate
+  // immediately without a manual Run.
+  useEffect(() => {
+    if (lastSyncedSqlRef.current === payload.sql) return
+    const prev = lastSyncedSqlRef.current
+    lastSyncedSqlRef.current = payload.sql ?? ""
+    setDraftSql((cur) => (cur === prev ? (payload.sql ?? "") : cur))
+    // Claim the current compiled SQL as the baseline *before* re-running.
+    // `compiledSql` is derived from `payload.sql`, so the rerun-on-compiled
+    // effect below also wakes on this change — but `draftSql` is still the
+    // stale pre-merge value in this commit, so letting it fire would run the
+    // OLD query and (winning the run nonce) clobber payload.sql right back.
+    // Pinning the baseline here makes that effect a no-op for this change.
+    prevCompiledRef.current = compiledSql
+    if (payload.sql) void runSql(payload.sql)
+  }, [payload.sql, compiledSql, runSql])
 
   // ── EXPLAIN ───────────────────────────────────────────────────────
   // Plan-only EXPLAIN (FORMAT JSON) never executes the query, so it is
@@ -395,7 +433,6 @@ export function DataGridWindow({
   // upstream's SQL changed, a `param.X.Y` substitution flipped, or a self
   // subscription resolved. Skips the initial mount (prev=null) and only
   // fires after at least one run has already recorded the baseline.
-  const prevCompiledRef = useRef<string | null>(null)
   useEffect(() => {
     if (prevCompiledRef.current === null) return
     if (prevCompiledRef.current === compiledSql) return
@@ -659,6 +696,13 @@ export function DataGridWindow({
           ) : null}
         </div>
       </section>
+      <TimeTravelStrip
+        sql={draftSql}
+        onChange={setDraftSql}
+        onRun={onRun}
+        connectionId={activeConnectionId}
+        hasRvbbit={hasRvbbit}
+      />
     </div>
   )
 }
