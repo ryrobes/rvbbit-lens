@@ -42,6 +42,7 @@ import {
 } from "@/lib/rvbbit/routing"
 import { RoutingProfileTab } from "./routing-profile-tab"
 import { RoutingExplainTab } from "./routing-explain-tab"
+import { RoutingTrainTab } from "./routing-train-tab"
 
 interface RoutingWindowProps {
   activeConnectionId: string | null
@@ -55,11 +56,12 @@ const REFRESH_OPTIONS_MS = [
   { ms: 30_000, label: "30s" },
 ]
 
-type TabKey = "flow" | "profile" | "explain"
+type TabKey = "flow" | "profile" | "explain" | "train"
 const TABS: { key: TabKey; label: string }[] = [
   { key: "flow", label: "Flow" },
   { key: "profile", label: "Profile" },
   { key: "explain", label: "Explain" },
+  { key: "train", label: "Train" },
 ]
 
 /**
@@ -257,11 +259,13 @@ export function RoutingWindow({ activeConnectionId, hasRvbbit }: RoutingWindowPr
           <FlowTab flow={flow} profileData={profileData} loading={loading} />
         ) : tab === "profile" ? (
           <RoutingProfileTab data={profileData} />
-        ) : (
+        ) : tab === "explain" ? (
           <RoutingExplainTab
             activeConnectionId={activeConnectionId}
             columnarTables={columnarTables}
           />
+        ) : (
+          <RoutingTrainTab activeConnectionId={activeConnectionId} />
         )}
       </div>
     </div>

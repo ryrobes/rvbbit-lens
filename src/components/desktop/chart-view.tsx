@@ -21,12 +21,14 @@ import CodeMirror, { type Extension } from "@uiw/react-codemirror"
 import { yaml as yamlLang } from "@codemirror/lang-yaml"
 import { VegaEmbed } from "react-vega"
 import type { Result as VegaEmbedResult } from "vega-embed"
-import { BarChart3, ClipboardCopy, ClipboardPaste, Pencil, RotateCcw, X } from "@/lib/icons"
+import { BarChart3, ClipboardCopy, ClipboardPaste, FileCode2, RotateCcw, Sigma } from "@/lib/icons"
 import { Button } from "@/components/ui/button"
+import { cn } from "@/lib/utils"
 import type { QueryResult } from "@/lib/db/types"
 import { inferChartSpec, schemaComment, type InferResult } from "@/lib/desktop/chart-infer"
 import { themeFingerprint, vegaConfigFromTheme } from "@/lib/desktop/chart-theme"
 import { rvbbitLensCodeMirrorTheme } from "@/lib/desktop/codemirror-theme"
+import { ChartShelf } from "./chart-shelf"
 
 export interface ChartViewProps {
   result: QueryResult
@@ -37,8 +39,10 @@ export interface ChartViewProps {
   onEmitParam: (field: string, value: unknown, dataTypeId: number) => void
 }
 
+type EditorMode = "shelf" | "yaml"
+
 export function ChartView({ result, userSpec, onChangeUserSpec, onEmitParam }: ChartViewProps) {
-  const [editing, setEditing] = useState(false)
+  const [mode, setMode] = useState<EditorMode>("shelf")
   const [themeStamp, setThemeStamp] = useState(0)
 
   // Bump on :root mutations — palette overrides + font writes touch
@@ -173,79 +177,102 @@ export function ChartView({ result, userSpec, onChangeUserSpec, onEmitParam }: C
     console.warn("[ChartView] vega-embed error", err)
   }, [])
 
+  const canvas =
+    !finalSpec ? (
+      <EmptyState columns={result.columns.length} rows={result.rows.length} />
+    ) : (
+      <div ref={containerRefCallback} className="relative h-full w-full">
+        <VegaEmbed
+          spec={finalSpec as Parameters<typeof VegaEmbed>[0]["spec"]}
+          options={{
+            actions: false,
+            renderer: "svg",
+            tooltip: { theme: "dark" },
+          }}
+          onEmbed={handleEmbed}
+          onError={handleError}
+          className="absolute inset-0"
+          style={{ width: "100%", height: "100%" }}
+        />
+      </div>
+    )
+
   return (
     <div className="flex h-full flex-col bg-doc-bg">
       <ChartHeader
-        editing={editing}
+        mode={mode}
         userSpec={userSpec}
         markType={inferred?.markType ?? null}
-        onToggleEdit={() => setEditing((e) => !e)}
+        onModeChange={setMode}
         onReset={() => onChangeUserSpec(null)}
       />
 
-      {editing ? (
+      {mode === "yaml" ? (
         <SpecEditor
           initial={baseSpec}
           columns={result.columns}
           rowCount={result.rowCount}
-          onApply={(spec) => {
-            onChangeUserSpec(spec)
-            setEditing(false)
-          }}
-          onCancel={() => setEditing(false)}
+          onApply={(spec) => onChangeUserSpec(spec)}
         />
-      ) : !finalSpec ? (
-        <EmptyState columns={result.columns.length} rows={result.rows.length} />
       ) : (
-        <div ref={containerRefCallback} className="relative min-h-0 flex-1">
-          <VegaEmbed
-            spec={finalSpec as Parameters<typeof VegaEmbed>[0]["spec"]}
-            options={{
-              actions: false,
-              renderer: "svg",
-              tooltip: { theme: "dark" },
-            }}
-            onEmbed={handleEmbed}
-            onError={handleError}
-            className="absolute inset-0"
-            style={{ width: "100%", height: "100%" }}
-          />
-        </div>
+        <ChartShelf
+          columns={result.columns}
+          rows={result.rows}
+          spec={baseSpec}
+          onChangeSpec={onChangeUserSpec}
+        >
+          {canvas}
+        </ChartShelf>
       )}
     </div>
   )
 }
 
 function ChartHeader({
-  editing,
+  mode,
   userSpec,
   markType,
-  onToggleEdit,
+  onModeChange,
   onReset,
 }: {
-  editing: boolean
+  mode: EditorMode
   userSpec: Record<string, unknown> | null
   markType: string | null
-  onToggleEdit: () => void
+  onModeChange: (m: EditorMode) => void
   onReset: () => void
 }) {
   return (
     <div className="flex items-center gap-1 border-b border-chrome-border bg-chrome-bg/40 px-2 py-1">
       <BarChart3 className="h-3.5 w-3.5 text-rvbbit-accent" />
       <span className="text-[10px] uppercase tracking-wider text-chrome-text">
-        {userSpec ? "custom spec" : markType ? `auto: ${markType}` : "auto"}
+        {userSpec ? "custom" : markType ? `auto · ${markType}` : "auto"}
       </span>
+      <div className="ml-2 flex items-center rounded border border-chrome-border/60 bg-doc-bg p-0.5 text-[10px]">
+        {(["shelf", "yaml"] as EditorMode[]).map((m) => (
+          <button
+            key={m}
+            type="button"
+            onClick={() => onModeChange(m)}
+            className={cn(
+              "inline-flex items-center gap-1 rounded px-1.5 py-0.5 font-mono",
+              mode === m
+                ? "bg-rvbbit-accent/15 text-foreground"
+                : "text-chrome-text/65 hover:text-foreground",
+            )}
+            title={m === "shelf" ? "Visual shelf editor" : "Edit raw Vega-Lite YAML"}
+          >
+            {m === "shelf" ? <Sigma className="h-3 w-3" /> : <FileCode2 className="h-3 w-3" />}
+            {m === "shelf" ? "Shelf" : "YAML"}
+          </button>
+        ))}
+      </div>
       <div className="flex-1" />
       {userSpec ? (
-        <Button size="sm" variant="ghost" onClick={onReset} title="Discard custom spec; return to auto">
+        <Button size="sm" variant="ghost" onClick={onReset} title="Discard custom spec; return to auto-inferred">
           <RotateCcw className="h-3 w-3" />
           <span className="text-xs">Reset to auto</span>
         </Button>
       ) : null}
-      <Button size="sm" variant="ghost" onClick={onToggleEdit} title="Edit Vega-Lite spec">
-        {editing ? <X className="h-3 w-3" /> : <Pencil className="h-3 w-3" />}
-        <span className="text-xs">{editing ? "Close editor" : "Edit spec"}</span>
-      </Button>
     </div>
   )
 }
@@ -268,13 +295,11 @@ function SpecEditor({
   columns,
   rowCount,
   onApply,
-  onCancel,
 }: {
   initial: Record<string, unknown> | null
   columns: QueryResult["columns"]
   rowCount: number
   onApply: (spec: Record<string, unknown>) => void
-  onCancel: () => void
 }) {
   const [text, setText] = useState(() => initialYaml(initial, columns, rowCount))
   const [error, setError] = useState<string | null>(null)
@@ -332,10 +357,7 @@ function SpecEditor({
           <ClipboardPaste className="h-3 w-3" />
           <span className="text-xs">Paste</span>
         </Button>
-        <Button size="sm" variant="ghost" onClick={onCancel}>
-          <span className="text-xs">Cancel</span>
-        </Button>
-        <Button size="sm" onClick={parseAndApply}>
+        <Button size="sm" onClick={parseAndApply} title="Parse this YAML and apply it as the chart spec">
           <span className="text-xs">Apply</span>
         </Button>
       </div>
