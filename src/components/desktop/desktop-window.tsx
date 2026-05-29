@@ -47,6 +47,9 @@ function rollupOpIcon(op: RollupOp): LucideIcon {
     case "max": return TrendingUp
     case "count": return Hash
     case "count_distinct": return Boxes
+    // median / stddev / variance are reachable only via the shelf, never
+    // as drop tiles, so they don't need a dedicated tile icon.
+    default: return Sigma
   }
 }
 

@@ -32,7 +32,10 @@ import type {
   DesktopParamOperator,
   DesktopParamValue,
   DesktopWindowState,
+  RollupSpec,
 } from "@/lib/desktop/types"
+import { rollupSpecFromColumns } from "@/lib/desktop/sql-builder"
+import { RollupShelf } from "./rollup-shelf"
 import type { QueryResult } from "@/lib/db/types"
 import { cn } from "@/lib/utils"
 import { rowsToCsv } from "@/lib/sql/format"
@@ -72,6 +75,11 @@ interface DataGridWindowProps {
   }) => void
   onSubscribeParam: (key: string, targetField?: string) => void
   /**
+   * Apply a pure transform to this window's rollup spec (shelf edits).
+   * Rebuilds SQL/title at the host so the window chrome stays in sync.
+   */
+  onEditRollup?: (transform: (s: RollupSpec) => RollupSpec) => void
+  /**
    * Round-trip back into the KG when this Data window was opened from a
    * KG evidence row (i.e. payload.sourceContext is set). Phase 2's
    * reverse bridge.
@@ -103,6 +111,7 @@ export function DataGridWindow({
   onSaveAsViewApp,
   onEmitParam,
   onSubscribeParam,
+  onEditRollup,
   onOpenKgForSource,
 }: DataGridWindowProps) {
   const view = payload.view ?? {}
@@ -503,6 +512,13 @@ export function DataGridWindow({
   const error = runState.kind === "error" ? runState : null
   const isRunning = runState.kind === "running"
 
+  // The editable rollup spec, when this window is a column-aggregate.
+  const rollupSpec = useMemo<RollupSpec | null>(() => {
+    const lin = payload.lineage
+    if (!lin || lin.kind !== "column-aggregate") return null
+    return lin.rollup ?? rollupSpecFromColumns(lin.columns ?? [])
+  }, [payload.lineage])
+
   // Provide the column drag source so result-grid header cells can
   // serialize themselves into a column-drag DataTransfer payload.
   const columnDragSource = useMemo(() => {
@@ -624,6 +640,10 @@ export function DataGridWindow({
             </>
           ) : null}
         </div>
+
+        {rollupSpec && onEditRollup ? (
+          <RollupShelf spec={rollupSpec} onEdit={onEditRollup} />
+        ) : null}
 
         <div className="flex-1 overflow-hidden">
           {activeTab === "rows" && result ? (

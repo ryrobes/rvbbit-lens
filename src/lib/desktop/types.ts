@@ -233,7 +233,16 @@ export interface RollupSpec {
   pivot?: RollupPivot | null
 }
 
-export type RollupAgg = "sum" | "avg" | "min" | "max" | "count" | "count_distinct"
+export type RollupAgg =
+  | "sum"
+  | "avg"
+  | "min"
+  | "max"
+  | "count"
+  | "count_distinct"
+  | "median"
+  | "stddev"
+  | "variance"
 
 export interface RollupMeasure {
   /** Stable identity (`<agg>:<column|*>`) — dedupe key + pivot target. */

@@ -1882,6 +1882,39 @@ export function DesktopShell() {
     }))
   }, [pivotColumnInWindow])
 
+  // Apply a pure transform to a column-aggregate window's rollup spec
+  // (rollup-shelf edits: remove a pill, cycle an aggregate, clear pivot).
+  // Shares the merge handler's rebuild path so SQL/title/chrome stay in
+  // sync and the window re-runs off the `payload.sql` change.
+  const editRollupSpec = useCallback((targetWindowId: string, transform: (s: RollupSpec) => RollupSpec) => {
+    setWindows((ws) => ws.map((w) => {
+      if (w.id !== targetWindowId || w.kind !== "data") return w
+      const p = w.payload as DataPayload | undefined
+      const lin = p?.lineage
+      if (!p || !lin || lin.kind !== "column-aggregate") return w
+      const baseSpec = lin.rollup ?? rollupSpecFromColumns(lin.columns ?? [])
+      const nextSpec = transform(baseSpec)
+      const parentBlockName = lin.parentBlockName ?? ""
+      if (!parentBlockName) return w
+      const { sql, title } = buildRollupQuery(nextSpec, { parentBlockName, parentTitle: lin.parentTitle })
+      const nextReactive = p.reactive
+        ? { ...p.reactive, sourceSql: sql, version: (p.reactive.version ?? 1) + 1 }
+        : undefined
+      return {
+        ...w,
+        title,
+        payload: {
+          ...p,
+          title,
+          sql,
+          view: p.view ? { ...p.view, sqlDraft: undefined } : p.view,
+          lineage: { ...lin, parentBlockName, columns: rollupSpecColumns(nextSpec), rollup: nextSpec },
+          reactive: nextReactive,
+        } satisfies DataPayload,
+      }
+    }))
+  }, [])
+
   const openBlockReference = useCallback((payload: DesktopBlockDragPayload, at: { x: number; y: number }) => {
     const title = `${payload.title} → ref`
     const sql = `SELECT *\nFROM {${payload.blockName}}\nLIMIT 200;`
@@ -2238,6 +2271,7 @@ export function DesktopShell() {
                   runSignal: runSignals[w.id] ?? 0,
                   emitParam,
                   subscribeParam,
+                  editRollupSpec,
                   palette: activePalette,
                   paletteOverrides,
                   hasWallpaper: !!wallpaperUrl,
@@ -2403,6 +2437,7 @@ interface WindowContext {
     type?: string
   }) => void
   subscribeParam: (targetWindowId: string, key: string, targetField?: string) => void
+  editRollupSpec: (targetWindowId: string, transform: (s: RollupSpec) => RollupSpec) => void
   palette: ImagePalette | null
   paletteOverrides: Partial<ImagePalette> | null
   hasWallpaper: boolean
@@ -2452,6 +2487,7 @@ function renderWindowContent(
           onSaveAsViewApp={(sql) => ctx.openViewAppBuilder({ initialSql: sql })}
           onEmitParam={ctx.emitParam}
           onSubscribeParam={(key, field) => ctx.subscribeParam(w.id, key, field)}
+          onEditRollup={(transform) => ctx.editRollupSpec(w.id, transform)}
           onOpenKgForSource={ctx.openKgForSource}
         />
       )

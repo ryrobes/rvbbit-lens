@@ -78,6 +78,9 @@ export function opAppliesToColumn(op: RollupOp, c: DesktopColumnRef): boolean {
   switch (op.agg) {
     case "sum":
     case "avg":
+    case "median":
+    case "stddev":
+    case "variance":
       return isNumericRef(c)
     case "min":
     case "max":
@@ -259,6 +262,77 @@ export function applyRollupOp(
   }
 }
 
+// ── Shelf edits (pure spec transforms) ─────────────────────────────────
+//
+// The rollup shelf mutates the spec through these; the host rebuilds SQL
+// with `buildRollupQuery`, exactly like a drag merge. The drop tiles stay
+// "Standard", but cycling a measure pill walks the full agg vocabulary —
+// that's where median / stddev / variance become reachable.
+
+const NUMERIC_AGG_CYCLE: RollupAgg[] = [
+  "sum", "avg", "min", "max", "count", "count_distinct", "median", "stddev", "variance",
+]
+const TEXT_AGG_CYCLE: RollupAgg[] = ["count", "count_distinct"]
+
+function aggCycleFor(m: RollupMeasure): RollupAgg[] {
+  if (!m.column) return ["count"]
+  return isNumericRef(m.column) ? NUMERIC_AGG_CYCLE : TEXT_AGG_CYCLE
+}
+
+/** Cycle a measure to the next aggregate valid for its column type. */
+export function cycleMeasureAgg(spec: RollupSpec, id: string): RollupSpec {
+  const idx = spec.measures.findIndex((m) => m.id === id)
+  if (idx < 0) return spec
+  const m = spec.measures[idx]
+  if (!m.column) return spec // row count — nothing to cycle
+  const cycle = aggCycleFor(m)
+  const here = cycle.indexOf(m.agg)
+  const existingIds = new Set(spec.measures.map((x) => x.id))
+  for (let step = 1; step <= cycle.length; step += 1) {
+    const nextAgg = cycle[(here + step) % cycle.length]
+    const nextId = measureId(nextAgg, m.column)
+    if (nextId !== m.id && existingIds.has(nextId)) continue // would collide
+    const taken = new Set(spec.measures.filter((_, i) => i !== idx).map((x) => x.alias))
+    const alias = uniqueAlias(aggAliasBase(nextAgg, m.column), taken)
+    const measures = [...spec.measures]
+    measures[idx] = { id: nextId, column: m.column, agg: nextAgg, alias }
+    return reconcilePivot({ ...spec, measures })
+  }
+  return spec
+}
+
+/** Remove a group-by dimension (and any order term that referenced it). */
+export function removeGroupBy(spec: RollupSpec, colName: string): RollupSpec {
+  const lower = colName.toLowerCase()
+  const groupBy = spec.groupBy.filter((c) => c.name.toLowerCase() !== lower)
+  if (groupBy.length === spec.groupBy.length) return spec
+  const orderBy = spec.orderBy?.filter((t) => t.ref.toLowerCase() !== lower)
+  return { ...spec, groupBy, orderBy: orderBy?.length ? orderBy : undefined }
+}
+
+/** Remove a measure (and any order/pivot scoping that referenced it). */
+export function removeMeasure(spec: RollupSpec, id: string): RollupSpec {
+  const removed = spec.measures.find((m) => m.id === id)
+  if (!removed) return spec
+  const measures = spec.measures.filter((m) => m.id !== id)
+  const orderBy = spec.orderBy?.filter((t) => t.ref.toLowerCase() !== removed.alias.toLowerCase())
+  return reconcilePivot({ ...spec, measures, orderBy: orderBy?.length ? orderBy : undefined })
+}
+
+/** Drop the pivot, collapsing the grid back to a plain rollup. */
+export function clearPivot(spec: RollupSpec): RollupSpec {
+  if (!spec.pivot) return spec
+  return { ...spec, pivot: null }
+}
+
+/** Keep `pivot.measureIds` pointing only at measures that still exist. */
+function reconcilePivot(spec: RollupSpec): RollupSpec {
+  if (!spec.pivot?.measureIds) return spec
+  const live = new Set(spec.measures.map((m) => m.id))
+  const ids = spec.pivot.measureIds.filter((id) => live.has(id))
+  return { ...spec, pivot: { ...spec.pivot, measureIds: ids.length ? ids : undefined } }
+}
+
 /** Flatten a spec back to the legacy column list (for `lineage.columns`). */
 export function rollupSpecColumns(spec: RollupSpec): DesktopColumnRef[] {
   const out: DesktopColumnRef[] = [...spec.groupBy]
@@ -270,9 +344,14 @@ export function rollupSpecColumns(spec: RollupSpec): DesktopColumnRef[] {
 function measureExpr(m: RollupMeasure): string {
   if (m.agg === "count" && m.column == null) return "count(1)"
   const col = quoteSqlIdent(m.column!.name)
-  if (m.agg === "count") return `count(${col})`
-  if (m.agg === "count_distinct") return `count(DISTINCT ${col})`
-  return `${m.agg}(${col})`
+  switch (m.agg) {
+    case "count": return `count(${col})`
+    case "count_distinct": return `count(DISTINCT ${col})`
+    case "median": return `percentile_cont(0.5) WITHIN GROUP (ORDER BY ${col})`
+    case "stddev": return `stddev_samp(${col})`
+    case "variance": return `var_samp(${col})`
+    default: return `${m.agg}(${col})` // sum / avg / min / max
+  }
 }
 
 function renderMeasure(m: RollupMeasure): string {
@@ -315,11 +394,9 @@ export function buildRollupQuery(
   }
 
   const dims = spec.groupBy
-  const measures = spec.measures.length > 0
-    ? spec.measures
-    : dims.length > 0
-      ? [rowCountMeasure()]
-      : []
+  // Always keep at least a row count, so an emptied shelf still yields a
+  // valid SELECT (the grand-total count) rather than an empty projection.
+  const measures = spec.measures.length > 0 ? spec.measures : [rowCountMeasure()]
 
   const selectLines = [
     ...dims.map((c) => `  ${quoteSqlIdent(c.name)}`),
