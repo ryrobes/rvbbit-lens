@@ -270,7 +270,9 @@ export type RollupOp =
   | { kind: "group-by" }
   | { kind: "order-by" }
   | { kind: "measure"; agg: RollupAgg }
-// future: | { kind: "pivot" }
+  // Pivot the dragged dimension across columns. `measureIds` scopes which
+  // measures get spread (one per pivot value); omitted ⇒ all measures.
+  | { kind: "pivot"; measureIds?: string[] }
 
 export interface DataWindowViewState {
   activeTab?: "rows" | "profile" | "chart" | "sql" | "explain"

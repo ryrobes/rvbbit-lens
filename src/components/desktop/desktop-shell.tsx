@@ -91,6 +91,7 @@ import type {
   DesktopColumnDragPayload,
   DesktopParamOperator,
   RollupOp,
+  RollupSpec,
   DesktopParamValue,
   DesktopViewportState,
   DesktopWindowState,
@@ -145,7 +146,7 @@ import {
   rollupSpecFromColumns,
 } from "@/lib/desktop/sql-builder"
 import { fetchKgEvidenceBySource, fetchPrimaryKeyColumn } from "@/lib/rvbbit/kg"
-import { paramKey, sameParamValue, sourceSqlForPayload, uniqueBlockName } from "@/lib/desktop/reactive-sql"
+import { buildDesktopRuntimeGraph, paramKey, sameParamValue, sourceSqlForPayload, uniqueBlockName } from "@/lib/desktop/reactive-sql"
 import {
   hasColumnDragPayload,
   readColumnDragPayload,
@@ -246,6 +247,11 @@ export function DesktopShell() {
   // that must see the current windows without being re-subscribed.
   const workspacesRef = useRef(workspaces)
   workspacesRef.current = workspaces
+
+  // Latest active connection, for async handlers (e.g. the pivot
+  // distinct-value probe) that fire outside React's render flow.
+  const activeConnectionIdRef = useRef(activeConnectionId)
+  activeConnectionIdRef.current = activeConnectionId
 
   const mutateCanvas = useCallback(
     (fn: (c: WorkspaceCanvas) => WorkspaceCanvas) => {
@@ -1705,6 +1711,116 @@ export function DesktopShell() {
     })
   }, [openWindow])
 
+  // Pivot a dragged dimension across columns. Needs the dimension's
+  // distinct values (a query round-trip), so this is async: probe the
+  // values via a synthetic block that references the parent, then fold a
+  // `pivot` term into the spec and rebuild. The `payload.sql` change is
+  // what re-runs the window (same mechanism as the sync merge).
+  const pivotColumnInWindow = useCallback(async (
+    targetWindowId: string,
+    payload: DesktopColumnDragPayload,
+    measureIds?: string[],
+  ) => {
+    const PIVOT_VALUE_CAP = 24
+    const connectionId = activeConnectionIdRef.current
+    if (!connectionId) return
+    const canvas = workspacesRef.current[activeWorkspaceRef.current]
+    const wins = canvas?.windows ?? []
+    const params = canvas?.params ?? []
+
+    const target = wins.find((w) => w.id === targetWindowId)
+    if (!target || target.kind !== "data") return
+    const lin = (target.payload as DataPayload | undefined)?.lineage
+    if (!lin || lin.kind !== "column-aggregate") return
+    if (lin.parentWindowId !== payload.parentWindowId) return
+    if (lin.relationKey !== payload.relationKey) return
+
+    const pivotCol = payload.columns[0]
+    if (!pivotCol) return
+    const parentBlockName = lin.parentBlockName ?? payload.parentBlockName
+
+    // Compile a DISTINCT probe by injecting a throwaway block that
+    // references the parent; the graph expands `{parentBlockName}` to the
+    // parent's compiled (cascaded) SQL.
+    const probeId = `__pivot_probe_${targetWindowId}`
+    const col = quoteSqlIdent(pivotCol.name)
+    const probeSql = [
+      `SELECT DISTINCT ${col} AS pivot_value`,
+      `FROM {${parentBlockName}}`,
+      `WHERE ${col} IS NOT NULL`,
+      `ORDER BY 1`,
+      `LIMIT ${PIVOT_VALUE_CAP + 1}`,
+    ].join("\n")
+    const synthetic: DesktopWindowState = {
+      id: probeId,
+      kind: "data",
+      title: "pivot probe",
+      x: 0, y: 0, width: 1, height: 1, zIndex: 0, minimized: true,
+      payload: {
+        kind: "data",
+        title: "pivot probe",
+        sql: probeSql,
+        reactive: {
+          blockName: uniqueBlockName("pivot_probe", wins),
+          sourceSql: probeSql,
+          paramSubscriptions: [],
+          version: 1,
+        },
+      } satisfies DataPayload,
+    }
+    const graph = buildDesktopRuntimeGraph([...wins, synthetic], params)
+    const compiled = graph.blocks.get(probeId)?.compiledSql ?? probeSql
+
+    let values: (string | number | null)[] = []
+    try {
+      const res = await fetch("/api/db/query", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ connectionId, sql: compiled, rowLimit: PIVOT_VALUE_CAP + 1, readOnly: true }),
+      })
+      const body = (await res.json()) as { ok?: boolean; rows?: Record<string, unknown>[] }
+      if (!body.ok || !Array.isArray(body.rows)) return
+      values = body.rows.map((r) => (r.pivot_value ?? null) as string | number | null)
+    } catch {
+      return
+    }
+    const truncated = values.length > PIVOT_VALUE_CAP
+    values = values.slice(0, PIVOT_VALUE_CAP)
+    if (values.length === 0) return
+
+    setWindows((ws) => ws.map((w) => {
+      if (w.id !== targetWindowId || w.kind !== "data") return w
+      const p = w.payload as DataPayload | undefined
+      const linNow = p?.lineage
+      if (!p || !linNow || linNow.kind !== "column-aggregate") return w
+
+      const baseSpec = linNow.rollup ?? rollupSpecFromColumns(linNow.columns ?? [])
+      const nextSpec: RollupSpec = {
+        ...baseSpec,
+        // The pivot column moves out of the rows (GROUP BY) into headers.
+        groupBy: baseSpec.groupBy.filter((d) => d.name.toLowerCase() !== pivotCol.name.toLowerCase()),
+        pivot: { column: pivotCol, values, measureIds, truncated },
+      }
+      const blockName = linNow.parentBlockName ?? payload.parentBlockName
+      const { sql, title } = buildRollupQuery(nextSpec, { parentBlockName: blockName, parentTitle: linNow.parentTitle })
+      const nextReactive = p.reactive
+        ? { ...p.reactive, sourceSql: sql, version: (p.reactive.version ?? 1) + 1 }
+        : undefined
+      return {
+        ...w,
+        title,
+        payload: {
+          ...p,
+          title,
+          sql,
+          view: p.view ? { ...p.view, sqlDraft: undefined } : p.view,
+          lineage: { ...linNow, parentBlockName: blockName, columns: rollupSpecColumns(nextSpec), rollup: nextSpec },
+          reactive: nextReactive,
+        } satisfies DataPayload,
+      }
+    }))
+  }, [])
+
   // Drop a column onto an existing column-aggregate window via a chosen
   // operation tile: fold it into the rollup spec, regenerate SQL/title.
   // The target window's `payload.sql` change is what re-runs the query —
@@ -1712,6 +1828,12 @@ export function DesktopShell() {
   // and triggers a fresh run, so we don't need to bump the run signal
   // here (doing both would race two runSql() calls).
   const mergeColumnIntoWindow = useCallback((targetWindowId: string, payload: DesktopColumnDragPayload, op: RollupOp) => {
+    // Pivot needs the dragged dimension's distinct values, which requires
+    // a query round-trip — handled on a separate async path.
+    if (op.kind === "pivot") {
+      void pivotColumnInWindow(targetWindowId, payload, op.measureIds)
+      return
+    }
     setWindows((ws) => ws.map((w) => {
       if (w.id !== targetWindowId || w.kind !== "data") return w
       const p = w.payload as DataPayload | undefined
@@ -1758,7 +1880,7 @@ export function DesktopShell() {
         } satisfies DataPayload,
       }
     }))
-  }, [])
+  }, [pivotColumnInWindow])
 
   const openBlockReference = useCallback((payload: DesktopBlockDragPayload, at: { x: number; y: number }) => {
     const title = `${payload.title} → ref`
@@ -2071,7 +2193,12 @@ export function DesktopShell() {
                 if (w.kind !== "data") return null
                 const lin = (w.payload as DataPayload | undefined)?.lineage
                 if (!lin || lin.kind !== "column-aggregate") return null
-                return { parentWindowId: lin.parentWindowId, relationKey: lin.relationKey }
+                const spec = lin.rollup ?? rollupSpecFromColumns(lin.columns ?? [])
+                return {
+                  parentWindowId: lin.parentWindowId,
+                  relationKey: lin.relationKey,
+                  measures: spec.measures,
+                }
               })()
               return (
               <DesktopWindow

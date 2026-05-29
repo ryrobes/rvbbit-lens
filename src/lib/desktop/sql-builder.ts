@@ -72,6 +72,9 @@ export function isDateRef(c: DesktopColumnRef): boolean {
 /** Does an op make sense for a given column's type? */
 export function opAppliesToColumn(op: RollupOp, c: DesktopColumnRef): boolean {
   if (op.kind === "group-by" || op.kind === "order-by") return true
+  // Pivot fans a column's distinct values into headers — only sane for
+  // (low-cardinality) non-numeric dimensions.
+  if (op.kind === "pivot") return !isNumericRef(c)
   switch (op.agg) {
     case "sum":
     case "avg":
@@ -91,7 +94,14 @@ export interface RollupOpTile {
   label: string
   /** Tooltip / sublabel, e.g. `avg(col)`. */
   hint: string
-  group: "measure" | "dimension"
+  group: "measure" | "dimension" | "pivot"
+}
+
+/** Short human label for a measure, e.g. `sum(amount)` or `count`. */
+export function measureLabel(m: RollupMeasure): string {
+  if (m.alias === "row_count") return "count"
+  if (m.agg === "count_distinct") return `distinct(${m.column?.name ?? "*"})`
+  return `${m.agg}(${m.column?.name ?? "*"})`
 }
 
 // Canonical tile order, independent of which columns are dragged.
@@ -110,10 +120,41 @@ const TILE_ORDER: RollupOpTile[] = [
  * The set of drop tiles to offer for a (possibly multi-column) drag.
  * A tile is shown when it applies to at least one dragged column; on
  * drop, `applyRollupOp` only affects the columns it actually fits.
+ *
+ * `targetMeasures` are the existing measures of the block being hovered.
+ * When a single dimension is dragged over a block that already has
+ * measures, per-measure "Pivot …" tiles (plus a "Pivot all") are appended
+ * so the dimension's distinct values can fan out into columns.
  */
-export function availableRollupOps(columns: DesktopColumnRef[]): RollupOpTile[] {
+export function availableRollupOps(
+  columns: DesktopColumnRef[],
+  targetMeasures: RollupMeasure[] = [],
+): RollupOpTile[] {
   if (columns.length === 0) return []
-  return TILE_ORDER.filter((tile) => columns.some((c) => opAppliesToColumn(tile.op, c)))
+  const base = TILE_ORDER.filter((tile) => columns.some((c) => opAppliesToColumn(tile.op, c)))
+
+  // Pivot is single-dimension only (which column fans out must be
+  // unambiguous), and needs at least one measure to spread.
+  const canPivot = columns.length === 1
+    && opAppliesToColumn({ kind: "pivot" }, columns[0])
+    && targetMeasures.length > 0
+  if (!canPivot) return base
+
+  const pivotTiles: RollupOpTile[] = targetMeasures.map((m) => ({
+    op: { kind: "pivot", measureIds: [m.id] },
+    label: `Pivot ${measureLabel(m)}`,
+    hint: `${measureLabel(m)} per ${columns[0].name} value`,
+    group: "pivot",
+  }))
+  if (targetMeasures.length > 1) {
+    pivotTiles.push({
+      op: { kind: "pivot" },
+      label: "Pivot all",
+      hint: `every measure per ${columns[0].name} value`,
+      group: "pivot",
+    })
+  }
+  return [...base, ...pivotTiles]
 }
 
 function rowCountMeasure(): RollupMeasure {
@@ -186,6 +227,9 @@ export function applyRollupOp(
     changed = true
   }
 
+  // Pivot is resolved on an async path (it needs distinct values), not here.
+  if (op.kind === "pivot") return { spec, changed: false }
+
   for (const c of columns) {
     if (!opAppliesToColumn(op, c)) continue
     if (op.kind === "group-by") {
@@ -222,13 +266,18 @@ export function rollupSpecColumns(spec: RollupSpec): DesktopColumnRef[] {
   return uniqueColumns(out)
 }
 
+/** The aggregate expression for a measure, without the `AS alias`. */
+function measureExpr(m: RollupMeasure): string {
+  if (m.agg === "count" && m.column == null) return "count(1)"
+  const col = quoteSqlIdent(m.column!.name)
+  if (m.agg === "count") return `count(${col})`
+  if (m.agg === "count_distinct") return `count(DISTINCT ${col})`
+  return `${m.agg}(${col})`
+}
+
 function renderMeasure(m: RollupMeasure): string {
   if (m.agg === "count" && m.column == null) return "  count(1) AS row_count"
-  const col = quoteSqlIdent(m.column!.name)
-  const alias = quoteSqlIdent(m.alias)
-  if (m.agg === "count") return `  count(${col}) AS ${alias}`
-  if (m.agg === "count_distinct") return `  count(DISTINCT ${col}) AS ${alias}`
-  return `  ${m.agg}(${col}) AS ${alias}`
+  return `  ${measureExpr(m)} AS ${quoteSqlIdent(m.alias)}`
 }
 
 function renderOrderBy(spec: RollupSpec): string {
@@ -244,11 +293,27 @@ function renderOrderBy(spec: RollupSpec): string {
   return ""
 }
 
+function sqlLiteral(v: string | number | null): string {
+  if (v === null) return "NULL"
+  if (typeof v === "number") return Number.isFinite(v) ? String(v) : "NULL"
+  return `'${String(v).replace(/'/g, "''")}'`
+}
+
+function valueSlug(v: string | number | null): string {
+  if (v === null) return "null"
+  const cleaned = String(v).toLowerCase().replace(/[^a-z0-9_]+/g, "_").replace(/^_+|_+$/g, "")
+  return cleaned || "val"
+}
+
 /** Render a `RollupSpec` to SQL over a parent block reference. */
 export function buildRollupQuery(
   spec: RollupSpec,
   args: { parentBlockName: string; parentTitle: string },
 ): { sql: string; title: string } {
+  if (spec.pivot && spec.pivot.values.length > 0) {
+    return buildPivotQuery(spec, spec.pivot, args)
+  }
+
   const dims = spec.groupBy
   const measures = spec.measures.length > 0
     ? spec.measures
@@ -272,6 +337,64 @@ export function buildRollupQuery(
   ].join("\n")
 
   return { sql, title: titleForRollup(args.parentTitle, spec) }
+}
+
+/**
+ * Tableau-style pivot via conditional aggregation: each (pivot value ×
+ * pivoted measure) becomes a `agg(col) FILTER (WHERE pivotcol = v)` column.
+ * Portable (no `crosstab`/tablefunc) and a pure function of the resolved
+ * `pivot.values`. Non-pivoted measures stay as ordinary columns.
+ */
+function buildPivotQuery(
+  spec: RollupSpec,
+  pivot: NonNullable<RollupSpec["pivot"]>,
+  args: { parentBlockName: string; parentTitle: string },
+): { sql: string; title: string } {
+  const pivotColLower = pivot.column.name.toLowerCase()
+  const rowDims = spec.groupBy.filter((d) => d.name.toLowerCase() !== pivotColLower)
+  const allMeasures = spec.measures.length > 0 ? spec.measures : [rowCountMeasure()]
+  const scoped = pivot.measureIds && pivot.measureIds.length > 0
+    ? new Set(pivot.measureIds)
+    : null
+  const pivoted = scoped ? allMeasures.filter((m) => scoped.has(m.id)) : allMeasures
+  const plain = scoped ? allMeasures.filter((m) => !scoped.has(m.id)) : []
+
+  const taken = new Set<string>()
+  const selectLines: string[] = [
+    ...rowDims.map((c) => `  ${quoteSqlIdent(c.name)}`),
+    ...plain.map((m) => {
+      const alias = uniqueAlias(m.alias, taken)
+      taken.add(alias)
+      return `  ${measureExpr(m)} AS ${quoteSqlIdent(alias)}`
+    }),
+  ]
+
+  const pivotCol = quoteSqlIdent(pivot.column.name)
+  for (const v of pivot.values) {
+    const pred = v === null ? `${pivotCol} IS NULL` : `${pivotCol} = ${sqlLiteral(v)}`
+    for (const m of pivoted) {
+      const alias = uniqueAlias(`${valueSlug(v)}_${m.alias}`, taken)
+      taken.add(alias)
+      selectLines.push(`  ${measureExpr(m)} FILTER (WHERE ${pred}) AS ${quoteSqlIdent(alias)}`)
+    }
+  }
+
+  const groupBy = rowDims.length > 0
+    ? `\nGROUP BY ${rowDims.map((c) => quoteSqlIdent(c.name)).join(", ")}`
+    : ""
+  const orderBy = rowDims.length > 0 ? "\nORDER BY 1" : ""
+
+  const sql = [
+    `SELECT`,
+    selectLines.join(",\n"),
+    `FROM {${args.parentBlockName}}${groupBy}${orderBy};`,
+  ].join("\n")
+
+  const rowLabel = rowDims.length > 0 ? rowDims.map((c) => c.name).join(", ") : "totals"
+  return {
+    sql,
+    title: `${args.parentTitle}: ${rowLabel} × ${pivot.column.name}`,
+  }
 }
 
 function titleForRollup(parentTitle: string, spec: RollupSpec): string {

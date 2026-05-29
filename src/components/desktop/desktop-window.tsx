@@ -12,6 +12,7 @@ import {
   Minus,
   Sigma,
   Table2,
+  TreeStructure,
   TrendingUp,
   X,
   type LucideIcon,
@@ -24,17 +25,21 @@ import { availableRollupOps, isNumericRef } from "@/lib/desktop/sql-builder"
 import type {
   DesktopColumnDragPayload,
   DesktopWindowState,
+  RollupMeasure,
   RollupOp,
 } from "@/lib/desktop/types"
 import { cn } from "@/lib/utils"
 
 function rollupOpKey(op: RollupOp): string {
-  return op.kind === "measure" ? `measure:${op.agg}` : op.kind
+  if (op.kind === "measure") return `measure:${op.agg}`
+  if (op.kind === "pivot") return `pivot:${op.measureIds?.join(",") ?? "all"}`
+  return op.kind
 }
 
 function rollupOpIcon(op: RollupOp): LucideIcon {
   if (op.kind === "group-by") return Layers
   if (op.kind === "order-by") return Table2
+  if (op.kind === "pivot") return TreeStructure
   switch (op.agg) {
     case "sum": return Sigma
     case "avg": return Calculator
@@ -63,7 +68,12 @@ interface DesktopWindowProps {
    * outer ring shows on every compatible window during a drag; a strong
    * outer glow appears on the one the cursor is over.
    */
-  columnDropAcceptsFrom?: { parentWindowId: string; relationKey: string } | null
+  columnDropAcceptsFrom?: {
+    parentWindowId: string
+    relationKey: string
+    /** Existing measures of this block — drives the per-measure pivot tiles. */
+    measures: RollupMeasure[]
+  } | null
   /**
    * Called when a compatible column drag is dropped on one of the
    * type-aware operation tiles (or the fallback default zone).
@@ -103,13 +113,58 @@ export function DesktopWindow({
   const [columnDragHover, setColumnDragHover] = useState(false)
   const [hoveredOpKey, setHoveredOpKey] = useState<string | null>(null)
   const draggedColumns = activeColumnDrag?.columns ?? []
-  const rollupTiles = columnDragCompatible ? availableRollupOps(draggedColumns) : []
+  const rollupTiles = columnDragCompatible
+    ? availableRollupOps(draggedColumns, columnDropAcceptsFrom?.measures ?? [])
+    : []
+  const baseTiles = rollupTiles.filter((t) => t.group !== "pivot")
+  const pivotTiles = rollupTiles.filter((t) => t.group === "pivot")
   // Default op for a drop on the cluster backdrop (not a specific tile):
   // sum for numeric drags, group-by otherwise — matches the old one-shot.
   const defaultRollupOp: RollupOp = draggedColumns.some(isNumericRef)
     ? { kind: "measure", agg: "sum" }
     : { kind: "group-by" }
   const resetColumnDragState = () => { setColumnDragHover(false); setHoveredOpKey(null) }
+
+  function renderRollupTile(tile: { op: RollupOp; label: string; hint: string }, fullWidth: boolean) {
+    const key = rollupOpKey(tile.op)
+    const Icon = rollupOpIcon(tile.op)
+    const hot = hoveredOpKey === key
+    const accent = `oklch(var(--win-l-icon) var(--win-c) var(--win-${w.kind}-h))`
+    return (
+      <div
+        key={key}
+        title={tile.hint}
+        onDragEnter={(e) => { e.preventDefault(); e.stopPropagation(); setHoveredOpKey(key) }}
+        onDragOver={(e) => {
+          e.preventDefault()
+          e.stopPropagation()
+          e.dataTransfer.dropEffect = "copy"
+          setHoveredOpKey(key)
+        }}
+        onDrop={(e) => {
+          e.preventDefault()
+          e.stopPropagation()
+          resetColumnDragState()
+          const payload = readColumnDragPayload(e.dataTransfer)
+          if (payload && onColumnMerge) onColumnMerge(payload, tile.op)
+        }}
+        className={cn(
+          "flex cursor-copy select-none items-center gap-1.5 rounded-md border px-2 text-[11px] font-medium transition-colors",
+          fullWidth ? "col-span-2 py-1.5" : "flex-col justify-center py-2.5",
+          hot
+            ? "border-transparent text-foreground"
+            : "border-chrome-border/50 bg-foreground/[0.03] text-chrome-text hover:bg-foreground/[0.06]",
+        )}
+        style={hot ? {
+          backgroundColor: `oklch(var(--win-l-icon) var(--win-c) var(--win-${w.kind}-h) / 0.22)`,
+          boxShadow: `inset 0 0 0 1.5px oklch(var(--win-l-icon) var(--win-c) var(--win-${w.kind}-h) / 0.9)`,
+        } : undefined}
+      >
+        <Icon className="h-4 w-4 shrink-0" style={{ color: accent }} />
+        <span className="truncate">{tile.label}</span>
+      </div>
+    )
+  }
   const dragRef = useRef<{
     pointerId: number
     startX: number
@@ -300,52 +355,26 @@ export function DesktopWindow({
             className="pointer-events-none absolute inset-0"
             style={{ backgroundColor: `oklch(var(--win-l) var(--win-c) var(--win-${w.kind}-h) / 0.12)` }}
           />
-          <div className="relative grid w-[min(78%,17rem)] grid-cols-2 gap-1.5 rounded-lg border border-chrome-border/60 bg-chrome-bg/80 p-2 backdrop-blur-[3px]">
+          <div className="relative grid w-[min(80%,18rem)] grid-cols-2 gap-1.5 rounded-lg border border-chrome-border/60 bg-chrome-bg/80 p-2 backdrop-blur-[3px]">
             <div className="col-span-2 truncate px-1 pb-0.5 text-center text-[10px] uppercase tracking-wider text-chrome-text/80">
               {draggedColumns.length > 1
                 ? `${draggedColumns.length} columns →`
                 : `${draggedColumns[0]?.name ?? "column"} →`}
             </div>
-            {rollupTiles.map((tile, i) => {
-              const key = rollupOpKey(tile.op)
-              const Icon = rollupOpIcon(tile.op)
-              const hot = hoveredOpKey === key
-              const lastOdd = rollupTiles.length % 2 === 1 && i === rollupTiles.length - 1
-              return (
-                <div
-                  key={key}
-                  title={tile.hint}
-                  onDragEnter={(e) => { e.preventDefault(); e.stopPropagation(); setHoveredOpKey(key) }}
-                  onDragOver={(e) => {
-                    e.preventDefault()
-                    e.stopPropagation()
-                    e.dataTransfer.dropEffect = "copy"
-                    setHoveredOpKey(key)
-                  }}
-                  onDrop={(e) => {
-                    e.preventDefault()
-                    e.stopPropagation()
-                    resetColumnDragState()
-                    const payload = readColumnDragPayload(e.dataTransfer)
-                    if (payload) onColumnMerge(payload, tile.op)
-                  }}
-                  className={cn(
-                    "flex cursor-copy select-none flex-col items-center justify-center gap-1 rounded-md border px-2 py-2.5 text-[11px] font-medium transition-colors",
-                    lastOdd && "col-span-2",
-                    hot
-                      ? "border-transparent text-foreground"
-                      : "border-chrome-border/50 bg-foreground/[0.03] text-chrome-text hover:bg-foreground/[0.06]",
-                  )}
-                  style={hot ? {
-                    backgroundColor: `oklch(var(--win-l-icon) var(--win-c) var(--win-${w.kind}-h) / 0.22)`,
-                    boxShadow: `inset 0 0 0 1.5px oklch(var(--win-l-icon) var(--win-c) var(--win-${w.kind}-h) / 0.9)`,
-                  } : undefined}
-                >
-                  <Icon className="h-4 w-4 shrink-0" style={{ color: `oklch(var(--win-l-icon) var(--win-c) var(--win-${w.kind}-h))` }} />
-                  <span className="truncate">{tile.label}</span>
-                </div>
-              )
+            {baseTiles.map((tile, i) => {
+              const lastOdd = baseTiles.length % 2 === 1 && i === baseTiles.length - 1
+              return renderRollupTile(tile, lastOdd)
             })}
+            {pivotTiles.length > 0 ? (
+              <>
+                <div className="col-span-2 mt-1 flex items-center gap-2 px-1 text-[9px] uppercase tracking-wider text-chrome-text/60">
+                  <span className="h-px flex-1 bg-chrome-border/60" />
+                  pivot
+                  <span className="h-px flex-1 bg-chrome-border/60" />
+                </div>
+                {pivotTiles.map((tile) => renderRollupTile(tile, true))}
+              </>
+            ) : null}
           </div>
         </div>
       ) : null}

@@ -19,9 +19,11 @@ import { cn } from "@/lib/utils"
 import {
   Calendar,
   Check,
+  ChevronDown,
   Filter,
   Hash,
   Search,
+  Settings2,
   Sparkles,
   Tag,
   X,
@@ -84,6 +86,11 @@ export function ChartShelf({
   // Drag-and-drop hover/active state for visual feedback only.
   const [hoverChannel, setHoverChannel] = useState<ShelfChannel | "filter" | null>(null)
   const [hoverField, setHoverField] = useState<string | null>(null)
+
+  // Shelf editor starts collapsed — only the Mark row shows, giving the
+  // chart maximum room. Expanding reveals the field rail + all channel
+  // shelves for full Tableau-style editing.
+  const [expanded, setExpanded] = useState(false)
 
   const apply = useCallback(
     (mutator: (s: ShelfState) => ShelfState) => {
@@ -234,12 +241,15 @@ export function ChartShelf({
 
   return (
     <div className="flex min-h-0 flex-1 bg-doc-bg">
-      <FieldRail
-        columns={columns}
-        rows={rows}
-        hoverField={hoverField}
-        onHoverField={setHoverField}
-      />
+      {/* Field rail is only useful while editing — hidden when collapsed. */}
+      {expanded ? (
+        <FieldRail
+          columns={columns}
+          rows={rows}
+          hoverField={hoverField}
+          onHoverField={setHoverField}
+        />
+      ) : null}
       <div className="flex min-w-0 flex-1 flex-col">
         <ShelvesStrip
           state={state}
@@ -247,6 +257,8 @@ export function ChartShelf({
           rows={rows}
           hoverChannel={hoverChannel}
           goodMarks={goodMarks}
+          expanded={expanded}
+          onToggleExpanded={() => setExpanded((e) => !e)}
           onDragOver={handleDragOver}
           onDrop={handleDrop}
           onDragLeave={handleDragLeave}
@@ -414,6 +426,8 @@ interface ShelvesProps {
   rows: Record<string, unknown>[]
   hoverChannel: ShelfChannel | "filter" | null
   goodMarks: Set<MarkType>
+  expanded: boolean
+  onToggleExpanded: () => void
   onDragOver: (e: React.DragEvent, channel: ShelfChannel | "filter") => void
   onDrop: (e: React.DragEvent, channel: ShelfChannel | "filter") => void
   onDragLeave: () => void
@@ -432,6 +446,8 @@ function ShelvesStrip(props: ShelvesProps) {
     rows,
     hoverChannel,
     goodMarks,
+    expanded,
+    onToggleExpanded,
     onDragOver,
     onDrop,
     onDragLeave,
@@ -449,8 +465,12 @@ function ShelvesStrip(props: ShelvesProps) {
         mark={state.mark}
         goodMarks={goodMarks}
         canStack={state.color != null || state.mark.type === "bar" || state.mark.type === "area"}
+        expanded={expanded}
+        onToggleExpanded={onToggleExpanded}
         onChange={onSetMark}
       />
+      {!expanded ? null : (
+      <>
       <PositionalShelf
         label="Columns"
         channel="x"
@@ -549,6 +569,8 @@ function ShelvesStrip(props: ShelvesProps) {
         onDragLeave={onDragLeave}
         onChange={onSetFilters}
       />
+      </>
+      )}
     </div>
   )
 }
@@ -559,11 +581,15 @@ function MarkRow({
   mark,
   goodMarks,
   canStack,
+  expanded,
+  onToggleExpanded,
   onChange,
 }: {
   mark: ShelfState["mark"]
   goodMarks: Set<MarkType>
   canStack: boolean
+  expanded: boolean
+  onToggleExpanded: () => void
   onChange: (m: ShelfState["mark"]) => void
 }) {
   return (
@@ -592,40 +618,64 @@ function MarkRow({
           </button>
         ))}
       </div>
-      {/* Stack toggle */}
-      {(mark.type === "bar" || mark.type === "area") && canStack ? (
-        <div className="ml-auto flex items-center gap-1 rounded border border-chrome-border/40 bg-doc-bg p-0.5 text-[9px]">
-          {(["zero", "normalize", null] as const).map((s) => (
-            <button
-              key={String(s)}
-              type="button"
-              onClick={() => onChange({ ...mark, stack: s as StackMode })}
-              className={cn(
-                "rounded px-1 py-px font-mono",
-                mark.stack === s
-                  ? "bg-rvbbit-accent/20 text-foreground"
-                  : "text-chrome-text/60 hover:text-foreground",
-              )}
-              title={
-                s === "zero" ? "stacked" : s === "normalize" ? "100% normalized" : "side-by-side"
-              }
-            >
-              {s === "zero" ? "▤" : s === "normalize" ? "▥" : "▦"}
-            </button>
-          ))}
-        </div>
-      ) : null}
-      {/* Per-mark accents */}
-      {mark.type === "line" ? (
-        <label className="ml-auto inline-flex items-center gap-1 text-[9px] text-chrome-text/70">
-          <input
-            type="checkbox"
-            checked={mark.point === true}
-            onChange={(e) => onChange({ ...mark, point: e.target.checked })}
+
+      {/* Right-aligned cluster: mark-specific controls + the shelf toggle. */}
+      <div className="ml-auto flex items-center gap-1.5">
+        {/* Stack toggle */}
+        {(mark.type === "bar" || mark.type === "area") && canStack ? (
+          <div className="flex items-center gap-1 rounded border border-chrome-border/40 bg-doc-bg p-0.5 text-[9px]">
+            {(["zero", "normalize", null] as const).map((s) => (
+              <button
+                key={String(s)}
+                type="button"
+                onClick={() => onChange({ ...mark, stack: s as StackMode })}
+                className={cn(
+                  "rounded px-1 py-px font-mono",
+                  mark.stack === s
+                    ? "bg-rvbbit-accent/20 text-foreground"
+                    : "text-chrome-text/60 hover:text-foreground",
+                )}
+                title={
+                  s === "zero" ? "stacked" : s === "normalize" ? "100% normalized" : "side-by-side"
+                }
+              >
+                {s === "zero" ? "▤" : s === "normalize" ? "▥" : "▦"}
+              </button>
+            ))}
+          </div>
+        ) : null}
+        {/* Per-mark accents */}
+        {mark.type === "line" ? (
+          <label className="inline-flex items-center gap-1 text-[9px] text-chrome-text/70">
+            <input
+              type="checkbox"
+              checked={mark.point === true}
+              onChange={(e) => onChange({ ...mark, point: e.target.checked })}
+            />
+            points
+          </label>
+        ) : null}
+
+        {/* Expand / collapse the full shelf editor. */}
+        <button
+          type="button"
+          onClick={onToggleExpanded}
+          title={expanded ? "Hide shelves" : "Edit shelves — drag fields onto Columns, Rows, Color…"}
+          aria-expanded={expanded}
+          className={cn(
+            "inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-[10px] font-medium",
+            expanded
+              ? "border-rvbbit-accent/60 bg-rvbbit-bg text-foreground"
+              : "border-chrome-border/50 bg-doc-bg text-chrome-text/85 hover:border-rvbbit-accent/40 hover:text-foreground",
+          )}
+        >
+          <Settings2 className="h-3 w-3" />
+          shelves
+          <ChevronDown
+            className={cn("h-3 w-3 transition-transform", expanded && "rotate-180")}
           />
-          points
-        </label>
-      ) : null}
+        </button>
+      </div>
     </div>
   )
 }
