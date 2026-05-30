@@ -32,9 +32,11 @@ import type {
   DesktopParamOperator,
   DesktopParamValue,
   DesktopWindowState,
+  RollupGrain,
   RollupSpec,
 } from "@/lib/desktop/types"
 import { rollupSpecFromColumns } from "@/lib/desktop/sql-builder"
+import { rollupChartSpec } from "@/lib/desktop/rollup-chart"
 import { RollupShelf } from "./rollup-shelf"
 import type { QueryResult } from "@/lib/db/types"
 import { cn } from "@/lib/utils"
@@ -79,6 +81,8 @@ interface DataGridWindowProps {
    * Rebuilds SQL/title at the host so the window chrome stays in sync.
    */
   onEditRollup?: (transform: (s: RollupSpec) => RollupSpec) => void
+  /** Re-pivot with a new temporal grain (re-probes distinct values). */
+  onRepivot?: (grain: RollupGrain) => void
   /**
    * Round-trip back into the KG when this Data window was opened from a
    * KG evidence row (i.e. payload.sourceContext is set). Phase 2's
@@ -112,6 +116,7 @@ export function DataGridWindow({
   onEmitParam,
   onSubscribeParam,
   onEditRollup,
+  onRepivot,
   onOpenKgForSource,
 }: DataGridWindowProps) {
   const view = payload.view ?? {}
@@ -519,6 +524,13 @@ export function DataGridWindow({
     return lin.rollup ?? rollupSpecFromColumns(lin.columns ?? [])
   }, [payload.lineage])
 
+  // Seed the Chart tab from the rollup spec (knows dims vs measures, and
+  // which dim is temporal) instead of guessing from result column types.
+  const chartSeedSpec = useMemo(
+    () => (rollupSpec ? rollupChartSpec(rollupSpec) : null),
+    [rollupSpec],
+  )
+
   // Provide the column drag source so result-grid header cells can
   // serialize themselves into a column-drag DataTransfer payload.
   const columnDragSource = useMemo(() => {
@@ -642,7 +654,7 @@ export function DataGridWindow({
         </div>
 
         {rollupSpec && onEditRollup ? (
-          <RollupShelf spec={rollupSpec} onEdit={onEditRollup} />
+          <RollupShelf spec={rollupSpec} onEdit={onEditRollup} onRepivot={onRepivot} />
         ) : null}
 
         <div className="flex-1 overflow-hidden">
@@ -681,6 +693,7 @@ export function DataGridWindow({
               result={result}
               userSpec={payload.chartSpec ?? null}
               onChangeUserSpec={(spec) => onChangePayload((p) => ({ ...p, chartSpec: spec }))}
+              seedSpec={chartSeedSpec}
               onEmitParam={(field, value, dataTypeId) => {
                 onEmitParam({
                   sourceWindowId: w.id,

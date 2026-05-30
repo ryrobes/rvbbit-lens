@@ -1,6 +1,10 @@
 import type {
   DesktopColumnRef,
   RollupAgg,
+  RollupCompareOp,
+  RollupGrain,
+  RollupGroupTerm,
+  RollupLimit,
   RollupMeasure,
   RollupOp,
   RollupSpec,
@@ -119,6 +123,14 @@ const TILE_ORDER: RollupOpTile[] = [
   { op: { kind: "order-by" }, label: "Order by", hint: "ORDER BY col", group: "dimension" },
 ]
 
+// For a temporal column the generic "Group by" is swapped for these
+// grain tiles (the shelf dropdown exposes the full set incl. week/day/hour).
+const GRAIN_TILES: RollupOpTile[] = [
+  { op: { kind: "group-by", grain: "month" }, label: "By month", hint: "GROUP BY date_trunc(month)", group: "dimension" },
+  { op: { kind: "group-by", grain: "quarter" }, label: "By quarter", hint: "GROUP BY date_trunc(quarter)", group: "dimension" },
+  { op: { kind: "group-by", grain: "year" }, label: "By year", hint: "GROUP BY date_trunc(year)", group: "dimension" },
+]
+
 /**
  * The set of drop tiles to offer for a (possibly multi-column) drag.
  * A tile is shown when it applies to at least one dragged column; on
@@ -134,7 +146,14 @@ export function availableRollupOps(
   targetMeasures: RollupMeasure[] = [],
 ): RollupOpTile[] {
   if (columns.length === 0) return []
-  const base = TILE_ORDER.filter((tile) => columns.some((c) => opAppliesToColumn(tile.op, c)))
+  let base = TILE_ORDER.filter((tile) => columns.some((c) => opAppliesToColumn(tile.op, c)))
+
+  // A single temporal dimension groups by a grain, not the raw timestamp:
+  // swap the generic "Group by" tile for the grain tiles.
+  const singleDate = columns.length === 1 && isDateRef(columns[0]) && !isNumericRef(columns[0])
+  if (singleDate) {
+    base = base.flatMap((tile) => (tile.op.kind === "group-by" ? GRAIN_TILES : [tile]))
+  }
 
   // Pivot is single-dimension only (which column fans out must be
   // unambiguous), and needs at least one measure to spread.
@@ -143,17 +162,20 @@ export function availableRollupOps(
     && targetMeasures.length > 0
   if (!canPivot) return base
 
+  // Temporal pivots default to month grain (changeable in the shelf chip).
+  const pivotGrain: RollupGrain | undefined = singleDate ? "month" : undefined
+  const grainNote = pivotGrain ? ` (by ${pivotGrain})` : ""
   const pivotTiles: RollupOpTile[] = targetMeasures.map((m) => ({
-    op: { kind: "pivot", measureIds: [m.id] },
+    op: { kind: "pivot", measureIds: [m.id], grain: pivotGrain },
     label: `Pivot ${measureLabel(m)}`,
-    hint: `${measureLabel(m)} per ${columns[0].name} value`,
+    hint: `${measureLabel(m)} per ${columns[0].name} value${grainNote}`,
     group: "pivot",
   }))
   if (targetMeasures.length > 1) {
     pivotTiles.push({
-      op: { kind: "pivot" },
+      op: { kind: "pivot", grain: pivotGrain },
       label: "Pivot all",
-      hint: `every measure per ${columns[0].name} value`,
+      hint: `every measure per ${columns[0].name} value${grainNote}`,
       group: "pivot",
     })
   }
@@ -183,6 +205,19 @@ function uniqueAlias(base: string, taken: Set<string>): string {
   return `${base}_${taken.size}`
 }
 
+// Date grain → Postgres date_trunc unit (names already align 1:1).
+const DEFAULT_DATE_GRAIN: RollupGrain = "month"
+
+export function grainTruncExpr(quotedCol: string, grain: RollupGrain): string {
+  return `date_trunc('${grain}', ${quotedCol})`
+}
+
+/** The grain to use when a temporal column becomes a dimension with none set. */
+function defaultGrainFor(c: DesktopColumnRef, explicit?: RollupGrain): RollupGrain | undefined {
+  if (explicit) return explicit
+  return isDateRef(c) ? DEFAULT_DATE_GRAIN : undefined
+}
+
 /** Build the default spec for the initial canvas drop (legacy behavior). */
 export function rollupSpecFromColumns(columns: DesktopColumnRef[]): RollupSpec {
   const cols = uniqueColumns(columns)
@@ -201,7 +236,22 @@ export function rollupSpecFromColumns(columns: DesktopColumnRef[]): RollupSpec {
     taken.add(alias)
     measures.push({ id: measureId("sum", c), column: c, agg: "sum", alias })
   }
-  return { groupBy: dimensions, measures }
+  const groupBy: RollupGroupTerm[] = dimensions.map((c) => ({ column: c, grain: defaultGrainFor(c) }))
+  return { groupBy, measures }
+}
+
+/**
+ * Coerce a possibly-legacy spec into the current shape. Phase-1 windows
+ * persisted `groupBy` as bare column refs; wrap those as group terms so
+ * older saved desktops keep working.
+ */
+export function normalizeRollupSpec(spec: RollupSpec): RollupSpec {
+  const groupBy = (spec.groupBy as unknown as Array<RollupGroupTerm | DesktopColumnRef>).map((g) =>
+    g && typeof g === "object" && "column" in g
+      ? (g as RollupGroupTerm)
+      : { column: g as DesktopColumnRef },
+  )
+  return { ...spec, groupBy }
 }
 
 /**
@@ -217,15 +267,15 @@ export function applyRollupOp(
   const groupBy = [...spec.groupBy]
   const measures = [...spec.measures]
   const orderBy = [...(spec.orderBy ?? [])]
-  const groupNames = new Set(groupBy.map((c) => c.name.toLowerCase()))
+  const groupNames = new Set(groupBy.map((t) => t.column.name.toLowerCase()))
   const measureIds = new Set(measures.map((m) => m.id))
   const aliases = new Set(measures.map((m) => m.alias))
   const orderRefs = new Set(orderBy.map((t) => t.ref.toLowerCase()))
   let changed = false
 
-  const addGroupBy = (c: DesktopColumnRef) => {
+  const addGroupBy = (c: DesktopColumnRef, grain?: RollupGrain) => {
     if (groupNames.has(c.name.toLowerCase())) return
-    groupBy.push(c)
+    groupBy.push({ column: c, grain: defaultGrainFor(c, grain) })
     groupNames.add(c.name.toLowerCase())
     changed = true
   }
@@ -236,7 +286,7 @@ export function applyRollupOp(
   for (const c of columns) {
     if (!opAppliesToColumn(op, c)) continue
     if (op.kind === "group-by") {
-      addGroupBy(c)
+      addGroupBy(c, op.grain)
     } else if (op.kind === "order-by") {
       // Ordering by a raw column requires it to be grouped; ensure that.
       addGroupBy(c)
@@ -296,7 +346,10 @@ export function cycleMeasureAgg(spec: RollupSpec, id: string): RollupSpec {
     const alias = uniqueAlias(aggAliasBase(nextAgg, m.column), taken)
     const measures = [...spec.measures]
     measures[idx] = { id: nextId, column: m.column, agg: nextAgg, alias }
-    return reconcilePivot({ ...spec, measures })
+    // The measure's id (agg:col) changed — repoint anything keyed to it.
+    const having = spec.having?.map((h) => (h.measureId === id ? { ...h, measureId: nextId } : h))
+    const limit = spec.limit?.byMeasureId === id ? { ...spec.limit, byMeasureId: nextId } : spec.limit
+    return reconcilePivot({ ...spec, measures, having, limit })
   }
   return spec
 }
@@ -304,19 +357,63 @@ export function cycleMeasureAgg(spec: RollupSpec, id: string): RollupSpec {
 /** Remove a group-by dimension (and any order term that referenced it). */
 export function removeGroupBy(spec: RollupSpec, colName: string): RollupSpec {
   const lower = colName.toLowerCase()
-  const groupBy = spec.groupBy.filter((c) => c.name.toLowerCase() !== lower)
+  const groupBy = spec.groupBy.filter((t) => t.column.name.toLowerCase() !== lower)
   if (groupBy.length === spec.groupBy.length) return spec
   const orderBy = spec.orderBy?.filter((t) => t.ref.toLowerCase() !== lower)
   return { ...spec, groupBy, orderBy: orderBy?.length ? orderBy : undefined }
 }
 
-/** Remove a measure (and any order/pivot scoping that referenced it). */
+/** Set (or clear) the temporal grain on a group-by dimension. */
+export function setGroupByGrain(spec: RollupSpec, colName: string, grain: RollupGrain): RollupSpec {
+  const lower = colName.toLowerCase()
+  let changed = false
+  const groupBy = spec.groupBy.map((t) => {
+    if (t.column.name.toLowerCase() !== lower || t.grain === grain) return t
+    changed = true
+    return { ...t, grain }
+  })
+  return changed ? { ...spec, groupBy } : spec
+}
+
+/** Remove a measure (and any order/having/limit/pivot scoping for it). */
 export function removeMeasure(spec: RollupSpec, id: string): RollupSpec {
   const removed = spec.measures.find((m) => m.id === id)
   if (!removed) return spec
   const measures = spec.measures.filter((m) => m.id !== id)
   const orderBy = spec.orderBy?.filter((t) => t.ref.toLowerCase() !== removed.alias.toLowerCase())
-  return reconcilePivot({ ...spec, measures, orderBy: orderBy?.length ? orderBy : undefined })
+  const having = spec.having?.filter((h) => h.measureId !== id)
+  const limit = spec.limit?.byMeasureId === id ? { ...spec.limit, byMeasureId: undefined } : spec.limit
+  return reconcilePivot({
+    ...spec,
+    measures,
+    orderBy: orderBy?.length ? orderBy : undefined,
+    having: having?.length ? having : undefined,
+    limit,
+  })
+}
+
+/** Set or replace a HAVING condition on a measure. */
+export function setMeasureHaving(spec: RollupSpec, measureId: string, op: RollupCompareOp, value: number): RollupSpec {
+  const having = (spec.having ?? []).filter((h) => h.measureId !== measureId)
+  having.push({ measureId, op, value })
+  return { ...spec, having }
+}
+
+/** Remove the HAVING condition on a measure. */
+export function clearMeasureHaving(spec: RollupSpec, measureId: string): RollupSpec {
+  const having = spec.having?.filter((h) => h.measureId !== measureId)
+  return { ...spec, having: having?.length ? having : undefined }
+}
+
+/** Set the Top-N cap (and ranking measure / direction). */
+export function setLimit(spec: RollupSpec, limit: RollupLimit): RollupSpec {
+  return { ...spec, limit }
+}
+
+/** Clear the Top-N cap. */
+export function clearLimit(spec: RollupSpec): RollupSpec {
+  if (!spec.limit) return spec
+  return { ...spec, limit: null }
 }
 
 /** Drop the pivot, collapsing the grid back to a plain rollup. */
@@ -335,7 +432,7 @@ function reconcilePivot(spec: RollupSpec): RollupSpec {
 
 /** Flatten a spec back to the legacy column list (for `lineage.columns`). */
 export function rollupSpecColumns(spec: RollupSpec): DesktopColumnRef[] {
-  const out: DesktopColumnRef[] = [...spec.groupBy]
+  const out: DesktopColumnRef[] = spec.groupBy.map((t) => t.column)
   for (const m of spec.measures) if (m.column) out.push(m.column)
   return uniqueColumns(out)
 }
@@ -359,6 +456,18 @@ function renderMeasure(m: RollupMeasure): string {
   return `  ${measureExpr(m)} AS ${quoteSqlIdent(m.alias)}`
 }
 
+/** The SQL expression a group-by dim contributes (grained or raw). */
+function dimExpr(term: RollupGroupTerm): string {
+  const col = quoteSqlIdent(term.column.name)
+  return term.grain ? grainTruncExpr(col, term.grain) : col
+}
+
+/** SELECT line for a group-by dim — aliased to the column name when grained. */
+function dimSelectLine(term: RollupGroupTerm): string {
+  const col = quoteSqlIdent(term.column.name)
+  return term.grain ? `  ${grainTruncExpr(col, term.grain)} AS ${col}` : `  ${col}`
+}
+
 function renderOrderBy(spec: RollupSpec): string {
   const explicit = spec.orderBy ?? []
   if (explicit.length > 0) {
@@ -378,9 +487,43 @@ function sqlLiteral(v: string | number | null): string {
   return `'${String(v).replace(/'/g, "''")}'`
 }
 
+function rankingMeasure(measures: RollupMeasure[], byId?: string): RollupMeasure | undefined {
+  if (byId) {
+    const m = measures.find((x) => x.id === byId)
+    if (m) return m
+  }
+  return measures.find((m) => m.alias !== "row_count") ?? measures[0]
+}
+
+/** `HAVING <expr> <op> <val> AND …` over the (resolved) measures. */
+function renderHaving(spec: RollupSpec, measures: RollupMeasure[]): string {
+  const terms = (spec.having ?? [])
+    .map((h) => {
+      const m = measures.find((x) => x.id === h.measureId)
+      return m ? `${measureExpr(m)} ${h.op} ${h.value}` : null
+    })
+    .filter((t): t is string => t != null)
+  return terms.length > 0 ? `\nHAVING ${terms.join(" AND ")}` : ""
+}
+
+/** Top-N ordering + LIMIT clauses, or null when no limit is set. */
+function renderTopN(spec: RollupSpec, measures: RollupMeasure[]): { orderBy: string; limit: string } | null {
+  if (!spec.limit) return null
+  const rank = rankingMeasure(measures, spec.limit.byMeasureId)
+  const dir = (spec.limit.dir ?? "desc").toUpperCase()
+  const orderBy = rank ? `\nORDER BY ${measureExpr(rank)} ${dir}` : ""
+  const n = Math.max(1, Math.floor(spec.limit.n))
+  return { orderBy, limit: `\nLIMIT ${n}` }
+}
+
 function valueSlug(v: string | number | null): string {
   if (v === null) return "null"
-  const cleaned = String(v).toLowerCase().replace(/[^a-z0-9_]+/g, "_").replace(/^_+|_+$/g, "")
+  let s = String(v)
+  // Truncated dates serialize as midnight timestamps; keep just the date
+  // part so pivot aliases read `2024_01_01_…` not `2024_01_01t00_00_00z`.
+  const iso = s.match(/^(\d{4}-\d{2}-\d{2})[ T]00:00:00/)
+  if (iso) s = iso[1]
+  const cleaned = s.toLowerCase().replace(/[^a-z0-9_]+/g, "_").replace(/^_+|_+$/g, "")
   return cleaned || "val"
 }
 
@@ -399,18 +542,21 @@ export function buildRollupQuery(
   const measures = spec.measures.length > 0 ? spec.measures : [rowCountMeasure()]
 
   const selectLines = [
-    ...dims.map((c) => `  ${quoteSqlIdent(c.name)}`),
+    ...dims.map(dimSelectLine),
     ...measures.map(renderMeasure),
   ]
   const groupBy = dims.length > 0
-    ? `\nGROUP BY ${dims.map((c) => quoteSqlIdent(c.name)).join(", ")}`
+    ? `\nGROUP BY ${dims.map(dimExpr).join(", ")}`
     : ""
-  const orderBy = renderOrderBy({ ...spec, measures })
+  const having = renderHaving(spec, measures)
+  const topN = renderTopN(spec, measures)
+  const orderBy = topN ? topN.orderBy : renderOrderBy({ ...spec, measures })
+  const limit = topN ? topN.limit : ""
 
   const sql = [
     `SELECT`,
     selectLines.join(",\n"),
-    `FROM {${args.parentBlockName}}${groupBy}${orderBy};`,
+    `FROM {${args.parentBlockName}}${groupBy}${having}${orderBy}${limit};`,
   ].join("\n")
 
   return { sql, title: titleForRollup(args.parentTitle, spec) }
@@ -428,7 +574,7 @@ function buildPivotQuery(
   args: { parentBlockName: string; parentTitle: string },
 ): { sql: string; title: string } {
   const pivotColLower = pivot.column.name.toLowerCase()
-  const rowDims = spec.groupBy.filter((d) => d.name.toLowerCase() !== pivotColLower)
+  const rowDims = spec.groupBy.filter((d) => d.column.name.toLowerCase() !== pivotColLower)
   const allMeasures = spec.measures.length > 0 ? spec.measures : [rowCountMeasure()]
   const scoped = pivot.measureIds && pivot.measureIds.length > 0
     ? new Set(pivot.measureIds)
@@ -438,7 +584,7 @@ function buildPivotQuery(
 
   const taken = new Set<string>()
   const selectLines: string[] = [
-    ...rowDims.map((c) => `  ${quoteSqlIdent(c.name)}`),
+    ...rowDims.map(dimSelectLine),
     ...plain.map((m) => {
       const alias = uniqueAlias(m.alias, taken)
       taken.add(alias)
@@ -446,9 +592,11 @@ function buildPivotQuery(
     }),
   ]
 
-  const pivotCol = quoteSqlIdent(pivot.column.name)
+  const pivotColExpr = pivot.grain
+    ? grainTruncExpr(quoteSqlIdent(pivot.column.name), pivot.grain)
+    : quoteSqlIdent(pivot.column.name)
   for (const v of pivot.values) {
-    const pred = v === null ? `${pivotCol} IS NULL` : `${pivotCol} = ${sqlLiteral(v)}`
+    const pred = v === null ? `${pivotColExpr} IS NULL` : `${pivotColExpr} = ${sqlLiteral(v)}`
     for (const m of pivoted) {
       const alias = uniqueAlias(`${valueSlug(v)}_${m.alias}`, taken)
       taken.add(alias)
@@ -457,17 +605,23 @@ function buildPivotQuery(
   }
 
   const groupBy = rowDims.length > 0
-    ? `\nGROUP BY ${rowDims.map((c) => quoteSqlIdent(c.name)).join(", ")}`
+    ? `\nGROUP BY ${rowDims.map(dimExpr).join(", ")}`
     : ""
-  const orderBy = rowDims.length > 0 ? "\nORDER BY 1" : ""
+  // HAVING/Top-N reference measure *totals* (un-pivoted aggregates), so a
+  // pivot can still be filtered to "row groups whose total sales > X" or
+  // capped to the top N row groups by a measure.
+  const having = renderHaving(spec, allMeasures)
+  const topN = renderTopN(spec, allMeasures)
+  const orderBy = topN ? topN.orderBy : (rowDims.length > 0 ? "\nORDER BY 1" : "")
+  const limit = topN ? topN.limit : ""
 
   const sql = [
     `SELECT`,
     selectLines.join(",\n"),
-    `FROM {${args.parentBlockName}}${groupBy}${orderBy};`,
+    `FROM {${args.parentBlockName}}${groupBy}${having}${orderBy}${limit};`,
   ].join("\n")
 
-  const rowLabel = rowDims.length > 0 ? rowDims.map((c) => c.name).join(", ") : "totals"
+  const rowLabel = rowDims.length > 0 ? rowDims.map((c) => c.column.name).join(", ") : "totals"
   return {
     sql,
     title: `${args.parentTitle}: ${rowLabel} × ${pivot.column.name}`,
@@ -475,7 +629,7 @@ function buildPivotQuery(
 }
 
 function titleForRollup(parentTitle: string, spec: RollupSpec): string {
-  const dims = spec.groupBy.map((c) => c.name)
+  const dims = spec.groupBy.map((t) => t.column.name)
   const meas = spec.measures
     .filter((m) => m.alias !== "row_count")
     .map((m) => `${m.agg === "count_distinct" ? "distinct" : m.agg}(${m.column?.name ?? "*"})`)

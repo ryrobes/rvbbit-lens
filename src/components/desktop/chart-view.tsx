@@ -35,13 +35,18 @@ export interface ChartViewProps {
   /** Sticky spec authored by the user. When null, auto-render. */
   userSpec: Record<string, unknown> | null
   onChangeUserSpec: (spec: Record<string, unknown> | null) => void
+  /**
+   * Spec seeded from a rollup spec (column-aggregate windows). Takes
+   * precedence over column-type inference but yields to a user spec.
+   */
+  seedSpec?: Record<string, unknown> | null
   /** Forwarded to the desktop param-emit flow when a mark is clicked. */
   onEmitParam: (field: string, value: unknown, dataTypeId: number) => void
 }
 
 type EditorMode = "shelf" | "yaml"
 
-export function ChartView({ result, userSpec, onChangeUserSpec, onEmitParam }: ChartViewProps) {
+export function ChartView({ result, userSpec, onChangeUserSpec, seedSpec, onEmitParam }: ChartViewProps) {
   const [mode, setMode] = useState<EditorMode>("shelf")
   const [themeStamp, setThemeStamp] = useState(0)
 
@@ -72,7 +77,7 @@ export function ChartView({ result, userSpec, onChangeUserSpec, onEmitParam }: C
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [themeStamp])
 
-  const baseSpec = userSpec ?? inferred?.spec ?? null
+  const baseSpec = userSpec ?? seedSpec ?? inferred?.spec ?? null
 
   // Container-driven sizing for facet/concat. Plain single-mark specs use
   // Vega-Lite's `width: "container"` + signal-driven resize (smooth during

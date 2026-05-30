@@ -224,13 +224,48 @@ export interface DesktopQueryLineage {
  */
 export interface RollupSpec {
   /** Grouping dimensions → SELECT + GROUP BY. */
-  groupBy: DesktopColumnRef[]
+  groupBy: RollupGroupTerm[]
   /** Aggregate measures. */
   measures: RollupMeasure[]
   /** Optional explicit ordering; when absent a sensible default is used. */
   orderBy?: RollupOrderTerm[]
-  /** Reserved for Tableau-style pivots (built later). */
+  /** Post-aggregation filters on measures → HAVING (AND-combined). */
+  having?: RollupHavingTerm[]
+  /** Top-N: rank by a measure and cap the row count. */
+  limit?: RollupLimit | null
+  /** Tableau-style pivot: a dimension's distinct values fan into columns. */
   pivot?: RollupPivot | null
+}
+
+export type RollupCompareOp = ">" | ">=" | "<" | "<=" | "=" | "!="
+
+/** A HAVING condition on an aggregate measure. */
+export interface RollupHavingTerm {
+  measureId: string
+  op: RollupCompareOp
+  value: number
+}
+
+/** Top-N: order by a ranking measure and LIMIT the result. */
+export interface RollupLimit {
+  n: number
+  /** Measure to rank by; default = first measure. */
+  byMeasureId?: string
+  /** desc = top (default), asc = bottom. */
+  dir?: "asc" | "desc"
+}
+
+/**
+ * Date-truncation grain for a temporal dimension (group-by or pivot).
+ * Names map 1:1 to Postgres `date_trunc` units.
+ */
+export type RollupGrain = "year" | "quarter" | "month" | "week" | "day" | "hour"
+
+/** A grouping dimension, optionally binned to a temporal grain. */
+export interface RollupGroupTerm {
+  column: DesktopColumnRef
+  /** When set (temporal columns), the dim is `date_trunc(grain, col)`. */
+  grain?: RollupGrain
 }
 
 export type RollupAgg =
@@ -263,6 +298,8 @@ export interface RollupOrderTerm {
 export interface RollupPivot {
   /** Dimension whose distinct values fan out into columns. */
   column: DesktopColumnRef
+  /** When set (temporal pivot), values are `date_trunc(grain, col)`. */
+  grain?: RollupGrain
   /** Resolved distinct values (capped); rendered as FILTER predicates. */
   values: (string | number | null)[]
   /** Which measures to pivot; default = all measures. */
@@ -276,12 +313,14 @@ export interface RollupPivot {
  * one of these; `applyRollupOp` folds it into a `RollupSpec`.
  */
 export type RollupOp =
-  | { kind: "group-by" }
+  // `grain` bins a temporal column when dropped (e.g. group by month).
+  | { kind: "group-by"; grain?: RollupGrain }
   | { kind: "order-by" }
   | { kind: "measure"; agg: RollupAgg }
   // Pivot the dragged dimension across columns. `measureIds` scopes which
   // measures get spread (one per pivot value); omitted ⇒ all measures.
-  | { kind: "pivot"; measureIds?: string[] }
+  // `grain` bins a temporal pivot column.
+  | { kind: "pivot"; measureIds?: string[]; grain?: RollupGrain }
 
 export interface DataWindowViewState {
   activeTab?: "rows" | "profile" | "chart" | "sql" | "explain"

@@ -90,6 +90,7 @@ import type {
   DesktopBlockDragPayload,
   DesktopColumnDragPayload,
   DesktopParamOperator,
+  RollupGrain,
   RollupOp,
   RollupSpec,
   DesktopParamValue,
@@ -140,6 +141,8 @@ import { listViewApps } from "@/lib/desktop/view-apps"
 import {
   applyRollupOp,
   buildRollupQuery,
+  grainTruncExpr,
+  normalizeRollupSpec,
   previewSqlForTable,
   quoteSqlIdent,
   rollupSpecColumns,
@@ -1720,6 +1723,7 @@ export function DesktopShell() {
     targetWindowId: string,
     payload: DesktopColumnDragPayload,
     measureIds?: string[],
+    grain?: RollupGrain,
   ) => {
     const PIVOT_VALUE_CAP = 24
     const connectionId = activeConnectionIdRef.current
@@ -1744,8 +1748,9 @@ export function DesktopShell() {
     // parent's compiled (cascaded) SQL.
     const probeId = `__pivot_probe_${targetWindowId}`
     const col = quoteSqlIdent(pivotCol.name)
+    const valueExpr = grain ? grainTruncExpr(col, grain) : col
     const probeSql = [
-      `SELECT DISTINCT ${col} AS pivot_value`,
+      `SELECT DISTINCT ${valueExpr} AS pivot_value`,
       `FROM {${parentBlockName}}`,
       `WHERE ${col} IS NOT NULL`,
       `ORDER BY 1`,
@@ -1794,12 +1799,12 @@ export function DesktopShell() {
       const linNow = p?.lineage
       if (!p || !linNow || linNow.kind !== "column-aggregate") return w
 
-      const baseSpec = linNow.rollup ?? rollupSpecFromColumns(linNow.columns ?? [])
+      const baseSpec = linNow.rollup ? normalizeRollupSpec(linNow.rollup) : rollupSpecFromColumns(linNow.columns ?? [])
       const nextSpec: RollupSpec = {
         ...baseSpec,
         // The pivot column moves out of the rows (GROUP BY) into headers.
-        groupBy: baseSpec.groupBy.filter((d) => d.name.toLowerCase() !== pivotCol.name.toLowerCase()),
-        pivot: { column: pivotCol, values, measureIds, truncated },
+        groupBy: baseSpec.groupBy.filter((d) => d.column.name.toLowerCase() !== pivotCol.name.toLowerCase()),
+        pivot: { column: pivotCol, grain, values, measureIds, truncated },
       }
       const blockName = linNow.parentBlockName ?? payload.parentBlockName
       const { sql, title } = buildRollupQuery(nextSpec, { parentBlockName: blockName, parentTitle: linNow.parentTitle })
@@ -1831,7 +1836,7 @@ export function DesktopShell() {
     // Pivot needs the dragged dimension's distinct values, which requires
     // a query round-trip — handled on a separate async path.
     if (op.kind === "pivot") {
-      void pivotColumnInWindow(targetWindowId, payload, op.measureIds)
+      void pivotColumnInWindow(targetWindowId, payload, op.measureIds, op.grain)
       return
     }
     setWindows((ws) => ws.map((w) => {
@@ -1846,7 +1851,7 @@ export function DesktopShell() {
 
       // The rollup spec is the source of truth; derive one from the legacy
       // flat column list for windows that pre-date the spec.
-      const baseSpec = lin.rollup ?? rollupSpecFromColumns(lin.columns ?? [])
+      const baseSpec = lin.rollup ? normalizeRollupSpec(lin.rollup) : rollupSpecFromColumns(lin.columns ?? [])
       const { spec: nextSpec, changed } = applyRollupOp(baseSpec, payload.columns, op)
       if (!changed) return w
 
@@ -1892,7 +1897,7 @@ export function DesktopShell() {
       const p = w.payload as DataPayload | undefined
       const lin = p?.lineage
       if (!p || !lin || lin.kind !== "column-aggregate") return w
-      const baseSpec = lin.rollup ?? rollupSpecFromColumns(lin.columns ?? [])
+      const baseSpec = lin.rollup ? normalizeRollupSpec(lin.rollup) : rollupSpecFromColumns(lin.columns ?? [])
       const nextSpec = transform(baseSpec)
       const parentBlockName = lin.parentBlockName ?? ""
       if (!parentBlockName) return w
@@ -1914,6 +1919,29 @@ export function DesktopShell() {
       }
     }))
   }, [])
+
+  // Re-pivot an existing pivot with a new temporal grain — re-probes the
+  // distinct values via the same async path, reusing the stored pivot
+  // column and measure scope.
+  const repivotWindow = useCallback((targetWindowId: string, grain: RollupGrain) => {
+    const canvas = workspacesRef.current[activeWorkspaceRef.current]
+    const target = canvas?.windows.find((w) => w.id === targetWindowId)
+    if (!target || target.kind !== "data") return
+    const lin = (target.payload as DataPayload | undefined)?.lineage
+    if (!lin || lin.kind !== "column-aggregate" || !lin.rollup) return
+    const piv = normalizeRollupSpec(lin.rollup).pivot
+    if (!piv) return
+    const synthPayload: DesktopColumnDragPayload = {
+      kind: "rvbbit-lens.desktop.column",
+      parentWindowId: lin.parentWindowId,
+      parentBlockName: lin.parentBlockName ?? "",
+      parentTitle: lin.parentTitle,
+      parentSql: lin.parentSql,
+      relationKey: lin.relationKey,
+      columns: [piv.column],
+    }
+    void pivotColumnInWindow(targetWindowId, synthPayload, piv.measureIds, grain)
+  }, [pivotColumnInWindow])
 
   const openBlockReference = useCallback((payload: DesktopBlockDragPayload, at: { x: number; y: number }) => {
     const title = `${payload.title} → ref`
@@ -2226,7 +2254,7 @@ export function DesktopShell() {
                 if (w.kind !== "data") return null
                 const lin = (w.payload as DataPayload | undefined)?.lineage
                 if (!lin || lin.kind !== "column-aggregate") return null
-                const spec = lin.rollup ?? rollupSpecFromColumns(lin.columns ?? [])
+                const spec = lin.rollup ? normalizeRollupSpec(lin.rollup) : rollupSpecFromColumns(lin.columns ?? [])
                 return {
                   parentWindowId: lin.parentWindowId,
                   relationKey: lin.relationKey,
@@ -2272,6 +2300,7 @@ export function DesktopShell() {
                   emitParam,
                   subscribeParam,
                   editRollupSpec,
+                  repivotWindow,
                   palette: activePalette,
                   paletteOverrides,
                   hasWallpaper: !!wallpaperUrl,
@@ -2438,6 +2467,7 @@ interface WindowContext {
   }) => void
   subscribeParam: (targetWindowId: string, key: string, targetField?: string) => void
   editRollupSpec: (targetWindowId: string, transform: (s: RollupSpec) => RollupSpec) => void
+  repivotWindow: (targetWindowId: string, grain: RollupGrain) => void
   palette: ImagePalette | null
   paletteOverrides: Partial<ImagePalette> | null
   hasWallpaper: boolean
@@ -2488,6 +2518,7 @@ function renderWindowContent(
           onEmitParam={ctx.emitParam}
           onSubscribeParam={(key, field) => ctx.subscribeParam(w.id, key, field)}
           onEditRollup={(transform) => ctx.editRollupSpec(w.id, transform)}
+          onRepivot={(grain) => ctx.repivotWindow(w.id, grain)}
           onOpenKgForSource={ctx.openKgForSource}
         />
       )

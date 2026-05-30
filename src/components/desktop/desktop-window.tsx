@@ -4,6 +4,7 @@ import { useRef, useState } from "react"
 import {
   Boxes,
   Calculator,
+  Calendar,
   ChevronDown,
   Grip,
   Hash,
@@ -32,12 +33,13 @@ import { cn } from "@/lib/utils"
 
 function rollupOpKey(op: RollupOp): string {
   if (op.kind === "measure") return `measure:${op.agg}`
-  if (op.kind === "pivot") return `pivot:${op.measureIds?.join(",") ?? "all"}`
+  if (op.kind === "pivot") return `pivot:${op.measureIds?.join(",") ?? "all"}:${op.grain ?? ""}`
+  if (op.kind === "group-by") return `group-by:${op.grain ?? ""}`
   return op.kind
 }
 
 function rollupOpIcon(op: RollupOp): LucideIcon {
-  if (op.kind === "group-by") return Layers
+  if (op.kind === "group-by") return op.grain ? Calendar : Layers
   if (op.kind === "order-by") return Table2
   if (op.kind === "pivot") return TreeStructure
   switch (op.agg) {
