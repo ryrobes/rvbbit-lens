@@ -6,6 +6,7 @@ import {
   Brain,
   CheckCircle2,
   Clock,
+  FileCode2,
   FlowArrow,
   Globe,
   Rocket,
@@ -152,6 +153,18 @@ export function WarrenJobDetailWindow({
           >
             <FlowArrow className="h-3 w-3" />
             {job.operator_name}
+          </button>
+        ) : null}
+        {/* Runtime deployments register a runtime instead of a backend. */}
+        {job.runtime_name ? (
+          <button
+            type="button"
+            onClick={() => onOpenSpecialist(job.runtime_name!)}
+            className="inline-flex items-center gap-1 rounded-full border border-brand-capability/40 bg-brand-capability/10 px-2 py-0.5 text-[10px] text-brand-capability hover:bg-brand-capability/15"
+            title={`open runtime ${job.runtime_name}`}
+          >
+            <FileCode2 className="h-3 w-3" />
+            {job.runtime_name}
           </button>
         ) : null}
         <span className="ml-auto text-[10px] text-chrome-text/45">

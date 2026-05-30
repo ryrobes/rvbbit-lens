@@ -17,6 +17,7 @@ import {
   Brain,
   CheckCircle2,
   Cpu,
+  FileCode2,
   Pause,
   Play,
   RefreshCw,
@@ -33,6 +34,7 @@ import {
   type WarrenJob,
   type WarrenJobStatus,
 } from "@/lib/rvbbit/warren"
+import { fetchInstalledRuntimes, type InstalledRuntime } from "@/lib/rvbbit/capabilities"
 import { fmtAgo, fmtCount, fmtMs } from "./instruments"
 import type { WarrenPayload } from "@/lib/desktop/types"
 
@@ -45,10 +47,11 @@ interface WarrenWindowProps {
   onOpenOperator: (name: string) => void
 }
 
-type TabKey = "inventory" | "jobs"
+type TabKey = "inventory" | "jobs" | "runtimes"
 const TABS: { key: TabKey; label: string }[] = [
   { key: "inventory", label: "Inventory" },
   { key: "jobs", label: "Jobs" },
+  { key: "runtimes", label: "Python runtimes" },
 ]
 
 const REFRESH_OPTIONS_MS = [
@@ -74,6 +77,7 @@ export function WarrenWindow({
 }: WarrenWindowProps) {
   const [inventory, setInventory] = useState<WarrenInventoryRow[]>([])
   const [jobs, setJobs] = useState<WarrenJob[]>([])
+  const [runtimes, setRuntimes] = useState<InstalledRuntime[]>([])
   const [tab, setTab] = useState<TabKey>(payload.initialTab ?? "inventory")
   const [paused, setPaused] = useState(false)
   const [intervalMs, setIntervalMs] = useState(5000)
@@ -83,12 +87,14 @@ export function WarrenWindow({
 
   const reload = useCallback(async () => {
     if (!activeConnectionId) return
-    const [inv, jobsRes] = await Promise.all([
+    const [inv, jobsRes, rt] = await Promise.all([
       fetchWarrenInventory(activeConnectionId),
       fetchWarrenJobs(activeConnectionId, { limit: 200 }),
+      fetchInstalledRuntimes(activeConnectionId),
     ])
     setInventory(inv.rows)
     setJobs(jobsRes.jobs)
+    setRuntimes(rt.runtimes)
     setError(inv.error ?? jobsRes.error ?? null)
     setUpdatedAt(Date.now())
   }, [activeConnectionId])
@@ -270,6 +276,9 @@ export function WarrenWindow({
           <InventoryTab inventory={inventory} onOpenSpecialist={onOpenSpecialist} />
         ) : null}
         {tab === "jobs" ? <JobsTab jobs={jobs} onOpenJob={onOpenJob} /> : null}
+        {tab === "runtimes" ? (
+          <RuntimesTab runtimes={runtimes} loading={loading} onOpenSpecialist={onOpenSpecialist} />
+        ) : null}
       </div>
     </div>
   )
@@ -539,6 +548,19 @@ function DeploymentRow({
             {row.backend_name}
           </button>
         ) : null}
+        {/* Runtime deployments register a runtime_name with no backend —
+            that is expected, not a missing backend. */}
+        {row.runtime_name ? (
+          <button
+            type="button"
+            onClick={() => onOpenSpecialist(row.runtime_name!)}
+            className="inline-flex items-center gap-1 rounded-full border border-brand-capability/40 bg-brand-capability/10 px-1.5 py-px text-[9px] text-brand-capability hover:bg-brand-capability/15"
+            title={`open runtime ${row.runtime_name}`}
+          >
+            <FileCode2 className="h-2.5 w-2.5" />
+            {row.runtime_name}
+          </button>
+        ) : null}
       </div>
     </div>
   )
@@ -687,10 +709,93 @@ function JobRow({ job, onOpen }: { job: WarrenJob; onOpen: () => void }) {
           <span className="text-danger">{job.error}</span>
         ) : job.backend_name ? (
           <span className="font-mono text-chrome-text/55">→ {job.backend_name}</span>
+        ) : job.runtime_name ? (
+          <span className="font-mono text-brand-capability/80">→ {job.runtime_name}</span>
         ) : (
           <span className="text-chrome-text/40">—</span>
         )}
       </td>
     </tr>
+  )
+}
+
+// ── Python runtimes tab ─────────────────────────────────────────────
+
+function runtimeTone(status: string): string {
+  if (status === "ready") return "bg-success/15 text-success ring-success/30"
+  if (status === "failed" || status === "disabled") return "bg-danger/15 text-danger ring-danger/40"
+  if (status === "starting") return "bg-warning/15 text-warning ring-warning/40"
+  return "bg-foreground/[0.05] text-chrome-text/70 ring-chrome-border/40"
+}
+
+/**
+ * Registered execution runtimes (rvbbit.python_runtimes). A Warren-deployed
+ * runtime appears here with runtime_source = 'warren'. These back operator
+ * `kind: python` nodes over /run — a peer of model backends, not a model.
+ */
+function RuntimesTab({
+  runtimes,
+  loading,
+  onOpenSpecialist,
+}: {
+  runtimes: InstalledRuntime[]
+  loading: boolean
+  onOpenSpecialist: (name: string) => void
+}) {
+  if (!loading && runtimes.length === 0) {
+    return (
+      <div className="grid h-40 place-items-center px-6 text-center text-[11px] text-chrome-text/55">
+        <div>
+          <FileCode2 className="mx-auto mb-2 h-6 w-6 text-chrome-text/30" />
+          No Python runtimes registered. Deploy the{" "}
+          <span className="font-mono">python-runtime</span> capability to add one.
+        </div>
+      </div>
+    )
+  }
+  return (
+    <div className="space-y-2 p-2.5">
+      <p className="text-[11px] text-chrome-text/55">
+        Execution endpoints from <span className="font-mono">rvbbit.python_runtimes</span> that
+        run operator <span className="font-mono">kind: python</span> nodes over{" "}
+        <span className="font-mono">/run</span>. Runtime health is separate from backend health.
+      </p>
+      <div className="grid grid-cols-2 gap-2">
+        {runtimes.map((rt) => (
+          <button
+            key={rt.name}
+            type="button"
+            onClick={() => onOpenSpecialist(rt.name)}
+            className="flex flex-col gap-1 rounded border border-chrome-border/50 bg-foreground/[0.02] p-2 text-left transition-colors hover:border-brand-capability/40"
+          >
+            <div className="flex items-center gap-1.5">
+              <FileCode2 className="h-3 w-3 shrink-0 text-brand-capability" />
+              <span className="min-w-0 flex-1 truncate font-mono text-[12px] font-medium text-foreground">
+                {rt.name}
+              </span>
+              <span
+                className={cn(
+                  "shrink-0 rounded-full px-1.5 py-px text-[9px] uppercase tracking-wider ring-1",
+                  runtimeTone(rt.status),
+                )}
+              >
+                {rt.status || "unknown"}
+              </span>
+            </div>
+            <div className="flex items-center gap-1.5 text-[9px] text-chrome-text/55">
+              <span className="rounded bg-foreground/10 px-1 uppercase tracking-wide">
+                {rt.language ?? "python"}
+              </span>
+              {rt.runtime_source ? <span>via {rt.runtime_source}</span> : null}
+              {rt.endpoint_url ? (
+                <span className="min-w-0 flex-1 truncate text-right font-mono text-chrome-text/40">
+                  {rt.endpoint_url}
+                </span>
+              ) : null}
+            </div>
+          </button>
+        ))}
+      </div>
+    </div>
   )
 }

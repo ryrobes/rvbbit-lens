@@ -47,12 +47,17 @@ import {
   type SpecialistCall,
   type SpecialistHealth,
 } from "@/lib/rvbbit/specialists"
-import { fetchCatalog, type CatalogEntry } from "@/lib/rvbbit/capabilities"
+import {
+  fetchCatalog,
+  fetchInstalledRuntimes,
+  type CatalogEntry,
+  type InstalledRuntime,
+} from "@/lib/rvbbit/capabilities"
 import {
   fetchWarrenDeploymentByBackend,
   type WarrenDeployment,
 } from "@/lib/rvbbit/warren"
-import { Package, Rocket } from "@/lib/icons"
+import { FileCode2, Package, Rocket } from "@/lib/icons"
 import type { SpecialistDetailPayload } from "@/lib/desktop/types"
 
 interface SpecialistDetailWindowProps {
@@ -98,6 +103,7 @@ export function SpecialistDetailWindow({
 }: SpecialistDetailWindowProps) {
   const name = payload.specialistName
   const [spec, setSpec] = useState<RvbbitSpecialist | null>(null)
+  const [runtime, setRuntime] = useState<InstalledRuntime | null>(null)
   const [health, setHealth] = useState<SpecialistHealth | null>(null)
   const [calls, setCalls] = useState<SpecialistCall[]>([])
   const [inputKeys, setInputKeys] = useState<string[]>([])
@@ -129,19 +135,24 @@ export function SpecialistDetailWindow({
 
   const loadStatic = useCallback(async () => {
     if (!activeConnectionId) return
-    const [s, ctx, h, cat, warren] = await Promise.all([
+    const [s, ctx, h, cat, warren, rt] = await Promise.all([
       fetchSpecialists(activeConnectionId),
       fetchSpecialistContext(activeConnectionId, name),
       fetchSpecialistHealth(activeConnectionId),
-      fetchCatalog(),
+      fetchCatalog(activeConnectionId),
       // Best-effort warren probe — if the warren tables aren't present
       // (older rvbbit), the helper returns deployment=null without
       // raising, so this stays cheap on non-warren DBs.
       fetchWarrenDeploymentByBackend(activeConnectionId, name),
+      fetchInstalledRuntimes(activeConnectionId),
     ])
     const found = s.specialists.find((x) => x.name === name) ?? null
+    const rtFound = rt.runtimes.find((x) => x.name === name) ?? null
     setSpec(found)
-    setNotFound(!found)
+    setRuntime(rtFound)
+    // A name that's a registered runtime isn't "not found" — it's just an
+    // execution runtime rather than a model backend.
+    setNotFound(!found && !rtFound)
     setInputKeys(ctx.inputKeys)
     setTestValues((prev) =>
       ctx.inputKeys.length > 0 && Object.keys(prev).length === 0
@@ -150,7 +161,9 @@ export function SpecialistDetailWindow({
     )
     setHealth(h.health.find((x) => x.specialist === name) ?? null)
     setCapabilityEntry(
-      cat.doc?.capabilities.find((c) => c.backend_name === name) ?? null,
+      cat.doc?.capabilities.find(
+        (c) => c.backend_name === name || c.runtime_name === name,
+      ) ?? null,
     )
     setWarrenDeployment(warren.deployment)
   }, [activeConnectionId, name])
@@ -250,6 +263,20 @@ export function SpecialistDetailWindow({
           <Clock className="h-3 w-3 animate-pulse" /> Loading {name}…
         </span>
       </div>
+    )
+  }
+
+  // This name is an execution runtime, not a model backend — render a
+  // runtime-shaped view (no model / batch / `/predict` live test).
+  if (runtime && !spec) {
+    return (
+      <RuntimeDetailView
+        runtime={runtime}
+        capabilityEntry={capabilityEntry}
+        warrenDeployment={warrenDeployment}
+        onOpenCapability={onOpenCapability}
+        onOpenWarrenJob={onOpenWarrenJob}
+      />
     )
   }
 
@@ -737,6 +764,121 @@ function TestInputs({
         <Plus className="h-2.5 w-2.5" />
         add field
       </button>
+    </div>
+  )
+}
+
+/**
+ * Detail view for an execution runtime (rvbbit.python_runtimes) rather than
+ * a model backend. No model / batch / `/predict` live test — a runtime
+ * serves operator `kind: python` nodes over `/run`, and its packages are
+ * SQL-managed envs. The "three layers" framing: a backend/runtime is
+ * plumbing; the callable thing is the operator.
+ */
+function RuntimeDetailView({
+  runtime,
+  capabilityEntry,
+  warrenDeployment,
+  onOpenCapability,
+  onOpenWarrenJob,
+}: {
+  runtime: InstalledRuntime
+  capabilityEntry: CatalogEntry | null
+  warrenDeployment: WarrenDeployment | null
+  onOpenCapability?: (catalogId: string) => void
+  onOpenWarrenJob?: (jobId: string, jobName: string | null) => void
+}) {
+  const statusColor =
+    runtime.status === "ready"
+      ? "text-success"
+      : runtime.status === "failed" || runtime.status === "disabled"
+        ? "text-danger"
+        : runtime.status === "starting"
+          ? "text-warning"
+          : "text-chrome-text/60"
+  const health = runtime.health
+  const labels = runtime.labels
+  return (
+    <div className="flex h-full flex-col bg-doc-bg text-[12px] text-chrome-text">
+      <div className="flex flex-wrap items-center gap-2 border-b border-chrome-border bg-chrome-bg/40 px-3 py-1.5">
+        <span className="inline-flex items-center gap-1.5 rounded-full bg-brand-capability/10 px-1.5 py-0.5 text-[10px] uppercase tracking-wider text-brand-capability">
+          <FileCode2 className="h-3.5 w-3.5" /> python runtime
+        </span>
+        <span className="font-mono text-[13px] font-medium text-foreground">{runtime.name}</span>
+        <span className="rounded bg-foreground/10 px-1 text-[9px] uppercase tracking-wide text-chrome-text/70">
+          {runtime.language ?? "python"}
+        </span>
+        <span className={cn("text-[10px] uppercase tracking-wide", statusColor)}>
+          {runtime.status || "unknown"}
+        </span>
+        {capabilityEntry && onOpenCapability ? (
+          <button
+            type="button"
+            onClick={() => onOpenCapability(capabilityEntry.id)}
+            title={`Installed from capability pack: ${capabilityEntry.title}`}
+            className="inline-flex items-center gap-1 rounded-full border border-brand-capability/40 bg-brand-capability/10 px-2 py-0.5 text-[10px] text-brand-capability hover:bg-brand-capability/15"
+          >
+            <Package className="h-3 w-3" />
+            from capability
+          </button>
+        ) : null}
+        {warrenDeployment ? (
+          <button
+            type="button"
+            onClick={() =>
+              warrenDeployment.job_id && onOpenWarrenJob
+                ? onOpenWarrenJob(warrenDeployment.job_id, warrenDeployment.name)
+                : undefined
+            }
+            disabled={!warrenDeployment.job_id || !onOpenWarrenJob}
+            title={`Deployed by warren node ${warrenDeployment.node_name ?? "unknown"}`}
+            className="inline-flex items-center gap-1 rounded-full border border-brand-warren/40 bg-brand-warren/10 px-2 py-0.5 text-[10px] text-brand-warren hover:bg-brand-warren/15 disabled:cursor-default disabled:opacity-70"
+          >
+            <Rocket className="h-3 w-3" />
+            warren · {warrenDeployment.node_name ?? "unknown"}
+          </button>
+        ) : null}
+      </div>
+
+      <div className="flex-1 space-y-2.5 overflow-auto p-2.5">
+        <Panel
+          icon={FileCode2}
+          title="Runtime"
+          right={runtime.runtime_source ? <span>source: {runtime.runtime_source}</span> : null}
+        >
+          <div className="space-y-1.5">
+            <KV k="endpoint" v={runtime.endpoint_url ?? "—"} mono />
+            <KV k="transport" v="/run · execution" />
+            <KV k="language" v={runtime.language ?? "python"} />
+            <KV k="status" v={runtime.status || "unknown"} />
+            <KV k="source" v={runtime.runtime_source ?? "—"} />
+            {runtime.updated_at ? <KV k="updated" v={fmtAgo(runtime.updated_at)} /> : null}
+          </div>
+          <p className="mt-2 text-[10px] leading-relaxed text-chrome-text/55">
+            Serves operator <span className="font-mono">kind: python</span> nodes. Handler code
+            runs in SQL-managed package environments (<span className="font-mono">rvbbit.python_envs</span>,{" "}
+            <span className="font-mono">rvbbit.python_handlers</span>) — there is no model or{" "}
+            <span className="font-mono">/predict</span> batch transport. A runtime is plumbing;
+            the callable thing is the operator that uses it.
+          </p>
+        </Panel>
+
+        {labels && Object.keys(labels).length > 0 ? (
+          <Panel icon={Target} title="Labels">
+            <pre className="overflow-auto rounded bg-doc-bg/60 p-2 font-mono text-[10px] text-chrome-text/80">
+              {JSON.stringify(labels, null, 2)}
+            </pre>
+          </Panel>
+        ) : null}
+
+        {health && typeof health === "object" && Object.keys(health as object).length > 0 ? (
+          <Panel icon={Activity} title="Health">
+            <pre className="overflow-auto rounded bg-doc-bg/60 p-2 font-mono text-[10px] text-chrome-text/80">
+              {JSON.stringify(health, null, 2)}
+            </pre>
+          </Panel>
+        ) : null}
+      </div>
     </div>
   )
 }

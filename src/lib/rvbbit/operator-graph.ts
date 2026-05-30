@@ -18,6 +18,7 @@ export type OpNodeKind =
   | "llm"
   | "code"
   | "specialist"
+  | "python"
   | "mcp"
   | "sql"
   | "ward"

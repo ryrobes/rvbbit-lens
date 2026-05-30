@@ -57,7 +57,7 @@ export function OperatorInspector({
   )
 }
 
-const NODE_KINDS: NodeKind[] = ["llm", "specialist", "code", "sql", "mcp"]
+const NODE_KINDS: NodeKind[] = ["llm", "specialist", "python", "code", "sql", "mcp"]
 
 // ── Flow-control toggles ────────────────────────────────────────────
 
@@ -606,6 +606,46 @@ function StepEditor({
             inputs={step.inputs ?? {}}
             onChange={(inputs) => onChange({ ...step, inputs })}
           />
+        </>
+      ) : step.kind === "python" ? (
+        <>
+          <Row>
+            <Field label="env — rvbbit.python_envs">
+              <input
+                value={step.env ?? ""}
+                onChange={(e) => onChange({ ...step, env: e.target.value })}
+                placeholder="analytics"
+                className={inputCls}
+              />
+            </Field>
+            <Field label="handler — rvbbit.python_handlers">
+              <input
+                value={step.handler ?? ""}
+                onChange={(e) => onChange({ ...step, handler: e.target.value })}
+                placeholder="ticket_score"
+                className={inputCls}
+              />
+            </Field>
+          </Row>
+          <Field label="timeout (ms)">
+            <input
+              type="number"
+              value={step.timeout_ms ?? ""}
+              onChange={(e) => onChange({ ...step, timeout_ms: e.target.value ? Number(e.target.value) : undefined })}
+              placeholder="1000"
+              className={inputCls}
+            />
+          </Field>
+          <InputsEditor
+            inputs={step.inputs ?? {}}
+            onChange={(inputs) => onChange({ ...step, inputs })}
+          />
+          <p className="px-1 text-[10px] leading-relaxed text-chrome-text/50">
+            Runs a managed CPython handler in a sidecar venv. Define the env
+            and handler in SQL (<span className="font-mono">rvbbit.create_python_env</span>,{" "}
+            <span className="font-mono">rvbbit.create_python_handler</span>); the runtime is a
+            registered execution endpoint (Python Runtimes in Warren).
+          </p>
         </>
       ) : step.kind === "mcp" ? (
         <McpFields

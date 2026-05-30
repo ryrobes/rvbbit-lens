@@ -1,7 +1,7 @@
 "use client"
 
 import { useCallback, useEffect, useMemo, useState } from "react"
-import { Activity, AlertTriangle, Boxes, Brain, Pause, Play, RefreshCw } from "@/lib/icons"
+import { Activity, AlertTriangle, Boxes, Brain, FileCode2, Pause, Play, RefreshCw } from "@/lib/icons"
 import { cn } from "@/lib/utils"
 import { fetchSpecialists, type RvbbitSpecialist } from "@/lib/rvbbit/operators"
 import {
@@ -10,6 +10,7 @@ import {
   type SpecialistCall,
   type SpecialistHealth,
 } from "@/lib/rvbbit/specialists"
+import { fetchInstalledRuntimes, type InstalledRuntime } from "@/lib/rvbbit/capabilities"
 import { Sparkline } from "./sparkline"
 import {
   bucketCounts,
@@ -89,6 +90,7 @@ export function SpecialistsWindow({
   onOpenSpecialist,
 }: SpecialistsWindowProps) {
   const [specs, setSpecs] = useState<RvbbitSpecialist[]>([])
+  const [runtimes, setRuntimes] = useState<InstalledRuntime[]>([])
   const [calls, setCalls] = useState<SpecialistCall[]>([])
   const [health, setHealth] = useState<Map<string, SpecialistHealth>>(new Map())
   const [error, setError] = useState<string | null>(null)
@@ -100,12 +102,14 @@ export function SpecialistsWindow({
 
   const loadStatic = useCallback(async () => {
     if (!activeConnectionId) return
-    const [s, h] = await Promise.all([
+    const [s, h, rt] = await Promise.all([
       fetchSpecialists(activeConnectionId),
       fetchSpecialistHealth(activeConnectionId),
+      fetchInstalledRuntimes(activeConnectionId),
     ])
     setSpecs(s.specialists)
     setHealth(new Map(h.health.map((x) => [x.specialist, x])))
+    setRuntimes(rt.runtimes)
   }, [activeConnectionId])
 
   const pollCalls = useCallback(async () => {
@@ -217,6 +221,12 @@ export function SpecialistsWindow({
           <Brain className="h-3.5 w-3.5 text-rvbbit-accent" />
           {loading ? "loading…" : `${specs.length} backends`}
         </span>
+        {!loading && runtimes.length > 0 ? (
+          <span className="inline-flex items-center gap-1.5 text-foreground">
+            <FileCode2 className="h-3.5 w-3.5 text-brand-capability" />
+            {runtimes.length} runtime{runtimes.length === 1 ? "" : "s"}
+          </span>
+        ) : null}
         {!loading ? (
           <>
             <span className="text-chrome-text/40">·</span>
@@ -308,11 +318,13 @@ export function SpecialistsWindow({
           ))}
         </div>
 
-        {rollups.length === 0 && !loading ? (
+        {rollups.length === 0 && runtimes.length === 0 && !loading ? (
           <div className="grid h-24 place-items-center text-[11px] text-chrome-text/55">
-            No specialist backends registered.
+            No specialist backends or runtimes registered.
           </div>
         ) : null}
+
+        {runtimes.length > 0 ? <RuntimesPanel runtimes={runtimes} onOpen={onOpenSpecialist} /> : null}
 
         {ghosts.length > 0 ? <GhostPanel ghosts={ghosts} onOpen={onOpenSpecialist} /> : null}
       </div>
@@ -572,6 +584,73 @@ function GhostPanel({
             </button>
           )
         })}
+      </div>
+    </Panel>
+  )
+}
+
+// ── Runtimes panel ──────────────────────────────────────────────────
+
+function runtimeStatusColor(status: string): string {
+  if (status === "ready") return "text-success"
+  if (status === "failed" || status === "disabled") return "text-danger"
+  if (status === "starting") return "text-warning"
+  return "text-chrome-text/60"
+}
+
+/**
+ * Execution runtimes (rvbbit.python_runtimes) — peers of model backends in
+ * the fleet, not models. A runtime serves operator `kind: python` nodes
+ * over `/run` rather than the `/predict` specialist transport.
+ */
+function RuntimesPanel({
+  runtimes,
+  onOpen,
+}: {
+  runtimes: InstalledRuntime[]
+  onOpen: (name: string) => void
+}) {
+  return (
+    <Panel
+      icon={FileCode2}
+      title="Execution runtimes"
+      right={<span>{runtimes.length} registered</span>}
+    >
+      <p className="mb-2 text-[10px] text-chrome-text/55">
+        Code executors from <span className="font-mono">rvbbit.python_runtimes</span> that
+        serve operator <span className="font-mono">kind: python</span> nodes over{" "}
+        <span className="font-mono">/run</span> — not model backends.
+      </p>
+      <div className="grid grid-cols-2 gap-2">
+        {runtimes.map((rt) => (
+          <button
+            key={rt.name}
+            type="button"
+            onClick={() => onOpen(rt.name)}
+            className="flex flex-col gap-1 rounded border border-chrome-border bg-doc-bg/60 p-2 text-left transition-colors hover:border-brand-capability/40"
+          >
+            <div className="flex items-center gap-1.5">
+              <FileCode2 className="h-3 w-3 shrink-0 text-brand-capability" />
+              <span className="min-w-0 flex-1 truncate font-mono text-[12px] font-medium text-foreground">
+                {rt.name}
+              </span>
+              <span className={cn("shrink-0 text-[9px] uppercase tracking-wide", runtimeStatusColor(rt.status))}>
+                {rt.status || "unknown"}
+              </span>
+            </div>
+            <div className="flex items-center gap-1.5 text-[9px] text-chrome-text/55">
+              <span className="rounded bg-foreground/10 px-1 uppercase tracking-wide">
+                {rt.language ?? "python"}
+              </span>
+              {rt.runtime_source ? <span>via {rt.runtime_source}</span> : null}
+              {rt.endpoint_url ? (
+                <span className="min-w-0 flex-1 truncate text-right font-mono text-chrome-text/40">
+                  {rt.endpoint_url}
+                </span>
+              ) : null}
+            </div>
+          </button>
+        ))}
       </div>
     </Panel>
   )

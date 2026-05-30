@@ -869,6 +869,8 @@ export type InstallStateKey =
   | "error_seen"
   | "healthy"
   | "failing"
+  | "runtime_ready"
+  | "runtime_failing"
   | "external"
 
 const INSTALL_STATE_THEME: Record<
@@ -916,6 +918,20 @@ const INSTALL_STATE_THEME: Record<
     fg: "text-danger",
     ring: "ring-danger/40",
     title: "Most recent backend_probe failed",
+  },
+  runtime_ready: {
+    label: "runtime ready",
+    bg: "bg-success/12",
+    fg: "text-success",
+    ring: "ring-success/40",
+    title: "Execution runtime registered in rvbbit.python_runtimes with status = ready",
+  },
+  runtime_failing: {
+    label: "runtime failing",
+    bg: "bg-danger/12",
+    fg: "text-danger",
+    ring: "ring-danger/40",
+    title: "Execution runtime status is failed or disabled",
   },
   external: {
     label: "external",

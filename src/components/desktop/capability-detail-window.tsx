@@ -25,6 +25,7 @@ import {
   defaultKnobs,
   fetchCatalog,
   fetchInstalledBackends,
+  fetchInstalledRuntimes,
   fetchManifest,
   flagsToStates,
   joinCatalogToInstalled,
@@ -33,6 +34,7 @@ import {
   type CatalogEntry,
   type InstallKnobs,
   type InstalledBackend,
+  type InstalledRuntime,
   type JoinedCatalogEntry,
   type Manifest,
   type ProbeResult,
@@ -82,6 +84,7 @@ export function CapabilityDetailWindow({
   const [catalog, setCatalog] = useState<CatalogEntry | null>(null)
   const [manifest, setManifest] = useState<Manifest | null>(null)
   const [installed, setInstalled] = useState<InstalledBackend | null>(null)
+  const [installedRuntime, setInstalledRuntime] = useState<InstalledRuntime | null>(null)
   const [knobs, setKnobs] = useState<InstallKnobs | null>(null)
   const [tab, setTab] = useState<TabKey>(payload.initialTab ?? "overview")
   const [loadError, setLoadError] = useState<string | null>(null)
@@ -100,7 +103,7 @@ export function CapabilityDetailWindow({
   useEffect(() => {
     let cancelled = false
     const run = async () => {
-      const cat = await fetchCatalog()
+      const cat = await fetchCatalog(activeConnectionId)
       if (cancelled) return
       const entry =
         cat.doc?.capabilities.find((c) => c.id === payload.catalogId) ?? null
@@ -109,27 +112,37 @@ export function CapabilityDetailWindow({
         return
       }
       setCatalog(entry)
-      const m = await fetchManifest(entry.manifest_path)
-      if (cancelled) return
-      if (m.error || !m.manifest) {
-        setLoadError(m.error ?? "manifest load failed")
-        return
+      // DB catalog rows carry the manifest inline; only fall back to the
+      // disk YAML read for catalog.json (file-source) entries.
+      let m: Manifest | null = entry.manifest ?? null
+      if (!m) {
+        const loaded = await fetchManifest(entry.manifest_path)
+        if (cancelled) return
+        if (loaded.error || !loaded.manifest) {
+          setLoadError(loaded.error ?? "manifest load failed")
+          return
+        }
+        m = loaded.manifest
       }
-      setManifest(m.manifest)
-      setKnobs(defaultKnobs(m.manifest))
+      setManifest(m)
+      setKnobs(defaultKnobs(m))
     }
     void run()
     return () => {
       cancelled = true
     }
-  }, [payload.catalogId])
+  }, [payload.catalogId, activeConnectionId])
 
   // ── poll installed-backend row to keep the join fresh ──
   const pollInstalled = useCallback(async () => {
     if (!activeConnectionId || !hasRvbbit || !catalog) return
-    const r = await fetchInstalledBackends(activeConnectionId)
-    const join = joinCatalogToInstalled([catalog], r.backends)
+    const [b, rt] = await Promise.all([
+      fetchInstalledBackends(activeConnectionId),
+      fetchInstalledRuntimes(activeConnectionId),
+    ])
+    const join = joinCatalogToInstalled([catalog], b.backends, rt.runtimes)
     setInstalled(join.entries[0]?.installed ?? null)
+    setInstalledRuntime(join.entries[0]?.installedRuntime ?? null)
     setUpdatedAt(Date.now())
   }, [activeConnectionId, hasRvbbit, catalog])
 
@@ -181,9 +194,10 @@ export function CapabilityDetailWindow({
     const j = joinCatalogToInstalled(
       [catalog],
       installed ? [installed] : [],
+      installedRuntime ? [installedRuntime] : [],
     )
     return j.entries[0] ?? null
-  }, [catalog, installed])
+  }, [catalog, installed, installedRuntime])
 
   if (!hasRvbbit) {
     return (
@@ -228,16 +242,25 @@ export function CapabilityDetailWindow({
           </span>
         ) : null}
         <InstallStateBadgeGroup states={states} size="xs" />
-        {join?.installed ? (
+        {join?.installed && catalog!.backend_name ? (
           <button
             type="button"
-            onClick={() => onOpenSpecialist(catalog!.backend_name)}
+            onClick={() => onOpenSpecialist(catalog!.backend_name!)}
             className="inline-flex items-center gap-1 rounded-full border border-brand-specialists/40 bg-brand-specialists/10 px-2 py-0.5 text-[10px] text-brand-specialists hover:bg-brand-specialists/15"
             title="Open the registered backend in the Specialist Detail window"
           >
             <Brain className="h-3 w-3" />
             backend
           </button>
+        ) : null}
+        {join?.installedRuntime ? (
+          <span
+            className="inline-flex items-center gap-1 rounded-full border border-brand-capability/40 bg-brand-capability/10 px-2 py-0.5 text-[10px] text-brand-capability"
+            title={`Execution runtime ${join.installedRuntime.name} — status ${join.installedRuntime.status}`}
+          >
+            <FileCode2 className="h-3 w-3" />
+            runtime · {join.installedRuntime.status}
+          </span>
         ) : null}
         {catalog!.operators.map((opName) => (
           <button
@@ -312,6 +335,7 @@ export function CapabilityDetailWindow({
             warrenAvail={warrenAvail}
             setMode={setInstallMode}
             activeConnectionId={activeConnectionId}
+            catalogId={catalog!.id}
             manifestPath={catalog!.manifest_path}
             manifest={manifest!}
             knobs={knobs!}
@@ -541,7 +565,7 @@ function OverviewTab({
             min={1}
             max={1024}
             step={1}
-            help={`Manifest default: ${manifest.backend.batch_size ?? 32}`}
+            help={`Manifest default: ${manifest.backend?.batch_size ?? 32}`}
           />
           <NumberKnob
             label="Max concurrent"
@@ -550,7 +574,7 @@ function OverviewTab({
             min={1}
             max={64}
             step={1}
-            help={`Manifest default: ${manifest.backend.max_concurrent ?? 4}`}
+            help={`Manifest default: ${manifest.backend?.max_concurrent ?? 4}`}
           />
           <NumberKnob
             label="Timeout (ms)"
@@ -559,7 +583,7 @@ function OverviewTab({
             min={1000}
             max={600000}
             step={1000}
-            help={`Manifest default: ${manifest.backend.timeout_ms ?? 60000}`}
+            help={`Manifest default: ${manifest.backend?.timeout_ms ?? 60000}`}
           />
           <NumberKnob
             label="Host port"
@@ -875,7 +899,7 @@ function ProbeTab({
       : null
     const result = await probeBackend(
       activeConnectionId,
-      manifest.backend.name,
+      (manifest.backend?.name ?? manifest.name),
       filled,
     )
     setHistory((prev) => [
@@ -883,7 +907,7 @@ function ProbeTab({
       { at: Date.now(), result, input: filled },
     ])
     setRunning(false)
-  }, [activeConnectionId, manifest.backend.name, inputs, useCustomInput])
+  }, [activeConnectionId, (manifest.backend?.name ?? manifest.name), inputs, useCustomInput])
 
   const okLatencies = history.filter((h) => h.result.ok).map((h) => h.result.latency_ms)
   const sorted = [...okLatencies].sort((a, b) => a - b)
@@ -900,7 +924,7 @@ function ProbeTab({
           <div className="text-foreground">Backend not registered yet</div>
           <p className="text-[11px] leading-snug text-chrome-text/65">
             Probing calls <span className="font-mono">rvbbit.backend_probe</span>{" "}
-            on <span className="font-mono">{manifest.backend.name}</span>. Run the
+            on <span className="font-mono">{(manifest.backend?.name ?? manifest.name)}</span>. Run the
             install pipeline first (Phase 2) or apply the generated SQL manually.
           </p>
         </div>
@@ -1136,6 +1160,7 @@ function InstallTabDispatcher({
   warrenAvail,
   setMode,
   activeConnectionId,
+  catalogId,
   manifestPath,
   manifest,
   knobs,
@@ -1147,6 +1172,7 @@ function InstallTabDispatcher({
   warrenAvail: WarrenAvailability | null
   setMode: (m: "warren" | "local") => void
   activeConnectionId: string | null
+  catalogId: string
   manifestPath: string
   manifest: Manifest
   knobs: InstallKnobs
@@ -1194,6 +1220,7 @@ function InstallTabDispatcher({
         {mode === "warren" && warrenAvailable ? (
           <WarrenDeployPanel
             activeConnectionId={activeConnectionId}
+            catalogId={catalogId}
             manifest={manifest}
             knobs={knobs}
             onUseLocalInstead={() => setMode("local")}

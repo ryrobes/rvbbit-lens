@@ -16,10 +16,12 @@ import { cn } from "@/lib/utils"
 import {
   fetchCatalog,
   fetchInstalledBackends,
+  fetchInstalledRuntimes,
   flagsToStates,
   joinCatalogToInstalled,
   type CatalogDoc,
   type InstalledBackend,
+  type InstalledRuntime,
   type JoinedCatalogEntry,
 } from "@/lib/rvbbit/capabilities"
 import { fetchWarrenAvailability, type WarrenAvailability } from "@/lib/rvbbit/warren"
@@ -65,6 +67,7 @@ export function CapabilitiesWindow({
 }: CapabilitiesWindowProps) {
   const [catalog, setCatalog] = useState<CatalogDoc | null>(null)
   const [installed, setInstalled] = useState<InstalledBackend[]>([])
+  const [runtimes, setRuntimes] = useState<InstalledRuntime[]>([])
   const [catalogError, setCatalogError] = useState<string | null>(null)
   const [installedError, setInstalledError] = useState<string | null>(null)
   const [selectedTags, setSelectedTags] = useState<Set<string>>(
@@ -78,16 +81,20 @@ export function CapabilitiesWindow({
   const loadingCatalog = catalog == null && catalogError == null
 
   const loadCatalog = useCallback(async () => {
-    const r = await fetchCatalog()
+    const r = await fetchCatalog(activeConnectionId)
     setCatalog(r.doc)
     setCatalogError(r.error ?? null)
-  }, [])
+  }, [activeConnectionId])
 
   const pollInstalled = useCallback(async () => {
     if (!activeConnectionId || !hasRvbbit) return
-    const r = await fetchInstalledBackends(activeConnectionId)
-    setInstalled(r.backends)
-    setInstalledError(r.error ?? null)
+    const [b, rt] = await Promise.all([
+      fetchInstalledBackends(activeConnectionId),
+      fetchInstalledRuntimes(activeConnectionId),
+    ])
+    setInstalled(b.backends)
+    setRuntimes(rt.runtimes)
+    setInstalledError(b.error ?? null)
     setUpdatedAt(Date.now())
   }, [activeConnectionId, hasRvbbit])
 
@@ -142,8 +149,8 @@ export function CapabilitiesWindow({
   // ── derive ──
   const join = useMemo(() => {
     if (!catalog) return null
-    return joinCatalogToInstalled(catalog.capabilities, installed)
-  }, [catalog, installed])
+    return joinCatalogToInstalled(catalog.capabilities, installed, runtimes)
+  }, [catalog, installed, runtimes])
 
   const allTags = useMemo<[string, number][]>(() => {
     if (!catalog) return []
@@ -441,7 +448,8 @@ function filterBySearchOnly<T extends { catalog: JoinedCatalogEntry["catalog"] }
       c.description ?? "",
       c.source_model ?? "",
       c.source_provider ?? "",
-      c.backend_name,
+      c.backend_name ?? "",
+      c.runtime_name ?? "",
       c.runtime_handler,
       ...(c.tags ?? []),
       ...(c.operators ?? []),

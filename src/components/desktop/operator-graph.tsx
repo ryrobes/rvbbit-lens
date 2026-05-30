@@ -7,6 +7,7 @@ import {
   CheckCircle2,
   Cpu,
   Database,
+  FileCode2,
   Filter,
   FlowArrow,
   Globe,
@@ -270,6 +271,7 @@ type NodeAccent =
   | "gate"
   | "code"
   | "specialist"
+  | "python"
   | "sql"
   | "mcp"
   | "terminal"
@@ -280,6 +282,9 @@ const ACCENT_COLOR: Record<NodeAccent, string> = {
   gate: "var(--chart-3)",
   code: "var(--chart-2)",
   specialist: "var(--chart-1)",
+  // Python/executor nodes share the capability/runtime brand hue, tying
+  // them visually to the runtime-sidecar capability that serves them.
+  python: "var(--brand-capability)",
   sql: "var(--chart-4)",
   mcp: "var(--chart-5)",
   terminal: "var(--main)",
@@ -622,6 +627,16 @@ function describeStepNode(step: OpStep | undefined, fallbackModel: string): Node
         badges: [],
         accent: "specialist",
       }
+    case "python":
+      return {
+        Icon: FileCode2,
+        kindLabel: "python",
+        title: step.handler || "(unset)",
+        subtitle: step.env ? `env: ${step.env}` : step.name,
+        body: step.inputs ? Object.keys(step.inputs).join(", ") : undefined,
+        badges: step.timeout_ms ? [`${step.timeout_ms}ms`] : [],
+        accent: "python",
+      }
     case "sql":
       return {
         Icon: Database,
@@ -692,6 +707,8 @@ export function accentForSubCallKind(kind: string): string {
       return "var(--rvbbit-accent)"
     case "specialist":
       return "var(--chart-1)"
+    case "python":
+      return "var(--brand-capability)"
     case "code":
       return "var(--chart-2)"
     case "sql":

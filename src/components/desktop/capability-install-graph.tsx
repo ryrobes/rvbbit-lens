@@ -276,7 +276,13 @@ export function CapabilityInstallGraph({
     // The probe call is what the install-state badge uses, so running
     // it here ensures Capability Detail flips to "healthy" on success.
     const sqlResult = await applyInstallSql(activeConnectionId, rendered.smokeSql)
-    const probe = await probeBackend(activeConnectionId, manifest.backend.name, null)
+    // Runtime sidecars expose /run, not the /predict backend transport, so
+    // there is no backend_probe to run — the smoke SQL (a python_runtimes
+    // status check) is the verification.
+    const isRuntime = manifest.kind === "runtime_sidecar"
+    const probe = isRuntime || !manifest.backend
+      ? null
+      : await probeBackend(activeConnectionId, manifest.backend.name, null)
     setArtifacts((a) => ({
       ...a,
       smoke: {
@@ -284,27 +290,29 @@ export function CapabilityInstallGraph({
         latencyMs: sqlResult.latencyMs,
         lastRow: sqlResult.lastRow ?? null,
         error: sqlResult.ok ? undefined : sqlResult.error,
-        probe: {
-          ok: probe.ok,
-          latencyMs: probe.latency_ms,
-          outputType: probe.outputType,
-          error: probe.error,
-        },
+        probe: probe
+          ? {
+              ok: probe.ok,
+              latencyMs: probe.latency_ms,
+              outputType: probe.outputType,
+              error: probe.error,
+            }
+          : undefined,
       },
     }))
-    const failed = !sqlResult.ok || !probe.ok
+    const failed = !sqlResult.ok || (probe ? !probe.ok : false)
     if (failed) {
       setStep("smoke", {
         status: "failed",
         endedAt: Date.now(),
-        error: sqlResult.error ?? probe.error ?? "probe failed",
+        error: sqlResult.error ?? probe?.error ?? "smoke failed",
       })
       return false
     }
     setStep("smoke", { status: "ok", endedAt: Date.now() })
     onInstalledChanged?.()
     return true
-  }, [activeConnectionId, rendered.smokeSql, manifest.backend.name, setStep, onInstalledChanged])
+  }, [activeConnectionId, rendered.smokeSql, manifest.kind, manifest.backend, setStep, onInstalledChanged])
 
   // ── Pipeline orchestration ──
   const runFrom = useCallback(

@@ -42,8 +42,8 @@ export interface TakesPlan {
   evaluator?: { model?: string; instructions?: string }
 }
 
-/** The five node-kind primitives — peers, each `inputs → output`. */
-export type NodeKind = "llm" | "specialist" | "code" | "sql" | "mcp"
+/** The six node-kind primitives — peers, each `inputs → output`. */
+export type NodeKind = "llm" | "specialist" | "python" | "code" | "sql" | "mcp"
 
 export interface OpStep {
   name: string
@@ -54,17 +54,22 @@ export interface OpStep {
   user?: string
   max_tokens?: number
   temperature?: number
-  // code
+  // code — a built-in deterministic function
   fn?: string
-  // specialist
+  // specialist — names a registered model backend
   specialist?: string
+  // python — a managed CPython handler (rvbbit.python_handlers) in an
+  // env (rvbbit.python_envs); see OPERATORS.md §16.
+  env?: string
+  handler?: string
+  timeout_ms?: number
   // mcp — references rvbbit.mcp_servers / rvbbit.mcp_tools
   server?: string
   tool?: string
   // sql
   sql?: string
   params?: string[]
-  // specialist / code / mcp — templated input mapping
+  // specialist / python / code / mcp — templated input mapping
   inputs?: Record<string, string>
 }
 
@@ -77,6 +82,8 @@ export function defaultNode(kind: NodeKind, name: string): OpStep {
       return { name, kind, fn: "trim", inputs: { text: "{{ inputs.text }}" } }
     case "specialist":
       return { name, kind, specialist: "", inputs: { text: "{{ inputs.text }}" } }
+    case "python":
+      return { name, kind, env: "", handler: "", inputs: { text: "{{ inputs.text }}" }, timeout_ms: 1000 }
     case "sql":
       return { name, kind, sql: "SELECT 1 AS value", params: [] }
     case "mcp":

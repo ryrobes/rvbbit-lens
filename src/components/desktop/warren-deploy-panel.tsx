@@ -14,6 +14,7 @@ import { Button } from "@/components/ui/button"
 import type { InstallKnobs, Manifest } from "@/lib/rvbbit/capabilities"
 import {
   deployCapability,
+  deployCatalogCapability,
   fetchWarrenInventory,
   fetchWarrenLabelObservations,
   manifestWithKnobs,
@@ -29,6 +30,13 @@ import { fmtAgo } from "./instruments"
 
 interface WarrenDeployPanelProps {
   activeConnectionId: string | null
+  /**
+   * Catalog id for the preferred DB deploy path
+   * (`rvbbit.deploy_catalog_capability`). When present, the server reads
+   * the published manifest from `rvbbit.capability_catalog`; the local
+   * `manifest`/knob overrides are not sent. Absent ⇒ ad-hoc manifest deploy.
+   */
+  catalogId?: string | null
   manifest: Manifest
   knobs: InstallKnobs
   /** Switch the Install tab back to the local CapabilityInstallGraph. */
@@ -49,6 +57,7 @@ interface WarrenDeployPanelProps {
  */
 export function WarrenDeployPanel({
   activeConnectionId,
+  catalogId,
   manifest,
   knobs,
   onUseLocalInstead,
@@ -126,21 +135,21 @@ export function WarrenDeployPanel({
     if (!activeConnectionId) return
     setDeploying(true)
     setDeployError(null)
-    const final = manifestWithKnobs(manifest, knobs)
-    const result = await deployCapability(
-      activeConnectionId,
-      final,
-      selector,
-      jobName.trim().length > 0 ? jobName.trim() : null,
-    )
+    const trimmedName = jobName.trim().length > 0 ? jobName.trim() : null
+    // Preferred path: queue by catalog id — the server uses the published
+    // manifest and stamps the job with backend/runtime/operator intent. The
+    // manifest+knobs path is the ad-hoc escape hatch for catalog-less packs.
+    const result = catalogId
+      ? await deployCatalogCapability(activeConnectionId, catalogId, selector, trimmedName)
+      : await deployCapability(activeConnectionId, manifestWithKnobs(manifest, knobs), selector, trimmedName)
     setDeploying(false)
     if (result.error || !result.jobId) {
       setDeployError(result.error ?? "deploy returned no job id")
       return
     }
     setLastEnqueued({ jobId: result.jobId, at: Date.now() })
-    onOpenJob(result.jobId, jobName.trim().length > 0 ? jobName.trim() : null)
-  }, [activeConnectionId, manifest, knobs, selector, jobName, onOpenJob])
+    onOpenJob(result.jobId, trimmedName)
+  }, [activeConnectionId, catalogId, manifest, knobs, selector, jobName, onOpenJob])
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-doc-bg text-[12px] text-chrome-text">
@@ -284,7 +293,7 @@ export function WarrenDeployPanel({
               ) : null}
               <p className="text-[10px] leading-snug text-chrome-text/55">
                 Queues a row in <span className="font-mono">rvbbit.warren_jobs</span>;
-                a matching warren-agent claims it and registers the backend.
+                a matching warren-agent claims it and registers the backend or runtime.
                 Knob overrides from the Overview tab are baked into the
                 submitted manifest.
               </p>

@@ -100,6 +100,7 @@ export interface WarrenJob {
   endpoint_url: string | null
   backend_name: string | null
   operator_name: string | null
+  runtime_name: string | null
   error: string | null
   logs: unknown
   created_at: number | null
@@ -119,6 +120,7 @@ export interface WarrenDeployment {
   endpoint_url: string | null
   backend_name: string | null
   operator_name: string | null
+  runtime_name: string | null
   manifest: unknown
   compose_project: string | null
   work_dir: string | null
@@ -159,6 +161,7 @@ export interface WarrenInventoryRow {
   endpoint_url: string | null
   backend_name: string | null
   operator_name: string | null
+  runtime_name: string | null
   health: unknown
   error: string | null
   deployment_updated_at: number | null
@@ -236,9 +239,11 @@ function shallowEqualJsonValue(a: unknown, b: unknown): boolean {
  */
 export function manifestWithKnobs(manifest: Manifest, knobs: InstallKnobs): Manifest {
   const copy: Manifest = JSON.parse(JSON.stringify(manifest)) as Manifest
-  copy.backend.batch_size = knobs.batchSize
-  copy.backend.max_concurrent = knobs.maxConcurrent
-  copy.backend.timeout_ms = knobs.timeoutMs
+  if (copy.backend) {
+    copy.backend.batch_size = knobs.batchSize
+    copy.backend.max_concurrent = knobs.maxConcurrent
+    copy.backend.timeout_ms = knobs.timeoutMs
+  }
   copy.runtime = { ...(copy.runtime ?? {}), device: knobs.device }
   return copy
 }
@@ -359,6 +364,7 @@ function parseInventoryRow(r: Record<string, unknown>): WarrenInventoryRow {
     endpoint_url: r.endpoint_url == null ? null : String(r.endpoint_url),
     backend_name: r.backend_name == null ? null : String(r.backend_name),
     operator_name: r.operator_name == null ? null : String(r.operator_name),
+    runtime_name: r.runtime_name == null ? null : String(r.runtime_name),
     health: r.health ?? null,
     error: r.error == null ? null : String(r.error),
     deployment_updated_at: epoch(r.deployment_updated_at),
@@ -410,7 +416,7 @@ export async function fetchWarrenNodes(
 
 const JOB_COLS = `job_id, kind, desired_state, name, target_selector,
        status, claimed_by, claimed_at, attempts,
-       endpoint_url, backend_name, operator_name,
+       endpoint_url, backend_name, operator_name, runtime_name,
        error, logs, created_at, started_at, finished_at, manifest`
 
 function parseJob(r: Record<string, unknown>): WarrenJob {
@@ -427,6 +433,7 @@ function parseJob(r: Record<string, unknown>): WarrenJob {
     endpoint_url: r.endpoint_url == null ? null : String(r.endpoint_url),
     backend_name: r.backend_name == null ? null : String(r.backend_name),
     operator_name: r.operator_name == null ? null : String(r.operator_name),
+    runtime_name: r.runtime_name == null ? null : String(r.runtime_name),
     error: r.error == null ? null : String(r.error),
     logs: r.logs ?? null,
     created_at: epoch(r.created_at),
@@ -473,7 +480,7 @@ export async function fetchWarrenJob(
 // ── Deployments ─────────────────────────────────────────────────────
 
 const DEPLOYMENT_COLS = `deployment_id, job_id, node_id, node_name, kind, name, status,
-       endpoint_url, backend_name, operator_name, manifest,
+       endpoint_url, backend_name, operator_name, runtime_name, manifest,
        compose_project, work_dir, health, error,
        created_at, updated_at, stopped_at`
 
@@ -489,6 +496,7 @@ function parseDeployment(r: Record<string, unknown>): WarrenDeployment {
     endpoint_url: r.endpoint_url == null ? null : String(r.endpoint_url),
     backend_name: r.backend_name == null ? null : String(r.backend_name),
     operator_name: r.operator_name == null ? null : String(r.operator_name),
+    runtime_name: r.runtime_name == null ? null : String(r.runtime_name),
     manifest: r.manifest ?? null,
     compose_project: r.compose_project == null ? null : String(r.compose_project),
     work_dir: r.work_dir == null ? null : String(r.work_dir),
@@ -588,6 +596,32 @@ export async function deployCapability(
   if (!res.ok) return { jobId: null, error: res.error }
   const id = res.rows[0]?.job_id
   if (id == null) return { jobId: null, error: "deploy_capability returned no job id" }
+  return { jobId: String(id) }
+}
+
+/**
+ * Preferred deploy path (0.60.4+): queue by catalog id. The server reads
+ * the manifest from `rvbbit.capability_catalog` and stamps the queued job
+ * with the known backend_name / runtime_name / first operator_name, so the
+ * UI shows intent before Warren claims it. Returns the queued job_id.
+ */
+export async function deployCatalogCapability(
+  connectionId: string,
+  catalogId: string,
+  targetSelector: Record<string, unknown>,
+  jobName?: string | null,
+): Promise<{ jobId: string | null; error?: string }> {
+  const selectorSql = sqlLit(JSON.stringify(targetSelector)) + "::jsonb"
+  const jobNameSql = jobName == null || jobName === "" ? "NULL" : sqlLit(jobName)
+  const sql = `SELECT rvbbit.deploy_catalog_capability(
+      catalog_id => ${sqlLit(catalogId)},
+      target_selector => ${selectorSql},
+      job_name => ${jobNameSql}
+    ) AS job_id`
+  const res = await runQuery(connectionId, sql)
+  if (!res.ok) return { jobId: null, error: res.error }
+  const id = res.rows[0]?.job_id
+  if (id == null) return { jobId: null, error: "deploy_catalog_capability returned no job id" }
   return { jobId: String(id) }
 }
 

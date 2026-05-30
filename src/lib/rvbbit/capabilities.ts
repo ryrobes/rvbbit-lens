@@ -31,18 +31,37 @@ export interface CatalogEntry {
   title: string
   description: string | null
   tags: string[]
+  /** `hf_backend` (model pack) or `runtime_sidecar` (execution runtime). */
   kind: string
   source_provider: string | null
   source_model: string | null
   source_revision: string | null
   license: string | null
-  backend_name: string
-  backend_transport: string
+  /** null for runtime sidecars — they register a runtime, not a backend. */
+  backend_name: string | null
+  backend_transport: string | null
   runtime_template: string
   runtime_handler: string
+  /** Set for runtime sidecars: the rvbbit.python_runtimes name + language. */
+  runtime_name: string | null
+  runtime_language: string | null
+  /** Warren registration path, e.g. `/predict` (backend) or `/run` (runtime). */
+  endpoint_path: string | null
   device: string
   operators: string[]
   manifest_path: string
+  /**
+   * Inline manifest from `rvbbit.capability_catalog.manifest` when the
+   * catalog came from the DB (the primary source). Lets the UI skip the
+   * disk YAML read for normal deploy/detail flows. Null for catalog.json
+   * fallback rows, which still carry `manifest_path`.
+   */
+  manifest?: Manifest | null
+}
+
+/** A runtime-sidecar capability registers an execution runtime, not a model backend. */
+export function isRuntimeCapability(c: CatalogEntry): boolean {
+  return c.kind === "runtime_sidecar"
 }
 
 export interface CatalogDoc {
@@ -75,8 +94,10 @@ export interface ManifestSourceBlock {
 export interface ManifestRuntimeBlock {
   template?: string
   handler?: string
+  language?: string
   device?: string
   base_image?: string
+  python_version?: string
   env?: Record<string, string>
   extra_requirements?: string[]
 }
@@ -98,6 +119,16 @@ export interface ManifestSmokeBlock {
   sql?: string[]
 }
 
+/** Runtime-sidecar registration block (vs the `backend` block on model packs). */
+export interface ManifestRuntimeRegistrationBlock {
+  name: string
+  language?: string
+  endpoint?: string | null
+  endpoint_path?: string | null
+  set_default?: boolean
+  labels?: Record<string, unknown>
+}
+
 export interface Manifest {
   api_version: string
   kind: string
@@ -108,10 +139,18 @@ export interface Manifest {
   tags?: string[]
   source?: ManifestSourceBlock
   runtime?: ManifestRuntimeBlock
-  backend: ManifestBackendBlock
+  /** Present on model packs (`kind: hf_backend`); absent on runtime sidecars. */
+  backend?: ManifestBackendBlock
+  /** Present on runtime sidecars (`kind: runtime_sidecar`). */
+  runtime_registration?: ManifestRuntimeRegistrationBlock
+  warren?: { endpoint_path?: string | null }
   operators?: OperatorDef[]
   smoke?: ManifestSmokeBlock
   [k: string]: unknown
+}
+
+export function isRuntimeManifest(m: Manifest): boolean {
+  return m.kind === "runtime_sidecar"
 }
 
 // ── Install state ───────────────────────────────────────────────────
@@ -128,6 +167,8 @@ export type InstallState =
   | "error_seen"
   | "healthy"
   | "failing"
+  | "runtime_ready"
+  | "runtime_failing"
   | "external"
 
 export interface InstallStateFlags {
@@ -137,6 +178,10 @@ export interface InstallStateFlags {
   errorSeen: boolean
   /** null = never probed in this session */
   healthy: boolean | null
+  /** runtime-sidecar registered with status = 'ready' */
+  runtimeReady: boolean
+  /** runtime-sidecar registered with status in ('failed','disabled') */
+  runtimeFailing: boolean
   external: boolean
 }
 
@@ -164,9 +209,26 @@ export interface InstalledBackend {
   created_at: number | null
 }
 
+/** A registered execution runtime — a row in rvbbit.python_runtimes. */
+export interface InstalledRuntime {
+  name: string
+  endpoint_url: string | null
+  language: string | null
+  status: string
+  labels: Record<string, unknown> | null
+  runtime_source: string | null
+  install_manifest: Manifest | null
+  health: unknown
+  created_at: number | null
+  updated_at: number | null
+}
+
 export interface JoinedCatalogEntry {
   catalog: CatalogEntry
+  /** Set for `hf_backend` packs joined to rvbbit.backend_health. */
   installed: InstalledBackend | null
+  /** Set for `runtime_sidecar` packs joined to rvbbit.python_runtimes. */
+  installedRuntime: InstalledRuntime | null
   flags: InstallStateFlags
 }
 
@@ -174,6 +236,8 @@ export interface CatalogJoin {
   entries: JoinedCatalogEntry[]
   /** Installed backends with no matching catalog row — the `external` bucket. */
   external: InstalledBackend[]
+  /** Registered runtimes with no matching catalog row. */
+  externalRuntimes: InstalledRuntime[]
 }
 
 // ── /api/db/query helper (same shape as sibling modules) ────────────
@@ -217,15 +281,75 @@ function sqlLit(s: string): string {
 
 // ── Catalog fetch (via API route) ───────────────────────────────────
 
-export async function fetchCatalog(): Promise<{
+// The DB catalog (`rvbbit.capability_catalog`) is the primary source as of
+// 0.60.4; catalog.json (served by the API route) is read-only fallback.
+const CAPABILITY_CATALOG_SQL = `SELECT
+  id, manifest_path, name, title, description, tags, kind, license,
+  source_provider, source_model, source_revision,
+  backend_name, backend_transport,
+  runtime_name, runtime_language, runtime_template, runtime_handler,
+  endpoint_path, device, operators, manifest
+FROM rvbbit.capability_catalog
+WHERE active
+ORDER BY kind, name`
+
+function strArr(v: unknown): string[] {
+  return Array.isArray(v) ? v.map((x) => String(x)) : []
+}
+
+function parseCatalogRow(r: Record<string, unknown>): CatalogEntry {
+  const manifest = r.manifest
+  return {
+    id: String(r.id ?? ""),
+    name: String(r.name ?? ""),
+    title: String(r.title ?? r.name ?? ""),
+    description: r.description == null ? null : String(r.description),
+    tags: strArr(r.tags),
+    kind: String(r.kind ?? ""),
+    source_provider: r.source_provider == null ? null : String(r.source_provider),
+    source_model: r.source_model == null ? null : String(r.source_model),
+    source_revision: r.source_revision == null ? null : String(r.source_revision),
+    license: r.license == null ? null : String(r.license),
+    backend_name: r.backend_name == null ? null : String(r.backend_name),
+    backend_transport: r.backend_transport == null ? null : String(r.backend_transport),
+    runtime_name: r.runtime_name == null ? null : String(r.runtime_name),
+    runtime_language: r.runtime_language == null ? null : String(r.runtime_language),
+    runtime_template: String(r.runtime_template ?? ""),
+    runtime_handler: String(r.runtime_handler ?? ""),
+    endpoint_path: r.endpoint_path == null ? null : String(r.endpoint_path),
+    device: String(r.device ?? "auto"),
+    operators: strArr(r.operators),
+    manifest_path: String(r.manifest_path ?? ""),
+    manifest: manifest && typeof manifest === "object" ? (manifest as Manifest) : null,
+  }
+}
+
+/**
+ * Load the capability catalog. When a connection is given, read the DB
+ * catalog (`rvbbit.capability_catalog`) — the primary source. Fall back to
+ * the static catalog.json (API route) when there's no connection, the table
+ * is absent (older extension), or it's empty.
+ */
+export async function fetchCatalog(connectionId?: string | null): Promise<{
   doc: CatalogDoc | null
+  source?: "db" | "file"
   error?: string
 }> {
+  if (connectionId) {
+    const res = await runQuery(connectionId, CAPABILITY_CATALOG_SQL)
+    if (res.ok && res.rows.length > 0) {
+      return {
+        doc: { schema_version: 1, capabilities: res.rows.map(parseCatalogRow) },
+        source: "db",
+      }
+    }
+    // res not ok (table missing) or empty → fall through to the JSON file.
+  }
   try {
     const res = await fetch("/api/rvbbit/capabilities?action=catalog")
     const body = (await res.json()) as { ok: boolean; doc?: CatalogDoc; error?: string }
     if (!body.ok) return { doc: null, error: body.error ?? "failed to load catalog" }
-    return { doc: body.doc ?? null }
+    return { doc: body.doc ?? null, source: "file" }
   } catch (e) {
     return { doc: null, error: e instanceof Error ? e.message : String(e) }
   }
@@ -315,6 +439,50 @@ export async function fetchInstalledBackends(
   return { backends: res.rows.map(parseInstalled) }
 }
 
+// ── Installed-runtime query (CAPABILITIES.md § "Installed Runtime Query") ──
+
+const PYTHON_RUNTIMES_SQL = `SELECT
+  name,
+  endpoint_url,
+  language,
+  status,
+  labels,
+  runtime_source,
+  install_manifest,
+  health,
+  created_at,
+  updated_at
+FROM rvbbit.python_runtimes
+ORDER BY name`
+
+function parseRuntime(r: Record<string, unknown>): InstalledRuntime {
+  const labels = r.labels
+  const manifest = r.install_manifest
+  return {
+    name: String(r.name ?? ""),
+    endpoint_url: r.endpoint_url == null ? null : String(r.endpoint_url),
+    language: r.language == null ? null : String(r.language),
+    status: String(r.status ?? ""),
+    labels: labels && typeof labels === "object" ? (labels as Record<string, unknown>) : null,
+    runtime_source: r.runtime_source == null ? null : String(r.runtime_source),
+    install_manifest:
+      manifest && typeof manifest === "object" ? (manifest as Manifest) : null,
+    health: r.health ?? null,
+    created_at: epoch(r.created_at),
+    updated_at: epoch(r.updated_at),
+  }
+}
+
+export async function fetchInstalledRuntimes(
+  connectionId: string,
+): Promise<{ runtimes: InstalledRuntime[]; error?: string }> {
+  const res = await runQuery(connectionId, PYTHON_RUNTIMES_SQL)
+  // python_runtimes is newer; tolerate its absence so the capabilities
+  // window still works against older extensions (treat as "no runtimes").
+  if (!res.ok) return { runtimes: [], error: res.error }
+  return { runtimes: res.rows.map(parseRuntime) }
+}
+
 // ── 7-state derivation ──────────────────────────────────────────────
 
 /**
@@ -322,31 +490,59 @@ export async function fetchInstalledBackends(
  * map of last-probe results (so a window that has just probed a backend
  * can fold `healthy`/`failing` into the badges without a re-query).
  */
+const RUNTIME_READY_STATUS = new Set(["ready"])
+const RUNTIME_FAILING_STATUS = new Set(["failed", "disabled"])
+
 export function joinCatalogToInstalled(
   catalog: CatalogEntry[],
   installed: InstalledBackend[],
+  runtimes: InstalledRuntime[] = [],
   probes?: Map<string, ProbeResult>,
 ): CatalogJoin {
   const byName = new Map(installed.map((b) => [b.name, b]))
-  const catalogNames = new Set(catalog.map((c) => c.backend_name))
+  const byRuntime = new Map(runtimes.map((r) => [r.name, r]))
+  const catalogBackendNames = new Set(
+    catalog.map((c) => c.backend_name).filter((n): n is string => !!n),
+  )
+  const catalogRuntimeNames = new Set(
+    catalog.map((c) => c.runtime_name).filter((n): n is string => !!n),
+  )
 
   const entries: JoinedCatalogEntry[] = catalog.map((c) => {
-    const inst = byName.get(c.backend_name) ?? null
-    const probe = probes?.get(c.backend_name)
+    if (isRuntimeCapability(c)) {
+      const rt = c.runtime_name ? byRuntime.get(c.runtime_name) ?? null : null
+      const status = rt?.status ?? ""
+      const flags: InstallStateFlags = {
+        catalogOnly: rt == null,
+        registered: rt != null,
+        used: false,
+        errorSeen: false,
+        healthy: null,
+        runtimeReady: !!rt && RUNTIME_READY_STATUS.has(status),
+        runtimeFailing: !!rt && RUNTIME_FAILING_STATUS.has(status),
+        external: false,
+      }
+      return { catalog: c, installed: null, installedRuntime: rt, flags }
+    }
+    const inst = c.backend_name ? byName.get(c.backend_name) ?? null : null
+    const probe = c.backend_name ? probes?.get(c.backend_name) : undefined
     const flags: InstallStateFlags = {
       catalogOnly: inst == null,
       registered: inst != null,
       used: !!inst && inst.n_calls > 0,
       errorSeen: !!inst && inst.n_errors > 0,
       healthy: probe ? probe.ok : null,
+      runtimeReady: false,
+      runtimeFailing: false,
       external: false,
     }
-    return { catalog: c, installed: inst, flags }
+    return { catalog: c, installed: inst, installedRuntime: null, flags }
   })
 
-  const external = installed.filter((b) => !catalogNames.has(b.name))
+  const external = installed.filter((b) => !catalogBackendNames.has(b.name))
+  const externalRuntimes = runtimes.filter((r) => !catalogRuntimeNames.has(r.name))
 
-  return { entries, external }
+  return { entries, external, externalRuntimes }
 }
 
 /** Compact label list — fed to the badge primitive in instruments.tsx. */
@@ -358,6 +554,8 @@ export function flagsToStates(flags: InstallStateFlags): InstallState[] {
   if (flags.errorSeen) out.push("error_seen")
   if (flags.healthy === true) out.push("healthy")
   if (flags.healthy === false) out.push("failing")
+  if (flags.runtimeReady) out.push("runtime_ready")
+  if (flags.runtimeFailing) out.push("runtime_failing")
   if (flags.external) out.push("external")
   return out
 }
@@ -634,7 +832,7 @@ export interface InstallKnobs {
 }
 
 export function defaultKnobs(manifest: Manifest): InstallKnobs {
-  const backend = manifest.backend
+  const backend: Partial<ManifestBackendBlock> = manifest.backend ?? {}
   const runtime = manifest.runtime ?? {}
   return {
     device: runtime.device ?? "auto",
@@ -651,9 +849,12 @@ export function defaultKnobs(manifest: Manifest): InstallKnobs {
 /** Apply knobs onto a manifest copy. Pure — never mutates the input. */
 function applyKnobs(manifest: Manifest, knobs: InstallKnobs): Manifest {
   const copy: Manifest = JSON.parse(JSON.stringify(manifest)) as Manifest
-  copy.backend.batch_size = knobs.batchSize
-  copy.backend.max_concurrent = knobs.maxConcurrent
-  copy.backend.timeout_ms = knobs.timeoutMs
+  // Backend knobs only apply to model packs; runtime sidecars have no backend.
+  if (copy.backend) {
+    copy.backend.batch_size = knobs.batchSize
+    copy.backend.max_concurrent = knobs.maxConcurrent
+    copy.backend.timeout_ms = knobs.timeoutMs
+  }
   copy.runtime = { ...(copy.runtime ?? {}), device: knobs.device }
   return copy
 }
@@ -672,10 +873,15 @@ export function renderManifest(
   knobs: InstallKnobs,
 ): RenderedArtifacts {
   const m = applyKnobs(manifest, knobs)
+  const runtime = isRuntimeManifest(m)
   return {
     manifestYaml: renderManifestYaml(m),
-    registerSql: renderRegisterSql(m),
-    operatorSql: renderOperatorSql(m),
+    registerSql: runtime ? renderRegisterRuntimeSql(m) : renderRegisterSql(m),
+    // Runtime sidecars don't create operators directly (OPERATORS.md §16:
+    // they become node primitives used by operators).
+    operatorSql: runtime
+      ? `-- ${m.name} is an execution runtime; it registers no operators.\n-- Use it from an operator's \`kind: python\` node (env + handler).\n`
+      : renderOperatorSql(m),
     smokeSql: renderSmokeSql(m),
     composeYaml: renderCompose(m, knobs),
     composeGpuYaml: renderGpuCompose(m),
@@ -711,7 +917,7 @@ function sqlTextArray(values: string[]): string {
 }
 
 function backendEndpoint(m: Manifest): string {
-  if (m.backend.endpoint) return m.backend.endpoint
+  if (m.backend?.endpoint) return m.backend.endpoint
   const service = m.name.replace(/_/g, "-")
   return `http://${service}:8080/predict`
 }
@@ -727,8 +933,10 @@ function pickInstallManifest(m: Manifest): Record<string, unknown> {
     "tags",
     "source",
     "runtime",
+    "runtime_registration",
     "backend",
     "operators",
+    "warren",
   ]
   const out: Record<string, unknown> = {}
   for (const k of keep) {
@@ -737,8 +945,40 @@ function pickInstallManifest(m: Manifest): Record<string, unknown> {
   return out
 }
 
+/**
+ * Runtime-sidecar register SQL — mirrors `render_register_sql`'s
+ * `runtime_sidecar` branch in capabilities/tools/rvbbit-capability.
+ * Calls rvbbit.register_python_runtime(...) instead of register_backend.
+ */
+function renderRegisterRuntimeSql(m: Manifest): string {
+  const reg = m.runtime_registration ?? { name: m.name }
+  const runtime = m.runtime ?? {}
+  const endpointPath = m.warren?.endpoint_path ?? reg.endpoint_path ?? "/run"
+  const service = m.name.replace(/_/g, "-")
+  const endpoint = reg.endpoint ?? `http://${service}:8080${endpointPath}`
+  const labels = reg.labels ?? {
+    language: runtime.language ?? "python",
+    capability_kind: "runtime_sidecar",
+  }
+  return [
+    "-- Generated by rvbbit-lens capabilities renderer (TS port).",
+    `-- Runtime capability: ${m.name}`,
+    "SELECT rvbbit.register_python_runtime(",
+    `  runtime_name     => ${sqlLit(reg.name)},`,
+    `  endpoint_url     => ${sqlLit(endpoint)},`,
+    "  runtime_status  => 'ready',",
+    `  runtime_labels  => ${sqlJson(labels)},`,
+    "  runtime_source  => 'capability',",
+    `  install_manifest => ${sqlJson(pickInstallManifest(m))},`,
+    `  set_default     => ${reg.set_default === false ? "false" : "true"}`,
+    ");",
+    "",
+  ].join("\n")
+}
+
 function renderRegisterSql(m: Manifest): string {
   const backend = m.backend
+  if (!backend) return renderRegisterRuntimeSql(m)
   const source = m.source ?? {}
   const opts: Record<string, unknown> = { ...(backend.opts ?? {}) }
   if (source.model && !("model" in opts)) opts.model = source.model
@@ -772,9 +1012,9 @@ function renderRegisterSql(m: Manifest): string {
 
 function defaultStep(m: Manifest, op: OperatorDef): unknown {
   return {
-    name: op.step_name ?? m.backend.name,
+    name: op.step_name ?? m.backend?.name ?? m.name,
     kind: "specialist",
-    specialist: m.backend.name,
+    specialist: m.backend?.name ?? m.name,
     inputs:
       op.inputs ??
       Object.fromEntries(op.arg_names.map((name) => [name, `{{ inputs.${name} }}`])),
@@ -809,11 +1049,24 @@ function renderOperatorSql(m: Manifest): string {
 }
 
 function renderSmokeSql(m: Manifest): string {
+  const smoke = m.smoke ?? {}
+  // Runtime sidecars have no /predict backend to probe; their smoke is the
+  // manifest's own SQL (typically a python_runtimes status check).
+  if (isRuntimeManifest(m) || !m.backend) {
+    const lines = ["-- Generated runtime smoke check."]
+    for (const s of smoke.sql ?? []) lines.push(s)
+    if ((smoke.sql ?? []).length === 0 && m.runtime_registration?.name) {
+      lines.push(
+        `SELECT name, endpoint_url, status FROM rvbbit.python_runtimes WHERE name = ${sqlLit(m.runtime_registration.name)};`,
+      )
+    }
+    lines.push("")
+    return lines.join("\n")
+  }
   const lines = [
     "-- Generated smoke checks. Run after register.sql/operator.sql.",
     `SELECT jsonb_pretty(rvbbit.backend_probe(${sqlLit(m.backend.name)}));`,
   ]
-  const smoke = m.smoke ?? {}
   for (const s of smoke.sql ?? []) lines.push(s)
   const operators = m.operators ?? []
   if (operators.length > 0 && smoke.inputs && smoke.inputs.length > 0) {
