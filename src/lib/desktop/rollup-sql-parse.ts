@@ -331,11 +331,18 @@ export function parseRollupSql(sqlRaw: string): ParsedRollup | null {
     const limitBody = sql.slice(limitW.end, sql.length).trim()
     const n = Number(limitBody)
     if (!Number.isInteger(n) || n < 1) return null
-    // Top-N: ORDER BY must be a single measure expr/alias with a direction.
     if (!orderBody) return null
-    const rank = parseRankTerm(orderBody, measures)
-    if (!rank) return null
-    spec.limit = { n, byMeasureId: rank.measureId, dir: rank.dir }
+    // Explicit pill sorts (refs are dims/aliases) → orderBy + bare LIMIT.
+    // Otherwise a Top-N rank (ORDER BY a measure *expression*) → limit.byMeasureId.
+    const explicit = parseOrderTerms(orderBody, spec)
+    if (explicit) {
+      spec.orderBy = explicit
+      spec.limit = { n }
+    } else {
+      const rank = parseRankTerm(orderBody, measures)
+      if (!rank) return null
+      spec.limit = { n, byMeasureId: rank.measureId, dir: rank.dir }
+    }
   } else if (orderBody) {
     // No limit: either the default ordering (don't store) or explicit terms.
     if (norm(orderBody) !== norm(defaultOrderExpr(spec))) {

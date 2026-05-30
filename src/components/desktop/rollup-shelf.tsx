@@ -1,7 +1,7 @@
 "use client"
 
 import { useEffect, useMemo, useRef, useState } from "react"
-import { ChevronDown, Filter, Layers, Search, Sigma, TreeStructure, TrendingUp, X } from "@/lib/icons"
+import { ChevronDown, Filter, Layers, Search, Sigma, SortAscending, SortDescending, TreeStructure, TrendingUp, X } from "@/lib/icons"
 import type {
   RollupCompareOp,
   RollupFilter,
@@ -19,8 +19,11 @@ import {
   clearPivot,
   columnFilters,
   cycleMeasureAgg,
+  cycleOrderBy,
   filterBadge,
   measureLabel,
+  orderDir,
+  orderIndex,
   removeGroupBy,
   removeMeasure,
   setColumnFilters,
@@ -66,6 +69,12 @@ export function RollupShelf({ spec, onEdit, onRepivot, onProbeValues, columnKind
   const showDivider = spec.groupBy.length > 0 && spec.measures.length > 0
   const havingFor = (id: string) => spec.having?.find((h) => h.measureId === id)
   const kindOf = (name: string): FilterKind => columnKind?.(name) ?? "text"
+  const orderCount = spec.orderBy?.length ?? 0
+  const sortFor = (ref: string): SortInfo => {
+    const dir = orderDir(spec, ref)
+    const idx = orderIndex(spec, ref)
+    return { dir, badge: orderCount > 1 && idx >= 0 ? String(idx + 1) : null }
+  }
 
   // Filters whose column isn't a group-by dim → shown as standalone chips.
   const groupedNames = new Set(spec.groupBy.map((t) => t.column.name.toLowerCase()))
@@ -92,6 +101,8 @@ export function RollupShelf({ spec, onEdit, onRepivot, onProbeValues, columnKind
           term={term}
           filters={columnFilters(spec, term.column.name)}
           kind={kindOf(term.column.name)}
+          sort={sortFor(term.column.name)}
+          onCycleSort={() => onEdit((s) => cycleOrderBy(s, term.column.name))}
           onEdit={onEdit}
           onProbeValues={onProbeValues}
         />
@@ -100,7 +111,14 @@ export function RollupShelf({ spec, onEdit, onRepivot, onProbeValues, columnKind
       {showDivider ? <Divider /> : null}
 
       {spec.measures.map((m) => (
-        <MeasurePill key={`m:${m.id}`} measure={m} having={havingFor(m.id)} onEdit={onEdit} />
+        <MeasurePill
+          key={`m:${m.id}`}
+          measure={m}
+          having={havingFor(m.id)}
+          sort={sortFor(m.alias)}
+          onCycleSort={() => onEdit((s) => cycleOrderBy(s, m.alias))}
+          onEdit={onEdit}
+        />
       ))}
 
       {orphanColumns.length > 0 ? <Divider /> : null}
@@ -130,6 +148,29 @@ export function RollupShelf({ spec, onEdit, onRepivot, onProbeValues, columnKind
 
 function Divider() {
   return <span className="mx-0.5 h-3.5 w-px bg-chrome-border/60" />
+}
+
+interface SortInfo { dir: "asc" | "desc" | null; badge: string | null }
+
+/** Sort toggle on a pill: none → asc → desc → none. */
+function SortButton({ sort, onCycle }: { sort: SortInfo; onCycle: () => void }) {
+  const Icon = sort.dir === "desc" ? SortDescending : SortAscending
+  return (
+    <span
+      role="button"
+      onClick={(e) => { e.stopPropagation(); onCycle() }}
+      title={sort.dir ? `sorted ${sort.dir} — click to ${sort.dir === "asc" ? "flip to desc" : "clear"}` : "sort"}
+      className={cn(
+        "ml-0.5 inline-flex items-center gap-0.5 rounded-full",
+        sort.dir
+          ? "bg-main/15 px-1 text-[9px] text-main hover:bg-main/25"
+          : "h-3.5 w-3.5 justify-center text-chrome-text/40 opacity-0 transition-opacity hover:bg-foreground/10 hover:text-foreground group-hover:opacity-100",
+      )}
+    >
+      <Icon className="h-2.5 w-2.5" />
+      {sort.dir && sort.badge ? <span>{sort.badge}</span> : null}
+    </span>
+  )
 }
 
 function RemoveBtn({ onRemove }: { onRemove: (e: React.MouseEvent) => void }) {
@@ -183,12 +224,16 @@ function GroupPill({
   term,
   filters,
   kind,
+  sort,
+  onCycleSort,
   onEdit,
   onProbeValues,
 }: {
   term: RollupGroupTerm
   filters: RollupFilter[]
   kind: FilterKind
+  sort: SortInfo
+  onCycleSort: () => void
   onEdit: EditFn
   onProbeValues?: ProbeFn
 }) {
@@ -238,6 +283,7 @@ function GroupPill({
             <Filter className="h-2.5 w-2.5" />
           </span>
         )}
+        <SortButton sort={sort} onCycle={onCycleSort} />
         <RemoveBtn onRemove={() => onEdit((s) => removeGroupBy(s, name))} />
       </span>
       {menu === "grain" && term.grain ? (
@@ -510,7 +556,19 @@ function RangeFilter({
   )
 }
 
-function MeasurePill({ measure: m, having, onEdit }: { measure: RollupMeasure; having?: RollupHavingTerm; onEdit: EditFn }) {
+function MeasurePill({
+  measure: m,
+  having,
+  sort,
+  onCycleSort,
+  onEdit,
+}: {
+  measure: RollupMeasure
+  having?: RollupHavingTerm
+  sort: SortInfo
+  onCycleSort: () => void
+  onEdit: EditFn
+}) {
   const { open, setOpen, ref } = usePopover()
   const cyclable = !!m.column
   return (
@@ -543,6 +601,7 @@ function MeasurePill({ measure: m, having, onEdit }: { measure: RollupMeasure; h
             <Filter className="h-2.5 w-2.5" />
           </span>
         )}
+        <SortButton sort={sort} onCycle={onCycleSort} />
         <RemoveBtn onRemove={() => onEdit((s) => removeMeasure(s, m.id))} />
       </span>
       {open ? (
@@ -660,6 +719,9 @@ function PivotChip({ pivot, onEdit, onRepivot }: { pivot: RollupPivot; onEdit: E
 function TopNChip({ spec, onEdit }: { spec: RollupSpec; onEdit: EditFn }) {
   const { open, setOpen, ref } = usePopover()
   const limit = spec.limit ?? null
+  // When explicit pill sorts drive the order, the limit is just a row cap —
+  // label it "Limit N" rather than implying a Top-N-by-measure ranking.
+  const explicitOrder = (spec.orderBy?.length ?? 0) > 0
   const rankLabel = (() => {
     if (!limit) return ""
     const m = spec.measures.find((x) => x.id === limit.byMeasureId) ?? spec.measures.find((x) => x.alias !== "row_count") ?? spec.measures[0]
@@ -670,7 +732,9 @@ function TopNChip({ spec, onEdit }: { spec: RollupSpec; onEdit: EditFn }) {
       {limit ? (
         <span className={cn(PILL, "cursor-pointer hover:border-main/50")} onClick={() => setOpen((o) => !o)} title="edit Top-N">
           <TrendingUp className={cn("h-3 w-3 shrink-0 text-main/75", limit.dir === "asc" && "rotate-180")} />
-          <span className="truncate">{limit.dir === "asc" ? "Bottom" : "Top"} {limit.n} · {rankLabel}</span>
+          <span className="truncate">
+            {explicitOrder ? `Limit ${limit.n}` : `${limit.dir === "asc" ? "Bottom" : "Top"} ${limit.n} · ${rankLabel}`}
+          </span>
           <RemoveBtn onRemove={(e) => { e.stopPropagation(); onEdit(clearLimit) }} />
         </span>
       ) : (

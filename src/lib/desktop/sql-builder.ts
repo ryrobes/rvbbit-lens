@@ -10,6 +10,7 @@ import type {
   RollupLimit,
   RollupMeasure,
   RollupOp,
+  RollupOrderTerm,
   RollupSpec,
 } from "./types"
 
@@ -423,6 +424,28 @@ export function clearMeasureHaving(spec: RollupSpec, measureId: string): RollupS
   return { ...spec, having: having?.length ? having : undefined }
 }
 
+/** Current sort direction for a pill ref (group col name or measure alias). */
+export function orderDir(spec: RollupSpec, ref: string): "asc" | "desc" | null {
+  const t = spec.orderBy?.find((o) => o.ref.toLowerCase() === ref.toLowerCase())
+  return t?.dir ?? null
+}
+
+/** 0-based priority of a ref within the explicit ORDER BY (−1 if absent). */
+export function orderIndex(spec: RollupSpec, ref: string): number {
+  return (spec.orderBy ?? []).findIndex((o) => o.ref.toLowerCase() === ref.toLowerCase())
+}
+
+/** Cycle a pill's sort: none → asc → desc → none. New sorts append (lowest priority). */
+export function cycleOrderBy(spec: RollupSpec, ref: string): RollupSpec {
+  const cur = spec.orderBy ?? []
+  const i = cur.findIndex((o) => o.ref.toLowerCase() === ref.toLowerCase())
+  let next: RollupOrderTerm[]
+  if (i < 0) next = [...cur, { ref, dir: "asc" }]
+  else if (cur[i].dir === "asc") { next = [...cur]; next[i] = { ref, dir: "desc" } }
+  else next = cur.filter((_, j) => j !== i)
+  return { ...spec, orderBy: next.length ? next : undefined }
+}
+
 /** Set the Top-N cap (and ranking measure / direction). */
 export function setLimit(spec: RollupSpec, limit: RollupLimit): RollupSpec {
   return { ...spec, limit }
@@ -639,7 +662,9 @@ export function buildRollupQuery(
     : ""
   const having = renderHaving(spec, measures)
   const topN = renderTopN(spec, measures)
-  const orderBy = topN ? topN.orderBy : renderOrderBy({ ...spec, measures })
+  // Explicit pill sorts win the ORDER BY; a Top-N limit still caps rows.
+  const hasExplicitOrder = (spec.orderBy?.length ?? 0) > 0
+  const orderBy = hasExplicitOrder || !topN ? renderOrderBy({ ...spec, measures }) : topN.orderBy
   const limit = topN ? topN.limit : ""
 
   const sql = [
@@ -702,7 +727,10 @@ function buildPivotQuery(
   // capped to the top N row groups by a measure.
   const having = renderHaving(spec, allMeasures)
   const topN = renderTopN(spec, allMeasures)
-  const orderBy = topN ? topN.orderBy : (rowDims.length > 0 ? "\nORDER BY 1" : "")
+  const hasExplicitOrder = (spec.orderBy?.length ?? 0) > 0
+  const orderBy = hasExplicitOrder
+    ? renderOrderBy({ ...spec, measures: allMeasures })
+    : topN ? topN.orderBy : (rowDims.length > 0 ? "\nORDER BY 1" : "")
   const limit = topN ? topN.limit : ""
 
   const sql = [

@@ -110,6 +110,8 @@ export {
   SidebarSimple as PanelLeftClose,
   Sigma,
   SlidersHorizontal as Settings2,
+  SortAscending,
+  SortDescending,
   Sparkle as Sparkles,
   Stack as Boxes,
   StackSimple as Layers,
