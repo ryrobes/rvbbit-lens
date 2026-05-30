@@ -35,9 +35,11 @@ import type {
   RollupGrain,
   RollupSpec,
 } from "@/lib/desktop/types"
-import { rollupSpecFromColumns } from "@/lib/desktop/sql-builder"
+import { effectiveRollup } from "@/lib/desktop/sql-builder"
+import { reconcileRollupLineage } from "@/lib/desktop/rollup-sql-parse"
 import { rollupChartSpec } from "@/lib/desktop/rollup-chart"
-import { RollupShelf } from "./rollup-shelf"
+import { classifyColumn } from "@/lib/desktop/chart-infer"
+import { RollupShelf, type FilterKind } from "./rollup-shelf"
 import type { QueryResult } from "@/lib/db/types"
 import { cn } from "@/lib/utils"
 import { rowsToCsv } from "@/lib/sql/format"
@@ -83,6 +85,8 @@ interface DataGridWindowProps {
   onEditRollup?: (transform: (s: RollupSpec) => RollupSpec) => void
   /** Re-pivot with a new temporal grain (re-probes distinct values). */
   onRepivot?: (grain: RollupGrain) => void
+  /** Probe distinct source values for a column (WHERE filter multi-select). */
+  onProbeValues?: (column: DesktopColumnRef, search?: string) => Promise<{ values: (string | number | null)[]; truncated: boolean }>
   /**
    * Round-trip back into the KG when this Data window was opened from a
    * KG evidence row (i.e. payload.sourceContext is set). Phase 2's
@@ -117,6 +121,7 @@ export function DataGridWindow({
   onSubscribeParam,
   onEditRollup,
   onRepivot,
+  onProbeValues,
   onOpenKgForSource,
 }: DataGridWindowProps) {
   const view = payload.view ?? {}
@@ -257,6 +262,9 @@ export function DataGridWindow({
         onChangePayload((p) => ({
           ...p,
           sql: trimmedSource,
+          // Keep the rollup shelf in sync with hand-edited SQL: re-parse the
+          // run SQL back into a spec where we can, else detach the shelf.
+          lineage: p.lineage ? reconcileRollupLineage(p.lineage, trimmedSource) : p.lineage,
           reactive: {
             blockName,
             sourceSql: trimmedSource,
@@ -517,11 +525,12 @@ export function DataGridWindow({
   const error = runState.kind === "error" ? runState : null
   const isRunning = runState.kind === "running"
 
-  // The editable rollup spec, when this window is a column-aggregate.
+  // The editable rollup spec the shelf shows — null when this isn't a
+  // column-aggregate window, or when the SQL was hand-edited into a shape
+  // we can't model (detached: rollup === null).
   const rollupSpec = useMemo<RollupSpec | null>(() => {
     const lin = payload.lineage
-    if (!lin || lin.kind !== "column-aggregate") return null
-    return lin.rollup ?? rollupSpecFromColumns(lin.columns ?? [])
+    return lin ? effectiveRollup(lin) : null
   }, [payload.lineage])
 
   // Seed the Chart tab from the rollup spec (knows dims vs measures, and
@@ -530,6 +539,17 @@ export function DataGridWindow({
     () => (rollupSpec ? rollupChartSpec(rollupSpec) : null),
     [rollupSpec],
   )
+
+  // Which filter UI a column gets (text multi-select / numeric / date
+  // range), derived from the result column types when available.
+  const columnKind = useMemo(() => {
+    const map = new Map<string, FilterKind>()
+    for (const c of result?.columns ?? []) {
+      const role = classifyColumn(c)
+      map.set(c.name, role === "numeric" ? "numeric" : role === "temporal" ? "date" : "text")
+    }
+    return (name: string): FilterKind => map.get(name) ?? "text"
+  }, [result])
 
   // Provide the column drag source so result-grid header cells can
   // serialize themselves into a column-drag DataTransfer payload.
@@ -654,7 +674,13 @@ export function DataGridWindow({
         </div>
 
         {rollupSpec && onEditRollup ? (
-          <RollupShelf spec={rollupSpec} onEdit={onEditRollup} onRepivot={onRepivot} />
+          <RollupShelf
+            spec={rollupSpec}
+            onEdit={onEditRollup}
+            onRepivot={onRepivot}
+            onProbeValues={onProbeValues}
+            columnKind={columnKind}
+          />
         ) : null}
 
         <div className="flex-1 overflow-hidden">

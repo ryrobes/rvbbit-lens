@@ -1,7 +1,10 @@
 import type {
   DesktopColumnRef,
+  DesktopQueryLineage,
   RollupAgg,
   RollupCompareOp,
+  RollupFilter,
+  RollupFilterOp,
   RollupGrain,
   RollupGroupTerm,
   RollupLimit,
@@ -255,6 +258,21 @@ export function normalizeRollupSpec(spec: RollupSpec): RollupSpec {
 }
 
 /**
+ * The rollup spec a column-aggregate window currently presents to the
+ * shelf, or `null` when it has none to show:
+ *   - `rollup === null` → detached (hand-edited into un-modelable SQL).
+ *   - `rollup` present → normalized spec (source of truth).
+ *   - `rollup === undefined` → legacy window; derive from the flat columns.
+ * Returns null for any non-column-aggregate lineage.
+ */
+export function effectiveRollup(lineage: DesktopQueryLineage): RollupSpec | null {
+  if (lineage.kind !== "column-aggregate") return null
+  if (lineage.rollup === null) return null
+  if (lineage.rollup) return normalizeRollupSpec(lineage.rollup)
+  return rollupSpecFromColumns(lineage.columns ?? [])
+}
+
+/**
  * Fold a dropped column (or multi-selection) into a spec via the chosen
  * op. Returns the next spec plus whether anything actually changed (so a
  * no-op drop — e.g. a dim already grouped — can be ignored upstream).
@@ -422,6 +440,46 @@ export function clearPivot(spec: RollupSpec): RollupSpec {
   return { ...spec, pivot: null }
 }
 
+/** All WHERE filters targeting a given column. */
+export function columnFilters(spec: RollupSpec, colName: string): RollupFilter[] {
+  const lower = colName.toLowerCase()
+  return (spec.filters ?? []).filter((f) => f.column.name.toLowerCase() === lower)
+}
+
+/** Replace every filter on a column with `next` (pass [] to clear it). */
+export function setColumnFilters(spec: RollupSpec, colName: string, next: RollupFilter[]): RollupSpec {
+  const lower = colName.toLowerCase()
+  const others = (spec.filters ?? []).filter((f) => f.column.name.toLowerCase() !== lower)
+  const filters = [...others, ...next]
+  return { ...spec, filters: filters.length ? filters : undefined }
+}
+
+export function clearColumnFilters(spec: RollupSpec, colName: string): RollupSpec {
+  return setColumnFilters(spec, colName, [])
+}
+
+/** Compact human summary of a column's filters for the shelf badge. */
+export function filterBadge(filters: RollupFilter[]): string {
+  if (filters.length === 0) return ""
+  const byOp = (op: RollupFilterOp) => filters.find((f) => f.op === op)
+  const inF = byOp("in")
+  if (inF) return `in ${inF.values?.length ?? 0}`
+  const notIn = byOp("not_in")
+  if (notIn) return `not in ${notIn.values?.length ?? 0}`
+  if (byOp("is_null")) return "is null"
+  if (byOp("not_null")) return "not null"
+  const gte = byOp("gte") ?? byOp("gt")
+  const lte = byOp("lte") ?? byOp("lt")
+  if (gte && lte) return `${gte.value} – ${lte.value}`
+  if (gte) return `≥ ${gte.value}`
+  if (lte) return `≤ ${lte.value}`
+  const eq = byOp("eq")
+  if (eq) return `= ${eq.value}`
+  const neq = byOp("neq")
+  if (neq) return `≠ ${neq.value}`
+  return `${filters.length} filter${filters.length === 1 ? "" : "s"}`
+}
+
 /** Keep `pivot.measureIds` pointing only at measures that still exist. */
 function reconcilePivot(spec: RollupSpec): RollupSpec {
   if (!spec.pivot?.measureIds) return spec
@@ -438,7 +496,7 @@ export function rollupSpecColumns(spec: RollupSpec): DesktopColumnRef[] {
 }
 
 /** The aggregate expression for a measure, without the `AS alias`. */
-function measureExpr(m: RollupMeasure): string {
+export function measureExpr(m: RollupMeasure): string {
   if (m.agg === "count" && m.column == null) return "count(1)"
   const col = quoteSqlIdent(m.column!.name)
   switch (m.agg) {
@@ -457,7 +515,7 @@ function renderMeasure(m: RollupMeasure): string {
 }
 
 /** The SQL expression a group-by dim contributes (grained or raw). */
-function dimExpr(term: RollupGroupTerm): string {
+export function dimExpr(term: RollupGroupTerm): string {
   const col = quoteSqlIdent(term.column.name)
   return term.grain ? grainTruncExpr(col, term.grain) : col
 }
@@ -481,6 +539,11 @@ function renderOrderBy(spec: RollupSpec): string {
   return ""
 }
 
+/** The default ORDER BY body (no `ORDER BY ` prefix) for a spec's dims/measures. */
+export function defaultOrderExpr(spec: RollupSpec): string {
+  return renderOrderBy({ ...spec, orderBy: undefined }).replace(/^\nORDER BY /, "")
+}
+
 function sqlLiteral(v: string | number | null): string {
   if (v === null) return "NULL"
   if (typeof v === "number") return Number.isFinite(v) ? String(v) : "NULL"
@@ -493,6 +556,31 @@ function rankingMeasure(measures: RollupMeasure[], byId?: string): RollupMeasure
     if (m) return m
   }
   return measures.find((m) => m.alias !== "row_count") ?? measures[0]
+}
+
+const FILTER_OP_SQL: Record<"eq" | "neq" | "gt" | "gte" | "lt" | "lte", string> = {
+  eq: "=", neq: "<>", gt: ">", gte: ">=", lt: "<", lte: "<=",
+}
+
+/** A single WHERE predicate for a filter, or null if it has no effect. */
+function filterPredicate(f: RollupFilter): string | null {
+  const col = quoteSqlIdent(f.column.name)
+  if (f.op === "is_null") return `${col} IS NULL`
+  if (f.op === "not_null") return `${col} IS NOT NULL`
+  if (f.op === "in" || f.op === "not_in") {
+    const vals = (f.values ?? []).filter((v) => v !== null)
+    if (vals.length === 0) return null
+    const list = vals.map(sqlLiteral).join(", ")
+    return `${col} ${f.op === "in" ? "IN" : "NOT IN"} (${list})`
+  }
+  if (f.value === undefined || f.value === null) return null
+  return `${col} ${FILTER_OP_SQL[f.op]} ${sqlLiteral(f.value)}`
+}
+
+/** `WHERE <pred> AND …` over the source columns (pre-aggregation). */
+function renderWhere(spec: RollupSpec): string {
+  const preds = (spec.filters ?? []).map(filterPredicate).filter((p): p is string => p != null)
+  return preds.length > 0 ? `\nWHERE ${preds.join("\n  AND ")}` : ""
 }
 
 /** `HAVING <expr> <op> <val> AND …` over the (resolved) measures. */
@@ -545,6 +633,7 @@ export function buildRollupQuery(
     ...dims.map(dimSelectLine),
     ...measures.map(renderMeasure),
   ]
+  const where = renderWhere(spec)
   const groupBy = dims.length > 0
     ? `\nGROUP BY ${dims.map(dimExpr).join(", ")}`
     : ""
@@ -556,7 +645,7 @@ export function buildRollupQuery(
   const sql = [
     `SELECT`,
     selectLines.join(",\n"),
-    `FROM {${args.parentBlockName}}${groupBy}${having}${orderBy}${limit};`,
+    `FROM {${args.parentBlockName}}${where}${groupBy}${having}${orderBy}${limit};`,
   ].join("\n")
 
   return { sql, title: titleForRollup(args.parentTitle, spec) }
@@ -604,6 +693,7 @@ function buildPivotQuery(
     }
   }
 
+  const where = renderWhere(spec)
   const groupBy = rowDims.length > 0
     ? `\nGROUP BY ${rowDims.map(dimExpr).join(", ")}`
     : ""
@@ -618,7 +708,7 @@ function buildPivotQuery(
   const sql = [
     `SELECT`,
     selectLines.join(",\n"),
-    `FROM {${args.parentBlockName}}${groupBy}${having}${orderBy}${limit};`,
+    `FROM {${args.parentBlockName}}${where}${groupBy}${having}${orderBy}${limit};`,
   ].join("\n")
 
   const rowLabel = rowDims.length > 0 ? rowDims.map((c) => c.column.name).join(", ") : "totals"

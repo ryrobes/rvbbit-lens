@@ -209,10 +209,15 @@ export interface DesktopQueryLineage {
   columns?: DesktopColumnRef[]
   /**
    * Declarative rollup spec — the source of truth for (re)building a
-   * column-aggregate query. Group-bys, measures, ordering, and (future)
-   * pivot all live here so the SQL is a pure function of the spec.
+   * column-aggregate query. Group-bys, measures, ordering, and pivot all
+   * live here so the SQL is a pure function of the spec.
+   *
+   * `null` is a distinct state: the user hand-edited the SQL into a shape
+   * we can't model, so the rollup shelf detaches (hides) while the window
+   * keeps running as plain SQL. Editing back to a recognizable rollup
+   * re-attaches it. `undefined` = legacy window predating the spec.
    */
-  rollup?: RollupSpec
+  rollup?: RollupSpec | null
 }
 
 /**
@@ -229,6 +234,8 @@ export interface RollupSpec {
   measures: RollupMeasure[]
   /** Optional explicit ordering; when absent a sensible default is used. */
   orderBy?: RollupOrderTerm[]
+  /** Pre-aggregation filters on source columns → WHERE (AND-combined). */
+  filters?: RollupFilter[]
   /** Post-aggregation filters on measures → HAVING (AND-combined). */
   having?: RollupHavingTerm[]
   /** Top-N: rank by a measure and cap the row count. */
@@ -238,6 +245,23 @@ export interface RollupSpec {
 }
 
 export type RollupCompareOp = ">" | ">=" | "<" | "<=" | "=" | "!="
+
+/** A WHERE predicate on a source column (pre-aggregation). */
+export type RollupFilterOp =
+  | "in" | "not_in"          // values[]
+  | "eq" | "neq"             // value
+  | "gt" | "gte" | "lt" | "lte" // value (numeric/date bound)
+  | "is_null" | "not_null"
+
+export interface RollupFilter {
+  /** Source column (carries type/dataTypeId so the UI can pick a variant). */
+  column: DesktopColumnRef
+  op: RollupFilterOp
+  /** For `in` / `not_in`. */
+  values?: (string | number | null)[]
+  /** For scalar comparisons. */
+  value?: string | number | null
+}
 
 /** A HAVING condition on an aggregate measure. */
 export interface RollupHavingTerm {

@@ -1,9 +1,10 @@
 "use client"
 
-import { useEffect, useRef, useState } from "react"
-import { ChevronDown, Filter, Layers, Sigma, TreeStructure, TrendingUp, X } from "@/lib/icons"
+import { useEffect, useMemo, useRef, useState } from "react"
+import { ChevronDown, Filter, Layers, Search, Sigma, TreeStructure, TrendingUp, X } from "@/lib/icons"
 import type {
   RollupCompareOp,
+  RollupFilter,
   RollupGrain,
   RollupGroupTerm,
   RollupHavingTerm,
@@ -12,18 +13,24 @@ import type {
   RollupSpec,
 } from "@/lib/desktop/types"
 import {
+  clearColumnFilters,
   clearLimit,
   clearMeasureHaving,
   clearPivot,
+  columnFilters,
   cycleMeasureAgg,
+  filterBadge,
   measureLabel,
   removeGroupBy,
   removeMeasure,
+  setColumnFilters,
   setGroupByGrain,
   setLimit,
   setMeasureHaving,
 } from "@/lib/desktop/sql-builder"
 import { cn } from "@/lib/utils"
+
+export type FilterKind = "text" | "numeric" | "date"
 
 const GRAINS: RollupGrain[] = ["year", "quarter", "month", "week", "day", "hour"]
 const COMPARE_OPS: RollupCompareOp[] = [">", ">=", "<", "<=", "=", "!="]
@@ -32,6 +39,7 @@ const PILL = "group inline-flex max-w-[240px] items-center gap-1 rounded-full bo
 const POPOVER = "absolute left-0 top-full z-50 mt-1 rounded-md border border-chrome-border bg-chrome-bg/95 p-2 shadow-lg backdrop-blur"
 
 type EditFn = (transform: (s: RollupSpec) => RollupSpec) => void
+type ProbeFn = (column: RollupFilter["column"], search?: string) => Promise<{ values: (string | number | null)[]; truncated: boolean }>
 
 interface RollupShelfProps {
   spec: RollupSpec
@@ -39,31 +47,72 @@ interface RollupShelfProps {
   onEdit: EditFn
   /** Re-pivot with a new temporal grain (async re-probe at the host). */
   onRepivot?: (grain: RollupGrain) => void
+  /** Probe distinct source values for a column (filter multi-select). */
+  onProbeValues?: ProbeFn
+  /** Filter UI variant for a source column. */
+  columnKind?: (name: string) => FilterKind
 }
 
 /**
  * Editable view of a column-aggregate window's `RollupSpec` — the sibling
  * of the chart shelf and the params chip bar. Pills remove on ✕; measure
- * pills cycle their aggregate on click and carry a HAVING filter via the
- * funnel; temporal pills expose a grain dropdown; a Top-N chip caps rows.
+ * pills cycle their aggregate on click and carry a HAVING filter; group-by
+ * pills carry a WHERE filter (type-specific) and a grain dropdown; a Top-N
+ * chip caps rows. Filters on non-grouped columns surface as standalone
+ * chips so a hand-written WHERE stays visible.
  */
-export function RollupShelf({ spec, onEdit, onRepivot }: RollupShelfProps) {
+export function RollupShelf({ spec, onEdit, onRepivot, onProbeValues, columnKind }: RollupShelfProps) {
   const pivot = spec.pivot ?? null
   const showDivider = spec.groupBy.length > 0 && spec.measures.length > 0
   const havingFor = (id: string) => spec.having?.find((h) => h.measureId === id)
+  const kindOf = (name: string): FilterKind => columnKind?.(name) ?? "text"
+
+  // Filters whose column isn't a group-by dim → shown as standalone chips.
+  const groupedNames = new Set(spec.groupBy.map((t) => t.column.name.toLowerCase()))
+  const orphanColumns = useMemo(() => {
+    const seen = new Set<string>()
+    const out: RollupFilter["column"][] = []
+    for (const f of spec.filters ?? []) {
+      const key = f.column.name.toLowerCase()
+      if (groupedNames.has(key) || seen.has(key)) continue
+      seen.add(key)
+      out.push(f.column)
+    }
+    return out
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [spec.filters, spec.groupBy])
 
   return (
     <div className="flex flex-wrap items-center gap-1.5 border-b border-chrome-border/60 bg-chrome-bg/40 px-2 py-1.5">
       <span className="select-none text-[9px] uppercase tracking-wider text-chrome-text/70">Rollup</span>
 
       {spec.groupBy.map((term) => (
-        <GroupPill key={`g:${term.column.name}`} term={term} onEdit={onEdit} />
+        <GroupPill
+          key={`g:${term.column.name}`}
+          term={term}
+          filters={columnFilters(spec, term.column.name)}
+          kind={kindOf(term.column.name)}
+          onEdit={onEdit}
+          onProbeValues={onProbeValues}
+        />
       ))}
 
       {showDivider ? <Divider /> : null}
 
       {spec.measures.map((m) => (
         <MeasurePill key={`m:${m.id}`} measure={m} having={havingFor(m.id)} onEdit={onEdit} />
+      ))}
+
+      {orphanColumns.length > 0 ? <Divider /> : null}
+      {orphanColumns.map((col) => (
+        <FilterChip
+          key={`f:${col.name}`}
+          column={col}
+          filters={columnFilters(spec, col.name)}
+          kind={kindOf(col.name)}
+          onEdit={onEdit}
+          onProbeValues={onProbeValues}
+        />
       ))}
 
       {pivot ? (
@@ -130,17 +179,39 @@ function GrainMenu({ value, onPick }: { value: RollupGrain; onPick: (g: RollupGr
   )
 }
 
-function GroupPill({ term, onEdit }: { term: RollupGroupTerm; onEdit: EditFn }) {
-  const { open, setOpen, ref } = usePopover()
+function GroupPill({
+  term,
+  filters,
+  kind,
+  onEdit,
+  onProbeValues,
+}: {
+  term: RollupGroupTerm
+  filters: RollupFilter[]
+  kind: FilterKind
+  onEdit: EditFn
+  onProbeValues?: ProbeFn
+}) {
+  const ref = useRef<HTMLSpanElement>(null)
+  const [menu, setMenu] = useState<null | "grain" | "filter">(null)
+  useEffect(() => {
+    if (!menu) return
+    const onDoc = (e: MouseEvent) => { if (!ref.current?.contains(e.target as Node)) setMenu(null) }
+    document.addEventListener("mousedown", onDoc)
+    return () => document.removeEventListener("mousedown", onDoc)
+  }, [menu])
+
+  const badge = filterBadge(filters)
+  const name = term.column.name
   return (
     <span ref={ref} className="relative inline-flex">
-      <span className={PILL} title={`GROUP BY ${term.column.name}${term.grain ? ` (${term.grain})` : ""}`}>
+      <span className={PILL} title={`GROUP BY ${name}${term.grain ? ` (${term.grain})` : ""}`}>
         <Layers className="h-3 w-3 shrink-0 text-main/75" />
-        <span className="truncate">{term.column.name}</span>
+        <span className="truncate">{name}</span>
         {term.grain ? (
           <span
             role="button"
-            onClick={(e) => { e.stopPropagation(); setOpen((o) => !o) }}
+            onClick={(e) => { e.stopPropagation(); setMenu((m) => (m === "grain" ? null : "grain")) }}
             className="ml-0.5 inline-flex cursor-pointer items-center gap-0.5 rounded-full bg-foreground/[0.07] px-1 text-[9px] text-chrome-text/85 hover:bg-foreground/[0.14] hover:text-foreground"
             title="change grain"
           >
@@ -148,12 +219,294 @@ function GroupPill({ term, onEdit }: { term: RollupGroupTerm; onEdit: EditFn }) 
             <ChevronDown className="h-2 w-2" />
           </span>
         ) : null}
-        <RemoveBtn onRemove={() => onEdit((s) => removeGroupBy(s, term.column.name))} />
+        {badge ? (
+          <span
+            role="button"
+            onClick={(e) => { e.stopPropagation(); setMenu((m) => (m === "filter" ? null : "filter")) }}
+            className="ml-0.5 cursor-pointer rounded-full bg-main/15 px-1 text-[9px] text-main hover:bg-main/25"
+            title="edit filter"
+          >
+            {badge}
+          </span>
+        ) : (
+          <span
+            role="button"
+            onClick={(e) => { e.stopPropagation(); setMenu((m) => (m === "filter" ? null : "filter")) }}
+            className="ml-0.5 inline-grid h-3.5 w-3.5 place-items-center rounded-full text-chrome-text/40 opacity-0 transition-opacity hover:bg-foreground/10 hover:text-foreground group-hover:opacity-100"
+            title="filter (WHERE)"
+          >
+            <Filter className="h-2.5 w-2.5" />
+          </span>
+        )}
+        <RemoveBtn onRemove={() => onEdit((s) => removeGroupBy(s, name))} />
       </span>
-      {open && term.grain ? (
-        <GrainMenu value={term.grain} onPick={(g) => { setOpen(false); onEdit((s) => setGroupByGrain(s, term.column.name, g)) }} />
+      {menu === "grain" && term.grain ? (
+        <GrainMenu value={term.grain} onPick={(g) => { setMenu(null); onEdit((s) => setGroupByGrain(s, name, g)) }} />
+      ) : null}
+      {menu === "filter" ? (
+        <FilterPopover
+          column={term.column}
+          kind={kind}
+          filters={filters}
+          onProbeValues={onProbeValues}
+          onApply={(next) => { setMenu(null); onEdit((s) => setColumnFilters(s, name, next)) }}
+          onClear={() => { setMenu(null); onEdit((s) => clearColumnFilters(s, name)) }}
+        />
       ) : null}
     </span>
+  )
+}
+
+/** Standalone chip for a WHERE filter on a column that isn't grouped. */
+function FilterChip({
+  column,
+  filters,
+  kind,
+  onEdit,
+  onProbeValues,
+}: {
+  column: RollupFilter["column"]
+  filters: RollupFilter[]
+  kind: FilterKind
+  onEdit: EditFn
+  onProbeValues?: ProbeFn
+}) {
+  const { open, setOpen, ref } = usePopover()
+  const name = column.name
+  return (
+    <span ref={ref} className="relative inline-flex">
+      <span
+        role="button"
+        onClick={() => setOpen((o) => !o)}
+        className={cn(PILL, "cursor-pointer hover:border-main/50")}
+        title={`WHERE ${name}`}
+      >
+        <Filter className="h-3 w-3 shrink-0 text-main/75" />
+        <span className="truncate">{name}</span>
+        <span className="rounded-full bg-main/15 px-1 text-[9px] text-main">{filterBadge(filters)}</span>
+        <RemoveBtn onRemove={(e) => { e.stopPropagation(); onEdit((s) => clearColumnFilters(s, name)) }} />
+      </span>
+      {open ? (
+        <FilterPopover
+          column={column}
+          kind={kind}
+          filters={filters}
+          onProbeValues={onProbeValues}
+          onApply={(next) => { setOpen(false); onEdit((s) => setColumnFilters(s, name, next)) }}
+          onClear={() => { setOpen(false); onEdit((s) => clearColumnFilters(s, name)) }}
+        />
+      ) : null}
+    </span>
+  )
+}
+
+type FilterColumn = RollupFilter["column"]
+
+function FilterPopover({
+  column,
+  kind,
+  filters,
+  onProbeValues,
+  onApply,
+  onClear,
+}: {
+  column: FilterColumn
+  kind: FilterKind
+  filters: RollupFilter[]
+  onProbeValues?: ProbeFn
+  onApply: (next: RollupFilter[]) => void
+  onClear: () => void
+}) {
+  return (
+    <div className={cn(POPOVER, "min-w-[210px] space-y-1.5")}>
+      <div className="truncate text-[9px] uppercase tracking-wider text-chrome-text/70">filter {column.name}</div>
+      {kind === "text"
+        ? <TextFilter column={column} filters={filters} probe={onProbeValues} onApply={onApply} onClear={onClear} />
+        : <RangeFilter column={column} kind={kind} filters={filters} onApply={onApply} onClear={onClear} />}
+    </div>
+  )
+}
+
+function ApplyClear({ canClear, onApply, onClear }: { canClear: boolean; onApply: () => void; onClear: () => void }) {
+  return (
+    <div className="flex items-center gap-1 pt-0.5">
+      <button type="button" onClick={onApply} className="rounded bg-main/20 px-2 py-0.5 text-[10px] font-medium text-foreground hover:bg-main/30">Apply</button>
+      {canClear ? (
+        <button type="button" onClick={onClear} className="rounded px-2 py-0.5 text-[10px] text-chrome-text hover:bg-danger/15 hover:text-danger">Clear</button>
+      ) : null}
+    </div>
+  )
+}
+
+function TextFilter({
+  column,
+  filters,
+  probe,
+  onApply,
+  onClear,
+}: {
+  column: FilterColumn
+  filters: RollupFilter[]
+  probe?: ProbeFn
+  onApply: (next: RollupFilter[]) => void
+  onClear: () => void
+}) {
+  const existingIn = filters.find((f) => f.op === "in")
+  const [selected, setSelected] = useState<Map<string, string | number | null>>(() => {
+    const m = new Map<string, string | number | null>()
+    for (const v of existingIn?.values ?? []) m.set(String(v), v)
+    return m
+  })
+  const [search, setSearch] = useState("")
+  const [fetched, setFetched] = useState<(string | number | null)[]>([])
+  const [loading, setLoading] = useState(false)
+  const [truncated, setTruncated] = useState(false)
+
+  useEffect(() => {
+    if (!probe) return
+    let cancelled = false
+    const h = setTimeout(async () => {
+      setLoading(true)
+      const res = await probe(column, search)
+      if (cancelled) return
+      setFetched(res.values)
+      setTruncated(res.truncated)
+      setLoading(false)
+    }, search ? 250 : 0)
+    return () => { cancelled = true; clearTimeout(h) }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [search])
+
+  // Always show selected values; append fetched ones not already selected.
+  const display = useMemo(() => {
+    const out: (string | number | null)[] = []
+    const seen = new Set<string>()
+    for (const v of selected.values()) { out.push(v); seen.add(String(v)) }
+    for (const v of fetched) { const k = String(v); if (!seen.has(k)) { out.push(v); seen.add(k) } }
+    return out
+  }, [selected, fetched])
+
+  const toggle = (v: string | number | null) => setSelected((prev) => {
+    const m = new Map(prev)
+    const k = String(v)
+    if (m.has(k)) m.delete(k); else m.set(k, v)
+    return m
+  })
+  const addTyped = () => {
+    const t = search.trim()
+    if (!t) return
+    setSelected((prev) => new Map(prev).set(t, t))
+    setSearch("")
+  }
+  const apply = () => {
+    const vals = [...selected.values()]
+    if (vals.length) onApply([{ column, op: "in", values: vals }])
+    else onClear()
+  }
+
+  return (
+    <div className="space-y-1.5">
+      <div className="flex items-center gap-1 rounded border border-chrome-border/60 bg-doc-bg px-1">
+        <Search className="h-3 w-3 shrink-0 text-chrome-text/55" />
+        <input
+          value={search}
+          autoFocus
+          onChange={(e) => setSearch(e.target.value)}
+          onKeyDown={(e) => { if (e.key === "Enter") addTyped() }}
+          placeholder={probe ? "search values…" : "type a value, Enter"}
+          className="w-full bg-transparent py-0.5 text-[10px] text-foreground outline-none placeholder:text-chrome-text/40"
+        />
+      </div>
+      <div className="max-h-40 overflow-auto rounded border border-chrome-border/40">
+        {loading && display.length === 0 ? (
+          <div className="px-2 py-2 text-[10px] text-chrome-text/50">loading…</div>
+        ) : display.length === 0 ? (
+          <div className="px-2 py-2 text-[10px] text-chrome-text/50">no values</div>
+        ) : (
+          display.map((v) => {
+            const checked = selected.has(String(v))
+            return (
+              <button
+                key={String(v)}
+                type="button"
+                onClick={() => toggle(v)}
+                className={cn(
+                  "flex w-full items-center gap-1.5 px-2 py-0.5 text-left font-mono text-[10px]",
+                  checked ? "bg-main/15 text-foreground" : "text-chrome-text hover:bg-foreground/10",
+                )}
+              >
+                <span className={cn("inline-grid h-3 w-3 shrink-0 place-items-center rounded-sm border", checked ? "border-main bg-main/30" : "border-chrome-border/70")}>
+                  {checked ? <span className="h-1.5 w-1.5 rounded-[1px] bg-main" /> : null}
+                </span>
+                <span className="truncate">{v === null ? "∅ null" : String(v)}</span>
+              </button>
+            )
+          })
+        )}
+      </div>
+      {truncated ? <div className="text-[9px] text-chrome-text/45">showing most common — search to narrow</div> : null}
+      <div className="flex items-center justify-between">
+        <span className="text-[9px] text-chrome-text/55">{selected.size} selected</span>
+        <ApplyClear canClear={!!existingIn} onApply={apply} onClear={onClear} />
+      </div>
+    </div>
+  )
+}
+
+function RangeFilter({
+  column,
+  kind,
+  filters,
+  onApply,
+  onClear,
+}: {
+  column: FilterColumn
+  kind: FilterKind
+  filters: RollupFilter[]
+  onApply: (next: RollupFilter[]) => void
+  onClear: () => void
+}) {
+  const gte = filters.find((f) => f.op === "gte" || f.op === "gt")
+  const lte = filters.find((f) => f.op === "lte" || f.op === "lt")
+  const [lo, setLo] = useState(gte?.value != null ? String(gte.value) : "")
+  const [hi, setHi] = useState(lte?.value != null ? String(lte.value) : "")
+  const inputType = kind === "date" ? "date" : "number"
+
+  const coerce = (s: string): string | number | null => {
+    if (kind === "numeric") { const n = Number(s); return Number.isFinite(n) ? n : null }
+    return s
+  }
+  const apply = () => {
+    const next: RollupFilter[] = []
+    const loV = lo.trim(), hiV = hi.trim()
+    if (loV) { const v = coerce(loV); if (v !== null) next.push({ column, op: "gte", value: v }) }
+    if (hiV) { const v = coerce(hiV); if (v !== null) next.push({ column, op: "lte", value: v }) }
+    if (next.length) onApply(next); else onClear()
+  }
+  return (
+    <div className="space-y-1.5">
+      <div className="flex items-center gap-1">
+        <input
+          type={inputType}
+          value={lo}
+          autoFocus
+          onChange={(e) => setLo(e.target.value)}
+          onKeyDown={(e) => { if (e.key === "Enter") apply() }}
+          placeholder="min"
+          className="w-full rounded border border-chrome-border bg-doc-bg px-1.5 py-0.5 font-mono text-[10px] text-foreground outline-none"
+        />
+        <span className="text-chrome-text/50">–</span>
+        <input
+          type={inputType}
+          value={hi}
+          onChange={(e) => setHi(e.target.value)}
+          onKeyDown={(e) => { if (e.key === "Enter") apply() }}
+          placeholder="max"
+          className="w-full rounded border border-chrome-border bg-doc-bg px-1.5 py-0.5 font-mono text-[10px] text-foreground outline-none"
+        />
+      </div>
+      <ApplyClear canClear={!!(gte || lte)} onApply={apply} onClear={onClear} />
+    </div>
   )
 }
 

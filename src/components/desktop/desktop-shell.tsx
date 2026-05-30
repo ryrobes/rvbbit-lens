@@ -89,6 +89,7 @@ import type {
   DataPayload,
   DesktopBlockDragPayload,
   DesktopColumnDragPayload,
+  DesktopColumnRef,
   DesktopParamOperator,
   RollupGrain,
   RollupOp,
@@ -141,8 +142,8 @@ import { listViewApps } from "@/lib/desktop/view-apps"
 import {
   applyRollupOp,
   buildRollupQuery,
+  effectiveRollup,
   grainTruncExpr,
-  normalizeRollupSpec,
   previewSqlForTable,
   quoteSqlIdent,
   rollupSpecColumns,
@@ -1799,7 +1800,8 @@ export function DesktopShell() {
       const linNow = p?.lineage
       if (!p || !linNow || linNow.kind !== "column-aggregate") return w
 
-      const baseSpec = linNow.rollup ? normalizeRollupSpec(linNow.rollup) : rollupSpecFromColumns(linNow.columns ?? [])
+      const baseSpec = effectiveRollup(linNow)
+      if (!baseSpec) return w
       const nextSpec: RollupSpec = {
         ...baseSpec,
         // The pivot column moves out of the rows (GROUP BY) into headers.
@@ -1849,9 +1851,10 @@ export function DesktopShell() {
       if (lin.parentWindowId !== payload.parentWindowId) return w
       if (lin.relationKey !== payload.relationKey) return w
 
-      // The rollup spec is the source of truth; derive one from the legacy
-      // flat column list for windows that pre-date the spec.
-      const baseSpec = lin.rollup ? normalizeRollupSpec(lin.rollup) : rollupSpecFromColumns(lin.columns ?? [])
+      // The rollup spec is the source of truth (legacy windows derive one
+      // from their flat columns); a detached/custom-SQL window yields null.
+      const baseSpec = effectiveRollup(lin)
+      if (!baseSpec) return w
       const { spec: nextSpec, changed } = applyRollupOp(baseSpec, payload.columns, op)
       if (!changed) return w
 
@@ -1897,7 +1900,8 @@ export function DesktopShell() {
       const p = w.payload as DataPayload | undefined
       const lin = p?.lineage
       if (!p || !lin || lin.kind !== "column-aggregate") return w
-      const baseSpec = lin.rollup ? normalizeRollupSpec(lin.rollup) : rollupSpecFromColumns(lin.columns ?? [])
+      const baseSpec = effectiveRollup(lin)
+      if (!baseSpec) return w
       const nextSpec = transform(baseSpec)
       const parentBlockName = lin.parentBlockName ?? ""
       if (!parentBlockName) return w
@@ -1928,8 +1932,8 @@ export function DesktopShell() {
     const target = canvas?.windows.find((w) => w.id === targetWindowId)
     if (!target || target.kind !== "data") return
     const lin = (target.payload as DataPayload | undefined)?.lineage
-    if (!lin || lin.kind !== "column-aggregate" || !lin.rollup) return
-    const piv = normalizeRollupSpec(lin.rollup).pivot
+    if (!lin || lin.kind !== "column-aggregate") return
+    const piv = effectiveRollup(lin)?.pivot
     if (!piv) return
     const synthPayload: DesktopColumnDragPayload = {
       kind: "rvbbit-lens.desktop.column",
@@ -1942,6 +1946,79 @@ export function DesktopShell() {
     }
     void pivotColumnInWindow(targetWindowId, synthPayload, piv.measureIds, grain)
   }, [pivotColumnInWindow])
+
+  // Probe the distinct values of a source column (for the WHERE filter
+  // multi-select), ordered by frequency, optionally narrowed by a search
+  // substring. Same parent-probe mechanism as the pivot resolver.
+  const probeColumnValues = useCallback(async (
+    targetWindowId: string,
+    column: DesktopColumnRef,
+    search?: string,
+  ): Promise<{ values: (string | number | null)[]; truncated: boolean }> => {
+    const empty = { values: [] as (string | number | null)[], truncated: false }
+    const connectionId = activeConnectionIdRef.current
+    if (!connectionId) return empty
+    const canvas = workspacesRef.current[activeWorkspaceRef.current]
+    const wins = canvas?.windows ?? []
+    const params = canvas?.params ?? []
+    const target = wins.find((w) => w.id === targetWindowId)
+    if (!target || target.kind !== "data") return empty
+    const lin = (target.payload as DataPayload | undefined)?.lineage
+    if (!lin || lin.kind !== "column-aggregate") return empty
+    const parentBlockName = lin.parentBlockName
+    if (!parentBlockName) return empty
+
+    const CAP = 200
+    const col = quoteSqlIdent(column.name)
+    const where = [`${col} IS NOT NULL`]
+    const term = (search ?? "").trim()
+    if (term) {
+      // Escape LIKE wildcards then the SQL literal; `%term%` contains-match.
+      const esc = term.replace(/([\\%_])/g, "\\$1").replace(/'/g, "''")
+      where.push(`${col}::text ILIKE '%${esc}%'`)
+    }
+    const probeId = `__val_probe_${targetWindowId}`
+    const probeSql = [
+      `SELECT ${col} AS v, count(1) AS c`,
+      `FROM {${parentBlockName}}`,
+      `WHERE ${where.join(" AND ")}`,
+      `GROUP BY ${col}`,
+      `ORDER BY c DESC`,
+      `LIMIT ${CAP + 1}`,
+    ].join("\n")
+    const synthetic: DesktopWindowState = {
+      id: probeId,
+      kind: "data",
+      title: "value probe",
+      x: 0, y: 0, width: 1, height: 1, zIndex: 0, minimized: true,
+      payload: {
+        kind: "data",
+        title: "value probe",
+        sql: probeSql,
+        reactive: {
+          blockName: uniqueBlockName("val_probe", wins),
+          sourceSql: probeSql,
+          paramSubscriptions: [],
+          version: 1,
+        },
+      } satisfies DataPayload,
+    }
+    const graph = buildDesktopRuntimeGraph([...wins, synthetic], params)
+    const compiled = graph.blocks.get(probeId)?.compiledSql ?? probeSql
+    try {
+      const res = await fetch("/api/db/query", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ connectionId, sql: compiled, rowLimit: CAP + 1, readOnly: true }),
+      })
+      const body = (await res.json()) as { ok?: boolean; rows?: Record<string, unknown>[] }
+      if (!body.ok || !Array.isArray(body.rows)) return empty
+      const all = body.rows.map((r) => (r.v ?? null) as string | number | null)
+      return { values: all.slice(0, CAP), truncated: all.length > CAP }
+    } catch {
+      return empty
+    }
+  }, [])
 
   const openBlockReference = useCallback((payload: DesktopBlockDragPayload, at: { x: number; y: number }) => {
     const title = `${payload.title} → ref`
@@ -2254,7 +2331,10 @@ export function DesktopShell() {
                 if (w.kind !== "data") return null
                 const lin = (w.payload as DataPayload | undefined)?.lineage
                 if (!lin || lin.kind !== "column-aggregate") return null
-                const spec = lin.rollup ? normalizeRollupSpec(lin.rollup) : rollupSpecFromColumns(lin.columns ?? [])
+                // A detached (custom-SQL) window returns null → not a drop
+                // target, so dropping a column spawns a fresh block instead.
+                const spec = effectiveRollup(lin)
+                if (!spec) return null
                 return {
                   parentWindowId: lin.parentWindowId,
                   relationKey: lin.relationKey,
@@ -2301,6 +2381,7 @@ export function DesktopShell() {
                   subscribeParam,
                   editRollupSpec,
                   repivotWindow,
+                  probeColumnValues,
                   palette: activePalette,
                   paletteOverrides,
                   hasWallpaper: !!wallpaperUrl,
@@ -2468,6 +2549,7 @@ interface WindowContext {
   subscribeParam: (targetWindowId: string, key: string, targetField?: string) => void
   editRollupSpec: (targetWindowId: string, transform: (s: RollupSpec) => RollupSpec) => void
   repivotWindow: (targetWindowId: string, grain: RollupGrain) => void
+  probeColumnValues: (targetWindowId: string, column: DesktopColumnRef, search?: string) => Promise<{ values: (string | number | null)[]; truncated: boolean }>
   palette: ImagePalette | null
   paletteOverrides: Partial<ImagePalette> | null
   hasWallpaper: boolean
@@ -2519,6 +2601,7 @@ function renderWindowContent(
           onSubscribeParam={(key, field) => ctx.subscribeParam(w.id, key, field)}
           onEditRollup={(transform) => ctx.editRollupSpec(w.id, transform)}
           onRepivot={(grain) => ctx.repivotWindow(w.id, grain)}
+          onProbeValues={(column, search) => ctx.probeColumnValues(w.id, column, search)}
           onOpenKgForSource={ctx.openKgForSource}
         />
       )
