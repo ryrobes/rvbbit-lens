@@ -264,7 +264,7 @@ export function CapabilitiesWindow({
 
   if (!hasRvbbit) {
     return (
-      <div className="grid h-full place-items-center bg-doc-bg p-6 text-center text-[12px] text-chrome-text/70">
+      <div className="grid h-full place-items-center p-6 text-center text-[12px] text-chrome-text/70">
         <div>
           <Package className="mx-auto mb-2 h-6 w-6 text-chrome-text/40" />
           This connection has no <span className="font-mono">pg_rvbbit</span> extension —
@@ -275,7 +275,7 @@ export function CapabilitiesWindow({
   }
 
   return (
-    <div className="flex h-full flex-col bg-doc-bg text-[12px] text-chrome-text">
+    <div className="flex h-full flex-col text-[12px] text-chrome-text">
       {/* live/paused header bar */}
       <div className="flex flex-wrap items-center gap-2.5 border-b border-chrome-border bg-chrome-bg/40 px-3 py-1.5">
         <span

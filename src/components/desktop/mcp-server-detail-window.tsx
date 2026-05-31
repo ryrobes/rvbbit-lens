@@ -183,14 +183,14 @@ export function McpServerDetailWindow({
 
   if (!hasRvbbit) {
     return (
-      <div className="grid h-full place-items-center bg-doc-bg text-[12px] text-chrome-text/70">
+      <div className="grid h-full place-items-center text-[12px] text-chrome-text/70">
         No pg_rvbbit extension on this connection.
       </div>
     )
   }
   if (loading) {
     return (
-      <div className="grid h-full place-items-center bg-doc-bg text-[12px] text-chrome-text">
+      <div className="grid h-full place-items-center text-[12px] text-chrome-text">
         Loading {name}…
       </div>
     )
@@ -199,7 +199,7 @@ export function McpServerDetailWindow({
   const gatewayReady = gateway?.ready === true
 
   return (
-    <div className="flex h-full flex-col bg-doc-bg text-[12px] text-chrome-text">
+    <div className="flex h-full flex-col text-[12px] text-chrome-text">
       {/* header */}
       <div className="flex flex-wrap items-center gap-2 border-b border-chrome-border bg-chrome-bg/40 px-3 py-1.5">
         <span

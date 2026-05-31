@@ -329,7 +329,7 @@ export function ChartView({ result, userSpec, onChangeUserSpec, seedSpec, onEmit
     )
 
   return (
-    <div className="flex h-full flex-col bg-doc-bg">
+    <div className="flex h-full flex-col">
       <ChartHeader
         mode={mode}
         userSpec={userSpec}
@@ -492,7 +492,7 @@ function SpecEditor({
           <span className="text-xs">Apply</span>
         </Button>
       </div>
-      <div className="min-h-0 flex-1 overflow-hidden bg-doc-bg">
+      <div className="min-h-0 flex-1 overflow-hidden">
         <CodeMirror
           value={text}
           onChange={setText}

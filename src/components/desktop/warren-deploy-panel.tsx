@@ -201,7 +201,7 @@ export function WarrenDeployPanel({
   }, [activeConnectionId, acceptance, acceptanceRunning])
 
   return (
-    <div className="flex h-full min-h-0 flex-col bg-doc-bg text-[12px] text-chrome-text">
+    <div className="flex h-full min-h-0 flex-col text-[12px] text-chrome-text">
       {/* mode hint */}
       <div className="flex items-center gap-2 border-b border-chrome-border bg-chrome-bg/40 px-3 py-1.5">
         <Rocket className="h-3.5 w-3.5 text-brand-warren" />

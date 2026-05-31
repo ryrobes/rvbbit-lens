@@ -113,7 +113,7 @@ export function CostsWindow({
     filter.queryId != null
 
   return (
-    <div className="flex h-full min-h-0 flex-col bg-doc-bg text-foreground">
+    <div className="flex h-full min-h-0 flex-col text-foreground">
       <CostsHeader
         filter={filter}
         total={bundle?.total.total_cost_usd ?? 0}
@@ -836,7 +836,7 @@ function ReceiptsTable({
 
 function PanelFrame({ title, children }: { title: string; children: React.ReactNode }) {
   return (
-    <div className="flex min-h-0 flex-col bg-doc-bg">
+    <div className="flex min-h-0 flex-col">
       <div className="border-b border-chrome-border/40 bg-chrome-bg/20 px-3 py-1 text-[10px] uppercase tracking-wider text-chrome-text">
         {title}
       </div>

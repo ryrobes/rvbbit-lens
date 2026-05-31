@@ -171,7 +171,7 @@ export function SystemObjectsWindow({ payload, activeConnectionId }: SystemObjec
   )
 
   return (
-    <div className="flex h-full bg-doc-bg text-[12px] text-chrome-text">
+    <div className="flex h-full text-[12px] text-chrome-text">
       {/* sidebar */}
       <aside className="flex w-44 shrink-0 flex-col border-r border-chrome-border bg-chrome-bg/30">
         <div className="border-b border-chrome-border/40 px-3 py-2 text-[9px] uppercase tracking-wider text-chrome-text/55">

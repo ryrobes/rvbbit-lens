@@ -51,6 +51,7 @@ import { NotificationToasts } from "./notification-toasts"
 import { NotificationCenterWindow } from "./notification-center-window"
 import { OperatorsWindow } from "./operators-window"
 import { CostsWindow } from "./costs-window"
+import { DuckWindow } from "./duck-window"
 import { OperatorFlowWindow } from "./operator-flow-window"
 import { SpecialistsWindow } from "./specialists-window"
 import { SpecialistDetailWindow } from "./specialist-detail-window"
@@ -101,6 +102,7 @@ import type {
   FinderPayload,
   NotificationsPayload,
   CostsPayload,
+  DuckPayload,
   OperatorFlowPayload,
   OperatorsPayload,
   SpecialistsPayload,
@@ -1180,6 +1182,18 @@ export function DesktopShell() {
     })
   }, [focus, openWindow, windows, updatePayload])
 
+  const openDuck = useCallback(() => {
+    const existing = windows.find((w) => w.kind === "duck")
+    if (existing) return focus(existing.id)
+    openWindow({
+      id: randomUUID(),
+      kind: "duck",
+      title: "Duck Monitor",
+      x: 132, y: 70, width: 1000, height: 700,
+      payload: { kind: "duck" } satisfies DuckPayload,
+    })
+  }, [focus, openWindow, windows])
+
   const openCapabilities = useCallback((tagFilter?: string | null) => {
     const existing = windows.find((w) => w.kind === "capabilities")
     if (existing) {
@@ -2208,6 +2222,7 @@ export function DesktopShell() {
         onOpenMcpServers={openMcpServers}
         onOpenCapabilities={() => openCapabilities()}
         onOpenCosts={() => openCosts()}
+        onOpenDuck={openDuck}
         onOpenWarren={() => openWarren()}
         onOpenQueryLens={() => openQueryLens()}
         onOpenKgBrowser={() => openKgBrowser()}
@@ -2285,6 +2300,9 @@ export function DesktopShell() {
           ) : null}
           {hasRvbbit ? (
             <DesktopIcon label="Costs" icon={DollarSign} onActivate={() => openCosts()} iconColor="var(--brand-costs)" />
+          ) : null}
+          {hasRvbbit ? (
+            <DesktopIcon label="Duck" icon={Boxes} onActivate={openDuck} iconColor="var(--brand-duck)" />
           ) : null}
           {hasRvbbit ? (
             <DesktopIcon label="Query Lens" icon={Eye} onActivate={() => openQueryLens()} iconColor="var(--brand-query-lens)" />
@@ -2409,6 +2427,7 @@ export function DesktopShell() {
                   openKgMergeReview,
                   openKgExplorer,
                   openCosts,
+                  openDuck,
                   openCapabilities,
                   openCapabilityDetail,
                   openWarren,
@@ -2523,6 +2542,7 @@ interface WindowContext {
     seedLabel?: string | null,
   ) => void
   openCosts: (initialFilter?: CostsPayload["initialFilter"]) => void
+  openDuck: () => void
   openCapabilities: (tagFilter?: string | null) => void
   openCapabilityDetail: (
     catalogId: string,
@@ -2850,6 +2870,14 @@ function renderWindowContent(
           }
         />
       )
+    case "duck":
+      return (
+        <DuckWindow
+          activeConnectionId={ctx.activeConnectionId}
+          hasRvbbit={ctx.hasRvbbit}
+          workspaceActive={ctx.workspaceActive}
+        />
+      )
     case "notifications":
       return (
         <NotificationCenterWindow
@@ -2922,6 +2950,7 @@ function iconForKind(kind: DesktopWindowState["kind"]) {
     case "warren-job-detail":
       return Rocket
     case "costs": return DollarSign
+    case "duck": return Boxes
     default: return Table2
   }
 }

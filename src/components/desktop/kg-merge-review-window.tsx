@@ -197,7 +197,7 @@ export function KgMergeReviewWindow({
   const distinctGraphs = Array.from(new Set(candidates.map((c) => c.graphId))).sort()
 
   return (
-    <div className="flex h-full flex-col bg-background text-foreground">
+    <div className="flex h-full flex-col text-foreground">
       <header className="flex flex-wrap items-center gap-2 border-b border-chrome-border/60 bg-secondary-background/40 px-3 py-2">
         <Brain
           className="h-3.5 w-3.5"

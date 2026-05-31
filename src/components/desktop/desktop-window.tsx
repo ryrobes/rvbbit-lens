@@ -425,6 +425,7 @@ const KINDS = [
   "connections",
   "palette",
   "pg-monitor",
+  "duck",
 ] as const
 
 function buildChrome(kind: string): ChromeColors {

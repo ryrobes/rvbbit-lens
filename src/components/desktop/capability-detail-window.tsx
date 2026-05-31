@@ -204,14 +204,14 @@ export function CapabilityDetailWindow({
 
   if (!hasRvbbit) {
     return (
-      <div className="grid h-full place-items-center bg-doc-bg text-[12px] text-chrome-text/70">
+      <div className="grid h-full place-items-center text-[12px] text-chrome-text/70">
         No pg_rvbbit extension on this connection.
       </div>
     )
   }
   if (loadError) {
     return (
-      <div className="grid h-full place-items-center bg-doc-bg p-6 text-center text-[12px] text-danger">
+      <div className="grid h-full place-items-center p-6 text-center text-[12px] text-danger">
         <div>
           <AlertTriangle className="mx-auto mb-2 h-6 w-6" />
           {loadError}
@@ -221,7 +221,7 @@ export function CapabilityDetailWindow({
   }
   if (loading) {
     return (
-      <div className="grid h-full place-items-center bg-doc-bg text-[12px] text-chrome-text">
+      <div className="grid h-full place-items-center text-[12px] text-chrome-text">
         <span className="inline-flex items-center gap-1.5">
           <Clock className="h-3 w-3 animate-pulse" />
           Loading {payload.catalogId}…
@@ -233,7 +233,7 @@ export function CapabilityDetailWindow({
   const states = join ? flagsToStates(join.flags) : []
 
   return (
-    <div className="flex h-full flex-col bg-doc-bg text-[12px] text-chrome-text">
+    <div className="flex h-full flex-col text-[12px] text-chrome-text">
       {/* header */}
       <div className="flex flex-wrap items-center gap-2 border-b border-chrome-border bg-chrome-bg/40 px-3 py-1.5">
         <Package className="h-4 w-4 text-brand-capability" />
@@ -950,7 +950,7 @@ function ProbeTab({
 
   if (!registered) {
     return (
-      <div className="grid h-full place-items-center bg-doc-bg p-6 text-center text-[12px] text-chrome-text">
+      <div className="grid h-full place-items-center p-6 text-center text-[12px] text-chrome-text">
         <div className="max-w-md space-y-2">
           <Plug className="mx-auto h-6 w-6 text-chrome-text/40" />
           <div className="text-foreground">Backend not registered yet</div>
@@ -1246,7 +1246,7 @@ function AcceptanceTestsTab({
 
   if (!acceptance || definitions.length === 0) {
     return (
-      <div className="grid h-full place-items-center bg-doc-bg p-6 text-center text-[12px] text-chrome-text/65">
+      <div className="grid h-full place-items-center p-6 text-center text-[12px] text-chrome-text/65">
         <div>
           <CheckCircle2 className="mx-auto mb-2 h-6 w-6 text-chrome-text/35" />
           This catalog entry has no acceptance SQL.
@@ -1256,7 +1256,7 @@ function AcceptanceTestsTab({
   }
 
   return (
-    <div className="grid h-full grid-cols-[280px_minmax(0,1fr)] overflow-hidden bg-doc-bg">
+    <div className="grid h-full grid-cols-[280px_minmax(0,1fr)] overflow-hidden">
       <aside className="flex min-h-0 flex-col border-r border-chrome-border">
         <div className="flex items-center gap-2 border-b border-chrome-border bg-chrome-bg/40 px-3 py-1.5">
           <CheckCircle2 className="h-3.5 w-3.5 text-success" />

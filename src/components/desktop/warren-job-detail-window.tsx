@@ -83,14 +83,14 @@ export function WarrenJobDetailWindow({
 
   if (!hasRvbbit) {
     return (
-      <div className="grid h-full place-items-center bg-doc-bg text-[12px] text-chrome-text/70">
+      <div className="grid h-full place-items-center text-[12px] text-chrome-text/70">
         No pg_rvbbit extension on this connection.
       </div>
     )
   }
   if (loading) {
     return (
-      <div className="grid h-full place-items-center bg-doc-bg text-[12px] text-chrome-text">
+      <div className="grid h-full place-items-center text-[12px] text-chrome-text">
         <span className="inline-flex items-center gap-1.5">
           <Clock className="h-3 w-3 animate-pulse" /> loading job {payload.jobId.slice(0, 8)}…
         </span>
@@ -99,7 +99,7 @@ export function WarrenJobDetailWindow({
   }
   if (!job) {
     return (
-      <div className="grid h-full place-items-center bg-doc-bg p-6 text-center text-[12px] text-danger">
+      <div className="grid h-full place-items-center p-6 text-center text-[12px] text-danger">
         <div>
           <AlertTriangle className="mx-auto mb-2 h-6 w-6" />
           {error ?? `job ${payload.jobId} not found`}
@@ -111,7 +111,7 @@ export function WarrenJobDetailWindow({
   const titleName = job.name ?? payload.jobName ?? job.job_id.slice(0, 8)
 
   return (
-    <div className="flex h-full flex-col bg-doc-bg text-[12px] text-chrome-text">
+    <div className="flex h-full flex-col text-[12px] text-chrome-text">
       {/* header */}
       <div className="flex flex-wrap items-center gap-2 border-b border-chrome-border bg-chrome-bg/40 px-3 py-1.5">
         <Rocket className="h-4 w-4 text-brand-warren" />

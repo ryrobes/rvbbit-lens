@@ -93,7 +93,7 @@ export function OperatorGraph({
   }
 
   return (
-    <div className="h-full w-full overflow-auto bg-doc-bg p-2">
+    <div className="h-full w-full overflow-auto p-2">
       <div className="relative" style={{ width, height }}>
         {/* regions behind everything */}
         {graph.regions.map((r) => {

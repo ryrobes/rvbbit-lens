@@ -221,21 +221,21 @@ export function OperatorFlowWindow({
 
   if (!hasRvbbit) {
     return (
-      <div className="grid h-full place-items-center bg-doc-bg p-6 text-center text-[12px] text-chrome-text/70">
+      <div className="grid h-full place-items-center p-6 text-center text-[12px] text-chrome-text/70">
         This connection has no <span className="font-mono">&nbsp;pg_rvbbit&nbsp;</span> extension.
       </div>
     )
   }
   if (loadError) {
     return (
-      <div className="grid h-full place-items-center bg-doc-bg p-6 text-center text-[12px] text-danger">
+      <div className="grid h-full place-items-center p-6 text-center text-[12px] text-danger">
         {loadError}
       </div>
     )
   }
   if (!op) {
     return (
-      <div className="grid h-full place-items-center bg-doc-bg text-[12px] text-chrome-text">
+      <div className="grid h-full place-items-center text-[12px] text-chrome-text">
         <span className="inline-flex items-center gap-1.5">
           <Clock className="h-3 w-3 animate-pulse" /> Loading operator…
         </span>
@@ -244,7 +244,7 @@ export function OperatorFlowWindow({
   }
 
   return (
-    <div className="flex h-full flex-col bg-doc-bg">
+    <div className="flex h-full flex-col">
       {/* toolbar */}
       <div className="flex flex-wrap items-center gap-2 border-b border-chrome-border bg-chrome-bg/40 px-2 py-1">
         <div className="flex rounded border border-chrome-border">

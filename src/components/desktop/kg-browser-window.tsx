@@ -123,7 +123,7 @@ export function KgBrowserWindow({
   }
 
   return (
-    <div className="flex h-full flex-col bg-background text-foreground">
+    <div className="flex h-full flex-col text-foreground">
       <KgBrowserHeader
         activeGraph={activeGraph}
         graphs={graphs}

@@ -39,6 +39,7 @@ interface DesktopMenuBarProps {
   onOpenMcpServers: () => void
   onOpenCapabilities: () => void
   onOpenCosts: () => void
+  onOpenDuck: () => void
   onOpenWarren: () => void
   onOpenQueryLens: () => void
   onOpenKgBrowser: () => void
@@ -117,6 +118,7 @@ export function DesktopMenuBar({
   onOpenMcpServers,
   onOpenCapabilities,
   onOpenCosts,
+  onOpenDuck,
   onOpenWarren,
   onOpenQueryLens,
   onOpenKgBrowser,
@@ -194,6 +196,7 @@ export function DesktopMenuBar({
           { label: "MCP Servers", onClick: onOpenMcpServers },
           { label: "Capabilities", onClick: onOpenCapabilities },
           { label: "Warren", onClick: onOpenWarren },
+          { label: "Duck Monitor", onClick: onOpenDuck },
           { label: "Query Lens", onClick: onOpenQueryLens },
           { label: "Knowledge Graph", onClick: onOpenKgBrowser },
           { label: "KG · Extraction Runs", onClick: onOpenKgExtractionRuns },

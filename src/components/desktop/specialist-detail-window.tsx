@@ -251,14 +251,14 @@ export function SpecialistDetailWindow({
 
   if (!hasRvbbit) {
     return (
-      <div className="grid h-full place-items-center bg-doc-bg text-[12px] text-chrome-text/70">
+      <div className="grid h-full place-items-center text-[12px] text-chrome-text/70">
         No pg_rvbbit extension on this connection.
       </div>
     )
   }
   if (loading) {
     return (
-      <div className="grid h-full place-items-center bg-doc-bg text-[12px] text-chrome-text">
+      <div className="grid h-full place-items-center text-[12px] text-chrome-text">
         <span className="inline-flex items-center gap-1.5">
           <Clock className="h-3 w-3 animate-pulse" /> Loading {name}…
         </span>
@@ -281,7 +281,7 @@ export function SpecialistDetailWindow({
   }
 
   return (
-    <div className="flex h-full flex-col bg-doc-bg text-[12px] text-chrome-text">
+    <div className="flex h-full flex-col text-[12px] text-chrome-text">
       {/* header */}
       <div className="flex flex-wrap items-center gap-2 border-b border-chrome-border bg-chrome-bg/40 px-3 py-1.5">
         <span
@@ -798,7 +798,7 @@ function RuntimeDetailView({
   const health = runtime.health
   const labels = runtime.labels
   return (
-    <div className="flex h-full flex-col bg-doc-bg text-[12px] text-chrome-text">
+    <div className="flex h-full flex-col text-[12px] text-chrome-text">
       <div className="flex flex-wrap items-center gap-2 border-b border-chrome-border bg-chrome-bg/40 px-3 py-1.5">
         <span className="inline-flex items-center gap-1.5 rounded-full bg-brand-capability/10 px-1.5 py-0.5 text-[10px] uppercase tracking-wider text-brand-capability">
           <FileCode2 className="h-3.5 w-3.5" /> python runtime

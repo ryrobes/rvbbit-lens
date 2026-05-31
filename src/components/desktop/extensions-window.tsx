@@ -83,7 +83,7 @@ export function ExtensionsWindow({
   const others = extensions.filter((e) => !isRvbbitExtension(e.name))
 
   return (
-    <div className="flex h-full flex-col bg-doc-bg text-[12px] text-chrome-text">
+    <div className="flex h-full flex-col text-[12px] text-chrome-text">
       {/* header */}
       <div className="flex flex-wrap items-center gap-2.5 border-b border-chrome-border bg-chrome-bg/40 px-3 py-1.5">
         <span

@@ -482,7 +482,7 @@ export function CapabilityInstallGraph({
   }, [])
 
   return (
-    <div className="flex h-full min-h-0 flex-col bg-doc-bg">
+    <div className="flex h-full min-h-0 flex-col">
       {/* control bar */}
       <div className="flex flex-wrap items-center gap-2 border-b border-chrome-border bg-chrome-bg/40 px-3 py-1.5">
         <Rocket className="h-3.5 w-3.5 text-brand-capability" />
@@ -969,7 +969,7 @@ function BuildPanel({
   }
   return (
     <div className="flex h-full flex-col">
-      <div ref={ref} className="min-h-0 flex-1 overflow-auto bg-doc-bg p-2">
+      <div ref={ref} className="min-h-0 flex-1 overflow-auto p-2">
         <pre className="font-mono text-[10px] leading-snug">
           {artifact.lines.map((l, i) => (
             <div

@@ -43,7 +43,7 @@ export function NotificationCenterWindow({
   }, [channelDraft, onAddWatched])
 
   return (
-    <div className="flex h-full flex-col bg-doc-bg text-[12px] text-chrome-text">
+    <div className="flex h-full flex-col text-[12px] text-chrome-text">
       {/* Status strip */}
       <div className="flex items-center gap-2 border-b border-chrome-border bg-chrome-bg/40 px-3 py-1.5">
         <StatusDot status={status} />

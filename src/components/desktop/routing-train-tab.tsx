@@ -273,7 +273,7 @@ export function RoutingTrainTab({ activeConnectionId }: RoutingTrainTabProps) {
 
   if (!activeConnectionId) {
     return (
-      <div className="grid h-full place-items-center bg-doc-bg p-6 text-center text-[12px] text-chrome-text/70">
+      <div className="grid h-full place-items-center p-6 text-center text-[12px] text-chrome-text/70">
         Connect to a database to inspect and curate training profiles.
       </div>
     )
@@ -289,7 +289,7 @@ export function RoutingTrainTab({ activeConnectionId }: RoutingTrainTabProps) {
   }
 
   return (
-    <div className="flex h-full flex-col gap-2 bg-doc-bg p-2.5 text-[12px] text-chrome-text">
+    <div className="flex h-full flex-col gap-2 p-2.5 text-[12px] text-chrome-text">
       {/* Profile rail */}
       <ProfileRail
         profiles={profiles}

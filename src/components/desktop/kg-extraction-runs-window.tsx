@@ -102,7 +102,7 @@ export function KgExtractionRunsWindow({
   const graphs = Array.from(new Set(runs.map((r) => r.graphId))).sort()
 
   return (
-    <div className="flex h-full flex-col bg-background text-foreground">
+    <div className="flex h-full flex-col text-foreground">
       <header className="flex items-center gap-2 border-b border-chrome-border/60 bg-secondary-background/40 px-3 py-2">
         <FlowArrow
           className="h-3.5 w-3.5"

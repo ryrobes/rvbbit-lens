@@ -256,7 +256,7 @@ export function ExplainGraph({
   }
 
   return (
-    <div className="flex h-full flex-col bg-doc-bg">
+    <div className="flex h-full flex-col">
       <PlanSummary plan={plan} analyzed={analyzed} />
       {callSites.length > 0 ? <SemanticSummary semantic={semantic} /> : null}
 

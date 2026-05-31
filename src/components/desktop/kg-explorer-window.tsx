@@ -230,7 +230,7 @@ export function KgExplorerWindow({
   }
 
   return (
-    <div className="flex h-full flex-col bg-background text-foreground">
+    <div className="flex h-full flex-col text-foreground">
       <ExplorerHeader
         graphId={graphId}
         graphs={graphs}
