@@ -27,6 +27,8 @@ interface OperatorInspectorProps {
   specialists: RvbbitSpecialist[]
   mcpServers: McpServerOverview[]
   mcpTools: McpToolLite[]
+  mcpGatewayReady: boolean
+  onOpenMcpGateway?: () => void
   onChange: (next: RvbbitOperator) => void
 }
 
@@ -38,6 +40,8 @@ export function OperatorInspector({
   specialists,
   mcpServers,
   mcpTools,
+  mcpGatewayReady,
+  onOpenMcpGateway,
   onChange,
 }: OperatorInspectorProps) {
   return (
@@ -51,6 +55,8 @@ export function OperatorInspector({
         specialists={specialists}
         mcpServers={mcpServers}
         mcpTools={mcpTools}
+        mcpGatewayReady={mcpGatewayReady}
+        onOpenMcpGateway={onOpenMcpGateway}
         onChange={onChange}
       />
     </div>
@@ -232,6 +238,8 @@ function SelectedEditor({
   specialists,
   mcpServers,
   mcpTools,
+  mcpGatewayReady,
+  onOpenMcpGateway,
   onChange,
 }: {
   op: RvbbitOperator
@@ -240,6 +248,8 @@ function SelectedEditor({
   specialists: RvbbitSpecialist[]
   mcpServers: McpServerOverview[]
   mcpTools: McpToolLite[]
+  mcpGatewayReady: boolean
+  onOpenMcpGateway?: () => void
   onChange: (n: RvbbitOperator) => void
 }) {
   const id = selectedNodeId
@@ -302,6 +312,8 @@ function SelectedEditor({
           specialists={specialists}
           mcpServers={mcpServers}
           mcpTools={mcpTools}
+          mcpGatewayReady={mcpGatewayReady}
+          onOpenMcpGateway={onOpenMcpGateway}
           onChange={(s) => setNodes(nodes.map((x, i) => (i === ni ? s : x)))}
           onRemove={nodes.length > 1 ? () => setNodes(nodes.filter((_, i) => i !== ni)) : undefined}
           onMoveUp={ni > 0 ? () => setNodes(swap(nodes, ni, ni - 1)) : undefined}
@@ -325,6 +337,8 @@ function SelectedEditor({
           specialists={specialists}
           mcpServers={mcpServers}
           mcpTools={mcpTools}
+          mcpGatewayReady={mcpGatewayReady}
+          onOpenMcpGateway={onOpenMcpGateway}
           onChange={(s) => setSteps(steps.map((x, i) => (i === si ? s : x)))}
           onRemove={steps.length > 1 ? () => setSteps(steps.filter((_, i) => i !== si)) : undefined}
           onMoveUp={si > 0 ? () => setSteps(swap(steps, si, si - 1)) : undefined}
@@ -513,6 +527,8 @@ function StepEditor({
   specialists,
   mcpServers,
   mcpTools,
+  mcpGatewayReady,
+  onOpenMcpGateway,
   onChange,
   onRemove,
   onMoveUp,
@@ -523,6 +539,8 @@ function StepEditor({
   specialists: RvbbitSpecialist[]
   mcpServers: McpServerOverview[]
   mcpTools: McpToolLite[]
+  mcpGatewayReady: boolean
+  onOpenMcpGateway?: () => void
   onChange: (s: OpStep) => void
   onRemove?: () => void
   onMoveUp?: () => void
@@ -652,6 +670,8 @@ function StepEditor({
           step={step}
           mcpServers={mcpServers}
           mcpTools={mcpTools}
+          mcpGatewayReady={mcpGatewayReady}
+          onOpenMcpGateway={onOpenMcpGateway}
           onChange={onChange}
         />
       ) : (
@@ -728,11 +748,15 @@ function McpFields({
   step,
   mcpServers,
   mcpTools,
+  mcpGatewayReady,
+  onOpenMcpGateway,
   onChange,
 }: {
   step: OpStep
   mcpServers: McpServerOverview[]
   mcpTools: McpToolLite[]
+  mcpGatewayReady: boolean
+  onOpenMcpGateway?: () => void
   onChange: (s: OpStep) => void
 }) {
   const server = step.server ?? ""
@@ -756,12 +780,28 @@ function McpFields({
   const knownServer = serverNames.includes(server)
   return (
     <>
+      {!mcpGatewayReady ? (
+        <div className="rounded border border-warning/35 bg-warning/10 p-2 text-[10px] text-warning">
+          <div className="flex items-center gap-2">
+            <span className="min-w-0 flex-1">MCP Gateway runtime is not ready.</span>
+            {onOpenMcpGateway ? (
+              <button
+                type="button"
+                onClick={onOpenMcpGateway}
+                className="rounded border border-warning/45 px-1.5 py-0.5 text-[9px] hover:bg-warning/15"
+              >
+                Install
+              </button>
+            ) : null}
+          </div>
+        </div>
+      ) : null}
       <Field label="mcp server">
         {mcpServers.length === 0 ? (
           <input
             value={server}
             onChange={(e) => onChange({ ...step, server: e.target.value })}
-            placeholder="no servers registered — type a name"
+            placeholder={mcpGatewayReady ? "no servers registered — type a name" : "install MCP Gateway first"}
             className={inputCls}
           />
         ) : (

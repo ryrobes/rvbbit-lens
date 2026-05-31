@@ -729,9 +729,10 @@ function runtimeTone(status: string): string {
 }
 
 /**
- * Registered execution runtimes (rvbbit.python_runtimes). A Warren-deployed
- * runtime appears here with runtime_source = 'warren'. These back operator
- * `kind: python` nodes over /run — a peer of model backends, not a model.
+ * Registered execution runtimes (rvbbit.python_runtimes plus rvbbit.mcp_gateways).
+ * A Warren-deployed runtime appears here with runtime_source = 'warren'. These
+ * back operator node kinds such as `python` and `mcp` — peers of model
+ * backends, not models.
  */
 function RuntimesTab({
   runtimes,
@@ -747,8 +748,9 @@ function RuntimesTab({
       <div className="grid h-40 place-items-center px-6 text-center text-[11px] text-chrome-text/55">
         <div>
           <FileCode2 className="mx-auto mb-2 h-6 w-6 text-chrome-text/30" />
-          No Python runtimes registered. Deploy the{" "}
-          <span className="font-mono">python-runtime</span> capability to add one.
+          No execution runtimes registered. Deploy{" "}
+          <span className="font-mono">python-runtime</span> or{" "}
+          <span className="font-mono">mcp-gateway</span> to add one.
         </div>
       </div>
     )
@@ -756,9 +758,10 @@ function RuntimesTab({
   return (
     <div className="space-y-2 p-2.5">
       <p className="text-[11px] text-chrome-text/55">
-        Execution endpoints from <span className="font-mono">rvbbit.python_runtimes</span> that
-        run operator <span className="font-mono">kind: python</span> nodes over{" "}
-        <span className="font-mono">/run</span>. Runtime health is separate from backend health.
+        Execution endpoints from runtime catalogs that run operator nodes like{" "}
+        <span className="font-mono">kind: python</span> and{" "}
+        <span className="font-mono">kind: mcp</span>. Runtime health is separate from backend
+        health.
       </p>
       <div className="grid grid-cols-2 gap-2">
         {runtimes.map((rt) => (

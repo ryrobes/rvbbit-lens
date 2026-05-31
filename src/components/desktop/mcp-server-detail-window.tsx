@@ -34,9 +34,11 @@ import {
   dropServer,
   fetchCache,
   fetchInvocations,
+  fetchMcpGatewayStatus,
   fetchResources,
   fetchServers,
   fetchTools,
+  MCP_GATEWAY_CATALOG_ID,
   mcpCall,
   mcpProbe,
   mcpResource,
@@ -48,6 +50,7 @@ import {
   setToolCaching,
   type JsonSchema,
   type McpCacheEntry,
+  type McpGatewayStatus,
   type McpInvocation,
   type McpProbe,
   type McpResource,
@@ -61,6 +64,7 @@ interface McpServerDetailWindowProps {
   activeConnectionId: string | null
   hasRvbbit: boolean
   onOpenQueryLens: (queryId: string) => void
+  onOpenCapability: (catalogId: string, initialTab?: "overview" | "generated-sql" | "probe" | "install" | "tests") => void
 }
 
 const REFRESH_OPTIONS_MS = [
@@ -83,6 +87,7 @@ export function McpServerDetailWindow({
   activeConnectionId,
   hasRvbbit,
   onOpenQueryLens,
+  onOpenCapability,
 }: McpServerDetailWindowProps) {
   const name = payload.serverName
   const [server, setServer] = useState<McpServerOverview | null>(null)
@@ -90,6 +95,7 @@ export function McpServerDetailWindow({
   const [resources, setResources] = useState<McpResource[]>([])
   const [cache, setCache] = useState<McpCacheEntry[]>([])
   const [invocations, setInvocations] = useState<McpInvocation[]>([])
+  const [gateway, setGateway] = useState<McpGatewayStatus | null>(null)
   const [tab, setTab] = useState<TabKey>("tools")
   const [error, setError] = useState<string | null>(null)
   const [paused, setPaused] = useState(false)
@@ -110,11 +116,13 @@ export function McpServerDetailWindow({
       fetchResources(activeConnectionId, name),
       fetchCache(activeConnectionId, name),
     ])
+    const gw = await fetchMcpGatewayStatus(activeConnectionId)
+    setGateway(gw)
     setServer(s.rows.find((x) => x.name === name) ?? null)
     setTools(t.rows)
     setResources(r.rows)
     setCache(c.rows)
-    setError(s.error ?? t.error ?? r.error ?? c.error ?? null)
+    setError(s.error ?? t.error ?? r.error ?? c.error ?? gw.error ?? null)
   }, [activeConnectionId, name])
 
   const pollInvocations = useCallback(async () => {
@@ -145,22 +153,22 @@ export function McpServerDetailWindow({
   }, [activeConnectionId, hasRvbbit, paused, intervalMs, pollInvocations])
 
   const onProbe = useCallback(async () => {
-    if (!activeConnectionId) return
+    if (!activeConnectionId || gateway?.ready !== true) return
     setProbing(true)
     setProbe(null)
     const r = await mcpProbe(activeConnectionId, name)
     setProbe(r.probe ?? { reachable: false, latencyMs: null, nTools: null, error: r.error ?? null })
     setProbing(false)
-  }, [activeConnectionId, name])
+  }, [activeConnectionId, gateway?.ready, name])
 
   const onRefresh = useCallback(async () => {
-    if (!activeConnectionId) return
+    if (!activeConnectionId || gateway?.ready !== true) return
     setRefreshing(true)
     await refreshServer(activeConnectionId, name)
     setRefreshing(false)
     await reloadStatic()
     await pollInvocations()
-  }, [activeConnectionId, name, reloadStatic, pollInvocations])
+  }, [activeConnectionId, gateway?.ready, name, reloadStatic, pollInvocations])
 
   const onDrop = useCallback(async () => {
     if (!activeConnectionId) return
@@ -187,6 +195,8 @@ export function McpServerDetailWindow({
       </div>
     )
   }
+
+  const gatewayReady = gateway?.ready === true
 
   return (
     <div className="flex h-full flex-col bg-doc-bg text-[12px] text-chrome-text">
@@ -254,7 +264,7 @@ export function McpServerDetailWindow({
           <button
             type="button"
             onClick={() => void onProbe()}
-            disabled={probing || dropped}
+            disabled={probing || dropped || !gatewayReady}
             title="Probe — actively round-trip the gateway"
             className="inline-flex h-6 items-center gap-1 rounded border border-chrome-border px-1.5 text-[10px] text-chrome-text/80 hover:border-rvbbit-accent/40 hover:text-foreground disabled:opacity-40"
           >
@@ -264,7 +274,7 @@ export function McpServerDetailWindow({
           <button
             type="button"
             onClick={() => void onRefresh()}
-            disabled={refreshing || dropped}
+            disabled={refreshing || dropped || !gatewayReady}
             title="Re-discover tools and resources"
             className="inline-flex h-6 items-center gap-1 rounded border border-chrome-border px-1.5 text-[10px] text-chrome-text/80 hover:border-rvbbit-accent/40 hover:text-foreground disabled:opacity-40"
           >
@@ -338,6 +348,14 @@ export function McpServerDetailWindow({
       ) : null}
 
       <div className="min-h-0 flex-1 overflow-auto">
+        {!gatewayReady && !dropped ? (
+          <McpGatewayRequiredNotice
+            gateway={gateway}
+            onOpenCapability={() =>
+              onOpenCapability(gateway?.catalogId ?? MCP_GATEWAY_CATALOG_ID, "install")
+            }
+          />
+        ) : null}
         {dropped ? (
           <div className="grid h-40 place-items-center text-center text-[11px] text-chrome-text/55">
             <div>
@@ -353,13 +371,19 @@ export function McpServerDetailWindow({
             server={name}
             tools={tools}
             invocations={invocations}
+            gatewayReady={gatewayReady}
             onReload={async () => {
               await reloadStatic()
               await pollInvocations()
             }}
           />
         ) : tab === "resources" ? (
-          <ResourcesTab connId={activeConnectionId} server={name} resources={resources} />
+          <ResourcesTab
+            connId={activeConnectionId}
+            server={name}
+            resources={resources}
+            gatewayReady={gatewayReady}
+          />
         ) : tab === "invocations" ? (
           <InvocationsTab invocations={invocations} onOpenQueryLens={onOpenQueryLens} />
         ) : (
@@ -428,6 +452,34 @@ function ProbePill({ probe }: { probe: McpProbe }) {
   )
 }
 
+function McpGatewayRequiredNotice({
+  gateway,
+  onOpenCapability,
+}: {
+  gateway: McpGatewayStatus | null
+  onOpenCapability: () => void
+}) {
+  return (
+    <div className="border-b border-warning/35 bg-warning/10 px-3 py-2 text-[11px] text-warning">
+      <div className="flex items-center gap-2">
+        <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+        <span className="min-w-0 flex-1 truncate">
+          {gateway?.installed
+            ? `MCP gateway ${gateway.name ?? "runtime"} is ${gateway.status ?? "not ready"}.`
+            : "MCP Gateway runtime is not installed."}
+        </span>
+        <button
+          type="button"
+          onClick={onOpenCapability}
+          className="rounded border border-warning/45 bg-warning/10 px-2 py-0.5 text-[10px] text-warning hover:bg-warning/15"
+        >
+          {gateway?.installed ? "Open runtime" : "Install runtime"}
+        </button>
+      </div>
+    </div>
+  )
+}
+
 // ── Tools tab ───────────────────────────────────────────────────────
 
 function ToolsTab({
@@ -435,12 +487,14 @@ function ToolsTab({
   server,
   tools,
   invocations,
+  gatewayReady,
   onReload,
 }: {
   connId: string | null
   server: string
   tools: McpTool[]
   invocations: McpInvocation[]
+  gatewayReady: boolean
   onReload: () => Promise<void>
 }) {
   if (tools.length === 0) {
@@ -465,6 +519,7 @@ function ToolsTab({
           server={server}
           tool={t}
           invocations={invocations.filter((i) => i.tool === t.name)}
+          gatewayReady={gatewayReady}
           onReload={onReload}
         />
       ))}
@@ -477,12 +532,14 @@ function ToolRow({
   server,
   tool,
   invocations,
+  gatewayReady,
   onReload,
 }: {
   connId: string | null
   server: string
   tool: McpTool
   invocations: McpInvocation[]
+  gatewayReady: boolean
   onReload: () => Promise<void>
 }) {
   const [expanded, setExpanded] = useState(false)
@@ -523,6 +580,7 @@ function ToolRow({
             server={server}
             tool={tool}
             invocations={invocations}
+            gatewayReady={gatewayReady}
             onReload={onReload}
           />
         </div>
@@ -536,12 +594,14 @@ function ToolExpansion({
   server,
   tool,
   invocations,
+  gatewayReady,
   onReload,
 }: {
   connId: string | null
   server: string
   tool: McpTool
   invocations: McpInvocation[]
+  gatewayReady: boolean
   onReload: () => Promise<void>
 }) {
   const [showRaw, setShowRaw] = useState(false)
@@ -551,7 +611,13 @@ function ToolExpansion({
         <div className="mb-1 flex items-center gap-1 text-[9px] uppercase tracking-wider text-chrome-text/45">
           Test
         </div>
-        <ToolTester connId={connId} server={server} tool={tool} onComplete={onReload} />
+        <ToolTester
+          connId={connId}
+          server={server}
+          tool={tool}
+          gatewayReady={gatewayReady}
+          onComplete={onReload}
+        />
       </div>
       <div className="space-y-2">
         <div>
@@ -628,11 +694,13 @@ function ToolTester({
   connId,
   server,
   tool,
+  gatewayReady,
   onComplete,
 }: {
   connId: string | null
   server: string
   tool: McpTool
+  gatewayReady: boolean
   onComplete: () => Promise<void>
 }) {
   const properties = tool.inputSchema?.properties ?? {}
@@ -652,7 +720,7 @@ function ToolTester({
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({})
 
   const run = async () => {
-    if (!connId) return
+    if (!connId || !gatewayReady) return
     const { args, errors } = buildArgsFromForm(tool.inputSchema, values)
     setFieldErrors(errors)
     if (Object.keys(errors).length > 0) return
@@ -717,11 +785,11 @@ function ToolTester({
       <button
         type="button"
         onClick={() => void run()}
-        disabled={running || !connId}
+        disabled={running || !connId || !gatewayReady}
         className="inline-flex items-center gap-1 rounded border border-rvbbit-accent/50 bg-rvbbit-bg px-2 py-1 text-[11px] font-medium text-rvbbit-accent hover:bg-rvbbit-accent/15 disabled:opacity-40"
       >
         <Play className="h-3 w-3" />
-        {running ? "Calling…" : "Run"}
+        {running ? "Calling…" : gatewayReady ? "Run" : "Gateway required"}
       </button>
       {result ? (
         <div className="mt-1 space-y-1">
@@ -866,16 +934,18 @@ function ResourcesTab({
   connId,
   server,
   resources,
+  gatewayReady,
 }: {
   connId: string | null
   server: string
   resources: McpResource[]
+  gatewayReady: boolean
 }) {
   const [reading, setReading] = useState<string | null>(null)
   const [output, setOutput] = useState<{ uri: string; data: unknown; error?: string } | null>(null)
 
   const read = async (uri: string) => {
-    if (!connId) return
+    if (!connId || !gatewayReady) return
     setReading(uri)
     const res = await mcpResource(connId, server, uri)
     setOutput({ uri, data: res.data, error: res.error })
@@ -913,11 +983,11 @@ function ResourcesTab({
             <button
               type="button"
               onClick={() => void read(r.uri)}
-              disabled={reading === r.uri}
+              disabled={reading === r.uri || !gatewayReady}
               className="inline-flex items-center gap-1 rounded border border-rvbbit-accent/40 bg-rvbbit-bg px-1.5 py-0.5 text-[10px] text-rvbbit-accent hover:bg-rvbbit-accent/15 disabled:opacity-40"
             >
               <Play className="h-3 w-3" />
-              {reading === r.uri ? "Reading…" : "Read"}
+              {reading === r.uri ? "Reading…" : gatewayReady ? "Read" : "Gateway required"}
             </button>
           </div>
           {(r.name || r.description) && (

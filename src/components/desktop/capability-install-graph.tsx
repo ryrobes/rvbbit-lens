@@ -21,6 +21,7 @@ import {
   type ComposeFrame,
   type InstallKnobs,
   type Manifest,
+  type ProbeResult,
   type RenderedArtifacts,
   type ScaffoldedFileEntry,
 } from "@/lib/rvbbit/capabilities"
@@ -70,8 +71,28 @@ interface SqlArtifact {
   error?: string
 }
 
+interface ProbeAttemptArtifact {
+  attempt: number
+  elapsedMs: number
+  latencyMs: number
+  ok: boolean
+  outputType?: string
+  error?: string
+}
+
 interface SmokeArtifact extends SqlArtifact {
-  probe?: { ok: boolean; latencyMs: number; outputType?: string; error?: string }
+  probe?: {
+    ok: boolean
+    latencyMs: number
+    outputType?: string
+    error?: string
+    attempts?: number
+    waitedMs?: number
+    timeoutMs?: number
+  }
+  probeAttempts?: ProbeAttemptArtifact[]
+  probeWaiting?: boolean
+  probeTimeoutMs?: number
 }
 
 interface ArtifactsMap {
@@ -97,7 +118,7 @@ const STEP_HINT: Record<StepKey, string> = {
   build: "docker compose up -d --build",
   register: "Apply register.sql → rvbbit.register_backend(…)",
   operator: "Apply operator.sql → rvbbit.create_operator(…)",
-  smoke: "Apply smoke.sql → rvbbit.backend_probe + sample operator call",
+  smoke: "Apply smoke.sql, then wait for backend_probe readiness",
 }
 
 function initSteps(): Record<StepKey, StepState> {
@@ -123,6 +144,28 @@ const NODE_H = 86
 const COL_GAP = 36
 const PAD_X = 16
 const PAD_Y = 20
+const SMOKE_PROBE_TIMEOUT_MS = 120_000
+const SMOKE_PROBE_INTERVAL_MS = 2_000
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+function probeArtifact(
+  probe: ProbeResult,
+  attempts: number,
+  waitedMs: number,
+): NonNullable<SmokeArtifact["probe"]> {
+  return {
+    ok: probe.ok,
+    latencyMs: probe.latency_ms,
+    outputType: probe.outputType,
+    error: probe.error,
+    attempts,
+    waitedMs,
+    timeoutMs: SMOKE_PROBE_TIMEOUT_MS,
+  }
+}
 
 export function CapabilityInstallGraph({
   activeConnectionId,
@@ -276,42 +319,104 @@ export function CapabilityInstallGraph({
     // The probe call is what the install-state badge uses, so running
     // it here ensures Capability Detail flips to "healthy" on success.
     const sqlResult = await applyInstallSql(activeConnectionId, rendered.smokeSql)
-    // Runtime sidecars expose /run, not the /predict backend transport, so
-    // there is no backend_probe to run — the smoke SQL (a python_runtimes
-    // status check) is the verification.
-    const isRuntime = manifest.kind === "runtime_sidecar"
-    const probe = isRuntime || !manifest.backend
-      ? null
-      : await probeBackend(activeConnectionId, manifest.backend.name, null)
+    // Runtime sidecars do not expose the /predict backend transport, so
+    // there is no backend_probe to run — the smoke SQL is the verification.
+    const smokeBase: SmokeArtifact = {
+      sql: rendered.smokeSql,
+      latencyMs: sqlResult.latencyMs,
+      lastRow: sqlResult.lastRow ?? null,
+      error: sqlResult.ok ? undefined : sqlResult.error,
+    }
     setArtifacts((a) => ({
       ...a,
-      smoke: {
-        sql: rendered.smokeSql,
-        latencyMs: sqlResult.latencyMs,
-        lastRow: sqlResult.lastRow ?? null,
-        error: sqlResult.ok ? undefined : sqlResult.error,
-        probe: probe
-          ? {
-              ok: probe.ok,
-              latencyMs: probe.latency_ms,
-              outputType: probe.outputType,
-              error: probe.error,
-            }
-          : undefined,
-      },
+      smoke: smokeBase,
     }))
-    const failed = !sqlResult.ok || (probe ? !probe.ok : false)
-    if (failed) {
+    if (!sqlResult.ok) {
       setStep("smoke", {
         status: "failed",
         endedAt: Date.now(),
-        error: sqlResult.error ?? probe?.error ?? "smoke failed",
+        error: sqlResult.error ?? "smoke failed",
       })
       return false
     }
-    setStep("smoke", { status: "ok", endedAt: Date.now() })
-    onInstalledChanged?.()
-    return true
+
+    const isRuntime = manifest.kind === "runtime_sidecar"
+    if (isRuntime || !manifest.backend) {
+      setStep("smoke", { status: "ok", endedAt: Date.now() })
+      onInstalledChanged?.()
+      return true
+    }
+
+    const probeStartedAt = Date.now()
+    const probeDeadline = probeStartedAt + SMOKE_PROBE_TIMEOUT_MS
+    let attempts: ProbeAttemptArtifact[] = []
+    let lastProbe: ProbeResult | null = null
+
+    while (Date.now() <= probeDeadline) {
+      const attempt = attempts.length + 1
+      const probe = await probeBackend(activeConnectionId, manifest.backend.name, null)
+      lastProbe = probe
+      const elapsedMs = Date.now() - probeStartedAt
+      attempts = [
+        ...attempts,
+        {
+          attempt,
+          elapsedMs,
+          latencyMs: probe.latency_ms,
+          ok: probe.ok,
+          outputType: probe.outputType,
+          error: probe.error,
+        },
+      ]
+      setArtifacts((a) => ({
+        ...a,
+        smoke: {
+          ...smokeBase,
+          probe: probeArtifact(probe, attempt, elapsedMs),
+          probeAttempts: attempts,
+          probeWaiting: !probe.ok,
+          probeTimeoutMs: SMOKE_PROBE_TIMEOUT_MS,
+        },
+      }))
+
+      if (probe.ok) {
+        setStep("smoke", { status: "ok", endedAt: Date.now() })
+        onInstalledChanged?.()
+        return true
+      }
+
+      const waitMs = Math.min(SMOKE_PROBE_INTERVAL_MS, probeDeadline - Date.now())
+      if (waitMs <= 0) break
+      await sleep(waitMs)
+    }
+
+    const waitedMs = Date.now() - probeStartedAt
+    const lastError = lastProbe?.error ?? "probe failed"
+    const error = `backend_probe did not become ready within ${Math.round(SMOKE_PROBE_TIMEOUT_MS / 1000)}s: ${lastError}`
+    setArtifacts((a) => ({
+      ...a,
+      smoke: {
+        ...(a.smoke ?? smokeBase),
+        probe: {
+          ok: false,
+          latencyMs: lastProbe?.latency_ms ?? 0,
+          outputType: lastProbe?.outputType,
+          error,
+          attempts: attempts.length,
+          waitedMs,
+          timeoutMs: SMOKE_PROBE_TIMEOUT_MS,
+        },
+        probeAttempts: attempts,
+        probeWaiting: false,
+        probeTimeoutMs: SMOKE_PROBE_TIMEOUT_MS,
+      },
+    }))
+    setStep("smoke", {
+      status: "failed",
+      endedAt: Date.now(),
+      error,
+    })
+    return false
   }, [activeConnectionId, rendered.smokeSql, manifest.kind, manifest.backend, setStep, onInstalledChanged])
 
   // ── Pipeline orchestration ──
@@ -973,13 +1078,15 @@ function SmokePanel({
       <EmptyArtifact
         label={
           state.status === "pending"
-            ? "Run smoke to apply smoke.sql + a backend_probe round-trip."
+            ? "Run smoke to apply smoke.sql, then wait for backend_probe readiness."
             : "no artifact"
         }
       />
     )
   }
   const probe = artifact.probe
+  const attemptCount = probe?.attempts ?? artifact.probeAttempts?.length ?? 0
+  const recentAttempts = (artifact.probeAttempts ?? []).slice(-5)
   return (
     <div className="grid h-full grid-cols-[minmax(0,1fr)_320px] overflow-hidden">
       <div className="flex h-full min-w-0 flex-col overflow-hidden border-r border-chrome-border">
@@ -1020,27 +1127,70 @@ function SmokePanel({
           <div
             className={cn(
               "rounded border p-2",
-              probe.ok
-                ? "border-success/40 bg-success/10 text-success"
-                : "border-danger/40 bg-danger/10 text-danger",
+              artifact.probeWaiting
+                ? "border-rvbbit-accent/40 bg-rvbbit-accent/10 text-rvbbit-accent"
+                : probe.ok
+                  ? "border-success/40 bg-success/10 text-success"
+                  : "border-danger/40 bg-danger/10 text-danger",
             )}
           >
             <div className="mb-0.5 flex items-center justify-between text-[9px] uppercase tracking-wider opacity-75">
               <span>backend_probe</span>
               <span className="font-mono tabular-nums">
+                {attemptCount > 0 ? `try ${attemptCount} · ` : ""}
                 {fmtMs(probe.latencyMs)}
               </span>
             </div>
-            {probe.ok ? (
+            {artifact.probeWaiting ? (
+              <div className="space-y-1 text-[10px]">
+                <div>
+                  Waiting for the backend to accept requests
+                  {probe.waitedMs != null && probe.timeoutMs != null
+                    ? ` · ${fmtMs(probe.waitedMs)} / ${fmtMs(probe.timeoutMs)}`
+                    : ""}
+                </div>
+                {probe.error ? (
+                  <pre className="whitespace-pre-wrap break-words font-mono text-[10px] opacity-85">
+                    {probe.error}
+                  </pre>
+                ) : null}
+              </div>
+            ) : probe.ok ? (
               <div className="text-[10px]">
-                Round-trip ok · output type{" "}
+                Round-trip ok
+                {attemptCount > 1 ? ` after ${attemptCount} tries` : ""} · output type{" "}
                 <span className="font-mono">{probe.outputType ?? "?"}</span>
               </div>
             ) : (
-              <pre className="whitespace-pre-wrap break-words font-mono text-[10px]">
-                {probe.error ?? "probe failed"}
-              </pre>
+              <div className="space-y-1">
+                <pre className="whitespace-pre-wrap break-words font-mono text-[10px]">
+                  {probe.error ?? "probe failed"}
+                </pre>
+                {probe.waitedMs != null ? (
+                  <div className="text-[10px] opacity-80">
+                    Waited {fmtMs(probe.waitedMs)} across {attemptCount || 1} tries.
+                  </div>
+                ) : null}
+              </div>
             )}
+            {recentAttempts.length > 1 ? (
+              <details className="mt-2">
+                <summary className="cursor-pointer text-[9px] uppercase tracking-wider opacity-75 hover:opacity-100">
+                  recent tries
+                </summary>
+                <div className="mt-1 space-y-1">
+                  {recentAttempts.map((attempt) => (
+                    <div
+                      key={attempt.attempt}
+                      className="rounded border border-current/20 bg-doc-bg/45 p-1 font-mono text-[9px] text-chrome-text"
+                    >
+                      #{attempt.attempt} · {fmtMs(attempt.elapsedMs)} ·{" "}
+                      {attempt.ok ? "ok" : attempt.error ?? "failed"}
+                    </div>
+                  ))}
+                </div>
+              </details>
+            ) : null}
           </div>
         ) : null}
         {artifact.lastRow ? (

@@ -553,13 +553,13 @@ export interface CapabilityDetailPayload {
   /** Catalog entry id (e.g. `extract/gliner-medium-v2.1.yaml`). */
   catalogId: string
   /** Optional starting tab. */
-  initialTab?: "overview" | "generated-sql" | "probe" | "install"
+  initialTab?: "overview" | "generated-sql" | "probe" | "install" | "tests"
 }
 
 export interface WarrenPayload {
   kind?: "warren"
   /** Optional starting tab. */
-  initialTab?: "inventory" | "jobs"
+  initialTab?: "inventory" | "jobs" | "runtimes"
   /** Optional pre-applied label filter for inventory (selector-style match). */
   labelFilter?: Record<string, unknown>
 }

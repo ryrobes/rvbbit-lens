@@ -924,7 +924,7 @@ const INSTALL_STATE_THEME: Record<
     bg: "bg-success/12",
     fg: "text-success",
     ring: "ring-success/40",
-    title: "Execution runtime registered in rvbbit.python_runtimes with status = ready",
+    title: "Execution runtime registered with status = ready",
   },
   runtime_failing: {
     label: "runtime failing",

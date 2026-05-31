@@ -3,10 +3,13 @@
 import { useCallback, useEffect, useMemo, useState } from "react"
 import {
   AlertTriangle,
+  CheckCircle2,
   Cpu,
+  Globe,
   Package,
   Pause,
   Play,
+  Plus,
   RefreshCw,
   Rocket,
   Search,
@@ -18,6 +21,7 @@ import {
   fetchInstalledBackends,
   fetchInstalledRuntimes,
   flagsToStates,
+  importCapabilityCatalogUrl,
   joinCatalogToInstalled,
   type CatalogDoc,
   type InstalledBackend,
@@ -78,12 +82,24 @@ export function CapabilitiesWindow({
   const [intervalMs, setIntervalMs] = useState(5000)
   const [updatedAt, setUpdatedAt] = useState(0)
   const [warrenAvail, setWarrenAvail] = useState<WarrenAvailability | null>(null)
+  const [catalogOrigin, setCatalogOrigin] = useState<"db" | "file" | null>(null)
+  const [selectedSources, setSelectedSources] = useState<Set<string>>(() => new Set())
+  const [importOpen, setImportOpen] = useState(false)
+  const [importUrl, setImportUrl] = useState("")
+  const [importSource, setImportSource] = useState("")
+  const [importPrune, setImportPrune] = useState(false)
+  const [importing, setImporting] = useState(false)
+  const [importStatus, setImportStatus] = useState<{
+    ok: boolean
+    message: string
+  } | null>(null)
   const loadingCatalog = catalog == null && catalogError == null
 
   const loadCatalog = useCallback(async () => {
     const r = await fetchCatalog(activeConnectionId)
     setCatalog(r.doc)
     setCatalogError(r.error ?? null)
+    setCatalogOrigin(r.source ?? null)
   }, [activeConnectionId])
 
   const pollInstalled = useCallback(async () => {
@@ -161,6 +177,16 @@ export function CapabilitiesWindow({
     return [...counts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
   }, [catalog])
 
+  const allSources = useMemo<[string, number][]>(() => {
+    if (!catalog) return []
+    const counts = new Map<string, number>()
+    for (const e of catalog.capabilities) {
+      const source = e.catalog_source || "unknown"
+      counts.set(source, (counts.get(source) ?? 0) + 1)
+    }
+    return [...counts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+  }, [catalog])
+
   // Tag chip "running counts" — how many *currently visible* entries
   // would match if you toggled this tag. Lets the user see the impact
   // of each chip before clicking.
@@ -187,6 +213,9 @@ export function CapabilitiesWindow({
         return true
       })
     }
+    if (selectedSources.size > 0) {
+      v = v.filter((e) => selectedSources.has(e.catalog.catalog_source || "unknown"))
+    }
     if (search.trim().length > 0) {
       v = filterBySearchOnly(v, search) as JoinedCatalogEntry[]
     }
@@ -199,13 +228,39 @@ export function CapabilitiesWindow({
       if (r !== 0) return r
       return a.catalog.title.localeCompare(b.catalog.title)
     })
-  }, [join, selectedTags, search])
+  }, [join, selectedTags, selectedSources, search])
 
   const totalCatalog = catalog?.capabilities.length ?? 0
   const totalRegistered = join?.entries.filter((e) => e.flags.registered).length ?? 0
   const totalUsed = join?.entries.filter((e) => e.flags.used).length ?? 0
   const totalErrors = join?.entries.filter((e) => e.flags.errorSeen).length ?? 0
   const totalExternal = join?.external.length ?? 0
+
+  const handleImportCatalog = useCallback(async () => {
+    if (!activeConnectionId || importUrl.trim().length === 0) return
+    setImporting(true)
+    setImportStatus(null)
+    const result = await importCapabilityCatalogUrl({
+      connectionId: activeConnectionId,
+      url: importUrl.trim(),
+      catalogSource: importSource.trim() || undefined,
+      prune: importPrune,
+    })
+    setImporting(false)
+    if (!result.ok) {
+      setImportStatus({
+        ok: false,
+        message: result.error ?? "catalog import failed",
+      })
+      return
+    }
+    setImportStatus({
+      ok: true,
+      message: `imported ${result.imported ?? 0} pack${(result.imported ?? 0) === 1 ? "" : "s"} into ${result.catalogSource ?? "catalog"}`,
+    })
+    await loadCatalog()
+    await pollInstalled()
+  }, [activeConnectionId, importUrl, importSource, importPrune, loadCatalog, pollInstalled])
 
   if (!hasRvbbit) {
     return (
@@ -241,6 +296,14 @@ export function CapabilitiesWindow({
           <Package className="h-3.5 w-3.5 text-brand-capability" />
           {loadingCatalog ? "loading…" : `${totalCatalog} packs`}
         </span>
+        {catalogOrigin ? (
+          <span
+            className="rounded bg-foreground/[0.05] px-1.5 py-0.5 text-[9px] uppercase tracking-wider text-chrome-text/60"
+            title={catalogOrigin === "db" ? "Browsing rvbbit.capability_catalog" : "Fallback catalog.json"}
+          >
+            {catalogOrigin}
+          </span>
+        ) : null}
         {!loadingCatalog ? (
           <>
             <span className="text-chrome-text/40">·</span>
@@ -272,7 +335,7 @@ export function CapabilitiesWindow({
                 </span>
               </>
             ) : null}
-            {warrenAvail?.available && onOpenWarren ? (
+          {warrenAvail?.available && onOpenWarren ? (
               <button
                 type="button"
                 onClick={onOpenWarren}
@@ -287,6 +350,17 @@ export function CapabilitiesWindow({
                 {warrenAvail.readyNodes > 0
                   ? `${warrenAvail.readyNodes} warren${warrenAvail.readyNodes === 1 ? "" : "s"} ready`
                   : `${warrenAvail.totalNodes} warren${warrenAvail.totalNodes === 1 ? "" : "s"}`}
+              </button>
+            ) : null}
+            {activeConnectionId ? (
+              <button
+                type="button"
+                onClick={() => setImportOpen((v) => !v)}
+                className="inline-flex items-center gap-1 rounded-full border border-brand-capability/40 bg-brand-capability/10 px-2 py-0.5 text-[10px] text-brand-capability hover:bg-brand-capability/15"
+                title="Import an external capability catalog URL into rvbbit.capability_catalog"
+              >
+                <Globe className="h-3 w-3" />
+                catalog URL
               </button>
             ) : null}
           </>
@@ -340,6 +414,71 @@ export function CapabilitiesWindow({
         <div className="flex items-start gap-1.5 border-b border-danger/40 bg-danger/10 px-3 py-1.5 text-[11px] text-danger">
           <AlertTriangle className="mt-px h-3 w-3 shrink-0" />
           <span className="break-words">backend_health: {installedError}</span>
+        </div>
+      ) : null}
+      {importOpen ? (
+        <div className="border-b border-chrome-border bg-chrome-bg/25 px-3 py-2">
+          <div className="flex flex-wrap items-end gap-2">
+            <div className="min-w-[260px] flex-1">
+              <div className="mb-0.5 text-[9px] uppercase tracking-wider text-chrome-text/55">
+                catalog url
+              </div>
+              <input
+                type="url"
+                value={importUrl}
+                onChange={(e) => setImportUrl(e.target.value)}
+                placeholder="https://example.com/rvbbit-capability-seed.json"
+                className="h-7 w-full rounded border border-chrome-border bg-secondary-background px-2 font-mono text-[11px] text-foreground outline-none focus:ring-2 focus:ring-ring"
+              />
+            </div>
+            <div className="w-[210px]">
+              <div className="mb-0.5 text-[9px] uppercase tracking-wider text-chrome-text/55">
+                source label
+              </div>
+              <input
+                type="text"
+                value={importSource}
+                onChange={(e) => setImportSource(e.target.value)}
+                placeholder="url:team-capabilities"
+                className="h-7 w-full rounded border border-chrome-border bg-secondary-background px-2 font-mono text-[11px] text-foreground outline-none focus:ring-2 focus:ring-ring"
+              />
+            </div>
+            <label className="flex h-7 items-center gap-1.5 rounded border border-chrome-border bg-secondary-background px-2 text-[10px] text-chrome-text">
+              <input
+                type="checkbox"
+                checked={importPrune}
+                onChange={(e) => setImportPrune(e.target.checked)}
+                className="h-3.5 w-3.5 accent-brand-capability"
+              />
+              prune missing
+            </label>
+            <button
+              type="button"
+              onClick={() => void handleImportCatalog()}
+              disabled={importing || !activeConnectionId || importUrl.trim().length === 0}
+              className="inline-flex h-7 items-center gap-1 rounded border border-brand-capability/45 bg-brand-capability/15 px-2.5 text-[10px] font-medium uppercase tracking-wider text-brand-capability hover:bg-brand-capability/20 disabled:cursor-not-allowed disabled:opacity-45"
+            >
+              <Plus className="h-3 w-3" />
+              {importing ? "importing" : "import"}
+            </button>
+          </div>
+          {importStatus ? (
+            <div
+              className={cn(
+                "mt-2 flex items-start gap-1.5 rounded border px-2 py-1.5 text-[11px]",
+                importStatus.ok
+                  ? "border-success/40 bg-success/10 text-success"
+                  : "border-danger/40 bg-danger/10 text-danger",
+              )}
+            >
+              {importStatus.ok ? (
+                <CheckCircle2 className="mt-px h-3 w-3 shrink-0" />
+              ) : (
+                <AlertTriangle className="mt-px h-3 w-3 shrink-0" />
+              )}
+              <span className="break-words">{importStatus.message}</span>
+            </div>
+          ) : null}
         </div>
       ) : null}
 
@@ -403,6 +542,53 @@ export function CapabilitiesWindow({
             })}
           </div>
         ) : null}
+        {allSources.length > 1 ? (
+          <div className="flex flex-wrap items-center gap-1 border-t border-chrome-border/35 pt-1.5">
+            <span className="mr-1 text-[9px] uppercase tracking-wider text-chrome-text/45">
+              sources
+            </span>
+            {allSources.map(([source, total]) => {
+              const active = selectedSources.has(source)
+              return (
+                <button
+                  key={source}
+                  type="button"
+                  onClick={() =>
+                    setSelectedSources((prev) => {
+                      const next = new Set(prev)
+                      if (next.has(source)) next.delete(source)
+                      else next.add(source)
+                      return next
+                    })
+                  }
+                  className={cn(
+                    "inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] transition",
+                    active
+                      ? "border-brand-capability/50 bg-brand-capability/15 text-brand-capability"
+                      : "border-chrome-border bg-secondary-background text-chrome-text hover:text-foreground",
+                  )}
+                  title={`${source} — ${total} pack${total === 1 ? "" : "s"}`}
+                >
+                  <Globe className="h-2.5 w-2.5" />
+                  <span className="max-w-[220px] truncate font-mono">{source}</span>
+                  <span className="font-mono tabular-nums text-chrome-text/55">
+                    {total}
+                  </span>
+                </button>
+              )
+            })}
+            {selectedSources.size > 0 ? (
+              <button
+                type="button"
+                onClick={() => setSelectedSources(new Set())}
+                className="inline-flex items-center gap-1 text-[10px] text-chrome-text/55 hover:text-foreground"
+              >
+                <X className="h-3 w-3" />
+                clear sources
+              </button>
+            ) : null}
+          </div>
+        ) : null}
       </div>
 
       {/* card grid */}
@@ -450,7 +636,11 @@ function filterBySearchOnly<T extends { catalog: JoinedCatalogEntry["catalog"] }
       c.source_provider ?? "",
       c.backend_name ?? "",
       c.runtime_name ?? "",
+      c.catalog_source ?? "",
+      c.capability_role ?? "",
+      c.system_runtime ? "system runtime operator runtime" : "",
       c.runtime_handler,
+      ...(c.acceptance_tests ?? []),
       ...(c.tags ?? []),
       ...(c.operators ?? []),
     ]
@@ -467,8 +657,9 @@ function CapabilityCard({
   entry: JoinedCatalogEntry
   onOpen: () => void
 }) {
-  const { catalog, installed, flags } = entry
+  const { catalog, installed, installedRuntime, flags } = entry
   const states = flagsToStates(flags)
+  const testCount = catalog.acceptance_tests.length
   return (
     <button
       type="button"
@@ -503,6 +694,28 @@ function CapabilityCard({
       {/* state badges */}
       <div className="mt-2 flex flex-wrap items-center gap-1">
         <InstallStateBadgeGroup states={states} size="xs" />
+        <span
+          className="rounded-full border border-chrome-border/50 bg-foreground/[0.03] px-1.5 py-px font-mono text-[9px] text-chrome-text/60"
+          title={`catalog source: ${catalog.catalog_source}`}
+        >
+          {catalog.catalog_source}
+        </span>
+        {testCount > 0 ? (
+          <span
+            className="rounded-full border border-success/35 bg-success/10 px-1.5 py-px text-[9px] uppercase tracking-wider text-success"
+            title={catalog.acceptance_tests.join(", ")}
+          >
+            {testCount} test{testCount === 1 ? "" : "s"}
+          </span>
+        ) : null}
+        {catalog.system_runtime ? (
+          <span
+            className="rounded-full border border-brand-capability/40 bg-brand-capability/10 px-1.5 py-px text-[9px] uppercase tracking-wider text-brand-capability"
+            title="Operator runtime capability"
+          >
+            runtime
+          </span>
+        ) : null}
       </div>
 
       {/* facts row */}
@@ -539,6 +752,14 @@ function CapabilityCard({
 
       {/* installed stats — only when registered */}
       {installed ? <InstalledFooter installed={installed} /> : null}
+      {!installed && installedRuntime ? (
+        <div className="mt-2 border-t border-chrome-border/40 pt-1.5 text-[10px] text-chrome-text/55">
+          runtime{" "}
+          <span className="font-mono text-foreground">{installedRuntime.name}</span>{" "}
+          <span className="text-chrome-text/45">·</span>{" "}
+          <span className="text-success">{installedRuntime.status}</span>
+        </div>
+      ) : null}
     </button>
   )
 }

@@ -22,12 +22,9 @@ export const runtime = "nodejs"
  */
 
 function repoRoot(): string {
-  return (
-    process.env.RVBBIT_REPO_PATH ??
-    process.env.HOME
-      ? path.join(process.env.HOME ?? "", "repos2026", "rvbbit")
-      : "/home/ryanr/repos2026/rvbbit"
-  )
+  if (process.env.RVBBIT_REPO_PATH) return process.env.RVBBIT_REPO_PATH
+  const sibling = process.env.RVBBIT_REPO_NAME ?? "rvbbit-sql"
+  return path.resolve(/*turbopackIgnore: true*/ process.cwd(), "..", sibling)
 }
 
 async function readCatalog(): Promise<{ ok: true; doc: unknown } | { ok: false; status: number; error: string }> {
@@ -56,14 +53,15 @@ async function readManifest(
   relPath: string,
 ): Promise<{ ok: true; manifest: unknown } | { ok: false; status: number; error: string }> {
   const root = repoRoot()
-  const manifestRoot = path.resolve(path.join(root, "capabilities", "manifests"))
+  const capabilitiesRoot = path.resolve(path.join(root, "capabilities"))
 
-  // Accept either a full `capabilities/manifests/...` path (catalog shape)
-  // or a bare `extract/gliner.yaml`. Either way, resolve under manifestRoot.
-  const stripped = relPath.replace(/^capabilities\/manifests\//, "").replace(/^\/+/, "")
-  const resolved = path.resolve(path.join(manifestRoot, stripped))
-  if (!resolved.startsWith(manifestRoot + path.sep) && resolved !== manifestRoot) {
-    return { ok: false, status: 400, error: "manifest path escapes manifests root" }
+  // Accept the current pack shape (`capabilities/packs/.../capability.yaml`)
+  // plus the older `capabilities/manifests/...` fallback. Either way, the
+  // read is constrained to the capabilities tree.
+  const stripped = relPath.replace(/^capabilities\//, "").replace(/^\/+/, "")
+  const resolved = path.resolve(path.join(capabilitiesRoot, stripped))
+  if (!resolved.startsWith(capabilitiesRoot + path.sep) && resolved !== capabilitiesRoot) {
+    return { ok: false, status: 400, error: "manifest path escapes capabilities root" }
   }
 
   try {

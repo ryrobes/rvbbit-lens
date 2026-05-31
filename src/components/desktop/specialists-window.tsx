@@ -599,9 +599,8 @@ function runtimeStatusColor(status: string): string {
 }
 
 /**
- * Execution runtimes (rvbbit.python_runtimes) — peers of model backends in
- * the fleet, not models. A runtime serves operator `kind: python` nodes
- * over `/run` rather than the `/predict` specialist transport.
+ * Execution runtimes — peers of model backends in the fleet, not models.
+ * Runtime catalogs include rvbbit.python_runtimes and rvbbit.mcp_gateways.
  */
 function RuntimesPanel({
   runtimes,
@@ -617,9 +616,9 @@ function RuntimesPanel({
       right={<span>{runtimes.length} registered</span>}
     >
       <p className="mb-2 text-[10px] text-chrome-text/55">
-        Code executors from <span className="font-mono">rvbbit.python_runtimes</span> that
-        serve operator <span className="font-mono">kind: python</span> nodes over{" "}
-        <span className="font-mono">/run</span> — not model backends.
+        Code and tool runtimes that serve operator nodes such as{" "}
+        <span className="font-mono">kind: python</span> and{" "}
+        <span className="font-mono">kind: mcp</span> — not model backends.
       </p>
       <div className="grid grid-cols-2 gap-2">
         {runtimes.map((rt) => (

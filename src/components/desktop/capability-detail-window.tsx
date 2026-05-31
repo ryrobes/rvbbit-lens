@@ -31,7 +31,9 @@ import {
   joinCatalogToInstalled,
   probeBackend,
   renderManifest,
+  runAcceptanceSql,
   type CatalogEntry,
+  type AcceptanceRunStep,
   type InstallKnobs,
   type InstalledBackend,
   type InstalledRuntime,
@@ -65,12 +67,13 @@ interface CapabilityDetailWindowProps {
   onOpenWarrenJob: (jobId: string, jobName: string | null) => void
 }
 
-type TabKey = "overview" | "generated-sql" | "probe" | "install"
+type TabKey = "overview" | "generated-sql" | "probe" | "install" | "tests"
 const TABS: { key: TabKey; label: string }[] = [
   { key: "overview", label: "Overview" },
   { key: "generated-sql", label: "Generated SQL" },
   { key: "probe", label: "Probe" },
   { key: "install", label: "Install" },
+  { key: "tests", label: "Tests" },
 ]
 
 export function CapabilityDetailWindow({
@@ -342,6 +345,13 @@ export function CapabilityDetailWindow({
             rendered={rendered!}
             onInstalledChanged={() => void pollInstalled()}
             onOpenWarrenJob={onOpenWarrenJob}
+            acceptance={catalog!.acceptance}
+          />
+        ) : null}
+        {tab === "tests" ? (
+          <AcceptanceTestsTab
+            activeConnectionId={activeConnectionId}
+            catalog={catalog!}
           />
         ) : null}
       </div>
@@ -383,6 +393,7 @@ function OverviewTab({
 
         <Panel icon={Sparkles} title="Source">
           <div className="space-y-1.5">
+            <KV k="catalog" v={catalog.catalog_source} mono />
             <KV k="provider" v={source.provider ?? "—"} mono />
             <KV
               k="model"
@@ -403,6 +414,7 @@ function OverviewTab({
               mono
             />
             <KV k="revision" v={source.revision ?? "(latest)"} mono />
+            {catalog.updated_at ? <KV k="updated" v={fmtAgo(catalog.updated_at)} mono /> : null}
           </div>
         </Panel>
 
@@ -480,6 +492,25 @@ function OverviewTab({
             </div>
           )}
         </Panel>
+
+        {catalog.acceptance_tests.length > 0 ? (
+          <Panel icon={CheckCircle2} title="Acceptance">
+            <div className="space-y-1.5">
+              {catalog.acceptance_tests.map((name) => (
+                <div
+                  key={name}
+                  className="rounded border border-success/30 bg-success/5 px-2 py-1"
+                >
+                  <span className="font-mono text-[11px] text-success">{name}</span>
+                </div>
+              ))}
+              <p className="text-[10px] leading-snug text-chrome-text/55">
+                These SQL checks run against the deployed capability and the
+                database surfaces it registers.
+              </p>
+            </div>
+          </Panel>
+        ) : null}
 
         {installed ? (
           <Panel icon={Activity} title="Live usage">
@@ -888,6 +919,7 @@ function ProbeTab({
   const [useCustomInput, setUseCustomInput] = useState(false)
   const [running, setRunning] = useState(false)
   const [history, setHistory] = useState<HistoryEntry[]>([])
+  const probeName = manifest.backend?.name ?? manifest.name
 
   const runOnce = useCallback(async () => {
     if (!activeConnectionId) return
@@ -899,7 +931,7 @@ function ProbeTab({
       : null
     const result = await probeBackend(
       activeConnectionId,
-      (manifest.backend?.name ?? manifest.name),
+      probeName,
       filled,
     )
     setHistory((prev) => [
@@ -907,7 +939,7 @@ function ProbeTab({
       { at: Date.now(), result, input: filled },
     ])
     setRunning(false)
-  }, [activeConnectionId, (manifest.backend?.name ?? manifest.name), inputs, useCustomInput])
+  }, [activeConnectionId, probeName, inputs, useCustomInput])
 
   const okLatencies = history.filter((h) => h.result.ok).map((h) => h.result.latency_ms)
   const sorted = [...okLatencies].sort((a, b) => a - b)
@@ -1152,6 +1184,220 @@ function ProbeRow({ entry }: { entry: HistoryEntry }) {
   )
 }
 
+// ── Acceptance tests tab ────────────────────────────────────────────
+
+function AcceptanceTestsTab({
+  activeConnectionId,
+  catalog,
+}: {
+  activeConnectionId: string | null
+  catalog: CatalogEntry
+}) {
+  const acceptance = catalog.acceptance
+  type AcceptanceDefinition = {
+    kind: AcceptanceRunStep["kind"]
+    name: string
+    description?: string | null
+    sql: string
+  }
+  const definitions = useMemo(() => {
+    if (!acceptance) return [] as AcceptanceDefinition[]
+    return [
+      ...(acceptance.setup_sql ?? []).map((sql, i) => ({
+        kind: "setup" as const,
+        name: `setup_${i + 1}`,
+        description: null,
+        sql,
+      })),
+      ...(acceptance.tests ?? []).map((t) => ({
+        kind: "test" as const,
+        name: t.name,
+        description: t.description,
+        sql: t.sql,
+      })),
+      ...(acceptance.teardown_sql ?? []).map((sql, i) => ({
+        kind: "teardown" as const,
+        name: `teardown_${i + 1}`,
+        description: null,
+        sql,
+      })),
+    ] satisfies AcceptanceDefinition[]
+  }, [acceptance])
+  const [selected, setSelected] = useState(0)
+  const [running, setRunning] = useState(false)
+  const [runSteps, setRunSteps] = useState<AcceptanceRunStep[]>([])
+  const [lastOk, setLastOk] = useState<boolean | null>(null)
+  const selectedDef = definitions[Math.min(selected, Math.max(0, definitions.length - 1))]
+  const selectedRun = selectedDef
+    ? runSteps.find((s) => s.kind === selectedDef.kind && s.name === selectedDef.name)
+    : undefined
+
+  const runAll = useCallback(async () => {
+    if (!activeConnectionId || !acceptance || running) return
+    setRunning(true)
+    setRunSteps([])
+    setLastOk(null)
+    const result = await runAcceptanceSql(activeConnectionId, acceptance, (step) => {
+      setRunSteps((prev) => [...prev, step])
+    })
+    setLastOk(result.ok)
+    setRunning(false)
+  }, [activeConnectionId, acceptance, running])
+
+  if (!acceptance || definitions.length === 0) {
+    return (
+      <div className="grid h-full place-items-center bg-doc-bg p-6 text-center text-[12px] text-chrome-text/65">
+        <div>
+          <CheckCircle2 className="mx-auto mb-2 h-6 w-6 text-chrome-text/35" />
+          This catalog entry has no acceptance SQL.
+        </div>
+      </div>
+    )
+  }
+
+  return (
+    <div className="grid h-full grid-cols-[280px_minmax(0,1fr)] overflow-hidden bg-doc-bg">
+      <aside className="flex min-h-0 flex-col border-r border-chrome-border">
+        <div className="flex items-center gap-2 border-b border-chrome-border bg-chrome-bg/40 px-3 py-1.5">
+          <CheckCircle2 className="h-3.5 w-3.5 text-success" />
+          <span className="text-[11px] uppercase tracking-wider text-chrome-text">
+            Pack tests
+          </span>
+          <span className="ml-auto font-mono text-[10px] text-chrome-text/55">
+            {definitions.length}
+          </span>
+        </div>
+        <div className="space-y-2 border-b border-chrome-border/40 p-3">
+          <Button
+            size="sm"
+            onClick={() => void runAll()}
+            disabled={running || !activeConnectionId}
+            className="w-full"
+          >
+            <Play className="h-3 w-3" />
+            {running ? "Running…" : "Run acceptance SQL"}
+          </Button>
+          {acceptance.target_selector ? (
+            <pre className="overflow-auto rounded border border-chrome-border/40 bg-secondary-background p-2 font-mono text-[10px] text-foreground/80">
+              {JSON.stringify(acceptance.target_selector)}
+            </pre>
+          ) : null}
+          {lastOk != null ? (
+            <div
+              className={cn(
+                "flex items-center gap-1.5 rounded border px-2 py-1 text-[11px]",
+                lastOk
+                  ? "border-success/40 bg-success/10 text-success"
+                  : "border-danger/40 bg-danger/10 text-danger",
+              )}
+            >
+              {lastOk ? <CheckCircle2 className="h-3 w-3" /> : <X className="h-3 w-3" />}
+              {lastOk ? "all tests passed" : "stopped on failure"}
+            </div>
+          ) : null}
+        </div>
+        <div className="min-h-0 flex-1 overflow-auto py-1">
+          {definitions.map((def, i) => {
+            const run = runSteps.find((s) => s.kind === def.kind && s.name === def.name)
+            const active = i === selected
+            return (
+              <button
+                key={`${def.kind}:${def.name}`}
+                type="button"
+                onClick={() => setSelected(i)}
+                className={cn(
+                  "flex w-full items-center gap-2 px-3 py-1.5 text-left text-[11px] transition",
+                  active
+                    ? "bg-success/10 text-success"
+                    : "text-chrome-text hover:bg-foreground/[0.04] hover:text-foreground",
+                )}
+              >
+                <StatusDot ok={run?.ok} running={running && !run && runSteps.length === i} />
+                <div className="min-w-0 flex-1">
+                  <div className="truncate font-mono">{def.name}</div>
+                  <div className="text-[9px] uppercase tracking-wider text-chrome-text/45">
+                    {def.kind}
+                  </div>
+                </div>
+                {run ? (
+                  <span className="font-mono text-[9px] tabular-nums text-chrome-text/55">
+                    {fmtMs(run.latencyMs)}
+                  </span>
+                ) : null}
+              </button>
+            )
+          })}
+        </div>
+      </aside>
+      <div className="flex min-h-0 flex-col overflow-hidden">
+        <div className="flex items-center gap-2 border-b border-chrome-border bg-chrome-bg/40 px-3 py-1.5">
+          <FileCode2 className="h-3.5 w-3.5 text-success" />
+          <span className="font-mono text-[11px] text-foreground">
+            {selectedDef?.name ?? "test"}
+          </span>
+          <span className="rounded bg-foreground/[0.05] px-1 text-[9px] uppercase tracking-wider text-chrome-text/55">
+            sql
+          </span>
+          {selectedRun ? (
+            <span
+              className={cn(
+                "ml-auto rounded-full px-1.5 py-px text-[9px] uppercase tracking-wider",
+                selectedRun.ok ? "bg-success/15 text-success" : "bg-danger/15 text-danger",
+              )}
+            >
+              {selectedRun.ok ? "passed" : "failed"}
+            </span>
+          ) : null}
+        </div>
+        {selectedDef?.description ? (
+          <div className="border-b border-chrome-border/40 px-3 py-1.5 text-[11px] text-chrome-text/70">
+            {selectedDef.description}
+          </div>
+        ) : null}
+        <div className="grid min-h-0 flex-1 grid-rows-[minmax(0,1fr)_minmax(120px,0.45fr)]">
+          <CodePreview code={selectedDef?.sql ?? ""} lang="sql" className="min-h-0" />
+          <div className="min-h-0 overflow-auto border-t border-chrome-border bg-secondary-background/30 p-2">
+            {!selectedRun ? (
+              <div className="grid h-full place-items-center text-[11px] text-chrome-text/45">
+                Run tests to see output for this step.
+              </div>
+            ) : selectedRun.error ? (
+              <pre className="whitespace-pre-wrap break-words font-mono text-[11px] text-danger">
+                {selectedRun.error}
+              </pre>
+            ) : (
+              <CodePreview
+                code={JSON.stringify(selectedRun.lastRow ?? { ok: true }, null, 2)}
+                lang="json"
+                className="max-h-full rounded border border-chrome-border/40"
+              />
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function StatusDot({
+  ok,
+  running,
+}: {
+  ok: boolean | undefined
+  running: boolean
+}) {
+  if (running) {
+    return (
+      <span className="relative inline-flex h-2 w-2 shrink-0">
+        <span className="absolute inset-0 animate-ping rounded-full bg-rvbbit-accent opacity-75" />
+        <span className="relative inline-block h-2 w-2 rounded-full bg-rvbbit-accent" />
+      </span>
+    )
+  }
+  if (ok === true) return <span className="h-2 w-2 shrink-0 rounded-full bg-success" />
+  if (ok === false) return <span className="h-2 w-2 shrink-0 rounded-full bg-danger" />
+  return <span className="h-2 w-2 shrink-0 rounded-full bg-chrome-border" />
+}
 
 // ── Install tab dispatcher ──────────────────────────────────────────
 
@@ -1167,6 +1413,7 @@ function InstallTabDispatcher({
   rendered,
   onInstalledChanged,
   onOpenWarrenJob,
+  acceptance,
 }: {
   mode: "warren" | "local"
   warrenAvail: WarrenAvailability | null
@@ -1179,6 +1426,7 @@ function InstallTabDispatcher({
   rendered: RenderedArtifacts
   onInstalledChanged: () => void
   onOpenWarrenJob: (jobId: string, jobName: string | null) => void
+  acceptance: CatalogEntry["acceptance"]
 }) {
   // No warren tables on this DB → never show the toggle; only local
   // install. Preserves the pre-Phase-3 UX exactly.
@@ -1223,6 +1471,7 @@ function InstallTabDispatcher({
             catalogId={catalogId}
             manifest={manifest}
             knobs={knobs}
+            acceptance={acceptance}
             onUseLocalInstead={() => setMode("local")}
             onOpenJob={onOpenWarrenJob}
           />

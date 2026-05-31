@@ -26,7 +26,10 @@ import {
 } from "@/lib/rvbbit/operators"
 import {
   fetchAllToolsLite,
+  fetchMcpGatewayStatus,
   fetchServers,
+  MCP_GATEWAY_CATALOG_ID,
+  type McpGatewayStatus,
   type McpServerOverview,
   type McpToolLite,
 } from "@/lib/rvbbit/mcp"
@@ -47,6 +50,7 @@ interface OperatorFlowWindowProps {
    * to the KG Extraction Runs dashboard.
    */
   onOpenKgExtractionRuns?: (graphId?: string | null, runId?: number | null) => void
+  onOpenCapability?: (catalogId: string, initialTab?: "overview" | "generated-sql" | "probe" | "install" | "tests") => void
 }
 
 export function OperatorFlowWindow({
@@ -55,6 +59,7 @@ export function OperatorFlowWindow({
   hasRvbbit,
   onOpenQueryLens,
   onOpenKgExtractionRuns,
+  onOpenCapability,
 }: OperatorFlowWindowProps) {
   const startedNew = payload.operatorName === null
   const [op, setOp] = useState<RvbbitOperator | null>(null)
@@ -71,6 +76,7 @@ export function OperatorFlowWindow({
   const [specialists, setSpecialists] = useState<RvbbitSpecialist[]>([])
   const [mcpServers, setMcpServers] = useState<McpServerOverview[]>([])
   const [mcpTools, setMcpTools] = useState<McpToolLite[]>([])
+  const [mcpGateway, setMcpGateway] = useState<McpGatewayStatus | null>(null)
   const [receipts, setReceipts] = useState<OperatorReceipt[]>([])
   const [receiptId, setReceiptId] = useState<string | null>(payload.receiptId ?? null)
   const [tryInputs, setTryInputs] = useState<string[]>([])
@@ -104,15 +110,17 @@ export function OperatorFlowWindow({
     let cancelled = false
     const conn = activeConnectionId
     const run = async () => {
-      const [sp, srv, tools] = await Promise.all([
+      const [sp, srv, tools, gateway] = await Promise.all([
         fetchSpecialists(conn),
         fetchServers(conn),
         fetchAllToolsLite(conn),
+        fetchMcpGatewayStatus(conn),
       ])
       if (cancelled) return
       setSpecialists(sp.specialists)
       setMcpServers(srv.rows)
       setMcpTools(tools.rows)
+      setMcpGateway(gateway)
     }
     void run()
     return () => {
@@ -270,6 +278,19 @@ export function OperatorFlowWindow({
             extraction runs →
           </button>
         ) : null}
+        {mcpGateway && !mcpGateway.ready ? (
+          <button
+            type="button"
+            onClick={() =>
+              onOpenCapability?.(mcpGateway.catalogId ?? MCP_GATEWAY_CATALOG_ID, "install")
+            }
+            title={mcpGateway.error ?? "Install MCP Gateway runtime"}
+            className="inline-flex h-6 items-center gap-1 rounded border border-warning/40 bg-warning/10 px-1.5 text-[10px] text-warning hover:bg-warning/15"
+          >
+            <AlertTriangle className="h-3 w-3" />
+            MCP gateway
+          </button>
+        ) : null}
 
         {/* In run mode, surface receipt-level metrics inline so the
             shape of the most-recent run is readable without expanding
@@ -367,6 +388,10 @@ export function OperatorFlowWindow({
               specialists={specialists}
               mcpServers={mcpServers}
               mcpTools={mcpTools}
+              mcpGatewayReady={mcpGateway?.ready === true}
+              onOpenMcpGateway={() =>
+                onOpenCapability?.(mcpGateway?.catalogId ?? MCP_GATEWAY_CATALOG_ID, "install")
+              }
               onChange={onChangeOp}
             />
           ) : (

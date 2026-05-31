@@ -26,12 +26,15 @@ import {
   SERIES_COLORS,
 } from "./instruments"
 import {
+  fetchMcpGatewayStatus,
   fetchGhostServers,
   fetchInvocations,
   fetchServers,
+  MCP_GATEWAY_CATALOG_ID,
   registerServer,
   serverStatus,
   type GhostServerRow,
+  type McpGatewayStatus,
   type McpInvocation,
   type McpServerOverview,
   type RegisterServerInput,
@@ -43,6 +46,7 @@ interface McpServersWindowProps {
   activeConnectionId: string | null
   hasRvbbit: boolean
   onOpenServer: (name: string) => void
+  onOpenCapability: (catalogId: string, initialTab?: "overview" | "generated-sql" | "probe" | "install" | "tests") => void
 }
 
 const REFRESH_OPTIONS_MS = [
@@ -56,10 +60,12 @@ export function McpServersWindow({
   activeConnectionId,
   hasRvbbit,
   onOpenServer,
+  onOpenCapability,
 }: McpServersWindowProps) {
   const [servers, setServers] = useState<McpServerOverview[]>([])
   const [invocations, setInvocations] = useState<McpInvocation[]>([])
   const [ghosts, setGhosts] = useState<GhostServerRow[]>([])
+  const [gateway, setGateway] = useState<McpGatewayStatus | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [paused, setPaused] = useState(false)
   const [intervalMs, setIntervalMs] = useState(5000)
@@ -74,7 +80,9 @@ export function McpServersWindow({
       fetchInvocations(activeConnectionId, { limit: 300 }),
       fetchGhostServers(activeConnectionId),
     ])
-    setError(s.error ?? inv.error ?? null)
+    const gw = await fetchMcpGatewayStatus(activeConnectionId)
+    setGateway(gw)
+    setError(s.error ?? inv.error ?? gw.error ?? null)
     setServers(s.rows)
     setInvocations(inv.rows)
     setGhosts(gh)
@@ -131,6 +139,7 @@ export function McpServersWindow({
   const totalErrors = invocations.filter((i) => i.error).length
   const totalCacheHits = invocations.filter((i) => i.cacheHit).length
   const reachableCount = servers.filter((s) => serverStatus(s) === "active").length
+  const gatewayReady = gateway?.ready === true
 
   return (
     <div className="flex h-full flex-col bg-doc-bg text-[12px] text-chrome-text">
@@ -154,6 +163,7 @@ export function McpServersWindow({
           <Globe className="h-3.5 w-3.5 text-rvbbit-accent" />
           {loading ? "loading…" : `${servers.length} servers`}
         </span>
+        <GatewayChip gateway={gateway} />
         {!loading ? (
           <>
             <span className="text-chrome-text/40">·</span>
@@ -211,12 +221,14 @@ export function McpServersWindow({
           <button
             type="button"
             onClick={() => setShowAdd((s) => !s)}
+            disabled={!gatewayReady}
             title="Register a new MCP server"
             className={cn(
               "inline-flex h-6 items-center gap-1 rounded border px-1.5 text-[11px]",
               showAdd
                 ? "border-rvbbit-accent/50 bg-rvbbit-accent/15 text-rvbbit-accent"
                 : "border-chrome-border text-chrome-text/80 hover:border-rvbbit-accent/40 hover:text-foreground",
+              !gatewayReady && "cursor-not-allowed opacity-45 hover:border-chrome-border hover:text-chrome-text/80",
             )}
           >
             <Plus className="h-3 w-3" />
@@ -233,6 +245,15 @@ export function McpServersWindow({
       ) : null}
 
       <div className="flex-1 space-y-2.5 overflow-auto p-2.5">
+        {!gatewayReady ? (
+          <McpGatewayRequiredPanel
+            gateway={gateway}
+            onOpenCapability={() =>
+              onOpenCapability(gateway?.catalogId ?? MCP_GATEWAY_CATALOG_ID, "install")
+            }
+          />
+        ) : null}
+
         {showAdd ? (
           <RegisterForm
             connId={activeConnectionId}
@@ -271,9 +292,23 @@ export function McpServersWindow({
           <div className="grid h-32 place-items-center text-center text-[11px] text-chrome-text/55">
             <div>
               <Globe className="mx-auto mb-1.5 h-5 w-5 text-chrome-text/30" />
-              No MCP servers registered.
+              {gatewayReady ? "No MCP servers registered." : "MCP gateway runtime is not installed."}
               <br />
-              Click <span className="font-mono text-rvbbit-accent">+ Server</span> above to add one.
+              {gatewayReady ? (
+                <>
+                  Click <span className="font-mono text-rvbbit-accent">+ Server</span> above to add one.
+                </>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() =>
+                    onOpenCapability(gateway?.catalogId ?? MCP_GATEWAY_CATALOG_ID, "install")
+                  }
+                  className="mt-2 rounded border border-rvbbit-accent/45 bg-rvbbit-bg px-2 py-1 text-[10px] text-rvbbit-accent hover:bg-rvbbit-accent/15"
+                >
+                  Open MCP Gateway capability
+                </button>
+              )}
             </div>
           </div>
         ) : null}
@@ -281,6 +316,72 @@ export function McpServersWindow({
         {ghosts.length > 0 ? <GhostPanel ghosts={ghosts} /> : null}
       </div>
     </div>
+  )
+}
+
+function GatewayChip({ gateway }: { gateway: McpGatewayStatus | null }) {
+  const ready = gateway?.ready === true
+  const installed = gateway?.installed === true
+  const label = ready ? "gateway ready" : installed ? `gateway ${gateway.status ?? "unknown"}` : "gateway missing"
+  return (
+    <span
+      className={cn(
+        "inline-flex items-center gap-1 rounded-full px-1.5 py-0.5 text-[10px] uppercase tracking-wider",
+        ready
+          ? "bg-success/10 text-success"
+          : installed
+            ? "bg-warning/15 text-warning"
+            : "bg-danger/10 text-danger",
+      )}
+      title={gateway?.endpointUrl ?? gateway?.error ?? undefined}
+    >
+      <span
+        className={cn(
+          "h-1.5 w-1.5 rounded-full",
+          ready ? "bg-success" : installed ? "bg-warning" : "bg-danger",
+        )}
+      />
+      {label}
+    </span>
+  )
+}
+
+function McpGatewayRequiredPanel({
+  gateway,
+  onOpenCapability,
+}: {
+  gateway: McpGatewayStatus | null
+  onOpenCapability: () => void
+}) {
+  const installed = gateway?.installed === true
+  return (
+    <Panel
+      icon={AlertTriangle}
+      title="MCP gateway runtime"
+      right={
+        <button
+          type="button"
+          onClick={onOpenCapability}
+          className="rounded border border-rvbbit-accent/45 bg-rvbbit-bg px-2 py-0.5 text-[10px] text-rvbbit-accent hover:bg-rvbbit-accent/15"
+        >
+          {installed ? "Open runtime" : "Install runtime"}
+        </button>
+      }
+    >
+      <div className="flex items-start gap-2 text-[11px] text-chrome-text/70">
+        <Globe className="mt-0.5 h-3.5 w-3.5 shrink-0 text-rvbbit-accent" />
+        <div className="min-w-0">
+          <div className="text-foreground">
+            {installed
+              ? `Gateway ${gateway?.name ?? "runtime"} is ${gateway?.status ?? "not ready"}.`
+              : "Install the MCP Gateway capability before refreshing tools or running MCP calls."}
+          </div>
+          <div className="mt-0.5 truncate font-mono text-[10px] text-chrome-text/50">
+            {gateway?.endpointUrl ?? gateway?.error ?? MCP_GATEWAY_CATALOG_ID}
+          </div>
+        </div>
+      </div>
+    </Panel>
   )
 }
 

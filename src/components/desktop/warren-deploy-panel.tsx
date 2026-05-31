@@ -4,17 +4,27 @@ import { useCallback, useEffect, useMemo, useState } from "react"
 import {
   AlertTriangle,
   CheckCircle2,
+  Clock,
   Cpu,
+  FileCode2,
+  Play,
   Rocket,
   Settings,
   X,
 } from "@/lib/icons"
 import { cn } from "@/lib/utils"
 import { Button } from "@/components/ui/button"
-import type { InstallKnobs, Manifest } from "@/lib/rvbbit/capabilities"
+import {
+  runAcceptanceSql,
+  type AcceptanceRunStep,
+  type InstallKnobs,
+  type Manifest,
+  type ManifestAcceptanceBlock,
+} from "@/lib/rvbbit/capabilities"
 import {
   deployCapability,
   deployCatalogCapability,
+  fetchWarrenJob,
   fetchWarrenInventory,
   fetchWarrenLabelObservations,
   manifestWithKnobs,
@@ -25,8 +35,9 @@ import {
   type NodeHeartbeatState,
   type WarrenInventoryRow,
   type WarrenLabelObservation,
+  type WarrenJobStatus,
 } from "@/lib/rvbbit/warren"
-import { fmtAgo } from "./instruments"
+import { fmtAgo, fmtMs } from "./instruments"
 
 interface WarrenDeployPanelProps {
   activeConnectionId: string | null
@@ -39,6 +50,7 @@ interface WarrenDeployPanelProps {
   catalogId?: string | null
   manifest: Manifest
   knobs: InstallKnobs
+  acceptance?: ManifestAcceptanceBlock | null
   /** Switch the Install tab back to the local CapabilityInstallGraph. */
   onUseLocalInstead?: () => void
   /** After enqueue, open the live job tracker. */
@@ -60,6 +72,7 @@ export function WarrenDeployPanel({
   catalogId,
   manifest,
   knobs,
+  acceptance,
   onUseLocalInstead,
   onOpenJob,
 }: WarrenDeployPanelProps) {
@@ -74,6 +87,11 @@ export function WarrenDeployPanel({
     jobId: string
     at: number
   } | null>(null)
+  const [lastJobStatus, setLastJobStatus] = useState<WarrenJobStatus | null>(null)
+  const [acceptanceSteps, setAcceptanceSteps] = useState<AcceptanceRunStep[]>([])
+  const [acceptanceRunning, setAcceptanceRunning] = useState(false)
+  const [acceptanceOk, setAcceptanceOk] = useState<boolean | null>(null)
+  const hasAcceptance = (acceptance?.tests?.length ?? 0) > 0
 
   // ── poll inventory + label observations ──
   const reload = useCallback(async () => {
@@ -100,6 +118,22 @@ export function WarrenDeployPanel({
       clearInterval(id)
     }
   }, [activeConnectionId, reload])
+
+  useEffect(() => {
+    if (!activeConnectionId || !lastEnqueued) return
+    let cancelled = false
+    const poll = async () => {
+      const r = await fetchWarrenJob(activeConnectionId, lastEnqueued.jobId)
+      if (cancelled) return
+      setLastJobStatus(r.job?.status ?? null)
+    }
+    void poll()
+    const id = setInterval(() => void poll(), 2000)
+    return () => {
+      cancelled = true
+      clearInterval(id)
+    }
+  }, [activeConnectionId, lastEnqueued])
 
   // ── derive nodes + match preview ──
   const nodes = useMemo(() => uniqueNodesFromInventory(inventory), [inventory])
@@ -148,8 +182,23 @@ export function WarrenDeployPanel({
       return
     }
     setLastEnqueued({ jobId: result.jobId, at: Date.now() })
+    setLastJobStatus("queued")
+    setAcceptanceSteps([])
+    setAcceptanceOk(null)
     onOpenJob(result.jobId, trimmedName)
   }, [activeConnectionId, catalogId, manifest, knobs, selector, jobName, onOpenJob])
+
+  const runAcceptance = useCallback(async () => {
+    if (!activeConnectionId || !acceptance || acceptanceRunning) return
+    setAcceptanceSteps([])
+    setAcceptanceOk(null)
+    setAcceptanceRunning(true)
+    const result = await runAcceptanceSql(activeConnectionId, acceptance, (step) => {
+      setAcceptanceSteps((prev) => [...prev, step])
+    })
+    setAcceptanceOk(result.ok)
+    setAcceptanceRunning(false)
+  }, [activeConnectionId, acceptance, acceptanceRunning])
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-doc-bg text-[12px] text-chrome-text">
@@ -172,6 +221,15 @@ export function WarrenDeployPanel({
           </button>
         ) : null}
       </div>
+
+      <WarrenFlowStrip
+        targetOk={eligibleMatching.length > 0}
+        queued={lastEnqueued != null}
+        jobStatus={lastJobStatus}
+        hasAcceptance={hasAcceptance}
+        acceptanceRunning={acceptanceRunning}
+        acceptanceOk={acceptanceOk}
+      />
 
       <div className="grid min-h-0 flex-1 grid-cols-2 gap-0 overflow-hidden">
         {/* left — selector builder */}
@@ -291,6 +349,65 @@ export function WarrenDeployPanel({
                   </button>
                 </div>
               ) : null}
+              {hasAcceptance ? (
+                <div className="space-y-1.5 rounded border border-chrome-border/50 bg-secondary-background/35 p-2">
+                  <div className="flex items-center gap-1.5">
+                    <FileCode2 className="h-3 w-3 text-success" />
+                    <span className="text-[10px] uppercase tracking-wider text-chrome-text/60">
+                      acceptance tests
+                    </span>
+                    <span className="ml-auto font-mono text-[10px] text-chrome-text/50">
+                      {acceptance?.tests?.length ?? 0}
+                    </span>
+                  </div>
+                  <Button
+                    size="sm"
+                    variant="neutral"
+                    onClick={() => void runAcceptance()}
+                    disabled={!activeConnectionId || acceptanceRunning}
+                    className="h-6 w-full"
+                    title="Runs the pack acceptance SQL from rvbbit.capability_catalog"
+                  >
+                    <Play className="h-3 w-3" />
+                    {acceptanceRunning ? "running tests…" : "Run acceptance SQL"}
+                  </Button>
+                  {acceptanceOk != null ? (
+                    <div
+                      className={cn(
+                        "rounded px-2 py-1 text-[10px]",
+                        acceptanceOk
+                          ? "bg-success/10 text-success"
+                          : "bg-danger/10 text-danger",
+                      )}
+                    >
+                      {acceptanceOk ? "all tests passed" : "test failed"}
+                    </div>
+                  ) : null}
+                  {acceptanceSteps.length > 0 ? (
+                    <div className="max-h-24 space-y-1 overflow-auto">
+                      {acceptanceSteps.map((step) => (
+                        <div
+                          key={`${step.kind}:${step.name}`}
+                          className="flex items-center gap-1.5 rounded bg-foreground/[0.03] px-1.5 py-0.5 text-[10px]"
+                        >
+                          <span
+                            className={cn(
+                              "h-1.5 w-1.5 rounded-full",
+                              step.ok ? "bg-success" : "bg-danger",
+                            )}
+                          />
+                          <span className="min-w-0 flex-1 truncate font-mono text-foreground/80">
+                            {step.name}
+                          </span>
+                          <span className="font-mono tabular-nums text-chrome-text/45">
+                            {fmtMs(step.latencyMs)}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  ) : null}
+                </div>
+              ) : null}
               <p className="text-[10px] leading-snug text-chrome-text/55">
                 Queues a row in <span className="font-mono">rvbbit.warren_jobs</span>;
                 a matching warren-agent claims it and registers the backend or runtime.
@@ -335,6 +452,128 @@ export function WarrenDeployPanel({
       </div>
     </div>
   )
+}
+
+function WarrenFlowStrip({
+  targetOk,
+  queued,
+  jobStatus,
+  hasAcceptance,
+  acceptanceRunning,
+  acceptanceOk,
+}: {
+  targetOk: boolean
+  queued: boolean
+  jobStatus: WarrenJobStatus | null
+  hasAcceptance: boolean
+  acceptanceRunning: boolean
+  acceptanceOk: boolean | null
+}) {
+  const jobDone = jobStatus === "completed"
+  const jobFailed = jobStatus === "failed" || jobStatus === "cancelled"
+  const testsState =
+    !hasAcceptance
+      ? "skipped"
+      : acceptanceRunning
+        ? "running"
+        : acceptanceOk === true
+          ? "ok"
+          : acceptanceOk === false
+            ? "failed"
+            : "pending"
+  const nodes: Array<{
+    key: string
+    label: string
+    detail: string
+    state: "pending" | "running" | "ok" | "failed" | "skipped"
+  }> = [
+    {
+      key: "target",
+      label: "Target",
+      detail: targetOk ? "eligible Warren" : "no match",
+      state: targetOk ? "ok" : "failed",
+    },
+    {
+      key: "queue",
+      label: "Queue",
+      detail: queued ? "job created" : "waiting",
+      state: queued ? "ok" : "pending",
+    },
+    {
+      key: "warren",
+      label: "Warren",
+      detail: jobStatus ?? "not claimed",
+      state: jobFailed ? "failed" : jobDone ? "ok" : jobStatus === "running" ? "running" : "pending",
+    },
+    {
+      key: "tests",
+      label: "Tests",
+      detail: !hasAcceptance
+        ? "none"
+        : acceptanceOk === true
+          ? "passed"
+          : acceptanceOk === false
+            ? "failed"
+            : "acceptance SQL",
+      state: testsState,
+    },
+  ]
+
+  return (
+    <div className="border-b border-chrome-border/50 bg-doc-bg px-3 py-2">
+      <div className="grid grid-cols-4 gap-2">
+        {nodes.map((node, i) => (
+          <div key={node.key} className="flex items-center gap-2">
+            <div
+              className={cn(
+                "min-w-0 flex-1 rounded-md border px-2 py-1.5",
+                flowTone(node.state),
+              )}
+            >
+              <div className="flex items-center gap-1.5">
+                <FlowGlyph state={node.state} />
+                <span className="text-[10px] font-medium uppercase tracking-wider">
+                  {node.label}
+                </span>
+              </div>
+              <div className="mt-0.5 truncate font-mono text-[10px] opacity-75">
+                {node.detail}
+              </div>
+            </div>
+            {i < nodes.length - 1 ? (
+              <div className="h-px w-5 shrink-0 bg-chrome-border/70" />
+            ) : null}
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+function flowTone(state: "pending" | "running" | "ok" | "failed" | "skipped"): string {
+  if (state === "ok") return "border-success/40 bg-success/10 text-success"
+  if (state === "running") return "border-rvbbit-accent/40 bg-rvbbit-accent/10 text-rvbbit-accent"
+  if (state === "failed") return "border-danger/40 bg-danger/10 text-danger"
+  if (state === "skipped") return "border-chrome-border/40 bg-foreground/[0.03] text-chrome-text/50"
+  return "border-chrome-border/50 bg-secondary-background/45 text-chrome-text/65"
+}
+
+function FlowGlyph({
+  state,
+}: {
+  state: "pending" | "running" | "ok" | "failed" | "skipped"
+}) {
+  if (state === "ok") return <CheckCircle2 className="h-3 w-3" />
+  if (state === "failed") return <X className="h-3 w-3" />
+  if (state === "running") {
+    return (
+      <span className="relative inline-flex h-2 w-2">
+        <span className="absolute inset-0 animate-ping rounded-full bg-rvbbit-accent opacity-75" />
+        <span className="relative inline-block h-2 w-2 rounded-full bg-rvbbit-accent" />
+      </span>
+    )
+  }
+  return <Clock className="h-3 w-3" />
 }
 
 // ── helpers ─────────────────────────────────────────────────────────

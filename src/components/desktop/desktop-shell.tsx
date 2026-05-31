@@ -2671,6 +2671,7 @@ function renderWindowContent(
           hasRvbbit={ctx.hasRvbbit}
           onOpenQueryLens={ctx.openQueryLens}
           onOpenKgExtractionRuns={ctx.openKgExtractionRuns}
+          onOpenCapability={ctx.openCapabilityDetail}
         />
       )
     case "specialists":
@@ -2704,6 +2705,7 @@ function renderWindowContent(
           activeConnectionId={ctx.activeConnectionId}
           hasRvbbit={ctx.hasRvbbit}
           onOpenServer={ctx.openMcpServerDetail}
+          onOpenCapability={ctx.openCapabilityDetail}
         />
       )
     case "mcp-server-detail":
@@ -2713,6 +2715,7 @@ function renderWindowContent(
           activeConnectionId={ctx.activeConnectionId}
           hasRvbbit={ctx.hasRvbbit}
           onOpenQueryLens={ctx.openQueryLens}
+          onOpenCapability={ctx.openCapabilityDetail}
         />
       )
     case "query-lens":

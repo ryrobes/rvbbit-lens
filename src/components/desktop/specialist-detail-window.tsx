@@ -769,10 +769,9 @@ function TestInputs({
 }
 
 /**
- * Detail view for an execution runtime (rvbbit.python_runtimes) rather than
- * a model backend. No model / batch / `/predict` live test — a runtime
- * serves operator `kind: python` nodes over `/run`, and its packages are
- * SQL-managed envs. The "three layers" framing: a backend/runtime is
+ * Detail view for an execution runtime rather than a model backend. No model
+ * / batch / `/predict` live test — a runtime serves workflow node kinds such
+ * as `python` or `mcp`. The "three layers" framing: a backend/runtime is
  * plumbing; the callable thing is the operator.
  */
 function RuntimeDetailView({
@@ -848,18 +847,17 @@ function RuntimeDetailView({
         >
           <div className="space-y-1.5">
             <KV k="endpoint" v={runtime.endpoint_url ?? "—"} mono />
-            <KV k="transport" v="/run · execution" />
+            <KV k="transport" v={runtime.language === "mcp" ? "MCP gateway" : "/run · execution"} />
             <KV k="language" v={runtime.language ?? "python"} />
             <KV k="status" v={runtime.status || "unknown"} />
             <KV k="source" v={runtime.runtime_source ?? "—"} />
             {runtime.updated_at ? <KV k="updated" v={fmtAgo(runtime.updated_at)} /> : null}
           </div>
           <p className="mt-2 text-[10px] leading-relaxed text-chrome-text/55">
-            Serves operator <span className="font-mono">kind: python</span> nodes. Handler code
-            runs in SQL-managed package environments (<span className="font-mono">rvbbit.python_envs</span>,{" "}
-            <span className="font-mono">rvbbit.python_handlers</span>) — there is no model or{" "}
-            <span className="font-mono">/predict</span> batch transport. A runtime is plumbing;
-            the callable thing is the operator that uses it.
+            Serves workflow operator nodes such as{" "}
+            <span className="font-mono">kind: {runtime.language ?? "python"}</span>. There is no
+            model or <span className="font-mono">/predict</span> batch transport. A runtime is
+            plumbing; the callable thing is the operator that uses it.
           </p>
         </Panel>
 

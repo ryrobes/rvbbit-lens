@@ -60,7 +60,7 @@ const ALLOWED_OVERRIDES = new Set([
 function repoRoot(): string {
   return (
     process.env.RVBBIT_REPO_PATH ??
-    path.join(os.homedir(), "repos2026", "rvbbit")
+    path.join(/*turbopackIgnore: true*/ os.homedir(), "repos2026", "rvbbit-sql")
   )
 }
 

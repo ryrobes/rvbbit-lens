@@ -12,6 +12,7 @@
  *   - mcp_cache         (table)  opted-in tool result cache
  *   - mcp_usage         (view)   per-(server, tool) usage rollup
  *   - mcp_health        (view)   passive per-server status snapshot
+ *   - mcp_gateways      (table)  installed gateway runtime endpoints
  *
  * Functions: register_mcp_server, drop_mcp_server, refresh_mcp_server,
  *   set_mcp_tool_caching, purge_mcp_cache, generate_mcp_wrappers,
@@ -146,6 +147,21 @@ export interface GhostServerRow {
   lastCallAt: string | null
 }
 
+export interface McpGatewayStatus {
+  installed: boolean
+  ready: boolean
+  name: string | null
+  endpointUrl: string | null
+  status: string | null
+  source: string | null
+  health: unknown
+  updatedAt: string | null
+  catalogId: string | null
+  error?: string
+}
+
+export const MCP_GATEWAY_CATALOG_ID = "runtimes/mcp-gateway"
+
 // ── Query plumbing ──────────────────────────────────────────────────
 
 interface QueryOk {
@@ -202,6 +218,56 @@ function sqlIntOrNull(n: number | null | undefined): string {
 }
 
 // ── Read ────────────────────────────────────────────────────────────
+
+export async function fetchMcpGatewayStatus(
+  connectionId: string,
+): Promise<McpGatewayStatus> {
+  const res = await runQuery(
+    connectionId,
+    `WITH gateway AS ( ` +
+      `SELECT name, endpoint_url, status, gateway_source, health, updated_at ` +
+      `FROM rvbbit.mcp_gateways ` +
+      `ORDER BY (status = 'ready') DESC, (name = 'mcp_default') DESC, updated_at DESC ` +
+      `LIMIT 1 ` +
+      `), catalog AS ( ` +
+      `SELECT id FROM rvbbit.capability_catalog ` +
+      `WHERE id = ${sqlStr(MCP_GATEWAY_CATALOG_ID)} AND active LIMIT 1 ` +
+      `) ` +
+      `SELECT g.name, g.endpoint_url, g.status, g.gateway_source, g.health, g.updated_at, ` +
+      `c.id AS catalog_id ` +
+      `FROM (SELECT 1) x ` +
+      `LEFT JOIN gateway g ON true ` +
+      `LEFT JOIN catalog c ON true`,
+  )
+  if (!res.ok) {
+    return {
+      installed: false,
+      ready: false,
+      name: null,
+      endpointUrl: null,
+      status: null,
+      source: null,
+      health: null,
+      updatedAt: null,
+      catalogId: MCP_GATEWAY_CATALOG_ID,
+      error: res.error,
+    }
+  }
+  const row = res.rows[0] ?? {}
+  const name = strOrNull(row.name)
+  const status = strOrNull(row.status)
+  return {
+    installed: !!name,
+    ready: !!name && status === "ready",
+    name,
+    endpointUrl: strOrNull(row.endpoint_url),
+    status,
+    source: strOrNull(row.gateway_source),
+    health: row.health ?? null,
+    updatedAt: strOrNull(row.updated_at),
+    catalogId: strOrNull(row.catalog_id) ?? MCP_GATEWAY_CATALOG_ID,
+  }
+}
 
 export async function fetchServers(
   connectionId: string,

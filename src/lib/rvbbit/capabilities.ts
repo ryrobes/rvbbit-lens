@@ -33,6 +33,10 @@ export interface CatalogEntry {
   tags: string[]
   /** `hf_backend` (model pack) or `runtime_sidecar` (execution runtime). */
   kind: string
+  /** True for operator-runtime capabilities that unlock workflow primitives. */
+  system_runtime: boolean
+  /** Role hint such as `operator_runtime`. */
+  capability_role: string | null
   source_provider: string | null
   source_model: string | null
   source_revision: string | null
@@ -42,7 +46,9 @@ export interface CatalogEntry {
   backend_transport: string | null
   runtime_template: string
   runtime_handler: string
-  /** Set for runtime sidecars: the rvbbit.python_runtimes name + language. */
+  runtime_port: number | null
+  health_path: string | null
+  /** Set for runtime sidecars: runtime catalog name + language. */
   runtime_name: string | null
   runtime_language: string | null
   /** Warren registration path, e.g. `/predict` (backend) or `/run` (runtime). */
@@ -50,6 +56,12 @@ export interface CatalogEntry {
   device: string
   operators: string[]
   manifest_path: string
+  catalog_source: string
+  active: boolean
+  created_at: number | null
+  updated_at: number | null
+  acceptance_tests: string[]
+  acceptance: ManifestAcceptanceBlock | null
   /**
    * Inline manifest from `rvbbit.capability_catalog.manifest` when the
    * catalog came from the DB (the primary source). Lets the UI skip the
@@ -92,10 +104,15 @@ export interface ManifestSourceBlock {
 }
 
 export interface ManifestRuntimeBlock {
+  image?: string
+  image_digest?: string
+  pull_policy?: string
   template?: string
   handler?: string
   language?: string
   device?: string
+  port?: number
+  health_path?: string
   base_image?: string
   python_version?: string
   env?: Record<string, string>
@@ -117,6 +134,19 @@ export interface ManifestBackendBlock {
 export interface ManifestSmokeBlock {
   inputs?: Array<Record<string, string>>
   sql?: string[]
+}
+
+export interface ManifestAcceptanceTest {
+  name: string
+  description?: string | null
+  sql: string
+}
+
+export interface ManifestAcceptanceBlock {
+  target_selector?: Record<string, unknown>
+  setup_sql?: string[]
+  tests?: ManifestAcceptanceTest[]
+  teardown_sql?: string[]
 }
 
 /** Runtime-sidecar registration block (vs the `backend` block on model packs). */
@@ -143,7 +173,11 @@ export interface Manifest {
   backend?: ManifestBackendBlock
   /** Present on runtime sidecars (`kind: runtime_sidecar`). */
   runtime_registration?: ManifestRuntimeRegistrationBlock
-  warren?: { endpoint_path?: string | null }
+  warren?: {
+    endpoint_path?: string | null
+    container_port?: number | null
+    health_path?: string | null
+  }
   operators?: OperatorDef[]
   smoke?: ManifestSmokeBlock
   [k: string]: unknown
@@ -209,7 +243,7 @@ export interface InstalledBackend {
   created_at: number | null
 }
 
-/** A registered execution runtime — a row in rvbbit.python_runtimes. */
+/** A registered execution runtime — e.g. rvbbit.python_runtimes or rvbbit.mcp_gateways. */
 export interface InstalledRuntime {
   name: string
   endpoint_url: string | null
@@ -227,7 +261,7 @@ export interface JoinedCatalogEntry {
   catalog: CatalogEntry
   /** Set for `hf_backend` packs joined to rvbbit.backend_health. */
   installed: InstalledBackend | null
-  /** Set for `runtime_sidecar` packs joined to rvbbit.python_runtimes. */
+  /** Set for `runtime_sidecar` packs joined to a runtime catalog. */
   installedRuntime: InstalledRuntime | null
   flags: InstallStateFlags
 }
@@ -285,10 +319,14 @@ function sqlLit(s: string): string {
 // 0.60.4; catalog.json (served by the API route) is read-only fallback.
 const CAPABILITY_CATALOG_SQL = `SELECT
   id, manifest_path, name, title, description, tags, kind, license,
+  system_runtime, capability_role,
   source_provider, source_model, source_revision,
   backend_name, backend_transport,
   runtime_name, runtime_language, runtime_template, runtime_handler,
-  endpoint_path, device, operators, manifest
+  runtime_port, health_path, endpoint_path, device, operators, manifest,
+  catalog_source, active, created_at, updated_at,
+  catalog_entry->'acceptance_tests' AS acceptance_tests,
+  catalog_entry->'acceptance' AS acceptance
 FROM rvbbit.capability_catalog
 WHERE active
 ORDER BY kind, name`
@@ -297,8 +335,36 @@ function strArr(v: unknown): string[] {
   return Array.isArray(v) ? v.map((x) => String(x)) : []
 }
 
+function obj(v: unknown): Record<string, unknown> | null {
+  return v && typeof v === "object" && !Array.isArray(v)
+    ? (v as Record<string, unknown>)
+    : null
+}
+
+function parseAcceptance(v: unknown): ManifestAcceptanceBlock | null {
+  const raw = obj(v)
+  if (!raw) return null
+  const tests = Array.isArray(raw.tests)
+    ? raw.tests
+        .filter((t): t is Record<string, unknown> => !!obj(t))
+        .map((t) => ({
+          name: String(t.name ?? ""),
+          description: t.description == null ? null : String(t.description),
+          sql: String(t.sql ?? ""),
+        }))
+        .filter((t) => t.name.length > 0 && t.sql.length > 0)
+    : []
+  return {
+    target_selector: obj(raw.target_selector) ?? undefined,
+    setup_sql: strArr(raw.setup_sql),
+    tests,
+    teardown_sql: strArr(raw.teardown_sql),
+  }
+}
+
 function parseCatalogRow(r: Record<string, unknown>): CatalogEntry {
   const manifest = r.manifest
+  const acceptance = parseAcceptance(r.acceptance)
   return {
     id: String(r.id ?? ""),
     name: String(r.name ?? ""),
@@ -306,6 +372,8 @@ function parseCatalogRow(r: Record<string, unknown>): CatalogEntry {
     description: r.description == null ? null : String(r.description),
     tags: strArr(r.tags),
     kind: String(r.kind ?? ""),
+    system_runtime: r.system_runtime === true,
+    capability_role: r.capability_role == null ? null : String(r.capability_role),
     source_provider: r.source_provider == null ? null : String(r.source_provider),
     source_model: r.source_model == null ? null : String(r.source_model),
     source_revision: r.source_revision == null ? null : String(r.source_revision),
@@ -316,10 +384,56 @@ function parseCatalogRow(r: Record<string, unknown>): CatalogEntry {
     runtime_language: r.runtime_language == null ? null : String(r.runtime_language),
     runtime_template: String(r.runtime_template ?? ""),
     runtime_handler: String(r.runtime_handler ?? ""),
+    runtime_port: r.runtime_port == null ? null : Number(r.runtime_port),
+    health_path: r.health_path == null ? null : String(r.health_path),
     endpoint_path: r.endpoint_path == null ? null : String(r.endpoint_path),
     device: String(r.device ?? "auto"),
     operators: strArr(r.operators),
     manifest_path: String(r.manifest_path ?? ""),
+    catalog_source: String(r.catalog_source ?? "curated"),
+    active: r.active !== false,
+    created_at: epoch(r.created_at),
+    updated_at: epoch(r.updated_at),
+    acceptance_tests: strArr(r.acceptance_tests),
+    acceptance,
+    manifest: manifest && typeof manifest === "object" ? (manifest as Manifest) : null,
+  }
+}
+
+function normalizeCatalogEntry(e: CatalogEntry | Record<string, unknown>): CatalogEntry {
+  const manifest = "manifest" in e ? e.manifest : null
+  const acceptance = parseAcceptance((e as Record<string, unknown>).acceptance)
+  return {
+    id: String(e.id ?? ""),
+    name: String(e.name ?? ""),
+    title: String(e.title ?? e.name ?? ""),
+    description: e.description == null ? null : String(e.description),
+    tags: strArr(e.tags),
+    kind: String(e.kind ?? ""),
+    system_runtime: e.system_runtime === true,
+    capability_role: e.capability_role == null ? null : String(e.capability_role),
+    source_provider: e.source_provider == null ? null : String(e.source_provider),
+    source_model: e.source_model == null ? null : String(e.source_model),
+    source_revision: e.source_revision == null ? null : String(e.source_revision),
+    license: e.license == null ? null : String(e.license),
+    backend_name: e.backend_name == null ? null : String(e.backend_name),
+    backend_transport: e.backend_transport == null ? null : String(e.backend_transport),
+    runtime_name: e.runtime_name == null ? null : String(e.runtime_name),
+    runtime_language: e.runtime_language == null ? null : String(e.runtime_language),
+    runtime_template: String(e.runtime_template ?? ""),
+    runtime_handler: String(e.runtime_handler ?? ""),
+    runtime_port: e.runtime_port == null ? null : Number(e.runtime_port),
+    health_path: e.health_path == null ? null : String(e.health_path),
+    endpoint_path: e.endpoint_path == null ? null : String(e.endpoint_path),
+    device: String(e.device ?? "auto"),
+    operators: strArr(e.operators),
+    manifest_path: String(e.manifest_path ?? ""),
+    catalog_source: String(e.catalog_source ?? "file"),
+    active: e.active !== false,
+    created_at: epoch(e.created_at),
+    updated_at: epoch(e.updated_at),
+    acceptance_tests: strArr(e.acceptance_tests),
+    acceptance,
     manifest: manifest && typeof manifest === "object" ? (manifest as Manifest) : null,
   }
 }
@@ -349,7 +463,15 @@ export async function fetchCatalog(connectionId?: string | null): Promise<{
     const res = await fetch("/api/rvbbit/capabilities?action=catalog")
     const body = (await res.json()) as { ok: boolean; doc?: CatalogDoc; error?: string }
     if (!body.ok) return { doc: null, error: body.error ?? "failed to load catalog" }
-    return { doc: body.doc ?? null, source: "file" }
+    return {
+      doc: body.doc
+        ? {
+            ...body.doc,
+            capabilities: (body.doc.capabilities ?? []).map(normalizeCatalogEntry),
+          }
+        : null,
+      source: "file",
+    }
   } catch (e) {
     return { doc: null, error: e instanceof Error ? e.message : String(e) }
   }
@@ -455,6 +577,20 @@ const PYTHON_RUNTIMES_SQL = `SELECT
 FROM rvbbit.python_runtimes
 ORDER BY name`
 
+const MCP_GATEWAYS_SQL = `SELECT
+  name,
+  endpoint_url,
+  'mcp' AS language,
+  status,
+  labels,
+  gateway_source AS runtime_source,
+  install_manifest,
+  health,
+  created_at,
+  updated_at
+FROM rvbbit.mcp_gateways
+ORDER BY name`
+
 function parseRuntime(r: Record<string, unknown>): InstalledRuntime {
   const labels = r.labels
   const manifest = r.install_manifest
@@ -476,11 +612,19 @@ function parseRuntime(r: Record<string, unknown>): InstalledRuntime {
 export async function fetchInstalledRuntimes(
   connectionId: string,
 ): Promise<{ runtimes: InstalledRuntime[]; error?: string }> {
-  const res = await runQuery(connectionId, PYTHON_RUNTIMES_SQL)
+  const [res, mcpRes] = await Promise.all([
+    runQuery(connectionId, PYTHON_RUNTIMES_SQL),
+    runQuery(connectionId, MCP_GATEWAYS_SQL),
+  ])
   // python_runtimes is newer; tolerate its absence so the capabilities
   // window still works against older extensions (treat as "no runtimes").
   if (!res.ok) return { runtimes: [], error: res.error }
-  return { runtimes: res.rows.map(parseRuntime) }
+  return {
+    runtimes: [
+      ...res.rows.map(parseRuntime),
+      ...(mcpRes.ok ? mcpRes.rows.map(parseRuntime) : []),
+    ],
+  }
 }
 
 // ── 7-state derivation ──────────────────────────────────────────────
@@ -813,6 +957,102 @@ export async function applyInstallSql(
   }
 }
 
+export interface CatalogImportResult {
+  ok: boolean
+  imported?: number
+  catalogSource?: string
+  ids?: string[]
+  durationMs?: number
+  rowCount?: number
+  error?: string
+  detail?: string
+  hint?: string
+}
+
+export async function importCapabilityCatalogUrl(args: {
+  connectionId: string
+  url: string
+  catalogSource?: string
+  prune?: boolean
+}): Promise<CatalogImportResult> {
+  try {
+    const res = await fetch("/api/rvbbit/capabilities/import-catalog", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(args),
+    })
+    const body = (await res.json()) as CatalogImportResult
+    return body
+  } catch (e) {
+    return {
+      ok: false,
+      error: e instanceof Error ? e.message : String(e),
+    }
+  }
+}
+
+export interface AcceptanceRunStep {
+  kind: "setup" | "test" | "teardown"
+  name: string
+  description?: string | null
+  sql: string
+  ok: boolean
+  latencyMs: number
+  lastRow?: Record<string, unknown> | null
+  error?: string
+}
+
+export interface AcceptanceRunResult {
+  ok: boolean
+  startedAt: number
+  endedAt: number
+  steps: AcceptanceRunStep[]
+}
+
+export async function runAcceptanceSql(
+  connectionId: string,
+  acceptance: ManifestAcceptanceBlock,
+  onStep?: (step: AcceptanceRunStep) => void,
+): Promise<AcceptanceRunResult> {
+  const startedAt = Date.now()
+  const steps: AcceptanceRunStep[] = []
+  const run = async (
+    kind: AcceptanceRunStep["kind"],
+    name: string,
+    sql: string,
+    description?: string | null,
+  ): Promise<boolean> => {
+    const result = await applyInstallSql(connectionId, sql)
+    const step: AcceptanceRunStep = {
+      kind,
+      name,
+      description,
+      sql,
+      ok: result.ok,
+      latencyMs: result.latencyMs,
+      lastRow: result.lastRow ?? null,
+      error: result.error,
+    }
+    steps.push(step)
+    onStep?.(step)
+    return result.ok
+  }
+
+  for (const [i, sql] of (acceptance.setup_sql ?? []).entries()) {
+    const ok = await run("setup", `setup_${i + 1}`, sql)
+    if (!ok) return { ok: false, startedAt, endedAt: Date.now(), steps }
+  }
+  for (const test of acceptance.tests ?? []) {
+    const ok = await run("test", test.name, test.sql, test.description)
+    if (!ok) return { ok: false, startedAt, endedAt: Date.now(), steps }
+  }
+  for (const [i, sql] of (acceptance.teardown_sql ?? []).entries()) {
+    const ok = await run("teardown", `teardown_${i + 1}`, sql)
+    if (!ok) return { ok: false, startedAt, endedAt: Date.now(), steps }
+  }
+  return { ok: true, startedAt, endedAt: Date.now(), steps }
+}
+
 // ── Knob editor + live render ───────────────────────────────────────
 
 /**
@@ -839,7 +1079,7 @@ export function defaultKnobs(manifest: Manifest): InstallKnobs {
     batchSize: backend.batch_size ?? 32,
     maxConcurrent: backend.max_concurrent ?? 4,
     timeoutMs: backend.timeout_ms ?? 60000,
-    hostPort: 8080,
+    hostPort: Number(runtime.port ?? 8080),
     dockerNetwork: "docker_default",
     outputDir: `.rvbbit/capabilities/${manifest.name}`,
     gpu: false,
@@ -880,7 +1120,7 @@ export function renderManifest(
     // Runtime sidecars don't create operators directly (OPERATORS.md §16:
     // they become node primitives used by operators).
     operatorSql: runtime
-      ? `-- ${m.name} is an execution runtime; it registers no operators.\n-- Use it from an operator's \`kind: python\` node (env + handler).\n`
+      ? `-- ${m.name} is an execution runtime; it registers no operators.\n-- Use it from an operator workflow node such as \`kind: ${m.runtime_registration?.language ?? m.runtime?.language ?? "python"}\`.\n`
       : renderOperatorSql(m),
     smokeSql: renderSmokeSql(m),
     composeYaml: renderCompose(m, knobs),
@@ -937,6 +1177,8 @@ function pickInstallManifest(m: Manifest): Record<string, unknown> {
     "backend",
     "operators",
     "warren",
+    "system_runtime",
+    "capability_role",
   ]
   const out: Record<string, unknown> = {}
   for (const k of keep) {
@@ -945,30 +1187,54 @@ function pickInstallManifest(m: Manifest): Record<string, unknown> {
   return out
 }
 
+function runtimeContainerPort(m: Manifest): number {
+  return Number(m.warren?.container_port ?? m.runtime?.port ?? 8080)
+}
+
+function runtimeEndpointPath(m: Manifest): string {
+  const raw = m.warren?.endpoint_path ?? m.runtime_registration?.endpoint_path ?? "/run"
+  const path = String(raw || "/")
+  return path.startsWith("/") ? path : `/${path}`
+}
+
+function runtimeHealthPath(m: Manifest): string {
+  const raw = m.warren?.health_path ?? m.runtime?.health_path ?? "/health"
+  const path = String(raw || "/health")
+  return path.startsWith("/") ? path : `/${path}`
+}
+
 /**
  * Runtime-sidecar register SQL — mirrors `render_register_sql`'s
  * `runtime_sidecar` branch in capabilities/tools/rvbbit-capability.
- * Calls rvbbit.register_python_runtime(...) instead of register_backend.
  */
 function renderRegisterRuntimeSql(m: Manifest): string {
   const reg = m.runtime_registration ?? { name: m.name }
   const runtime = m.runtime ?? {}
-  const endpointPath = m.warren?.endpoint_path ?? reg.endpoint_path ?? "/run"
+  const language = reg.language ?? runtime.language ?? "python"
+  const endpointPath = runtimeEndpointPath(m)
   const service = m.name.replace(/_/g, "-")
-  const endpoint = reg.endpoint ?? `http://${service}:8080${endpointPath}`
+  const endpoint = reg.endpoint ?? `http://${service}:${runtimeContainerPort(m)}${endpointPath}`
   const labels = reg.labels ?? {
-    language: runtime.language ?? "python",
+    language,
     capability_kind: "runtime_sidecar",
   }
+  const isMcp = language === "mcp" || language === "mcp_gateway"
+  const registerFn = isMcp
+    ? "rvbbit.register_mcp_gateway"
+    : "rvbbit.register_python_runtime"
+  const nameArg = isMcp ? "gateway_name" : "runtime_name"
+  const statusArg = isMcp ? "gateway_status" : "runtime_status"
+  const labelsArg = isMcp ? "gateway_labels" : "runtime_labels"
+  const sourceArg = isMcp ? "gateway_source" : "runtime_source"
   return [
     "-- Generated by rvbbit-lens capabilities renderer (TS port).",
     `-- Runtime capability: ${m.name}`,
-    "SELECT rvbbit.register_python_runtime(",
-    `  runtime_name     => ${sqlLit(reg.name)},`,
+    `SELECT ${registerFn}(`,
+    `  ${nameArg}     => ${sqlLit(reg.name)},`,
     `  endpoint_url     => ${sqlLit(endpoint)},`,
-    "  runtime_status  => 'ready',",
-    `  runtime_labels  => ${sqlJson(labels)},`,
-    "  runtime_source  => 'capability',",
+    `  ${statusArg}  => 'ready',`,
+    `  ${labelsArg}  => ${sqlJson(labels)},`,
+    `  ${sourceArg}  => 'capability',`,
     `  install_manifest => ${sqlJson(pickInstallManifest(m))},`,
     `  set_default     => ${reg.set_default === false ? "false" : "true"}`,
     ");",
@@ -1051,14 +1317,14 @@ function renderOperatorSql(m: Manifest): string {
 function renderSmokeSql(m: Manifest): string {
   const smoke = m.smoke ?? {}
   // Runtime sidecars have no /predict backend to probe; their smoke is the
-  // manifest's own SQL (typically a python_runtimes status check).
+  // manifest's own SQL (typically a runtime catalog status check).
   if (isRuntimeManifest(m) || !m.backend) {
     const lines = ["-- Generated runtime smoke check."]
     for (const s of smoke.sql ?? []) lines.push(s)
     if ((smoke.sql ?? []).length === 0 && m.runtime_registration?.name) {
-      lines.push(
-        `SELECT name, endpoint_url, status FROM rvbbit.python_runtimes WHERE name = ${sqlLit(m.runtime_registration.name)};`,
-      )
+      const table =
+        m.runtime_registration.language === "mcp" ? "rvbbit.mcp_gateways" : "rvbbit.python_runtimes"
+      lines.push(`SELECT name, endpoint_url, status FROM ${table} WHERE name = ${sqlLit(m.runtime_registration.name)};`)
     }
     lines.push("")
     return lines.join("\n")
@@ -1085,6 +1351,8 @@ function renderCompose(m: Manifest, knobs: InstallKnobs): string {
   const service = m.name.replace(/_/g, "-")
   const source = m.source ?? {}
   const runtime = m.runtime ?? {}
+  const containerPort = runtimeContainerPort(m)
+  const healthPath = runtimeHealthPath(m)
   const env: Record<string, string> = { ...(runtime.env ?? {}) }
   if (!("RVBBIT_CAPABILITY_MODEL" in env))
     env.RVBBIT_CAPABILITY_MODEL = source.model ?? ""
@@ -1103,7 +1371,7 @@ function renderCompose(m: Manifest, knobs: InstallKnobs): string {
     build: .
     container_name: rvbbit-${service}
     ports:
-      - "\${RVBBIT_CAPABILITY_PORT:-${knobs.hostPort}}:8080"
+      - "\${RVBBIT_CAPABILITY_PORT:-${knobs.hostPort}}:${containerPort}"
     environment:
 ${envLines}
     volumes:
@@ -1111,7 +1379,7 @@ ${envLines}
     networks:
       - rvbbit
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/health').read()"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:${containerPort}${healthPath}').read()"]
       interval: 10s
       timeout: 5s
       retries: 60
