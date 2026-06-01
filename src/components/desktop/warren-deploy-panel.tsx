@@ -29,6 +29,7 @@ import {
   fetchWarrenLabelObservations,
   manifestWithKnobs,
   nodeHeartbeatState,
+  nodeFitsVram,
   nodeIsEligible,
   nodeMatchesSelector,
   uniqueNodesFromInventory,
@@ -141,12 +142,19 @@ export function WarrenDeployPanel({
     () => nodes.filter((n) => nodeMatchesSelector(n.labels, selector)),
     [nodes, selector],
   )
+  const vramRequired = manifest.resources?.gpu?.vram_required_bytes ?? null
+  const gpuPlacement = manifest.resources?.gpu?.placement ?? "single_gpu"
+  const gpuReservationWanted =
+    manifest.resources?.gpu?.required === true || selector.gpu === true
   const eligibleMatching = useMemo(
     () =>
       matching.filter((n) =>
-        nodeIsEligible({ status: n.node_status, last_heartbeat: n.last_heartbeat }),
+        nodeIsEligible({ status: n.node_status, last_heartbeat: n.last_heartbeat }) &&
+        (!gpuReservationWanted ||
+          vramRequired == null ||
+          nodeFitsVram(n, vramRequired, gpuPlacement) === "fits"),
       ),
-    [matching],
+    [matching, gpuReservationWanted, vramRequired, gpuPlacement],
   )
   const selectorIsEmpty = Object.keys(selector).length === 0
 
@@ -443,6 +451,8 @@ export function WarrenDeployPanel({
                     node={n}
                     matches={nodeMatchesSelector(n.labels, selector)}
                     selector={selector}
+                    vramRequired={gpuReservationWanted ? vramRequired : null}
+                    gpuPlacement={gpuPlacement}
                   />
                 ))}
               </div>
@@ -636,13 +646,21 @@ function NodeMatchCard({
   node,
   matches,
   selector,
+  vramRequired,
+  gpuPlacement,
 }: {
   node: WarrenInventoryRow
   matches: boolean
   selector: Record<string, unknown>
+  vramRequired: number | null
+  gpuPlacement: string
 }) {
   const hb = nodeHeartbeatState(node.last_heartbeat)
-  const eligible = matches && nodeIsEligible({ status: node.node_status, last_heartbeat: node.last_heartbeat })
+  const vramFit = nodeFitsVram(node, vramRequired, gpuPlacement)
+  const eligible =
+    matches &&
+    nodeIsEligible({ status: node.node_status, last_heartbeat: node.last_heartbeat }) &&
+    (vramFit === "not_required" || vramFit === "fits")
   const missingKeys = Object.keys(selector).filter(
     (k) => !(k in node.labels) || !shallowEqual(node.labels[k], selector[k]),
   )
@@ -679,8 +697,30 @@ function NodeMatchCard({
           {hb}
         </span>
         {node.gpu_count != null && node.gpu_count > 0 ? (
-          <span className="rounded bg-warning/10 px-1 text-[9px] uppercase tracking-wider text-warning">
+          <span
+            className="rounded bg-warning/10 px-1 text-[9px] uppercase tracking-wider text-warning"
+            title={node.gpu_names.length > 0 ? node.gpu_names.join(", ") : undefined}
+          >
             {node.gpu_count}×gpu
+          </span>
+        ) : null}
+        {vramRequired != null ? (
+          <span
+            className={cn(
+              "rounded px-1 text-[9px] uppercase tracking-wider",
+              vramFit === "fits"
+                ? "bg-success/10 text-success"
+                : vramFit === "insufficient"
+                  ? "bg-danger/10 text-danger"
+                  : "bg-warning/10 text-warning",
+            )}
+            title={
+              node.gpu_available_bytes != null
+                ? `${fmtVram(node.gpu_available_bytes)} available`
+                : undefined
+            }
+          >
+            {vramFit === "fits" ? "fits" : vramFit === "insufficient" ? "low vram" : "no gpu"}
           </span>
         ) : null}
         {node.version ? (
@@ -716,6 +756,23 @@ function NodeMatchCard({
           missing: <span className="font-mono">{missingKeys.join(", ")}</span>
         </div>
       ) : null}
+      {matches && vramRequired != null ? (
+        <div className="mt-1 text-[9px] text-chrome-text/55">
+          vram: <span className="font-mono">{fmtVram(vramRequired)}</span>
+          {node.gpu_available_bytes != null ? (
+            <>
+              {" "}
+              needs · <span className="font-mono">{fmtVram(node.gpu_available_bytes)}</span> free
+            </>
+          ) : null}
+        </div>
+      ) : null}
     </div>
   )
+}
+
+function fmtVram(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return "0B"
+  if (bytes < 1024 * 1024 * 1024) return `${Math.round(bytes / (1024 * 1024))}MB`
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)}GB`
 }

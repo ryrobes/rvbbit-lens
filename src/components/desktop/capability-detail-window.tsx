@@ -127,6 +127,9 @@ export function CapabilityDetailWindow({
         }
         m = loaded.manifest
       }
+      if (entry.resources && Object.keys(entry.resources).length > 0) {
+        m = { ...m, resources: m.resources ?? entry.resources }
+      }
       setManifest(m)
       setKnobs(defaultKnobs(m))
     }
@@ -242,6 +245,14 @@ export function CapabilityDetailWindow({
         {catalog!.license ? (
           <span className="rounded bg-foreground/[0.05] px-1 text-[9px] uppercase tracking-wider text-chrome-text/65">
             {catalog!.license}
+          </span>
+        ) : null}
+        {catalog!.vram_required_bytes != null ? (
+          <span
+            className="rounded bg-warning/10 px-1.5 py-px font-mono text-[9px] uppercase tracking-wider text-warning"
+            title={catalog!.gpu_required ? "GPU reservation required" : "GPU reservation when targeting a GPU Warren"}
+          >
+            gpu {fmtBytes(catalog!.vram_required_bytes)}
           </span>
         ) : null}
         <InstallStateBadgeGroup states={states} size="xs" />
@@ -616,14 +627,27 @@ function OverviewTab({
             step={1000}
             help={`Manifest default: ${manifest.backend?.timeout_ms ?? 60000}`}
           />
+          <label className="flex items-center gap-2 pt-1">
+            <input
+              type="checkbox"
+              checked={knobs.publishHostPort}
+              onChange={(e) =>
+                onChangeKnobs({ ...knobs, publishHostPort: e.target.checked })
+              }
+              className="h-3.5 w-3.5 accent-brand-capability"
+            />
+            <span className="text-[11px] text-foreground">
+              Publish host port overlay
+            </span>
+          </label>
           <NumberKnob
             label="Host port"
             value={knobs.hostPort}
             onChange={(v) => onChangeKnobs({ ...knobs, hostPort: v })}
-            min={1}
+            min={0}
             max={65535}
             step={1}
-            help="Maps to container port 8080 in compose.yaml"
+            help="Only used by compose.host-ports.yaml; 0 lets Docker choose a free host port"
           />
           <TextKnob
             label="Docker network"
@@ -795,6 +819,7 @@ function GeneratedSqlTab({ rendered }: { rendered: RenderedArtifacts }) {
     { name: "operator.sql", lang: "sql", body: rendered.operatorSql },
     { name: "smoke.sql", lang: "sql", body: rendered.smokeSql },
     { name: "compose.yaml", lang: "yaml", body: rendered.composeYaml },
+    { name: "compose.host-ports.yaml", lang: "yaml", body: rendered.composeHostPortsYaml },
     { name: "compose.gpu.yaml", lang: "yaml", body: rendered.composeGpuYaml },
   ]
   const [active, setActive] = useState(files[0].name)
@@ -1523,4 +1548,10 @@ function ModeChip({
       {label}
     </button>
   )
+}
+
+function fmtBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return "0B"
+  if (bytes < 1024 * 1024 * 1024) return `${Math.round(bytes / (1024 * 1024))}MB`
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)}GB`
 }

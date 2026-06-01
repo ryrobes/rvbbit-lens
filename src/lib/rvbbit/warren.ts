@@ -154,6 +154,12 @@ export interface WarrenInventoryRow {
   gpu_util_pct: number | null
   gpu_mem_used_bytes: number | null
   gpu_mem_total_bytes: number | null
+  gpu_names: string[]
+  vram_usable_ratio: number | null
+  gpu_mem_usable_bytes: number | null
+  single_gpu_mem_usable_bytes: number | null
+  gpu_provisioned_bytes: number | null
+  gpu_available_bytes: number | null
   deployment_id: string | null
   kind: string | null
   deployment_name: string | null
@@ -293,6 +299,16 @@ function jsonObj(v: unknown): Record<string, unknown> {
     : {}
 }
 
+function strArr(v: unknown): string[] {
+  return Array.isArray(v) ? v.map((x) => String(x)) : []
+}
+
+function numOrNull(v: unknown): number | null {
+  if (v == null || v === "") return null
+  const n = Number(v)
+  return Number.isFinite(n) ? n : null
+}
+
 // ── Availability probe ──────────────────────────────────────────────
 
 /**
@@ -354,6 +370,12 @@ function parseInventoryRow(r: Record<string, unknown>): WarrenInventoryRow {
     gpu_mem_used_bytes: r.gpu_mem_used_bytes == null ? null : Number(r.gpu_mem_used_bytes),
     gpu_mem_total_bytes:
       r.gpu_mem_total_bytes == null ? null : Number(r.gpu_mem_total_bytes),
+    gpu_names: strArr(r.gpu_names),
+    vram_usable_ratio: numOrNull(r.vram_usable_ratio),
+    gpu_mem_usable_bytes: numOrNull(r.gpu_mem_usable_bytes),
+    single_gpu_mem_usable_bytes: numOrNull(r.single_gpu_mem_usable_bytes),
+    gpu_provisioned_bytes: numOrNull(r.gpu_provisioned_bytes),
+    gpu_available_bytes: numOrNull(r.gpu_available_bytes),
     deployment_id: r.deployment_id == null ? null : String(r.deployment_id),
     kind: r.kind == null ? null : String(r.kind),
     deployment_name: r.deployment_name == null ? null : String(r.deployment_name),
@@ -643,4 +665,36 @@ export function uniqueNodesFromInventory(
     out.push(r)
   }
   return out
+}
+
+export type WarrenGpuFit = "not_required" | "fits" | "insufficient" | "no_gpu" | "unknown"
+
+export function nodeAvailableVramBytes(node: WarrenInventoryRow): number | null {
+  if (node.gpu_available_bytes != null) return node.gpu_available_bytes
+  if (node.gpu_mem_total_bytes != null && node.gpu_mem_total_bytes > 0) {
+    return Math.floor(node.gpu_mem_total_bytes * 0.9)
+  }
+  return null
+}
+
+export function nodeFitsVram(
+  node: WarrenInventoryRow,
+  vramRequiredBytes: number | null | undefined,
+  placement = "single_gpu",
+): WarrenGpuFit {
+  if (vramRequiredBytes == null || vramRequiredBytes <= 0) return "not_required"
+  if ((node.gpu_count ?? 0) <= 0) return "no_gpu"
+  const available = nodeAvailableVramBytes(node)
+  if (available == null) return "unknown"
+  if (available < vramRequiredBytes) return "insufficient"
+  if (placement === "single_gpu") {
+    const singleGpuUsable =
+      node.single_gpu_mem_usable_bytes ??
+      (node.gpu_mem_total_bytes != null && (node.gpu_count ?? 0) > 0
+        ? Math.floor((node.gpu_mem_total_bytes / Math.max(1, node.gpu_count ?? 1)) * 0.9)
+        : null)
+    if (singleGpuUsable == null) return "unknown"
+    if (singleGpuUsable < vramRequiredBytes) return "insufficient"
+  }
+  return "fits"
 }

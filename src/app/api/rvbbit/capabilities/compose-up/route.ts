@@ -26,6 +26,7 @@ export const runtime = "nodejs"
 interface ComposeBody {
   outDir?: string
   gpu?: boolean
+  publishHostPort?: boolean
 }
 
 function resolveOutDir(raw: string): { ok: true; path: string } | { ok: false; error: string } {
@@ -84,8 +85,20 @@ export async function POST(req: Request) {
   }
   const gpuFile = path.join(out.path, "compose.gpu.yaml")
   const useGpu = !!body.gpu && (await fileExists(gpuFile))
+  const hostPortsFile = path.join(out.path, "compose.host-ports.yaml")
+  const useHostPorts = !!body.publishHostPort
+  if (useHostPorts && !(await fileExists(hostPortsFile))) {
+    return new Response(
+      JSON.stringify({
+        ok: false,
+        error: `compose.host-ports.yaml not found in ${out.path}. Run scaffold first.`,
+      }),
+      { status: 404, headers: { "content-type": "application/json" } },
+    )
+  }
 
   const args = ["compose", "-f", "compose.yaml"]
+  if (useHostPorts) args.push("-f", "compose.host-ports.yaml")
   if (useGpu) args.push("-f", "compose.gpu.yaml")
   args.push("up", "-d", "--build")
 

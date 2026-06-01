@@ -81,6 +81,7 @@ export function WarrenWindow({
   const [tab, setTab] = useState<TabKey>(payload.initialTab ?? "inventory")
   const [paused, setPaused] = useState(false)
   const [intervalMs, setIntervalMs] = useState(5000)
+  const [showOfflineNodes, setShowOfflineNodes] = useState(false)
   const [updatedAt, setUpdatedAt] = useState(0)
   const [error, setError] = useState<string | null>(null)
   const loading = updatedAt === 0
@@ -134,6 +135,10 @@ export function WarrenWindow({
     return { total, ready, stale, offline }
   }, [inventory])
 
+  const visibleNodeCount = showOfflineNodes
+    ? nodeCounts.total
+    : Math.max(0, nodeCounts.total - nodeCounts.offline)
+
   const jobCounts = useMemo(() => {
     let queued = 0
     let running = 0
@@ -178,7 +183,7 @@ export function WarrenWindow({
         </span>
         <span className="inline-flex items-center gap-1.5 text-foreground">
           <Rocket className="h-3.5 w-3.5 text-brand-warren" />
-          {loading ? "loading…" : `${nodeCounts.total} nodes`}
+          {loading ? "loading…" : `${visibleNodeCount} nodes`}
         </span>
         {!loading ? (
           <>
@@ -190,7 +195,23 @@ export function WarrenWindow({
               <span className="text-warning">{nodeCounts.stale} stale</span>
             ) : null}
             {nodeCounts.offline > 0 ? (
-              <span className="text-danger">{nodeCounts.offline} offline</span>
+              <button
+                type="button"
+                onClick={() => setShowOfflineNodes((v) => !v)}
+                className={cn(
+                  "rounded-full px-1.5 py-px text-[10px] transition",
+                  showOfflineNodes
+                    ? "bg-danger/15 text-danger ring-1 ring-danger/30"
+                    : "bg-foreground/[0.05] text-chrome-text/55 hover:text-foreground",
+                )}
+                title={
+                  showOfflineNodes
+                    ? "Hide nodes whose Warren agent heartbeat is offline"
+                    : "Show offline Warren node rows"
+                }
+              >
+                {showOfflineNodes ? "hide" : "show"} {nodeCounts.offline} offline
+              </button>
             ) : null}
             <span className="text-chrome-text/40">·</span>
             <span>
@@ -273,7 +294,13 @@ export function WarrenWindow({
 
       <div className="min-h-0 flex-1 overflow-hidden">
         {tab === "inventory" ? (
-          <InventoryTab inventory={inventory} onOpenSpecialist={onOpenSpecialist} />
+          <InventoryTab
+            inventory={inventory}
+            showOfflineNodes={showOfflineNodes}
+            hiddenOfflineCount={showOfflineNodes ? 0 : nodeCounts.offline}
+            onShowOffline={() => setShowOfflineNodes(true)}
+            onOpenSpecialist={onOpenSpecialist}
+          />
         ) : null}
         {tab === "jobs" ? <JobsTab jobs={jobs} onOpenJob={onOpenJob} /> : null}
         {tab === "runtimes" ? (
@@ -293,9 +320,15 @@ interface GroupedNode {
 
 function InventoryTab({
   inventory,
+  showOfflineNodes,
+  hiddenOfflineCount,
+  onShowOffline,
   onOpenSpecialist,
 }: {
   inventory: WarrenInventoryRow[]
+  showOfflineNodes: boolean
+  hiddenOfflineCount: number
+  onShowOffline: () => void
   onOpenSpecialist: (name: string) => void
 }) {
   const grouped = useMemo<GroupedNode[]>(() => {
@@ -309,6 +342,13 @@ function InventoryTab({
       a.node.node_name.localeCompare(b.node.node_name),
     )
   }, [inventory])
+  const visible = useMemo(
+    () =>
+      showOfflineNodes
+        ? grouped
+        : grouped.filter((g) => nodeHeartbeatState(g.node.last_heartbeat) !== "offline"),
+    [grouped, showOfflineNodes],
+  )
 
   if (grouped.length === 0) {
     return (
@@ -319,10 +359,26 @@ function InventoryTab({
       </div>
     )
   }
+  if (visible.length === 0 && hiddenOfflineCount > 0) {
+    return (
+      <div className="grid h-full place-items-center p-6 text-center text-[11px] text-chrome-text/55">
+        <div className="space-y-2">
+          <div>{hiddenOfflineCount} offline Warren node{hiddenOfflineCount === 1 ? "" : "s"} hidden.</div>
+          <button
+            type="button"
+            onClick={onShowOffline}
+            className="rounded border border-chrome-border bg-secondary-background px-2 py-1 text-[10px] uppercase tracking-wider text-chrome-text hover:text-foreground"
+          >
+            show offline
+          </button>
+        </div>
+      </div>
+    )
+  }
 
   return (
     <div className="grid h-full grid-cols-[repeat(auto-fill,minmax(360px,1fr))] gap-2.5 overflow-auto p-3">
-      {grouped.map((g) => (
+      {visible.map((g) => (
         <NodeCard key={g.node.node_id} group={g} onOpenSpecialist={onOpenSpecialist} />
       ))}
     </div>
@@ -366,7 +422,10 @@ function NodeCard({
           {hb}
         </span>
         {n.gpu_count != null && n.gpu_count > 0 ? (
-          <span className="rounded bg-warning/10 px-1 text-[9px] uppercase tracking-wider text-warning">
+          <span
+            className="rounded bg-warning/10 px-1 text-[9px] uppercase tracking-wider text-warning"
+            title={n.gpu_names.length > 0 ? n.gpu_names.join(", ") : undefined}
+          >
             {n.gpu_count}×gpu
           </span>
         ) : null}
@@ -404,18 +463,40 @@ function NodeCard({
           }
         />
         {n.gpu_count != null && n.gpu_count > 0 ? (
-          <UtilBar
-            label="gpu"
-            pct={n.gpu_util_pct}
-            sub={
-              n.gpu_mem_used_bytes != null && n.gpu_mem_total_bytes != null
-                ? `${gb(n.gpu_mem_used_bytes)} / ${gb(n.gpu_mem_total_bytes)}`
-                : null
-            }
-            tone="warning"
-          />
+          <>
+            <UtilBar
+              label="gpu"
+              pct={n.gpu_util_pct}
+              sub={
+                n.gpu_mem_used_bytes != null && n.gpu_mem_total_bytes != null
+                  ? `${gb(n.gpu_mem_used_bytes)} / ${gb(n.gpu_mem_total_bytes)}`
+                  : null
+              }
+              tone="warning"
+            />
+            <UtilBar
+              label="vram"
+              pct={
+                n.gpu_mem_usable_bytes && n.gpu_mem_usable_bytes > 0 && n.gpu_provisioned_bytes != null
+                  ? (n.gpu_provisioned_bytes / n.gpu_mem_usable_bytes) * 100
+                  : null
+              }
+              sub={
+                n.gpu_available_bytes != null && n.gpu_mem_usable_bytes != null
+                  ? `${gb(n.gpu_available_bytes)} free`
+                  : null
+              }
+              tone="warning"
+            />
+          </>
         ) : null}
       </div>
+
+      {n.gpu_names.length > 0 ? (
+        <div className="truncate font-mono text-[9px] text-chrome-text/45">
+          {n.gpu_names.join(", ")}
+        </div>
+      ) : null}
 
       {/* labels */}
       {Object.keys(n.labels).length > 0 ? (

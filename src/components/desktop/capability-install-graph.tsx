@@ -114,8 +114,8 @@ const STEP_LABEL: Record<StepKey, string> = {
 }
 
 const STEP_HINT: Record<StepKey, string> = {
-  scaffold: "Write Dockerfile, main.py, register.sql, operator.sql, smoke.sql, compose.yaml",
-  build: "docker compose up -d --build",
+  scaffold: "Write Dockerfile, main.py, SQL files, compose.yaml, and optional compose overlays",
+  build: "docker compose up -d --build with selected overlays",
   register: "Apply register.sql → rvbbit.register_backend(…)",
   operator: "Apply operator.sql → rvbbit.create_operator(…)",
   smoke: "Apply smoke.sql, then wait for backend_probe readiness",
@@ -198,6 +198,7 @@ export function CapabilityInstallGraph({
         "operator.sql": rendered.operatorSql,
         "smoke.sql": rendered.smokeSql,
         "compose.yaml": rendered.composeYaml,
+        "compose.host-ports.yaml": rendered.composeHostPortsYaml,
         "compose.gpu.yaml": rendered.composeGpuYaml,
         "rvbbit.backend.yaml": rendered.manifestYaml,
       },
@@ -227,7 +228,7 @@ export function CapabilityInstallGraph({
     composeAbortRef.current = abort
 
     const result = await streamComposeUp(
-      { outDir: knobs.outputDir, gpu: knobs.gpu },
+      { outDir: knobs.outputDir, gpu: knobs.gpu, publishHostPort: knobs.publishHostPort },
       (frame: ComposeFrame) => {
         if (frame.type === "line") {
           setArtifacts((a) => {
@@ -262,7 +263,7 @@ export function CapabilityInstallGraph({
     }
     setStep("build", { status: "ok", endedAt: Date.now() })
     return true
-  }, [knobs.outputDir, knobs.gpu, setStep])
+  }, [knobs.outputDir, knobs.gpu, knobs.publishHostPort, setStep])
 
   const runSqlStep = useCallback(
     async (
@@ -495,6 +496,11 @@ export function CapabilityInstallGraph({
         {knobs.gpu ? (
           <span className="rounded-full bg-warning/15 px-1.5 py-0.5 text-[9px] uppercase tracking-wider text-warning">
             gpu overlay
+          </span>
+        ) : null}
+        {knobs.publishHostPort ? (
+          <span className="rounded-full bg-brand-capability/15 px-1.5 py-0.5 text-[9px] uppercase tracking-wider text-brand-capability">
+            host port {knobs.hostPort === 0 ? "auto" : knobs.hostPort}
           </span>
         ) : null}
         <div className="ml-auto flex items-center gap-1.5">

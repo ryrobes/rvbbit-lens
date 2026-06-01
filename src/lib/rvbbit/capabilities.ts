@@ -31,6 +31,8 @@ export interface CatalogEntry {
   title: string
   description: string | null
   tags: string[]
+  /** public rows are shown by default; example/internal rows stay hidden. */
+  catalog_visibility: "public" | "example" | "internal"
   /** `hf_backend` (model pack) or `runtime_sidecar` (execution runtime). */
   kind: string
   /** True for operator-runtime capabilities that unlock workflow primitives. */
@@ -54,6 +56,12 @@ export interface CatalogEntry {
   /** Warren registration path, e.g. `/predict` (backend) or `/run` (runtime). */
   endpoint_path: string | null
   device: string
+  resources: ResourceProfile
+  gpu_required: boolean
+  gpu_placement: string | null
+  model_size_bytes: number | null
+  vram_required_bytes: number | null
+  vram_headroom_pct: number | null
   operators: string[]
   manifest_path: string
   catalog_source: string
@@ -69,6 +77,20 @@ export interface CatalogEntry {
    * fallback rows, which still carry `manifest_path`.
    */
   manifest?: Manifest | null
+}
+
+export interface ResourceProfile {
+  gpu?: {
+    required?: boolean
+    reserved?: boolean
+    placement?: string
+    model_size_bytes?: number
+    vram_required_bytes?: number
+    headroom_pct?: number
+    estimate_source?: string
+    notes?: string
+  }
+  [key: string]: unknown
 }
 
 /** A runtime-sidecar capability registers an execution runtime, not a model backend. */
@@ -90,6 +112,8 @@ export interface OperatorDef {
   return_type: string
   parser?: string | null
   shape?: string
+  infix_symbol?: string | null
+  infix_word?: string | null
   inputs?: Record<string, string>
   steps?: unknown[]
   tests?: unknown
@@ -117,6 +141,7 @@ export interface ManifestRuntimeBlock {
   python_version?: string
   env?: Record<string, string>
   extra_requirements?: string[]
+  volumes?: Array<{ name?: string; mount?: string }>
 }
 
 export interface ManifestBackendBlock {
@@ -178,6 +203,7 @@ export interface Manifest {
     container_port?: number | null
     health_path?: string | null
   }
+  resources?: ResourceProfile
   operators?: OperatorDef[]
   smoke?: ManifestSmokeBlock
   [k: string]: unknown
@@ -303,6 +329,12 @@ function num(v: unknown): number {
   return v == null ? 0 : Number(v)
 }
 
+function numOrNull(v: unknown): number | null {
+  if (v == null || v === "") return null
+  const n = Number(v)
+  return Number.isFinite(n) ? n : null
+}
+
 function epoch(v: unknown): number | null {
   if (v == null) return null
   const t = new Date(String(v)).getTime()
@@ -319,16 +351,21 @@ function sqlLit(s: string): string {
 // 0.60.4; catalog.json (served by the API route) is read-only fallback.
 const CAPABILITY_CATALOG_SQL = `SELECT
   id, manifest_path, name, title, description, tags, kind, license,
+  coalesce(catalog_entry->>'catalog_visibility', 'public') AS catalog_visibility,
   system_runtime, capability_role,
   source_provider, source_model, source_revision,
   backend_name, backend_transport,
   runtime_name, runtime_language, runtime_template, runtime_handler,
-  runtime_port, health_path, endpoint_path, device, operators, manifest,
+  runtime_port, health_path, endpoint_path, device,
+  resource_profile, gpu_required, gpu_placement, model_size_bytes,
+  vram_required_bytes, vram_headroom_pct,
+  operators, manifest,
   catalog_source, active, created_at, updated_at,
   catalog_entry->'acceptance_tests' AS acceptance_tests,
   catalog_entry->'acceptance' AS acceptance
 FROM rvbbit.capability_catalog
 WHERE active
+  AND coalesce(catalog_entry->>'catalog_visibility', 'public') = 'public'
 ORDER BY kind, name`
 
 function strArr(v: unknown): string[] {
@@ -362,15 +399,26 @@ function parseAcceptance(v: unknown): ManifestAcceptanceBlock | null {
   }
 }
 
+function catalogVisibility(v: unknown): CatalogEntry["catalog_visibility"] {
+  return v === "example" || v === "internal" ? v : "public"
+}
+
+function resourceProfile(v: unknown): ResourceProfile {
+  const raw = obj(v)
+  return raw ? (raw as ResourceProfile) : {}
+}
+
 function parseCatalogRow(r: Record<string, unknown>): CatalogEntry {
   const manifest = r.manifest
   const acceptance = parseAcceptance(r.acceptance)
+  const resources = resourceProfile(r.resource_profile)
   return {
     id: String(r.id ?? ""),
     name: String(r.name ?? ""),
     title: String(r.title ?? r.name ?? ""),
     description: r.description == null ? null : String(r.description),
     tags: strArr(r.tags),
+    catalog_visibility: catalogVisibility(r.catalog_visibility),
     kind: String(r.kind ?? ""),
     system_runtime: r.system_runtime === true,
     capability_role: r.capability_role == null ? null : String(r.capability_role),
@@ -388,6 +436,12 @@ function parseCatalogRow(r: Record<string, unknown>): CatalogEntry {
     health_path: r.health_path == null ? null : String(r.health_path),
     endpoint_path: r.endpoint_path == null ? null : String(r.endpoint_path),
     device: String(r.device ?? "auto"),
+    resources,
+    gpu_required: r.gpu_required === true,
+    gpu_placement: r.gpu_placement == null ? null : String(r.gpu_placement),
+    model_size_bytes: numOrNull(r.model_size_bytes),
+    vram_required_bytes: numOrNull(r.vram_required_bytes),
+    vram_headroom_pct: numOrNull(r.vram_headroom_pct),
     operators: strArr(r.operators),
     manifest_path: String(r.manifest_path ?? ""),
     catalog_source: String(r.catalog_source ?? "curated"),
@@ -396,19 +450,25 @@ function parseCatalogRow(r: Record<string, unknown>): CatalogEntry {
     updated_at: epoch(r.updated_at),
     acceptance_tests: strArr(r.acceptance_tests),
     acceptance,
-    manifest: manifest && typeof manifest === "object" ? (manifest as Manifest) : null,
+    manifest:
+      manifest && typeof manifest === "object"
+        ? ({ resources, ...(manifest as Manifest) } as Manifest)
+        : null,
   }
 }
 
 function normalizeCatalogEntry(e: CatalogEntry | Record<string, unknown>): CatalogEntry {
   const manifest = "manifest" in e ? e.manifest : null
   const acceptance = parseAcceptance((e as Record<string, unknown>).acceptance)
+  const resources = resourceProfile(e.resources ?? (e as Record<string, unknown>).resource_profile)
+  const gpu = resources.gpu
   return {
     id: String(e.id ?? ""),
     name: String(e.name ?? ""),
     title: String(e.title ?? e.name ?? ""),
     description: e.description == null ? null : String(e.description),
     tags: strArr(e.tags),
+    catalog_visibility: catalogVisibility(e.catalog_visibility),
     kind: String(e.kind ?? ""),
     system_runtime: e.system_runtime === true,
     capability_role: e.capability_role == null ? null : String(e.capability_role),
@@ -426,6 +486,17 @@ function normalizeCatalogEntry(e: CatalogEntry | Record<string, unknown>): Catal
     health_path: e.health_path == null ? null : String(e.health_path),
     endpoint_path: e.endpoint_path == null ? null : String(e.endpoint_path),
     device: String(e.device ?? "auto"),
+    resources,
+    gpu_required: e.gpu_required === true || gpu?.required === true,
+    gpu_placement:
+      e.gpu_placement == null
+        ? gpu?.placement == null
+          ? null
+          : String(gpu.placement)
+        : String(e.gpu_placement),
+    model_size_bytes: numOrNull(e.model_size_bytes ?? gpu?.model_size_bytes),
+    vram_required_bytes: numOrNull(e.vram_required_bytes ?? gpu?.vram_required_bytes),
+    vram_headroom_pct: numOrNull(e.vram_headroom_pct ?? gpu?.headroom_pct),
     operators: strArr(e.operators),
     manifest_path: String(e.manifest_path ?? ""),
     catalog_source: String(e.catalog_source ?? "file"),
@@ -434,7 +505,10 @@ function normalizeCatalogEntry(e: CatalogEntry | Record<string, unknown>): Catal
     updated_at: epoch(e.updated_at),
     acceptance_tests: strArr(e.acceptance_tests),
     acceptance,
-    manifest: manifest && typeof manifest === "object" ? (manifest as Manifest) : null,
+    manifest:
+      manifest && typeof manifest === "object"
+        ? ({ resources, ...(manifest as Manifest) } as Manifest)
+        : null,
   }
 }
 
@@ -467,7 +541,9 @@ export async function fetchCatalog(connectionId?: string | null): Promise<{
       doc: body.doc
         ? {
             ...body.doc,
-            capabilities: (body.doc.capabilities ?? []).map(normalizeCatalogEntry),
+            capabilities: (body.doc.capabilities ?? [])
+              .map(normalizeCatalogEntry)
+              .filter((c) => c.catalog_visibility === "public"),
           }
         : null,
       source: "file",
@@ -843,7 +919,7 @@ export type ComposeFrame =
  * server-side.
  */
 export async function streamComposeUp(
-  args: { outDir: string; gpu?: boolean },
+  args: { outDir: string; gpu?: boolean; publishHostPort?: boolean },
   onFrame: (frame: ComposeFrame) => void,
   signal?: AbortSignal,
 ): Promise<{ exitCode: number; error?: string }> {
@@ -1065,6 +1141,7 @@ export interface InstallKnobs {
   batchSize: number
   maxConcurrent: number
   timeoutMs: number
+  publishHostPort: boolean
   hostPort: number
   dockerNetwork: string
   outputDir: string
@@ -1079,7 +1156,8 @@ export function defaultKnobs(manifest: Manifest): InstallKnobs {
     batchSize: backend.batch_size ?? 32,
     maxConcurrent: backend.max_concurrent ?? 4,
     timeoutMs: backend.timeout_ms ?? 60000,
-    hostPort: Number(runtime.port ?? 8080),
+    publishHostPort: false,
+    hostPort: 0,
     dockerNetwork: "docker_default",
     outputDir: `.rvbbit/capabilities/${manifest.name}`,
     gpu: false,
@@ -1105,6 +1183,7 @@ export interface RenderedArtifacts {
   operatorSql: string
   smokeSql: string
   composeYaml: string
+  composeHostPortsYaml: string
   composeGpuYaml: string
 }
 
@@ -1124,6 +1203,7 @@ export function renderManifest(
       : renderOperatorSql(m),
     smokeSql: renderSmokeSql(m),
     composeYaml: renderCompose(m, knobs),
+    composeHostPortsYaml: renderHostPortsCompose(m, knobs),
     composeGpuYaml: renderGpuCompose(m),
   }
 }
@@ -1159,7 +1239,7 @@ function sqlTextArray(values: string[]): string {
 function backendEndpoint(m: Manifest): string {
   if (m.backend?.endpoint) return m.backend.endpoint
   const service = m.name.replace(/_/g, "-")
-  return `http://${service}:8080/predict`
+  return `http://${service}:${runtimeContainerPort(m)}/predict`
 }
 
 function pickInstallManifest(m: Manifest): Record<string, unknown> {
@@ -1306,6 +1386,8 @@ function renderOperatorSql(m: Manifest): string {
       `  op_shape       => ${sqlLit(op.shape ?? "scalar")},`,
       `  op_description => ${sqlLitOrNull(op.description ?? m.description ?? null)},`,
       `  op_tests       => ${op.tests ? sqlJson(op.tests) : "NULL"},`,
+      `  op_infix_symbol => ${sqlLitOrNull(op.infix_symbol)},`,
+      `  op_infix_word   => ${sqlLitOrNull(op.infix_word)},`,
       `  op_steps       => ${sqlJson(steps)}`,
       ");",
     )
@@ -1366,16 +1448,25 @@ function renderCompose(m: Manifest, knobs: InstallKnobs): string {
     .sort()
     .map((k) => `      ${k}: ${JSON.stringify(env[k])}`)
     .join("\n")
+  const volumeSpecs = runtime.volumes ?? [{ name: "hf_cache", mount: "/root/.cache/huggingface" }]
+  const volumeMounts = volumeSpecs
+    .filter((spec) => spec.name && spec.mount)
+    .map((spec) => `      - ${spec.name}:${spec.mount}`)
+    .join("\n")
+  const volumeDefs = volumeSpecs
+    .filter((spec) => spec.name && spec.mount)
+    .map((spec) => `  ${spec.name}:`)
+    .join("\n")
+  const sourceLines = renderRuntimeSource(runtime)
   return `services:
   ${service}:
-    build: .
-    container_name: rvbbit-${service}
-    ports:
-      - "\${RVBBIT_CAPABILITY_PORT:-${knobs.hostPort}}:${containerPort}"
+${sourceLines}    container_name: rvbbit-${service}
+    expose:
+      - "${containerPort}"
     environment:
 ${envLines}
     volumes:
-      - hf_cache:/root/.cache/huggingface
+${volumeMounts}
     networks:
       - rvbbit
     healthcheck:
@@ -1390,7 +1481,35 @@ networks:
     external: true
 
 volumes:
-  hf_cache:
+${volumeDefs}
+`
+}
+
+function runtimeImage(runtime: ManifestRuntimeBlock): string | null {
+  const image = String(runtime.image ?? "").trim()
+  if (!image) return null
+  const digest = String(runtime.image_digest ?? "").trim()
+  if (digest && !image.includes("@")) return `${image}@${digest}`
+  return image
+}
+
+function renderRuntimeSource(runtime: ManifestRuntimeBlock): string {
+  const image = runtimeImage(runtime)
+  if (image) {
+    const pullPolicy = runtime.pull_policy ?? "missing"
+    return `    image: ${JSON.stringify(image)}\n    pull_policy: ${JSON.stringify(pullPolicy)}\n`
+  }
+  return "    build: .\n"
+}
+
+function renderHostPortsCompose(m: Manifest, knobs: InstallKnobs): string {
+  const service = m.name.replace(/_/g, "-")
+  const containerPort = runtimeContainerPort(m)
+  return `services:
+  ${service}:
+    container_name: rvbbit-${service}
+    ports:
+      - "\${RVBBIT_CAPABILITY_PORT:-${knobs.hostPort}}:${containerPort}"
 `
 }
 

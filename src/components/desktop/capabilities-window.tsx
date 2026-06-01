@@ -28,7 +28,15 @@ import {
   type InstalledRuntime,
   type JoinedCatalogEntry,
 } from "@/lib/rvbbit/capabilities"
-import { fetchWarrenAvailability, type WarrenAvailability } from "@/lib/rvbbit/warren"
+import {
+  fetchWarrenAvailability,
+  fetchWarrenInventory,
+  nodeFitsVram,
+  nodeIsEligible,
+  uniqueNodesFromInventory,
+  type WarrenAvailability,
+  type WarrenInventoryRow,
+} from "@/lib/rvbbit/warren"
 import { Sparkline } from "./sparkline"
 import {
   fmtAgo,
@@ -82,6 +90,7 @@ export function CapabilitiesWindow({
   const [intervalMs, setIntervalMs] = useState(5000)
   const [updatedAt, setUpdatedAt] = useState(0)
   const [warrenAvail, setWarrenAvail] = useState<WarrenAvailability | null>(null)
+  const [warrenInventory, setWarrenInventory] = useState<WarrenInventoryRow[]>([])
   const [catalogOrigin, setCatalogOrigin] = useState<"db" | "file" | null>(null)
   const [selectedSources, setSelectedSources] = useState<Set<string>>(() => new Set())
   const [importOpen, setImportOpen] = useState(false)
@@ -112,6 +121,12 @@ export function CapabilitiesWindow({
     setRuntimes(rt.runtimes)
     setInstalledError(b.error ?? null)
     setUpdatedAt(Date.now())
+  }, [activeConnectionId, hasRvbbit])
+
+  const pollWarrenInventory = useCallback(async () => {
+    if (!activeConnectionId || !hasRvbbit) return
+    const inv = await fetchWarrenInventory(activeConnectionId)
+    setWarrenInventory(inv.rows)
   }, [activeConnectionId, hasRvbbit])
 
   useEffect(() => {
@@ -150,9 +165,13 @@ export function CapabilitiesWindow({
     if (!activeConnectionId || !hasRvbbit) return
     let cancelled = false
     const probe = async () => {
-      const r = await fetchWarrenAvailability(activeConnectionId)
+      const [r, inv] = await Promise.all([
+        fetchWarrenAvailability(activeConnectionId),
+        fetchWarrenInventory(activeConnectionId),
+      ])
       if (cancelled) return
       setWarrenAvail(r)
+      setWarrenInventory(inv.rows)
     }
     void probe()
     const id = setInterval(() => void probe(), 15_000)
@@ -161,6 +180,12 @@ export function CapabilitiesWindow({
       clearInterval(id)
     }
   }, [activeConnectionId, hasRvbbit])
+
+  useEffect(() => {
+    if (!activeConnectionId || !hasRvbbit || paused) return
+    const id = setInterval(() => void pollWarrenInventory(), intervalMs)
+    return () => clearInterval(id)
+  }, [activeConnectionId, hasRvbbit, paused, intervalMs, pollWarrenInventory])
 
   // ── derive ──
   const join = useMemo(() => {
@@ -607,6 +632,7 @@ export function CapabilitiesWindow({
               <CapabilityCard
                 key={e.catalog.id}
                 entry={e}
+                warrenNodes={uniqueNodesFromInventory(warrenInventory)}
                 onOpen={() => onOpenCapability(e.catalog.id)}
               />
             ))}
@@ -652,14 +678,35 @@ function filterBySearchOnly<T extends { catalog: JoinedCatalogEntry["catalog"] }
 
 function CapabilityCard({
   entry,
+  warrenNodes,
   onOpen,
 }: {
   entry: JoinedCatalogEntry
+  warrenNodes: WarrenInventoryRow[]
   onOpen: () => void
 }) {
   const { catalog, installed, installedRuntime, flags } = entry
   const states = flagsToStates(flags)
   const testCount = catalog.acceptance_tests.length
+  const vramRequired = catalog.vram_required_bytes
+  const gpuPlacement = catalog.gpu_placement ?? "single_gpu"
+  const eligibleGpuNodes = warrenNodes.filter(
+    (n) =>
+      (n.gpu_count ?? 0) > 0 &&
+      nodeIsEligible({ status: n.node_status, last_heartbeat: n.last_heartbeat }),
+  )
+  const fitCount =
+    vramRequired == null
+      ? 0
+      : eligibleGpuNodes.filter((n) => nodeFitsVram(n, vramRequired, gpuPlacement) === "fits").length
+  const gpuFit =
+    vramRequired == null
+      ? null
+      : fitCount > 0
+        ? "fits"
+        : eligibleGpuNodes.length === 0
+          ? "no_gpu"
+          : "insufficient"
   return (
     <button
       type="button"
@@ -716,6 +763,14 @@ function CapabilityCard({
             runtime
           </span>
         ) : null}
+        {vramRequired != null ? (
+          <GpuWeightChip
+            bytes={vramRequired}
+            required={catalog.gpu_required}
+            fit={gpuFit}
+            fitCount={fitCount}
+          />
+        ) : null}
       </div>
 
       {/* facts row */}
@@ -761,6 +816,47 @@ function CapabilityCard({
         </div>
       ) : null}
     </button>
+  )
+}
+
+function GpuWeightChip({
+  bytes,
+  required,
+  fit,
+  fitCount,
+}: {
+  bytes: number
+  required: boolean
+  fit: "fits" | "no_gpu" | "insufficient" | null
+  fitCount: number
+}) {
+  const tone =
+    fit === "fits"
+      ? "border-success/35 bg-success/10 text-success"
+      : fit === "insufficient"
+        ? "border-danger/35 bg-danger/10 text-danger"
+        : fit === "no_gpu"
+          ? "border-warning/35 bg-warning/10 text-warning"
+          : "border-warning/35 bg-warning/10 text-warning"
+  const title =
+    fit === "fits"
+      ? `${fitCount} ready GPU Warren node${fitCount === 1 ? "" : "s"} can fit this reservation`
+      : fit === "insufficient"
+        ? "No ready GPU Warren has enough unreserved VRAM"
+        : fit === "no_gpu"
+          ? "No ready GPU Warren nodes are visible"
+          : "Estimated GPU reservation"
+  return (
+    <span
+      className={cn(
+        "rounded-full border px-1.5 py-px font-mono text-[9px] uppercase tracking-wider",
+        tone,
+      )}
+      title={title}
+    >
+      {required ? "gpu " : "gpu opt "}
+      {fmtBytes(bytes)}
+    </span>
   )
 }
 
@@ -845,4 +941,17 @@ function buildSparkSeries(firstMs: number, lastMs: number, total: number): numbe
   const per = Math.max(1, Math.round(total / buckets))
   for (let i = 0; i < buckets; i++) out[i] = per
   return out
+}
+
+function fmtBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return "0B"
+  const units = ["B", "KB", "MB", "GB", "TB"]
+  let value = bytes
+  let idx = 0
+  while (value >= 1024 && idx < units.length - 1) {
+    value /= 1024
+    idx += 1
+  }
+  const digits = value >= 10 || idx === 0 ? 0 : 1
+  return `${value.toFixed(digits)}${units[idx]}`
 }

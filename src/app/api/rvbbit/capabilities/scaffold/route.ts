@@ -29,6 +29,7 @@ export const runtime = "nodejs"
  *       "operator.sql"?: string,
  *       "smoke.sql"?: string,
  *       "compose.yaml"?: string,
+ *       "compose.host-ports.yaml"?: string,
  *       "compose.gpu.yaml"?: string,
  *       "rvbbit.backend.yaml"?: string,
  *     }
@@ -53,6 +54,7 @@ const ALLOWED_OVERRIDES = new Set([
   "operator.sql",
   "smoke.sql",
   "compose.yaml",
+  "compose.host-ports.yaml",
   "compose.gpu.yaml",
   "rvbbit.backend.yaml",
 ])
