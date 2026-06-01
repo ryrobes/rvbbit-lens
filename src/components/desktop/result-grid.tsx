@@ -136,7 +136,15 @@ export function ResultGrid({
   const totalWidth = columnWidths.reduce((a, b) => a + b, 0)
 
   return (
-    <div ref={parentRef} className={cn("flex h-full flex-col overflow-auto bg-doc-bg", className)}>
+    <div
+      ref={parentRef}
+      className={cn(
+        // Opaque while the window is focused (data stays crisp & readable);
+        // glass-tints to let the frame blur through when the window recedes.
+        "flex h-full flex-col overflow-auto bg-doc-bg group-data-[focused=false]/window:bg-doc-bg/70",
+        className,
+      )}
+    >
       <div className="sticky top-0 z-10 flex border-b border-chrome-border bg-chrome-bg/95 backdrop-blur" style={{ minWidth: totalWidth }}>
         {columns.map((c, i) => {
           const role = columnDragSource?.columns.find((col) => col.name === c.name)?.role

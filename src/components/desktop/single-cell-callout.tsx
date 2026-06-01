@@ -88,7 +88,7 @@ export function SingleCellCallout({ column, value }: SingleCellCalloutProps) {
         <span className="font-mono text-[10px] uppercase tracking-[0.2em] text-chrome-text/70">
           {column.name} · {column.dataTypeName ?? "json"}
         </span>
-        <pre className="flex-1 overflow-auto rounded-base border border-chrome-border/50 bg-doc-bg p-4 font-mono text-sm text-foreground">
+        <pre className="flex-1 overflow-auto rounded-base border border-chrome-border/50 bg-doc-bg p-4 font-mono text-sm text-foreground group-data-[focused=false]/window:bg-doc-bg/70">
           {(() => {
             try {
               return JSON.stringify(value, null, 2)

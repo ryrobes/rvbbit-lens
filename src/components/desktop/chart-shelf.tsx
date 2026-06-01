@@ -240,7 +240,7 @@ export function ChartShelf({
   const goodMarks = useMemo(() => new Set(suggestedMarks(state)), [state])
 
   return (
-    <div className="flex min-h-0 flex-1 bg-doc-bg">
+    <div className="flex min-h-0 flex-1 bg-doc-bg group-data-[focused=false]/window:bg-doc-bg/70">
       {/* Field rail is only useful while editing — hidden when collapsed. */}
       {expanded ? (
         <FieldRail

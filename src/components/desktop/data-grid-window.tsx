@@ -737,7 +737,7 @@ export function DataGridWindow({
             <EmptyResult error={error} running={isRunning} onRun={onRun} />
           ) : null}
           {activeTab === "sql" ? (
-            <div className="h-full bg-doc-bg">
+            <div className="h-full bg-doc-bg group-data-[focused=false]/window:bg-doc-bg/70">
               <SqlEditor value={draftSql} onChange={setDraftSql} onRun={onRun} />
             </div>
           ) : null}

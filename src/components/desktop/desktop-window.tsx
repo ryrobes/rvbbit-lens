@@ -252,7 +252,10 @@ export function DesktopWindow({
       data-focused={focused ? "true" : "false"}
       data-column-drop={columnDragCompatible ? (columnDragHover ? "hover" : "ready") : undefined}
       className={cn(
-        "pointer-events-auto absolute overflow-hidden rounded-md border transition-[background-color,backdrop-filter,box-shadow] duration-150",
+        // `group/window` lets content surfaces (datagrids, editors) react to
+        // this window's focus state via `group-data-[focused=…]/window:` —
+        // e.g. a grid stays opaque when focused but glass-tints when not.
+        "group/window pointer-events-auto absolute overflow-hidden rounded-md border transition-[background-color,backdrop-filter,box-shadow] duration-150",
         focused
           ? "bg-block-bg/95"
           : "bg-block-bg/55 backdrop-blur-[6px] saturate-[0.85]",

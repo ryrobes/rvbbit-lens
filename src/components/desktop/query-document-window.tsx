@@ -20,7 +20,7 @@ export function QueryDocumentWindow({ payload }: QueryDocumentWindowProps) {
         <span>·</span>
         <span>{q.rowCount ?? "—"} rows</span>
       </div>
-      <pre className="flex-1 overflow-auto bg-doc-bg p-3 text-[12px] text-foreground">
+      <pre className="flex-1 overflow-auto bg-doc-bg p-3 text-[12px] text-foreground group-data-[focused=false]/window:bg-doc-bg/70">
         {q.sql}
       </pre>
     </div>
