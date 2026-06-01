@@ -227,6 +227,7 @@ export type InstallState =
   | "error_seen"
   | "healthy"
   | "failing"
+  | "deployment_unavailable"
   | "runtime_ready"
   | "runtime_failing"
   | "external"
@@ -238,6 +239,8 @@ export interface InstallStateFlags {
   errorSeen: boolean
   /** null = never probed in this session */
   healthy: boolean | null
+  /** Warren-served backend is registered but the latest deployment is not callable. */
+  deploymentUnavailable: boolean
   /** runtime-sidecar registered with status = 'ready' */
   runtimeReady: boolean
   /** runtime-sidecar registered with status in ('failed','disabled') */
@@ -259,6 +262,12 @@ export interface InstalledBackend {
   source_model: string | null
   source_revision: string | null
   install_manifest: Manifest | null
+  deployment_id: string | null
+  deployment_status: string | null
+  deployment_serving_status: string | null
+  deployment_callable: boolean | null
+  deployment_error: string | null
+  deployment_updated_at: number | null
   n_calls: number
   n_errors: number
   avg_latency_ms: number | null
@@ -339,6 +348,13 @@ function epoch(v: unknown): number | null {
   if (v == null) return null
   const t = new Date(String(v)).getTime()
   return Number.isFinite(t) ? t : null
+}
+
+function boolOrNull(v: unknown): boolean | null {
+  if (v == null) return null
+  if (v === true || v === "t" || v === "true" || v === 1 || v === "1") return true
+  if (v === false || v === "f" || v === "false" || v === 0 || v === "0") return false
+  return null
 }
 
 function sqlLit(s: string): string {
@@ -574,7 +590,7 @@ export async function fetchManifest(
 
 // ── Installed-backend query (CAPABILITIES.md § "Installed Backend Query") ──
 
-const BACKEND_HEALTH_SQL = `SELECT
+const BACKEND_HEALTH_BASE_SQL = `SELECT
   name,
   transport,
   endpoint_url,
@@ -595,9 +611,48 @@ const BACKEND_HEALTH_SQL = `SELECT
   p95_latency_ms,
   first_call_at,
   last_call_at,
-  created_at
+  created_at,
+  NULL::uuid AS deployment_id,
+  NULL::text AS deployment_status,
+  NULL::text AS deployment_serving_status,
+  NULL::boolean AS deployment_callable,
+  NULL::text AS deployment_error,
+  NULL::timestamptz AS deployment_updated_at
 FROM rvbbit.backend_health
 ORDER BY name`
+
+const BACKEND_HEALTH_WITH_WARREN_SQL = `SELECT
+  h.name,
+  h.transport,
+  h.endpoint_url,
+  h.batch_size,
+  h.max_concurrent,
+  h.timeout_ms,
+  h.auth_header_env,
+  h.transport_opts,
+  h.description,
+  h.source_provider,
+  h.source_model,
+  h.source_revision,
+  h.install_manifest,
+  h.n_calls,
+  h.n_errors,
+  h.avg_latency_ms,
+  h.p50_latency_ms,
+  h.p95_latency_ms,
+  h.first_call_at,
+  h.last_call_at,
+  h.created_at,
+  w.deployment_id,
+  w.deployment_status,
+  w.serving_status AS deployment_serving_status,
+  w.callable AS deployment_callable,
+  w.deployment_error,
+  w.deployment_updated_at
+FROM rvbbit.backend_health h
+LEFT JOIN rvbbit.warren_backend_status w
+  ON w.name = h.name
+ORDER BY h.name`
 
 function parseInstalled(r: Record<string, unknown>): InstalledBackend {
   const opts = r.transport_opts
@@ -618,6 +673,14 @@ function parseInstalled(r: Record<string, unknown>): InstalledBackend {
     source_revision: r.source_revision == null ? null : String(r.source_revision),
     install_manifest:
       manifest && typeof manifest === "object" ? (manifest as Manifest) : null,
+    deployment_id: r.deployment_id == null ? null : String(r.deployment_id),
+    deployment_status:
+      r.deployment_status == null ? null : String(r.deployment_status),
+    deployment_serving_status:
+      r.deployment_serving_status == null ? null : String(r.deployment_serving_status),
+    deployment_callable: boolOrNull(r.deployment_callable),
+    deployment_error: r.deployment_error == null ? null : String(r.deployment_error),
+    deployment_updated_at: epoch(r.deployment_updated_at),
     n_calls: num(r.n_calls),
     n_errors: num(r.n_errors),
     avg_latency_ms: r.avg_latency_ms == null ? null : num(r.avg_latency_ms),
@@ -632,7 +695,10 @@ function parseInstalled(r: Record<string, unknown>): InstalledBackend {
 export async function fetchInstalledBackends(
   connectionId: string,
 ): Promise<{ backends: InstalledBackend[]; error?: string }> {
-  const res = await runQuery(connectionId, BACKEND_HEALTH_SQL)
+  let res = await runQuery(connectionId, BACKEND_HEALTH_WITH_WARREN_SQL)
+  if (!res.ok && /warren_backend_status/i.test(res.error)) {
+    res = await runQuery(connectionId, BACKEND_HEALTH_BASE_SQL)
+  }
   if (!res.ok) return { backends: [], error: res.error }
   return { backends: res.rows.map(parseInstalled) }
 }
@@ -738,6 +804,7 @@ export function joinCatalogToInstalled(
         used: false,
         errorSeen: false,
         healthy: null,
+        deploymentUnavailable: false,
         runtimeReady: !!rt && RUNTIME_READY_STATUS.has(status),
         runtimeFailing: !!rt && RUNTIME_FAILING_STATUS.has(status),
         external: false,
@@ -752,6 +819,8 @@ export function joinCatalogToInstalled(
       used: !!inst && inst.n_calls > 0,
       errorSeen: !!inst && inst.n_errors > 0,
       healthy: probe ? probe.ok : null,
+      deploymentUnavailable:
+        !!inst && inst.deployment_callable === false && inst.deployment_serving_status !== "external",
       runtimeReady: false,
       runtimeFailing: false,
       external: false,
@@ -774,6 +843,7 @@ export function flagsToStates(flags: InstallStateFlags): InstallState[] {
   if (flags.errorSeen) out.push("error_seen")
   if (flags.healthy === true) out.push("healthy")
   if (flags.healthy === false) out.push("failing")
+  if (flags.deploymentUnavailable) out.push("deployment_unavailable")
   if (flags.runtimeReady) out.push("runtime_ready")
   if (flags.runtimeFailing) out.push("runtime_failing")
   if (flags.external) out.push("external")

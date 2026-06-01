@@ -1,0 +1,13 @@
+node_modules
+.next
+out
+build
+.git
+.playwright-mcp
+*.log
+*.png
+*.jpg
+*.jpeg
+.env
+.env*.local
+tsconfig.tsbuildinfo

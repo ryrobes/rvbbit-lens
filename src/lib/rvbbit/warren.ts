@@ -22,6 +22,7 @@ import type { InstallKnobs, Manifest } from "./capabilities"
  * - Mirror Postgres `@>` containment on label objects so the deploy
  *   panel can show match preview without round-tripping.
  * - Enqueue a deploy via `rvbbit.deploy_capability(manifest, selector)`.
+ * - Request deployment stop/remove/redeploy via the Warren lifecycle SQL functions.
  *
  * Everything else (lifecycle, agent behavior, scheduling rules) lives
  * server-side. The UI is a read-mostly observer plus one queue action.
@@ -47,9 +48,14 @@ export type WarrenJobStatus =
 export type WarrenDeploymentStatus =
   | "starting"
   | "running"
+  | "stopping"
   | "stopped"
   | "failed"
+  | "drifted"
+  | "orphaned"
   | "removed"
+
+export type WarrenDesiredDeploymentState = "stopped" | "removed"
 
 export type WarrenJobKind =
   | "capability"
@@ -133,8 +139,8 @@ export interface WarrenDeployment {
 
 /**
  * One row from `rvbbit.warren_inventory` — already joined to latest
- * metrics + active deployment. `deployment_*` fields are nullable for
- * nodes with no active deployment.
+ * metrics + known non-removed deployment. `deployment_*` fields are nullable
+ * for nodes with no deployment row in the inventory view.
  */
 export interface WarrenInventoryRow {
   node_id: string
@@ -143,6 +149,9 @@ export interface WarrenInventoryRow {
   labels: Record<string, unknown>
   capacity: Record<string, unknown>
   node_status: WarrenNodeStatus
+  node_effective_status: WarrenNodeEffectiveStatus
+  heartbeat_state: NodeHeartbeatState
+  is_eligible: boolean
   version: string | null
   last_heartbeat: number | null
   latest_metrics_at: number | null
@@ -181,6 +190,9 @@ export interface WarrenLabelObservation {
 // ── Heartbeat staleness — UI policy from the contract doc ──────────
 
 export type NodeHeartbeatState = "unknown" | "fresh" | "stale" | "offline"
+export type WarrenNodeEffectiveStatus =
+  | WarrenNodeStatus
+  | "stale"
 
 export function nodeHeartbeatState(lastHeartbeatMs: number | null): NodeHeartbeatState {
   if (lastHeartbeatMs == null) return "unknown"
@@ -192,13 +204,23 @@ export function nodeHeartbeatState(lastHeartbeatMs: number | null): NodeHeartbea
 
 /**
  * A node is *eligible* to claim work when its status admits it AND
- * the heartbeat hasn't gone stale. The job queue itself does not
- * enforce heartbeat freshness — the doc treats this as UI policy, so
- * the deploy panel uses this to show truthful match counts even when
- * the underlying status row hasn't been re-marked offline.
+ * the heartbeat is recent enough. Newer databases expose the exact
+ * server-side decision as `is_eligible`; older ones fall back to the
+ * same heartbeat window in the browser.
  */
-export function nodeIsEligible(node: { status: WarrenNodeStatus; last_heartbeat: number | null }): boolean {
-  if (node.status !== "ready" && node.status !== "busy") return false
+export function nodeIsEligible(node: {
+  node_status?: WarrenNodeStatus | null
+  status?: WarrenNodeStatus | null
+  node_effective_status?: WarrenNodeEffectiveStatus | null
+  is_eligible?: boolean | null
+  last_heartbeat: number | null
+}): boolean {
+  if (typeof node.is_eligible === "boolean") return node.is_eligible
+  const status = node.node_status ?? node.status
+  const effective = node.node_effective_status
+  if (effective === "ready" || effective === "busy") return true
+  if (effective === "stale") return true
+  if (status !== "ready" && status !== "busy") return false
   const hb = nodeHeartbeatState(node.last_heartbeat)
   return hb === "fresh" || hb === "stale"
 }
@@ -309,6 +331,10 @@ function numOrNull(v: unknown): number | null {
   return Number.isFinite(n) ? n : null
 }
 
+function bool(v: unknown): boolean {
+  return v === true || v === "t" || v === "true" || v === 1 || v === "1"
+}
+
 // ── Availability probe ──────────────────────────────────────────────
 
 /**
@@ -321,23 +347,31 @@ export async function fetchWarrenAvailability(
 ): Promise<WarrenAvailability> {
   const probe = await runQuery(
     connectionId,
-    "SELECT to_regclass('rvbbit.warren_nodes') IS NOT NULL AS has_tables",
+    `SELECT
+       to_regclass('rvbbit.warren_nodes') IS NOT NULL AS has_tables,
+       to_regclass('rvbbit.warren_node_effective_status') IS NOT NULL AS has_effective_status`,
   )
   if (!probe.ok) return { available: false, totalNodes: 0, readyNodes: 0, error: probe.error }
   const has = probe.rows[0]?.has_tables
   const exists = has === true || has === "t"
   if (!exists) return { available: false, totalNodes: 0, readyNodes: 0 }
+  const hasEffectiveStatus = bool(probe.rows[0]?.has_effective_status)
 
   const counts = await runQuery(
     connectionId,
-    `SELECT
-       count(*)::int AS total,
-       count(*) FILTER (
-         WHERE status IN ('ready','busy')
-           AND last_heartbeat IS NOT NULL
-           AND now() - last_heartbeat < interval '2 minutes'
-       )::int AS ready
-     FROM rvbbit.warren_nodes`,
+    hasEffectiveStatus
+      ? `SELECT
+           count(*)::int AS total,
+           count(*) FILTER (WHERE is_eligible)::int AS ready
+         FROM rvbbit.warren_node_effective_status`
+      : `SELECT
+           count(*)::int AS total,
+           count(*) FILTER (
+             WHERE status IN ('ready','busy')
+               AND last_heartbeat IS NOT NULL
+               AND now() - last_heartbeat < interval '2 minutes'
+           )::int AS ready
+         FROM rvbbit.warren_nodes`,
   )
   if (!counts.ok) return { available: true, totalNodes: 0, readyNodes: 0, error: counts.error }
   const r = counts.rows[0] ?? {}
@@ -351,15 +385,35 @@ export async function fetchWarrenAvailability(
 // ── Inventory / nodes ───────────────────────────────────────────────
 
 function parseInventoryRow(r: Record<string, unknown>): WarrenInventoryRow {
+  const lastHeartbeat = epoch(r.last_heartbeat)
+  const nodeStatus = String(r.node_status ?? "registered") as WarrenNodeStatus
+  const reportedEffectiveStatus =
+    r.node_effective_status == null
+      ? null
+      : (String(r.node_effective_status) as WarrenNodeEffectiveStatus)
+  const effectiveStatus = reportedEffectiveStatus ?? nodeStatus
+  const heartbeatState = String(
+    r.heartbeat_state ?? nodeHeartbeatState(lastHeartbeat),
+  ) as NodeHeartbeatState
   return {
     node_id: String(r.node_id ?? ""),
     node_name: String(r.node_name ?? ""),
     base_url: r.base_url == null ? null : String(r.base_url),
     labels: jsonObj(r.labels),
     capacity: jsonObj(r.capacity),
-    node_status: String(r.node_status ?? "registered") as WarrenNodeStatus,
+    node_status: nodeStatus,
+    node_effective_status: effectiveStatus,
+    heartbeat_state: heartbeatState,
+    is_eligible:
+      r.is_eligible == null
+        ? nodeIsEligible({
+            node_status: nodeStatus,
+            node_effective_status: reportedEffectiveStatus,
+            last_heartbeat: lastHeartbeat,
+          })
+        : bool(r.is_eligible),
     version: r.version == null ? null : String(r.version),
-    last_heartbeat: epoch(r.last_heartbeat),
+    last_heartbeat: lastHeartbeat,
     latest_metrics_at: epoch(r.latest_metrics_at),
     cpu_pct: r.cpu_pct == null ? null : Number(r.cpu_pct),
     load1: r.load1 == null ? null : Number(r.load1),
@@ -566,6 +620,50 @@ export async function fetchWarrenDeploymentByBackend(
   if (!res.ok) return { deployment: null, error: res.error }
   if (res.rows.length === 0) return { deployment: null }
   return { deployment: parseDeployment(res.rows[0]) }
+}
+
+export async function requestWarrenDeploymentState(
+  connectionId: string,
+  deploymentId: string,
+  desiredState: WarrenDesiredDeploymentState,
+): Promise<{ jobId: string | null; error?: string }> {
+  const res = await runQuery(
+    connectionId,
+    `SELECT rvbbit.request_warren_deployment_state(
+       ${sqlLit(deploymentId)}::uuid,
+       ${sqlLit(desiredState)}
+     ) AS job_id`,
+  )
+  if (!res.ok) return { jobId: null, error: res.error }
+  return { jobId: String(res.rows[0]?.job_id ?? "") || null }
+}
+
+export function requestWarrenDeploymentStop(
+  connectionId: string,
+  deploymentId: string,
+): Promise<{ jobId: string | null; error?: string }> {
+  return requestWarrenDeploymentState(connectionId, deploymentId, "stopped")
+}
+
+export function requestWarrenDeploymentRemove(
+  connectionId: string,
+  deploymentId: string,
+): Promise<{ jobId: string | null; error?: string }> {
+  return requestWarrenDeploymentState(connectionId, deploymentId, "removed")
+}
+
+export async function requestWarrenDeploymentRedeploy(
+  connectionId: string,
+  deploymentId: string,
+): Promise<{ jobId: string | null; error?: string }> {
+  const res = await runQuery(
+    connectionId,
+    `SELECT rvbbit.request_warren_deployment_redeploy(
+       ${sqlLit(deploymentId)}::uuid
+     ) AS job_id`,
+  )
+  if (!res.ok) return { jobId: null, error: res.error }
+  return { jobId: String(res.rows[0]?.job_id ?? "") || null }
 }
 
 // ── Observed labels (for selector builder) ──────────────────────────

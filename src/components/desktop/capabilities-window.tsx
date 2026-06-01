@@ -693,7 +693,7 @@ function CapabilityCard({
   const eligibleGpuNodes = warrenNodes.filter(
     (n) =>
       (n.gpu_count ?? 0) > 0 &&
-      nodeIsEligible({ status: n.node_status, last_heartbeat: n.last_heartbeat }),
+      nodeIsEligible(n),
   )
   const fitCount =
     vramRequired == null

@@ -149,7 +149,7 @@ export function WarrenDeployPanel({
   const eligibleMatching = useMemo(
     () =>
       matching.filter((n) =>
-        nodeIsEligible({ status: n.node_status, last_heartbeat: n.last_heartbeat }) &&
+        nodeIsEligible(n) &&
         (!gpuReservationWanted ||
           vramRequired == null ||
           nodeFitsVram(n, vramRequired, gpuPlacement) === "fits"),
@@ -659,7 +659,7 @@ function NodeMatchCard({
   const vramFit = nodeFitsVram(node, vramRequired, gpuPlacement)
   const eligible =
     matches &&
-    nodeIsEligible({ status: node.node_status, last_heartbeat: node.last_heartbeat }) &&
+    nodeIsEligible(node) &&
     (vramFit === "not_required" || vramFit === "fits")
   const missingKeys = Object.keys(selector).filter(
     (k) => !(k in node.labels) || !shallowEqual(node.labels[k], selector[k]),

@@ -29,7 +29,11 @@ import {
   fetchWarrenInventory,
   fetchWarrenJobs,
   nodeHeartbeatState,
+  nodeIsEligible,
+  requestWarrenDeploymentRedeploy,
+  requestWarrenDeploymentState,
   type NodeHeartbeatState,
+  type WarrenDesiredDeploymentState,
   type WarrenInventoryRow,
   type WarrenJob,
   type WarrenJobStatus,
@@ -82,6 +86,7 @@ export function WarrenWindow({
   const [paused, setPaused] = useState(false)
   const [intervalMs, setIntervalMs] = useState(5000)
   const [showOfflineNodes, setShowOfflineNodes] = useState(false)
+  const [actionDeploymentId, setActionDeploymentId] = useState<string | null>(null)
   const [updatedAt, setUpdatedAt] = useState(0)
   const [error, setError] = useState<string | null>(null)
   const loading = updatedAt === 0
@@ -99,6 +104,43 @@ export function WarrenWindow({
     setError(inv.error ?? jobsRes.error ?? null)
     setUpdatedAt(Date.now())
   }, [activeConnectionId])
+
+  const requestDeploymentState = useCallback(
+    async (deploymentId: string, desiredState: WarrenDesiredDeploymentState) => {
+      if (!activeConnectionId) return
+      setActionDeploymentId(deploymentId)
+      try {
+        const res = await requestWarrenDeploymentState(activeConnectionId, deploymentId, desiredState)
+        if (res.error) {
+          setError(res.error)
+          return
+        }
+        await reload()
+      } finally {
+        setActionDeploymentId(null)
+      }
+    },
+    [activeConnectionId, reload],
+  )
+
+  const requestDeploymentRedeploy = useCallback(
+    async (deploymentId: string, deploymentName: string | null) => {
+      if (!activeConnectionId) return
+      setActionDeploymentId(deploymentId)
+      try {
+        const res = await requestWarrenDeploymentRedeploy(activeConnectionId, deploymentId)
+        if (res.error) {
+          setError(res.error)
+          return
+        }
+        if (res.jobId) onOpenJob(res.jobId, deploymentName)
+        await reload()
+      } finally {
+        setActionDeploymentId(null)
+      }
+    },
+    [activeConnectionId, onOpenJob, reload],
+  )
 
   useEffect(() => {
     let cancelled = false
@@ -127,10 +169,10 @@ export function WarrenWindow({
       if (seen.has(r.node_id)) continue
       seen.add(r.node_id)
       total += 1
-      const hb = nodeHeartbeatState(r.last_heartbeat)
-      if (hb === "fresh" && (r.node_status === "ready" || r.node_status === "busy")) ready += 1
-      else if (hb === "stale") stale += 1
-      else if (hb === "offline") offline += 1
+      const hb = r.heartbeat_state ?? nodeHeartbeatState(r.last_heartbeat)
+      if (nodeIsEligible(r)) ready += 1
+      else if (hb === "stale" || r.node_effective_status === "stale") stale += 1
+      else if (hb === "offline" || r.node_effective_status === "offline") offline += 1
     }
     return { total, ready, stale, offline }
   }, [inventory])
@@ -300,6 +342,9 @@ export function WarrenWindow({
             hiddenOfflineCount={showOfflineNodes ? 0 : nodeCounts.offline}
             onShowOffline={() => setShowOfflineNodes(true)}
             onOpenSpecialist={onOpenSpecialist}
+            onRequestDeploymentState={requestDeploymentState}
+            onRequestDeploymentRedeploy={requestDeploymentRedeploy}
+            actionDeploymentId={actionDeploymentId}
           />
         ) : null}
         {tab === "jobs" ? <JobsTab jobs={jobs} onOpenJob={onOpenJob} /> : null}
@@ -324,12 +369,24 @@ function InventoryTab({
   hiddenOfflineCount,
   onShowOffline,
   onOpenSpecialist,
+  onRequestDeploymentState,
+  onRequestDeploymentRedeploy,
+  actionDeploymentId,
 }: {
   inventory: WarrenInventoryRow[]
   showOfflineNodes: boolean
   hiddenOfflineCount: number
   onShowOffline: () => void
   onOpenSpecialist: (name: string) => void
+  onRequestDeploymentState: (
+    deploymentId: string,
+    desiredState: WarrenDesiredDeploymentState,
+  ) => void | Promise<void>
+  onRequestDeploymentRedeploy: (
+    deploymentId: string,
+    deploymentName: string | null,
+  ) => void | Promise<void>
+  actionDeploymentId: string | null
 }) {
   const grouped = useMemo<GroupedNode[]>(() => {
     const byId = new Map<string, GroupedNode>()
@@ -346,7 +403,10 @@ function InventoryTab({
     () =>
       showOfflineNodes
         ? grouped
-        : grouped.filter((g) => nodeHeartbeatState(g.node.last_heartbeat) !== "offline"),
+        : grouped.filter(
+            (g) =>
+              (g.node.heartbeat_state ?? nodeHeartbeatState(g.node.last_heartbeat)) !== "offline",
+          ),
     [grouped, showOfflineNodes],
   )
 
@@ -379,7 +439,14 @@ function InventoryTab({
   return (
     <div className="grid h-full grid-cols-[repeat(auto-fill,minmax(360px,1fr))] gap-2.5 overflow-auto p-3">
       {visible.map((g) => (
-        <NodeCard key={g.node.node_id} group={g} onOpenSpecialist={onOpenSpecialist} />
+        <NodeCard
+          key={g.node.node_id}
+          group={g}
+          onOpenSpecialist={onOpenSpecialist}
+          onRequestDeploymentState={onRequestDeploymentState}
+          onRequestDeploymentRedeploy={onRequestDeploymentRedeploy}
+          actionDeploymentId={actionDeploymentId}
+        />
       ))}
     </div>
   )
@@ -395,12 +462,25 @@ const HEARTBEAT_TONE: Record<NodeHeartbeatState, string> = {
 function NodeCard({
   group,
   onOpenSpecialist,
+  onRequestDeploymentState,
+  onRequestDeploymentRedeploy,
+  actionDeploymentId,
 }: {
   group: GroupedNode
   onOpenSpecialist: (name: string) => void
+  onRequestDeploymentState: (
+    deploymentId: string,
+    desiredState: WarrenDesiredDeploymentState,
+  ) => void | Promise<void>
+  onRequestDeploymentRedeploy: (
+    deploymentId: string,
+    deploymentName: string | null,
+  ) => void | Promise<void>
+  actionDeploymentId: string | null
 }) {
   const n = group.node
-  const hb = nodeHeartbeatState(n.last_heartbeat)
+  const hb = n.heartbeat_state ?? nodeHeartbeatState(n.last_heartbeat)
+  const effectiveStatus = n.node_effective_status ?? n.node_status
   return (
     <section className="flex flex-col gap-2 rounded-md border border-chrome-border bg-secondary-background/40 p-2.5">
       {/* header */}
@@ -410,8 +490,16 @@ function NodeCard({
           {n.node_name}
         </span>
         <span className="rounded bg-foreground/[0.05] px-1 text-[9px] uppercase tracking-wider text-chrome-text/65">
-          {n.node_status}
+          {effectiveStatus}
         </span>
+        {effectiveStatus !== n.node_status ? (
+          <span
+            className="rounded bg-foreground/[0.04] px-1 text-[9px] uppercase tracking-wider text-chrome-text/45"
+            title="reported Warren agent status"
+          >
+            raw {n.node_status}
+          </span>
+        ) : null}
         <span
           className={cn(
             "rounded-full px-1.5 py-px text-[9px] uppercase tracking-wider ring-1",
@@ -516,8 +604,8 @@ function NodeCard({
       <div className="border-t border-chrome-border/40 pt-1.5">
         <div className="mb-1 text-[9px] uppercase tracking-wider text-chrome-text/50">
           {group.deployments.length === 0
-            ? "no active deployments"
-            : `${group.deployments.length} active deployment${group.deployments.length === 1 ? "" : "s"}`}
+            ? "no deployments"
+            : `${group.deployments.length} deployment${group.deployments.length === 1 ? "" : "s"}`}
         </div>
         {group.deployments.length > 0 ? (
           <div className="space-y-1">
@@ -526,6 +614,9 @@ function NodeCard({
                 key={d.deployment_id ?? d.deployment_name ?? `slot-${i}`}
                 row={d}
                 onOpenSpecialist={onOpenSpecialist}
+                onRequestDeploymentState={onRequestDeploymentState}
+                onRequestDeploymentRedeploy={onRequestDeploymentRedeploy}
+                busy={actionDeploymentId === d.deployment_id}
               />
             ))}
           </div>
@@ -585,20 +676,41 @@ function gb(bytes: number): string {
 const DEPLOY_STATUS_TONE: Record<string, string> = {
   running: "bg-success/15 text-success ring-success/30",
   starting: "bg-rvbbit-accent/15 text-rvbbit-accent ring-rvbbit-accent/30",
+  stopping: "bg-warning/15 text-warning ring-warning/30",
   stopped: "bg-foreground/[0.05] text-chrome-text/65 ring-chrome-border/40",
   failed: "bg-danger/15 text-danger ring-danger/40",
+  drifted: "bg-danger/15 text-danger ring-danger/40",
+  orphaned: "bg-warning/15 text-warning ring-warning/30",
   removed: "bg-foreground/[0.05] text-chrome-text/45 ring-chrome-border/40",
 }
 
 function DeploymentRow({
   row,
   onOpenSpecialist,
+  onRequestDeploymentState,
+  onRequestDeploymentRedeploy,
+  busy,
 }: {
   row: WarrenInventoryRow
   onOpenSpecialist: (name: string) => void
+  onRequestDeploymentState: (
+    deploymentId: string,
+    desiredState: WarrenDesiredDeploymentState,
+  ) => void | Promise<void>
+  onRequestDeploymentRedeploy: (
+    deploymentId: string,
+    deploymentName: string | null,
+  ) => void | Promise<void>
+  busy: boolean
 }) {
   const status = row.deployment_status ?? "starting"
   const tone = DEPLOY_STATUS_TONE[status] ?? DEPLOY_STATUS_TONE.starting
+  const canRedeploy =
+    !!row.deployment_id && ["stopped", "failed", "drifted", "orphaned"].includes(status)
+  const canStop =
+    !!row.deployment_id && ["running", "drifted", "orphaned"].includes(status)
+  const canRemove =
+    !!row.deployment_id && ["stopped", "failed", "drifted", "orphaned"].includes(status)
   return (
     <div className="flex items-center gap-1.5 rounded border border-chrome-border/40 bg-foreground/[0.02] px-1.5 py-1">
       <span
@@ -640,6 +752,39 @@ function DeploymentRow({
           >
             <FileCode2 className="h-2.5 w-2.5" />
             {row.runtime_name}
+          </button>
+        ) : null}
+        {canRedeploy ? (
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => onRequestDeploymentRedeploy(row.deployment_id!, row.deployment_name)}
+            className="grid h-5 w-5 place-items-center rounded text-success hover:bg-success/10 disabled:cursor-wait disabled:opacity-50"
+            title="Redeploy"
+          >
+            {busy ? <RefreshCw className="h-3 w-3 animate-spin" /> : <Play className="h-3 w-3" />}
+          </button>
+        ) : null}
+        {canStop ? (
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => onRequestDeploymentState(row.deployment_id!, "stopped")}
+            className="grid h-5 w-5 place-items-center rounded text-warning hover:bg-warning/10 disabled:cursor-wait disabled:opacity-50"
+            title="Stop deployment"
+          >
+            {busy ? <RefreshCw className="h-3 w-3 animate-spin" /> : <Pause className="h-3 w-3" />}
+          </button>
+        ) : null}
+        {canRemove ? (
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => onRequestDeploymentState(row.deployment_id!, "removed")}
+            className="grid h-5 w-5 place-items-center rounded text-danger hover:bg-danger/10 disabled:cursor-wait disabled:opacity-50"
+            title="Remove deployment"
+          >
+            {busy ? <RefreshCw className="h-3 w-3 animate-spin" /> : <X className="h-3 w-3" />}
           </button>
         ) : null}
       </div>

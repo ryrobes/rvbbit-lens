@@ -869,6 +869,7 @@ export type InstallStateKey =
   | "error_seen"
   | "healthy"
   | "failing"
+  | "deployment_unavailable"
   | "runtime_ready"
   | "runtime_failing"
   | "external"
@@ -918,6 +919,13 @@ const INSTALL_STATE_THEME: Record<
     fg: "text-danger",
     ring: "ring-danger/40",
     title: "Most recent backend_probe failed",
+  },
+  deployment_unavailable: {
+    label: "not callable",
+    bg: "bg-danger/12",
+    fg: "text-danger",
+    ring: "ring-danger/40",
+    title: "Backend is registered, but its Warren deployment is stopped, failed, or unavailable",
   },
   runtime_ready: {
     label: "runtime ready",

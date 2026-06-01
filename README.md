@@ -31,6 +31,19 @@ npm run dev
 # http://localhost:3000
 ```
 
+## Docker
+
+```bash
+docker build -t ghcr.io/ryrobes/rvbbit-lens:local .
+docker run --rm -p 3000:3000 \
+  -v rvbbit_lens:/data \
+  -e RVBBIT_LENS_HOME=/data \
+  ghcr.io/ryrobes/rvbbit-lens:local
+```
+
+For the all-in Rvbbit stack, use `docker/docker-compose.release.yml` from the
+`rvbbit-sql` repo.
+
 ## Layout
 
 ```
