@@ -34,6 +34,7 @@ export type DesktopWindowKind =
   | "warren-job-detail"
   | "costs"
   | "duck"
+  | "data-search"
 
 export interface DesktopWindowPosition {
   x: number
@@ -93,6 +94,7 @@ export type WindowPayload =
   | WarrenJobDetailPayload
   | CostsPayload
   | DuckPayload
+  | DataSearchPayload
 
 export interface FinderPayload {
   kind?: "finder"
@@ -437,6 +439,12 @@ export interface CostsPayload {
 /** Duck/Vortex sidecar broker telemetry monitor. */
 export interface DuckPayload {
   kind?: "duck"
+}
+
+export interface DataSearchPayload {
+  kind?: "data-search"
+  /** Optional starting query, e.g. when opened from a deep-link. */
+  initialQuery?: string
 }
 
 export interface ConnectionsPayload {

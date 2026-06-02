@@ -20,6 +20,7 @@ import {
   Plug,
   Plus,
   Rocket,
+  Search,
   Settings2,
   Sparkles,
   Table2,
@@ -64,6 +65,7 @@ import { KgEntityDetailWindow } from "./kg-entity-detail-window"
 import { KgExtractionRunsWindow } from "./kg-extraction-runs-window"
 import { KgMergeReviewWindow } from "./kg-merge-review-window"
 import { KgExplorerWindow } from "./kg-explorer-window"
+import { DataSearchWindow } from "./data-search-window"
 import { CapabilitiesWindow } from "./capabilities-window"
 import { CapabilityDetailWindow } from "./capability-detail-window"
 import { WarrenWindow } from "./warren-window"
@@ -88,6 +90,7 @@ import type {
   RvbbitCachePayload,
   ArtifactPayload,
   DataPayload,
+  DataSearchPayload,
   DesktopBlockDragPayload,
   DesktopColumnDragPayload,
   DesktopColumnRef,
@@ -1427,6 +1430,29 @@ export function DesktopShell() {
     [focus, openWindow, windows, updatePayload],
   )
 
+  const openDataSearch = useCallback(
+    (initialQuery?: string) => {
+      const existing = windows.find((w) => w.kind === "data-search")
+      if (existing) {
+        if (initialQuery != null) {
+          updatePayload(existing.id, (p) => ({
+            ...(p as DataSearchPayload),
+            initialQuery,
+          }))
+        }
+        return focus(existing.id)
+      }
+      openWindow({
+        id: randomUUID(),
+        kind: "data-search",
+        title: "Data Search",
+        x: 160, y: 90, width: 720, height: 640,
+        payload: { kind: "data-search", initialQuery } satisfies DataSearchPayload,
+      })
+    },
+    [focus, openWindow, windows, updatePayload],
+  )
+
   const openKgExtractionRuns = useCallback(
     (graphId?: string | null, runId?: number | null) => {
       const existing = windows.find((w) => w.kind === "kg-extraction-runs")
@@ -2225,6 +2251,8 @@ export function DesktopShell() {
         onOpenDuck={openDuck}
         onOpenWarren={() => openWarren()}
         onOpenQueryLens={() => openQueryLens()}
+        onOpenDataSearch={() => openDataSearch()}
+        onOpenCatalogGraph={() => openKgExplorer("db_catalog")}
         onOpenKgBrowser={() => openKgBrowser()}
         onOpenKgExtractionRuns={() => openKgExtractionRuns()}
         onOpenKgMergeReview={() => openKgMergeReview()}
@@ -2306,6 +2334,9 @@ export function DesktopShell() {
           ) : null}
           {hasRvbbit ? (
             <DesktopIcon label="Query Lens" icon={Eye} onActivate={() => openQueryLens()} iconColor="var(--brand-query-lens)" />
+          ) : null}
+          {hasRvbbit ? (
+            <DesktopIcon label="Data Search" icon={Search} onActivate={() => openDataSearch()} iconColor="var(--brand-kg)" />
           ) : null}
           {hasRvbbit ? (
             <DesktopIcon label="Knowledge Graph" icon={TreeStructure} onActivate={() => openKgBrowser()} iconColor="var(--brand-kg)" />
@@ -2426,6 +2457,7 @@ export function DesktopShell() {
                   openKgExtractionRuns,
                   openKgMergeReview,
                   openKgExplorer,
+                  openDataSearch,
                   openCosts,
                   openDuck,
                   openCapabilities,
@@ -2541,6 +2573,7 @@ interface WindowContext {
     seedKind?: string | null,
     seedLabel?: string | null,
   ) => void
+  openDataSearch: (initialQuery?: string) => void
   openCosts: (initialFilter?: CostsPayload["initialFilter"]) => void
   openDuck: () => void
   openCapabilities: (tagFilter?: string | null) => void
@@ -2815,6 +2848,18 @@ function renderWindowContent(
           }
         />
       )
+    case "data-search":
+      return (
+        <DataSearchWindow
+          payload={w.payload as DataSearchPayload}
+          activeConnectionId={ctx.activeConnectionId}
+          hasRvbbit={ctx.hasRvbbit}
+          onOpenTable={ctx.openTableFromFinder}
+          onOpenCatalogGraph={(seedKind, seedLabel) =>
+            ctx.openKgExplorer("db_catalog", seedKind, seedLabel)
+          }
+        />
+      )
     case "capabilities":
       return (
         <CapabilitiesWindow
@@ -2943,6 +2988,8 @@ function iconForKind(kind: DesktopWindowState["kind"]) {
       return TreeStructure
     case "kg-extraction-runs":
       return FlowArrow
+    case "data-search":
+      return Search
     case "capabilities":
     case "capability-detail":
       return Package
