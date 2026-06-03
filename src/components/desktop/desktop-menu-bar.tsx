@@ -43,6 +43,7 @@ interface DesktopMenuBarProps {
   onOpenWarren: () => void
   onOpenQueryLens: () => void
   onOpenDataSearch: () => void
+  onOpenDrift: () => void
   onOpenCatalogGraph: () => void
   onOpenKgBrowser: () => void
   onOpenKgExtractionRuns: () => void
@@ -124,6 +125,7 @@ export function DesktopMenuBar({
   onOpenWarren,
   onOpenQueryLens,
   onOpenDataSearch,
+  onOpenDrift,
   onOpenCatalogGraph,
   onOpenKgBrowser,
   onOpenKgExtractionRuns,
@@ -203,6 +205,7 @@ export function DesktopMenuBar({
           { label: "Duck Monitor", onClick: onOpenDuck },
           { label: "Query Lens", onClick: onOpenQueryLens },
           { label: "Data Search", onClick: onOpenDataSearch },
+          { label: "Drift", onClick: onOpenDrift },
           { label: "Knowledge Graph", onClick: onOpenKgBrowser },
           { label: "KG · Extraction Runs", onClick: onOpenKgExtractionRuns },
           { label: "KG · Merge Review", onClick: onOpenKgMergeReview },

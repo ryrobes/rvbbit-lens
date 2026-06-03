@@ -35,6 +35,7 @@ export type DesktopWindowKind =
   | "costs"
   | "duck"
   | "data-search"
+  | "drift"
 
 export interface DesktopWindowPosition {
   x: number
@@ -95,6 +96,7 @@ export type WindowPayload =
   | CostsPayload
   | DuckPayload
   | DataSearchPayload
+  | DriftPayload
 
 export interface FinderPayload {
   kind?: "finder"
@@ -445,6 +447,13 @@ export interface DataSearchPayload {
   kind?: "data-search"
   /** Optional starting query, e.g. when opened from a deep-link. */
   initialQuery?: string
+}
+
+export interface DriftPayload {
+  kind?: "drift"
+  /** Optional starting run pair (baseline A, current B). Defaults to latest two. */
+  runA?: number
+  runB?: number
 }
 
 export interface ConnectionsPayload {
