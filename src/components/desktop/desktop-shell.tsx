@@ -68,6 +68,7 @@ import { KgMergeReviewWindow } from "./kg-merge-review-window"
 import { KgExplorerWindow } from "./kg-explorer-window"
 import { DataSearchWindow } from "./data-search-window"
 import { DriftWindow } from "./drift-window"
+import { ModelStudioWindow } from "./model-studio-window"
 import { CapabilitiesWindow } from "./capabilities-window"
 import { CapabilityDetailWindow } from "./capability-detail-window"
 import { WarrenWindow } from "./warren-window"
@@ -94,6 +95,7 @@ import type {
   DataPayload,
   DataSearchPayload,
   DriftPayload,
+  ModelStudioPayload,
   DesktopBlockDragPayload,
   DesktopColumnDragPayload,
   DesktopColumnRef,
@@ -1468,6 +1470,23 @@ export function DesktopShell() {
     })
   }, [focus, openWindow, windows])
 
+  const openModelStudio = useCallback((modelName?: string) => {
+    const existing = windows.find((w) => w.kind === "model-studio")
+    if (existing) {
+      if (modelName != null) {
+        updatePayload(existing.id, (p) => ({ ...(p as ModelStudioPayload), modelName }))
+      }
+      return focus(existing.id)
+    }
+    openWindow({
+      id: randomUUID(),
+      kind: "model-studio",
+      title: "Model Studio",
+      x: 150, y: 80, width: 980, height: 680,
+      payload: { kind: "model-studio", modelName } satisfies ModelStudioPayload,
+    })
+  }, [focus, openWindow, windows, updatePayload])
+
   const openKgExtractionRuns = useCallback(
     (graphId?: string | null, runId?: number | null) => {
       const existing = windows.find((w) => w.kind === "kg-extraction-runs")
@@ -2268,6 +2287,7 @@ export function DesktopShell() {
         onOpenQueryLens={() => openQueryLens()}
         onOpenDataSearch={() => openDataSearch()}
         onOpenDrift={() => openDrift()}
+        onOpenModelStudio={() => openModelStudio()}
         onOpenCatalogGraph={() => openKgExplorer("db_catalog")}
         onOpenKgBrowser={() => openKgBrowser()}
         onOpenKgExtractionRuns={() => openKgExtractionRuns()}
@@ -2356,6 +2376,9 @@ export function DesktopShell() {
           ) : null}
           {hasRvbbit ? (
             <DesktopIcon label="Drift" icon={LineChart} onActivate={() => openDrift()} iconColor="var(--brand-kg)" />
+          ) : null}
+          {hasRvbbit ? (
+            <DesktopIcon label="Model Studio" icon={Brain} onActivate={() => openModelStudio()} iconColor="var(--brand-specialists)" />
           ) : null}
           {hasRvbbit ? (
             <DesktopIcon label="Knowledge Graph" icon={TreeStructure} onActivate={() => openKgBrowser()} iconColor="var(--brand-kg)" />
@@ -2478,6 +2501,7 @@ export function DesktopShell() {
                   openKgExplorer,
                   openDataSearch,
                   openDrift,
+                  openModelStudio,
                   openCosts,
                   openDuck,
                   openCapabilities,
@@ -2595,6 +2619,7 @@ interface WindowContext {
   ) => void
   openDataSearch: (initialQuery?: string) => void
   openDrift: () => void
+  openModelStudio: (modelName?: string) => void
   openCosts: (initialFilter?: CostsPayload["initialFilter"]) => void
   openDuck: () => void
   openCapabilities: (tagFilter?: string | null) => void
@@ -2890,6 +2915,14 @@ function renderWindowContent(
           onOpenTable={ctx.openTableFromFinder}
         />
       )
+    case "model-studio":
+      return (
+        <ModelStudioWindow
+          payload={w.payload as ModelStudioPayload}
+          activeConnectionId={ctx.activeConnectionId}
+          hasRvbbit={ctx.hasRvbbit}
+        />
+      )
     case "capabilities":
       return (
         <CapabilitiesWindow
@@ -3022,6 +3055,8 @@ function iconForKind(kind: DesktopWindowState["kind"]) {
       return Search
     case "drift":
       return LineChart
+    case "model-studio":
+      return Brain
     case "capabilities":
     case "capability-detail":
       return Package

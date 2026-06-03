@@ -36,6 +36,7 @@ export type DesktopWindowKind =
   | "duck"
   | "data-search"
   | "drift"
+  | "model-studio"
 
 export interface DesktopWindowPosition {
   x: number
@@ -97,6 +98,7 @@ export type WindowPayload =
   | DuckPayload
   | DataSearchPayload
   | DriftPayload
+  | ModelStudioPayload
 
 export interface FinderPayload {
   kind?: "finder"
@@ -454,6 +456,12 @@ export interface DriftPayload {
   /** Optional starting run pair (baseline A, current B). Defaults to latest two. */
   runA?: number
   runB?: number
+}
+
+export interface ModelStudioPayload {
+  kind?: "model-studio"
+  /** Optional model to select on open. */
+  modelName?: string
 }
 
 export interface ConnectionsPayload {
