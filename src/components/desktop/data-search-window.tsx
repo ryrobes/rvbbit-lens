@@ -129,7 +129,7 @@ export function DataSearchWindow({
   const empty = installed && (status?.docs ?? 0) === 0
 
   return (
-    <div className="flex h-full flex-col bg-background text-foreground">
+    <div className="flex h-full flex-col text-foreground">
       {/* Header: status + controls */}
       <div className="shrink-0 border-b border-chrome-border/60 bg-chrome-bg/40 px-3 py-2">
         <div className="mb-2 flex items-center justify-between gap-2">
