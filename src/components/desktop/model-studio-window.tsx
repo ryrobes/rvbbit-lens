@@ -3,21 +3,28 @@
 import { useCallback, useEffect, useMemo, useState } from "react"
 import { Brain, Play, Plus, RefreshCw } from "@/lib/icons"
 import { fmtAgo, fmtCount } from "./instruments"
+import { Sparkline } from "./sparkline"
 import { SqlEditor } from "./sql-editor"
 import {
+  dropModel,
+  fetchAccuracySeries,
   fetchEvaluations,
   fetchModels,
   fetchPredictionReceipts,
   fetchPredictionStats,
   fetchRuns,
+  fetchVersions,
   ML_TASKS,
   predictRow,
   runEvaluate,
+  setModelEnabled,
   trainModel,
+  type AccuracyPoint,
   type FeatureSpec,
   type MlEvaluation,
   type MlModel,
   type MlRun,
+  type MlVersion,
   type PredictionReceipt,
   type PredictionStats,
 } from "@/lib/rvbbit/model-studio"
@@ -29,7 +36,7 @@ interface ModelStudioWindowProps {
   hasRvbbit: boolean
 }
 
-type SubTab = "overview" | "evaluate" | "predict" | "observe" | "train"
+type SubTab = "overview" | "evaluate" | "predict" | "monitor" | "observe" | "train"
 
 const STATUS_TONE: Record<string, string> = {
   active: "bg-emerald-500/15 text-emerald-500",
@@ -139,7 +146,7 @@ export function ModelStudioWindow({ payload, activeConnectionId, hasRvbbit }: Mo
         ) : (
           <div className="flex h-full flex-col">
             <div className="flex shrink-0 items-center gap-1 border-b border-chrome-border/60 px-2 py-1">
-              {(["overview", "evaluate", "predict", "observe", "train"] as const).map((t) => (
+              {(["overview", "evaluate", "predict", "monitor", "observe", "train"] as const).map((t) => (
                 <button
                   key={t}
                   type="button"
@@ -153,9 +160,10 @@ export function ModelStudioWindow({ payload, activeConnectionId, hasRvbbit }: Mo
               ))}
             </div>
             <div className="min-h-0 flex-1 overflow-auto p-3">
-              {tab === "overview" ? <OverviewTab model={model} connectionId={activeConnectionId} />
+              {tab === "overview" ? <OverviewTab model={model} connectionId={activeConnectionId} onChanged={reload} />
                 : tab === "evaluate" ? <EvaluateTab model={model} connectionId={activeConnectionId} />
                 : tab === "predict" ? <PredictTab model={model} connectionId={activeConnectionId} />
+                : tab === "monitor" ? <MonitorTab model={model} connectionId={activeConnectionId} />
                 : tab === "observe" ? <ObserveTab model={model} connectionId={activeConnectionId} />
                 : <TrainPane connectionId={activeConnectionId} seed={model} onQueued={reload} />}
             </div>
@@ -168,16 +176,30 @@ export function ModelStudioWindow({ payload, activeConnectionId, hasRvbbit }: Mo
 
 // ── Overview ─────────────────────────────────────────────────────────
 
-function OverviewTab({ model, connectionId }: { model: MlModel; connectionId: string }) {
+function OverviewTab({ model, connectionId, onChanged }: { model: MlModel; connectionId: string; onChanged: () => void }) {
   const [runs, setRuns] = useState<MlRun[]>([])
+  const [busy, setBusy] = useState(false)
   useEffect(() => {
     let c = false
     ;(async () => { const r = await fetchRuns(connectionId, model.name); if (!c) setRuns(r) })()
     return () => { c = true }
   }, [connectionId, model.name])
 
+  const act = useCallback(async (fn: () => Promise<unknown>) => {
+    setBusy(true); await fn(); onChanged(); setBusy(false)
+  }, [onChanged])
+
   return (
     <div className="space-y-3">
+      <div className="flex items-center gap-1.5">
+        {model.status === "disabled" ? (
+          <LifeBtn label="Enable" busy={busy} onClick={() => act(() => setModelEnabled(connectionId, model.name, true))} />
+        ) : (
+          <LifeBtn label="Disable" busy={busy} onClick={() => act(() => setModelEnabled(connectionId, model.name, false))} />
+        )}
+        <LifeBtn label="Drop" danger busy={busy}
+          onClick={() => { if (confirm(`Drop model "${model.name}" (and its runs + evaluations)?`)) void act(() => dropModel(connectionId, model.name)) }} />
+      </div>
       <Scorecard model={model} />
       {model.description ? <p className="text-[11px] text-chrome-text/70">{model.description}</p> : null}
 
@@ -582,6 +604,99 @@ function TrainPane({ connectionId, seed, onQueued }: { connectionId: string; see
 
 function trainModelSqlPreview(f: { name: string; sourceSql: string; target: string; task: string; features: string; opts: string }): string {
   return `SELECT rvbbit.train_model(\n  model_name => '${f.name}',\n  source_sql => $sql$${f.sourceSql}$sql$,\n  target_column => '${f.target}',\n  task => '${f.task}',\n  feature_schema => '${f.features}'::jsonb,\n  training_opts => '${f.opts}'::jsonb\n);`
+}
+
+// ── Monitor (accuracy-over-time + versions + diff) ───────────────────
+
+function MonitorTab({ model, connectionId }: { model: MlModel; connectionId: string }) {
+  const [series, setSeries] = useState<AccuracyPoint[]>([])
+  const [versions, setVersions] = useState<MlVersion[]>([])
+  useEffect(() => {
+    let c = false
+    ;(async () => {
+      const [s, v] = await Promise.all([
+        fetchAccuracySeries(connectionId, model.name),
+        fetchVersions(connectionId, model.name),
+      ])
+      if (!c) { setSeries(s); setVersions(v) }
+    })()
+    return () => { c = true }
+  }, [connectionId, model.name])
+
+  const vals = series.map((p) => p.metricValue ?? 0)
+  const metricName = series[0]?.metricName ?? (isClass(model.task) ? "accuracy" : "r2")
+
+  return (
+    <div className="space-y-3">
+      <Section title={`Evaluation ${metricName} over time (${series.length})`}>
+        {series.length < 2 ? (
+          <span className="text-[10px] text-chrome-text/40">run Evaluate at least twice to see a trend</span>
+        ) : (
+          <div className="max-w-[360px]">
+            <div className="mb-0.5 flex items-center justify-between text-[10px] text-chrome-text/50">
+              <span>{metricName}</span><span className="font-mono">{fmtNum(vals[vals.length - 1])}</span>
+            </div>
+            <Sparkline values={vals} height={36} color="var(--brand-specialists)" />
+          </div>
+        )}
+      </Section>
+      <Section title={`Versions (${versions.length})`}>
+        <div className="space-y-1">
+          {versions.length === 0 ? <span className="text-[10px] text-chrome-text/40">no training runs</span> : versions.map((v) => (
+            <div key={v.runId} className="flex items-center gap-2 rounded bg-foreground/[0.02] px-1.5 py-1 text-[10px]">
+              <span className="font-mono text-foreground">v{v.versionNo}</span>
+              <span className={`rounded-full px-1.5 py-0.5 ${STATUS_TONE[v.status === "completed" ? "active" : v.status] ?? "bg-foreground/[0.07] text-chrome-text/60"}`}>{v.status}</span>
+              {v.isActive ? <span className="rounded-full bg-emerald-500/15 px-1.5 py-0.5 text-emerald-500">active</span> : null}
+              <span className="text-chrome-text/45">{fmtAgo(v.finishedAt ?? v.createdAt ?? 0)}</span>
+              <span className="ml-auto font-mono text-chrome-text/60">{versionHeadline(v, model.task)}</span>
+            </div>
+          ))}
+        </div>
+      </Section>
+      {versions.length >= 2 ? <VersionDiff a={versions[1]} b={versions[0]} task={model.task} /> : null}
+    </div>
+  )
+}
+
+function VersionDiff({ a, b, task }: { a: MlVersion; b: MlVersion; task: string }) {
+  const keys = isClass(task) ? ["accuracy", "balanced_accuracy", "f1_macro"] : ["r2", "rmse", "mae"]
+  const rows = keys.filter((k) => a.metrics[k] != null || b.metrics[k] != null)
+  if (rows.length === 0) return null
+  return (
+    <Section title={`v${a.versionNo} → v${b.versionNo} diff`}>
+      <div className="space-y-0.5">
+        {rows.map((k) => {
+          const av = Number(a.metrics[k] ?? NaN), bv = Number(b.metrics[k] ?? NaN)
+          const d = bv - av
+          return (
+            <div key={k} className="flex items-center gap-2 text-[10px]">
+              <span className="w-28 text-chrome-text/55">{k}</span>
+              <span className="font-mono text-foreground">{fmtNum(a.metrics[k])} → {fmtNum(b.metrics[k])}</span>
+              {Number.isFinite(d) && d !== 0 ? (
+                <span className={`font-mono ${d > 0 ? "text-emerald-500" : "text-danger"}`}>{d > 0 ? "+" : ""}{d.toFixed(3)}</span>
+              ) : null}
+            </div>
+          )
+        })}
+      </div>
+    </Section>
+  )
+}
+
+function versionHeadline(v: MlVersion, task: string): string {
+  const m = v.metrics
+  return isClass(task) ? `acc ${fmtNum(m.accuracy)}` : `r² ${fmtNum(m.r2)}`
+}
+
+function LifeBtn({ label, onClick, busy, danger }: { label: string; onClick: () => void; busy?: boolean; danger?: boolean }) {
+  return (
+    <button type="button" onClick={onClick} disabled={busy}
+      className={`rounded-base border px-2 py-0.5 text-[10px] disabled:opacity-50 ${
+        danger ? "border-danger/40 text-danger hover:bg-danger/10"
+               : "border-chrome-border/60 text-chrome-text hover:bg-foreground/[0.06] hover:text-foreground"}`}>
+      {label}
+    </button>
+  )
 }
 
 // ── shared bits ──────────────────────────────────────────────────────

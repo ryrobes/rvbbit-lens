@@ -288,6 +288,79 @@ export async function fetchPredictionReceipts(connectionId: string, operatorName
   }))
 }
 
+// ── orchestration: versions, monitoring, lifecycle ──────────────────
+
+export interface MlVersion {
+  runId: string
+  versionNo: number
+  status: string
+  metrics: Record<string, unknown>
+  artifactUri: string | null
+  createdAt: number | null
+  finishedAt: number | null
+  isActive: boolean
+}
+
+export interface AccuracyPoint {
+  evalId: string
+  evalName: string | null
+  createdAt: number | null
+  nRows: number
+  metricName: string
+  metricValue: number | null
+}
+
+export async function fetchVersions(connectionId: string, modelName: string): Promise<MlVersion[]> {
+  const res = await runQuery(
+    connectionId,
+    `SELECT run_id::text AS run_id, version_no, status, metrics, artifact_uri, created_at, finished_at, is_active
+       FROM rvbbit.ml_model_versions WHERE model_name = ${sqlStr(modelName)}
+      ORDER BY version_no DESC`,
+  )
+  if (!res.ok) return []
+  return res.rows.map((r) => ({
+    runId: String(r.run_id ?? ""),
+    versionNo: num(r.version_no),
+    status: String(r.status ?? ""),
+    metrics: obj(r.metrics),
+    artifactUri: strOrNull(r.artifact_uri),
+    createdAt: epoch(r.created_at),
+    finishedAt: epoch(r.finished_at),
+    isActive: r.is_active === true,
+  }))
+}
+
+export async function fetchAccuracySeries(connectionId: string, modelName: string): Promise<AccuracyPoint[]> {
+  const res = await runQuery(
+    connectionId,
+    `SELECT eval_id::text AS eval_id, eval_name, created_at, n_rows, metric_name, metric_value
+       FROM rvbbit.ml_accuracy_series(${sqlStr(modelName)})`,
+  )
+  if (!res.ok) return []
+  return res.rows.map((r) => ({
+    evalId: String(r.eval_id ?? ""),
+    evalName: strOrNull(r.eval_name),
+    createdAt: epoch(r.created_at),
+    nRows: num(r.n_rows),
+    metricName: String(r.metric_name ?? ""),
+    metricValue: numOrNull(r.metric_value),
+  }))
+}
+
+async function callVoid(connectionId: string, sql: string): Promise<{ ok: boolean; error?: string }> {
+  const res = await runQuery(connectionId, sql, 1)
+  return res.ok ? { ok: true } : { ok: false, error: res.error }
+}
+
+export function setModelEnabled(connectionId: string, modelName: string, enabled: boolean) {
+  const fn = enabled ? "enable_model" : "disable_model"
+  return callVoid(connectionId, `SELECT rvbbit.${fn}(${sqlStr(modelName)})`)
+}
+
+export function dropModel(connectionId: string, modelName: string, dropOperator = false) {
+  return callVoid(connectionId, `SELECT rvbbit.drop_model(${sqlStr(modelName)}, ${dropOperator ? "true" : "false"})`)
+}
+
 export const ML_TASKS = [
   "classification", "regression", "tabular_classification", "tabular_regression",
   "forecasting", "anomaly", "survival", "causal", "embedding", "rerank", "custom",
