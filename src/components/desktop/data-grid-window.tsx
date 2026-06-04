@@ -43,6 +43,7 @@ import { RollupShelf, type FilterKind } from "./rollup-shelf"
 import type { QueryResult } from "@/lib/db/types"
 import { cn } from "@/lib/utils"
 import { rowsToCsv } from "@/lib/sql/format"
+import { hasTopLevelThen, wrapFlow, expandFlowResult } from "@/lib/sql/then-rewrite"
 import {
   buildDesktopRuntimeGraph,
   paramKey,
@@ -107,6 +108,19 @@ type ExplainState =
   | { kind: "done"; plan: ExplainRoot; analyzed: boolean }
   | { kind: "error"; message: string }
 
+type FlowStepRow = {
+  step_idx: number
+  stage: string
+  spec: string | null
+  n_rows: number
+  rows: Record<string, unknown>[]
+}
+
+const FLOW_STEPS_SQL =
+  "SELECT step_idx, stage, spec, n_rows, rows FROM rvbbit.flow_steps " +
+  "WHERE run_id = (SELECT run_id FROM rvbbit.flow_steps ORDER BY created_at DESC LIMIT 1) " +
+  "ORDER BY step_idx"
+
 export function DataGridWindow({
   window: w,
   payload,
@@ -144,6 +158,12 @@ export function DataGridWindow({
   const [activeTab, setActiveTab] = useState<NonNullable<DataPayload["view"]>["activeTab"]>(view.activeTab ?? (payload.origin === "table" ? "rows" : "sql"))
   const [sqlRailOpen, setSqlRailOpen] = useState<boolean>(view.sqlRailOpen ?? (payload.origin !== "table"))
   const [paramDropHot, setParamDropHot] = useState(false)
+  // Pipeline-cascade run state: when the last run was a `… then op(…)` pipeline,
+  // the Steps inspector reads rvbbit.flow_steps to show each stage's rowset.
+  const [isPipelineRun, setIsPipelineRun] = useState(false)
+  const [flowSteps, setFlowSteps] = useState<FlowStepRow[] | null>(null)
+  const [activeStep, setActiveStep] = useState(0)
+  const [flowStepsError, setFlowStepsError] = useState<string | null>(null)
 
   const blockName = useMemo(() => {
     if (payload.reactive?.blockName) return payload.reactive.blockName
@@ -233,6 +253,16 @@ export function DataGridWindow({
       params,
     )
     const compiled = graph.blocks.get(w.id)?.compiledSql ?? trimmedSource
+    // Pipeline cascade sugar: a bare `select … then op(…)` is wrapped as
+    // rvbbit.flow($$…$$) so the THENs never hit the PG parser. Detection mirrors
+    // the engine splitter (CASE…THEN / strings / comments are left untouched).
+    const isPipeline = hasTopLevelThen(compiled)
+    const toRun = isPipeline ? wrapFlow(compiled) : compiled
+    if (isPipeline) {
+      setFlowSteps(null)
+      setFlowStepsError(null)
+      setActiveStep(0)
+    }
     setRunState({ kind: "running", sql: compiled, startedAt: Date.now() })
     try {
       const res = await fetch("/api/db/query", {
@@ -240,7 +270,7 @@ export function DataGridWindow({
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
           connectionId: activeConnectionId,
-          sql: compiled,
+          sql: toRun,
           rowLimit: 5000,
           readOnly: false,
         }),
@@ -253,8 +283,12 @@ export function DataGridWindow({
       if (runNonceRef.current !== myNonce) return
       if (body.ok === false) {
         setRunState({ kind: "error", error: body.error, code: body.code, detail: body.detail, hint: body.hint })
+        setIsPipelineRun(false)
       } else {
-        setRunState({ kind: "done", result: body })
+        // flow() returns a single jsonb column per row; expand it into columns.
+        const finalResult = isPipeline ? expandFlowResult(body) : body
+        setIsPipelineRun(isPipeline)
+        setRunState({ kind: "done", result: finalResult })
         // Record the compiled SQL that just succeeded, so the auto-rerun
         // effect treats *this* as the baseline (not the unfiltered first
         // render).
@@ -281,6 +315,45 @@ export function DataGridWindow({
   }, [activeConnectionId, activeTab, allWindows, blockName, onChangePayload, params, subscriptions, w.id])
 
   const onRun = useCallback(() => { void runSql(draftSql || payload.sql) }, [draftSql, payload.sql, runSql])
+
+  // Lazily load per-step rowsets for the Steps inspector when that tab opens.
+  useEffect(() => {
+    if (activeTab !== "steps" || !isPipelineRun || flowSteps !== null || !activeConnectionId) return
+    let cancelled = false
+    void (async () => {
+      try {
+        const res = await fetch("/api/db/query", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            connectionId: activeConnectionId,
+            sql: FLOW_STEPS_SQL,
+            rowLimit: 500,
+            readOnly: true,
+          }),
+        })
+        const body = (await res.json()) as
+          | { ok: true; rows: FlowStepRow[] }
+          | { ok: false; error: string }
+        if (cancelled) return
+        if (body.ok === false) {
+          setFlowStepsError(body.error)
+          setFlowSteps([])
+        } else {
+          setFlowSteps(body.rows ?? [])
+          setFlowStepsError(null)
+        }
+      } catch (e) {
+        if (!cancelled) {
+          setFlowStepsError(e instanceof Error ? e.message : String(e))
+          setFlowSteps([])
+        }
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [activeTab, isPipelineRun, flowSteps, activeConnectionId])
 
   // When `payload.sql` changes from outside this window — e.g. another
   // window merged a dragged column into this rollup's lineage — adopt
@@ -611,6 +684,9 @@ export function DataGridWindow({
           <Tab label="Chart" icon={BarChart3} active={activeTab === "chart"} onClick={() => setActiveTab("chart")} />
           <Tab label="SQL" icon={FileCode2} active={activeTab === "sql"} onClick={() => setActiveTab("sql")} />
           <Tab label="Explain" icon={TreeStructure} active={activeTab === "explain"} onClick={() => setActiveTab("explain")} />
+          {isPipelineRun ? (
+            <Tab label="Steps" icon={GitBranch} active={activeTab === "steps"} onClick={() => setActiveTab("steps")} />
+          ) : null}
 
           <button
             type="button"
@@ -753,6 +829,14 @@ export function DataGridWindow({
               onAnalyze={onAnalyze}
             />
           ) : null}
+          {activeTab === "steps" ? (
+            <FlowStepsView
+              steps={flowSteps}
+              error={flowStepsError}
+              activeStep={activeStep}
+              onSelectStep={setActiveStep}
+            />
+          ) : null}
         </div>
       </section>
       <TimeTravelStrip
@@ -762,6 +846,110 @@ export function DataGridWindow({
         connectionId={activeConnectionId}
         hasRvbbit={hasRvbbit}
       />
+    </div>
+  )
+}
+
+function FlowStepsView({
+  steps,
+  error,
+  activeStep,
+  onSelectStep,
+}: {
+  steps: FlowStepRow[] | null
+  error: string | null
+  activeStep: number
+  onSelectStep: (i: number) => void
+}) {
+  if (error) {
+    return <div className="p-4 text-xs text-danger">Could not load pipeline steps: {error}</div>
+  }
+  if (steps === null) {
+    return <div className="p-4 text-xs text-chrome-text/55">Loading pipeline steps…</div>
+  }
+  if (steps.length === 0) {
+    return (
+      <div className="p-4 text-xs text-chrome-text/55">
+        No pipeline steps recorded for the last run.
+      </div>
+    )
+  }
+  const idx = Math.min(activeStep, steps.length - 1)
+  const step = steps[idx]
+  const rows = Array.isArray(step.rows) ? step.rows : []
+  const cols: string[] = []
+  const seen = new Set<string>()
+  for (const r of rows) {
+    if (r && typeof r === "object") {
+      for (const k of Object.keys(r)) {
+        if (!seen.has(k)) {
+          seen.add(k)
+          cols.push(k)
+        }
+      }
+    }
+  }
+  return (
+    <div className="flex h-full flex-col">
+      <div className="flex flex-wrap gap-1 border-b border-chrome-border p-2">
+        {steps.map((s, i) => (
+          <button
+            key={s.step_idx}
+            type="button"
+            onClick={() => onSelectStep(i)}
+            title={s.spec ?? s.stage}
+            className={`rounded px-2 py-1 text-xs ${
+              i === idx
+                ? "bg-main/15 text-rvbbit-accent"
+                : "text-chrome-text/55 hover:text-chrome-text"
+            }`}
+          >
+            <span className="font-mono">{s.step_idx}</span> · {s.stage} ·{" "}
+            <span className="font-mono">{s.n_rows}</span>
+          </button>
+        ))}
+      </div>
+      <div className="min-h-0 flex-1 overflow-auto p-2">
+        {step.spec ? (
+          <div className="mb-2 break-all font-mono text-[11px] text-chrome-text/55">{step.spec}</div>
+        ) : null}
+        {cols.length === 0 ? (
+          <div className="text-xs text-chrome-text/55">(no rows)</div>
+        ) : (
+          <table className="w-full border-collapse text-xs">
+            <thead>
+              <tr>
+                {cols.map((c) => (
+                  <th
+                    key={c}
+                    className="sticky top-0 border-b border-chrome-border bg-doc-bg px-2 py-1 text-left font-medium text-chrome-text"
+                  >
+                    {c}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {rows.slice(0, 200).map((r, ri) => (
+                <tr key={ri} className="border-b border-chrome-border/40">
+                  {cols.map((c) => {
+                    const v = (r as Record<string, unknown>)[c]
+                    return (
+                      <td key={c} className="px-2 py-1 align-top font-mono text-chrome-text">
+                        {v === null || v === undefined
+                          ? ""
+                          : typeof v === "object"
+                            ? JSON.stringify(v)
+                            : String(v)}
+                      </td>
+                    )
+                  })}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
     </div>
   )
 }

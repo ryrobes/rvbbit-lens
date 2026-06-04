@@ -355,7 +355,7 @@ export type RollupOp =
   | { kind: "pivot"; measureIds?: string[]; grain?: RollupGrain }
 
 export interface DataWindowViewState {
-  activeTab?: "rows" | "profile" | "chart" | "sql" | "explain"
+  activeTab?: "rows" | "profile" | "chart" | "sql" | "explain" | "steps"
   sqlRailOpen?: boolean
   sqlRailWidthPx?: number
   sqlDraft?: string
