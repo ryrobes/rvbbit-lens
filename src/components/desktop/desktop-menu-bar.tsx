@@ -3,6 +3,8 @@
 import { useEffect, useState } from "react"
 import { Activity, CaretRight, ChevronDown, Database, Plug, Plus } from "@/lib/icons"
 import { cn } from "@/lib/utils"
+import { RvbbitLogo } from "./rvbbit-logo"
+import { APP_NAME, APP_VERSION } from "@/lib/version"
 import {
   FONT_SCALE_LABELS,
   MONO_OPTIONS,
@@ -159,6 +161,7 @@ export function DesktopMenuBar({
   onSwitchWorkspace,
 }: DesktopMenuBarProps) {
   const active = connections.find((c) => c.id === activeConnectionId) ?? null
+  const [aboutOpen, setAboutOpen] = useState(false)
 
   // Auto-dismiss any open <details> dropdown when the user clicks
   // outside of it — matches every other desktop menu bar, and stops
@@ -271,12 +274,21 @@ export function DesktopMenuBar({
   ]
 
   return (
+    <>
     <header
       className="pointer-events-auto fixed top-0 left-0 right-0 z-50 flex h-8 items-center justify-between border-b border-chrome-border bg-chrome-bg/90 px-3 text-[12px] text-chrome-text backdrop-blur"
       style={{ WebkitAppRegion: "drag" } as React.CSSProperties}
     >
       <div className="flex items-center gap-3" style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}>
-        <span className="font-semibold tracking-tight text-foreground">rvbbit-lens</span>
+        <button
+          type="button"
+          onClick={() => setAboutOpen(true)}
+          title={`About ${APP_NAME}`}
+          aria-label={`About ${APP_NAME}`}
+          className="-mx-1 flex items-center rounded px-1 py-1 text-foreground transition-colors hover:text-main focus:outline-none focus-visible:text-main"
+        >
+          <RvbbitLogo className="h-[15px] w-auto" />
+        </button>
         <span className="text-chrome-text/60">·</span>
         <MenuPane label="File" items={fileItems} />
         <MenuPane label="Edit" items={editItems} />
@@ -305,6 +317,99 @@ export function DesktopMenuBar({
         />
       </div>
     </header>
+    <AboutDialog
+      open={aboutOpen}
+      onClose={() => setAboutOpen(false)}
+      hasRvbbit={hasRvbbit}
+      connectionLabel={active ? active.label : null}
+    />
+    </>
+  )
+}
+
+// ── About dialog ───────────────────────────────────────────────────
+// An "About This Mac"-style panel: the logo, the app name + version,
+// a one-line description, and a small meta block. Closes on Escape or
+// a click outside the panel. The Help button is a deliberate stub for
+// a future help surface.
+
+function AboutDialog({
+  open,
+  onClose,
+  hasRvbbit,
+  connectionLabel,
+}: {
+  open: boolean
+  onClose: () => void
+  hasRvbbit: boolean
+  connectionLabel: string | null
+}) {
+  useEffect(() => {
+    if (!open) return
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "Escape") onClose()
+    }
+    window.addEventListener("keydown", onKey)
+    return () => window.removeEventListener("keydown", onKey)
+  }, [open, onClose])
+
+  if (!open) return null
+
+  return (
+    <div
+      className="fixed inset-0 z-[100] grid place-items-center bg-overlay backdrop-blur-sm"
+      style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}
+      onMouseDown={onClose}
+    >
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-label={`About ${APP_NAME}`}
+        onMouseDown={(e) => e.stopPropagation()}
+        className="w-[340px] rounded-xl border border-chrome-border bg-block-bg/95 p-7 text-center shadow-2xl backdrop-blur"
+      >
+        <RvbbitLogo className="mx-auto h-11 w-auto text-foreground" />
+        <h2 className="mt-4 text-[15px] font-semibold tracking-tight text-foreground">{APP_NAME}</h2>
+        <p className="mt-0.5 text-[11px] text-chrome-text">Version {APP_VERSION}</p>
+        <p className="mx-auto mt-3 max-w-[260px] text-[11px] leading-relaxed text-chrome-text/80">
+          A PostgreSQL desktop for the rvbbit analytical extension.
+        </p>
+
+        <div className="mx-auto mt-4 space-y-1.5 border-t border-chrome-border/60 pt-3 text-left text-[11px]">
+          <AboutRow label="Connection" value={connectionLabel ?? "—"} />
+          <AboutRow label="Extension" value={hasRvbbit ? "pg_rvbbit active" : "not detected"} />
+        </div>
+
+        <p className="mt-4 text-[10px] text-chrome-text/50">© 2026 rvbbit</p>
+
+        <div className="mt-4 flex items-center justify-center gap-2">
+          <button
+            type="button"
+            disabled
+            title="Coming soon"
+            className="cursor-default rounded border border-chrome-border/50 px-3 py-1 text-[11px] text-chrome-text/35"
+          >
+            Help
+          </button>
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded border border-chrome-border bg-secondary-background px-3 py-1 text-[11px] text-foreground transition-colors hover:bg-foreground/[0.06]"
+          >
+            Close
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function AboutRow({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="flex items-baseline justify-between gap-3">
+      <span className="text-chrome-text/60">{label}</span>
+      <span className="truncate text-foreground">{value}</span>
+    </div>
   )
 }
 

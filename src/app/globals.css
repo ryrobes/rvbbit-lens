@@ -20,13 +20,16 @@
   --font-family-sans: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
   --font-family-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
 
-  --background: oklch(13% 0.035 270);
-  --secondary-background: oklch(18% 0.04 270);
-  --foreground: oklch(92% 0 0);
-  --main-foreground: oklch(0% 0 0);
-  --main: oklch(76% 0.14 195);
-  --border: oklch(40% 0.03 270);
-  --ring: oklch(76% 0.14 195);
+  /* Warm Ink — neutral near-black greys carry a whisper of warm hue
+     (~70°) so the UI reads as ink-on-paper rather than cold or violet.
+     Color lives only in the amber accent, charts, and code syntax. */
+  --background: oklch(13% 0.008 70);
+  --secondary-background: oklch(18% 0.010 70);
+  --foreground: oklch(92% 0.006 80);
+  --main-foreground: oklch(16% 0.02 70);
+  --main: oklch(80% 0.12 75);
+  --border: oklch(40% 0.012 70);
+  --ring: oklch(80% 0.12 75);
   --overlay: oklch(0% 0 0 / 0.7);
 
   --box-shadow-x: 3px;
@@ -44,31 +47,32 @@
   --danger: oklch(65% 0.22 25);
   --info: oklch(70% 0.14 240);
 
-  --chrome-bg: oklch(11% 0.034 270);
-  --chrome-border: oklch(30% 0.03 270);
-  --chrome-text: oklch(70% 0 0);
+  --chrome-bg: oklch(11% 0.007 70);
+  --chrome-border: oklch(30% 0.010 70);
+  --chrome-text: oklch(70% 0.006 78);
 
-  --doc-bg: oklch(12% 0.035 270);
-  --block-bg: oklch(17% 0.035 270);
-  --block-bg-hover: oklch(20% 0.04 270);
-  --block-border: oklch(32% 0.03 270);
-  --grid-dot: oklch(22% 0.03 270);
-  --grid-outline: oklch(22% 0.03 270);
+  --doc-bg: oklch(12.5% 0.008 70);
+  --block-bg: oklch(17% 0.009 70);
+  --block-bg-hover: oklch(20% 0.011 70);
+  --block-border: oklch(32% 0.010 70);
+  --grid-dot: oklch(22% 0.009 70);
+  --grid-outline: oklch(22% 0.009 70);
 
-  --rvbbit-accent: oklch(72% 0.13 175);
-  --rvbbit-bg: oklch(17% 0.025 175);
+  --rvbbit-accent: oklch(76% 0.10 72);
+  --rvbbit-bg: oklch(17% 0.02 70);
 
-  --terminal: oklch(72% 0.16 155);
-  --terminal-dim: oklch(45% 0.08 155);
+  /* Amber phosphor — the classic NeXTSTEP/CRT terminal glow. */
+  --terminal: oklch(80% 0.12 72);
+  --terminal-dim: oklch(48% 0.07 72);
 
-  --bevel-light: oklch(28% 0.03 270);
-  --bevel-dark: oklch(5% 0.025 270);
+  --bevel-light: oklch(28% 0.011 70);
+  --bevel-dark: oklch(5% 0.008 70);
 
   /* Small surfaces — used by desktop icons, view-app tile backgrounds,
      window-control buttons, etc. Calling them out as tokens means a
      theme can shift the icon-tile feel without touching every
      component. */
-  --icon-tile-bg: oklch(20% 0.04 270 / 0.65);
+  --icon-tile-bg: oklch(20% 0.011 70 / 0.65);
   --icon-tile-border: oklch(100% 0 0 / 0.10);
 
   /* ─── Window chrome ─── per-kind hue with shared L/C so a theme
@@ -78,7 +82,10 @@
      blue, data is green, query-document is yellow, etc.). */
   --win-l: 79%;
   --win-l-icon: 83%;
-  --win-c: 0.12;
+  /* Mostly-monochrome default: per-kind hues stay defined below but
+     near-zero chroma renders them as faint grey identity, not rainbow.
+     A custom (wallpaper-derived) theme raises --win-c to recolor. */
+  --win-c: 0.02;
 
   --win-finder-h: 220;
   --win-data-h: 155;
@@ -98,24 +105,24 @@
   /* Desktop shortcut brand colors. Most match a window-kind hue, but
      SQL Scratch points at a warmer 88 (yellow) because the shortcut
      represents "write a query" rather than "table view". */
-  --brand-finder: oklch(82% 0.13 220);
-  --brand-sql-scratch: oklch(83% 0.13 88);
-  --brand-view-apps: oklch(82% 0.11 196);
-  --brand-system-objects: oklch(82% 0.10 235);
-  --brand-extensions: oklch(82% 0.12 285);
-  --brand-connections: oklch(83% 0.13 290);
-  --brand-rvbbit-cache: oklch(82% 0.14 175);
-  --brand-pg-monitor: oklch(83% 0.13 150);
-  --brand-operators: oklch(82% 0.14 168);
-  --brand-specialists: oklch(80% 0.15 300);
-  --brand-routing: oklch(81% 0.14 255);
-  --brand-mcp: oklch(82% 0.16 55);
-  --brand-query-lens: oklch(82% 0.13 200);
-  --brand-kg: oklch(81% 0.15 320);
-  --brand-capability: oklch(82% 0.14 190);
-  --brand-warren: oklch(82% 0.15 35);
-  --brand-costs: oklch(83% 0.16 130);
-  --brand-duck: oklch(80% 0.13 210);
+  --brand-finder: oklch(82% 0.02 220);
+  --brand-sql-scratch: oklch(83% 0.02 88);
+  --brand-view-apps: oklch(82% 0.02 196);
+  --brand-system-objects: oklch(82% 0.02 235);
+  --brand-extensions: oklch(82% 0.02 285);
+  --brand-connections: oklch(83% 0.02 290);
+  --brand-rvbbit-cache: oklch(82% 0.02 175);
+  --brand-pg-monitor: oklch(83% 0.02 150);
+  --brand-operators: oklch(82% 0.02 168);
+  --brand-specialists: oklch(80% 0.02 300);
+  --brand-routing: oklch(81% 0.02 255);
+  --brand-mcp: oklch(82% 0.02 55);
+  --brand-query-lens: oklch(82% 0.02 200);
+  --brand-kg: oklch(81% 0.02 320);
+  --brand-capability: oklch(82% 0.02 190);
+  --brand-warren: oklch(82% 0.02 35);
+  --brand-costs: oklch(83% 0.02 130);
+  --brand-duck: oklch(80% 0.02 210);
 
   /* Wallpaper darkening overlay (when a custom wallpaper is set).
      Two stops on a 135deg gradient. */
@@ -124,9 +131,9 @@
 
   /* Default ambient backdrop (no wallpaper). Three radial ellipses
      layered with transparent fade-to-edge. */
-  --ambient-1: oklch(72% 0.16 175 / 0.08);
-  --ambient-2: oklch(80% 0.16 85 / 0.05);
-  --ambient-3: oklch(70% 0.18 310 / 0.05);
+  --ambient-1: oklch(45% 0.03 70 / 0.10);
+  --ambient-2: oklch(38% 0.02 60 / 0.06);
+  --ambient-3: oklch(30% 0.015 80 / 0.05);
 
   --syntax-foreground: oklch(89% 0.01 260);
   --syntax-keyword: oklch(76% 0.12 308);
@@ -139,14 +146,16 @@
 }
 
 :root[data-theme="light"] {
-  --background: oklch(96% 0.008 95);
-  --secondary-background: oklch(92% 0.012 95);
-  --foreground: oklch(21% 0.015 260);
-  --main-foreground: oklch(99% 0 0);
-  --main: oklch(62% 0.16 195);
-  --border: oklch(45% 0.02 255);
-  --ring: oklch(62% 0.16 195);
-  --overlay: oklch(18% 0.01 260 / 0.14);
+  /* Warm Ink (light) — warm paper whites and a warm-ink foreground,
+     amber accent. Color stays in charts + code syntax only. */
+  --background: oklch(97% 0.008 85);
+  --secondary-background: oklch(93% 0.010 85);
+  --foreground: oklch(22% 0.012 65);
+  --main-foreground: oklch(99% 0.004 85);
+  --main: oklch(58% 0.13 68);
+  --border: oklch(48% 0.012 70);
+  --ring: oklch(58% 0.13 68);
+  --overlay: oklch(22% 0.01 65 / 0.14);
 
   --box-shadow-x: 3px;
   --box-shadow-y: 3px;
@@ -163,19 +172,19 @@
   --danger: oklch(58% 0.21 25);
   --info: oklch(58% 0.14 240);
 
-  --chrome-bg: oklch(91% 0.01 95);
-  --chrome-border: oklch(73% 0.015 250);
-  --chrome-text: oklch(39% 0.012 255);
+  --chrome-bg: oklch(92% 0.010 85);
+  --chrome-border: oklch(74% 0.012 75);
+  --chrome-text: oklch(40% 0.010 68);
 
-  --doc-bg: oklch(98% 0.003 95);
-  --block-bg: oklch(100% 0 0);
-  --block-bg-hover: oklch(95% 0.012 190);
-  --block-border: oklch(76% 0.016 250);
-  --grid-dot: oklch(85% 0.015 240);
-  --grid-outline: oklch(82% 0.015 245);
+  --doc-bg: oklch(98% 0.005 88);
+  --block-bg: oklch(99% 0.004 88);
+  --block-bg-hover: oklch(95% 0.012 80);
+  --block-border: oklch(78% 0.012 75);
+  --grid-dot: oklch(85% 0.012 78);
+  --grid-outline: oklch(82% 0.012 78);
 
-  --rvbbit-accent: oklch(56% 0.12 175);
-  --rvbbit-bg: oklch(94% 0.03 175);
+  --rvbbit-accent: oklch(56% 0.11 70);
+  --rvbbit-bg: oklch(94% 0.025 78);
 
   --syntax-foreground: oklch(28% 0.012 260);
   --syntax-keyword: oklch(50% 0.15 304);
@@ -186,20 +195,20 @@
   --syntax-operator: oklch(48% 0.11 240);
   --syntax-identifier: oklch(50% 0.12 150);
 
-  --terminal: oklch(42% 0.14 155);
-  --terminal-dim: oklch(35% 0.08 155);
+  --terminal: oklch(50% 0.13 72);
+  --terminal-dim: oklch(40% 0.07 72);
 
-  --bevel-light: oklch(82% 0.01 95);
-  --bevel-dark: oklch(55% 0.015 255);
+  --bevel-light: oklch(85% 0.008 88);
+  --bevel-dark: oklch(55% 0.012 68);
 
-  --icon-tile-bg: oklch(94% 0.012 95 / 0.85);
+  --icon-tile-bg: oklch(95% 0.012 88 / 0.85);
   --icon-tile-border: oklch(20% 0 0 / 0.08);
 
-  /* Light theme keeps the same window-frame hues but slightly desats
-     so the colored borders don't fight black text on light bg. */
+  /* Mostly-monochrome default: per-kind hues stay defined but near-zero
+     chroma keeps frames as faint grey identity. Custom themes raise it. */
   --win-l: 62%;
   --win-l-icon: 50%;
-  --win-c: 0.14;
+  --win-c: 0.028;
 
   --win-finder-h: 220;
   --win-data-h: 155;
@@ -216,31 +225,31 @@
   --win-pg-monitor-h: 150;
   --win-duck-h: 210;
 
-  --brand-finder: oklch(50% 0.16 220);
-  --brand-sql-scratch: oklch(58% 0.15 88);
-  --brand-view-apps: oklch(54% 0.14 196);
-  --brand-system-objects: oklch(50% 0.13 235);
-  --brand-extensions: oklch(54% 0.15 285);
-  --brand-connections: oklch(50% 0.16 290);
-  --brand-rvbbit-cache: oklch(54% 0.16 175);
-  --brand-pg-monitor: oklch(50% 0.15 150);
-  --brand-operators: oklch(53% 0.16 168);
-  --brand-specialists: oklch(52% 0.17 300);
-  --brand-routing: oklch(52% 0.16 255);
-  --brand-mcp: oklch(54% 0.17 55);
-  --brand-query-lens: oklch(53% 0.14 200);
-  --brand-kg: oklch(52% 0.16 320);
-  --brand-capability: oklch(54% 0.15 190);
-  --brand-warren: oklch(56% 0.17 35);
-  --brand-costs: oklch(56% 0.18 130);
-  --brand-duck: oklch(54% 0.15 210);
+  --brand-finder: oklch(50% 0.025 220);
+  --brand-sql-scratch: oklch(54% 0.025 88);
+  --brand-view-apps: oklch(54% 0.025 196);
+  --brand-system-objects: oklch(50% 0.025 235);
+  --brand-extensions: oklch(54% 0.025 285);
+  --brand-connections: oklch(50% 0.025 290);
+  --brand-rvbbit-cache: oklch(54% 0.025 175);
+  --brand-pg-monitor: oklch(50% 0.025 150);
+  --brand-operators: oklch(53% 0.025 168);
+  --brand-specialists: oklch(52% 0.025 300);
+  --brand-routing: oklch(52% 0.025 255);
+  --brand-mcp: oklch(54% 0.025 55);
+  --brand-query-lens: oklch(53% 0.025 200);
+  --brand-kg: oklch(52% 0.025 320);
+  --brand-capability: oklch(54% 0.025 190);
+  --brand-warren: oklch(56% 0.025 35);
+  --brand-costs: oklch(56% 0.025 130);
+  --brand-duck: oklch(54% 0.025 210);
 
   --wallpaper-overlay-from: oklch(94% 0.01 95 / 0.62);
   --wallpaper-overlay-to: oklch(86% 0.03 90 / 0.35);
 
-  --ambient-1: oklch(76% 0.10 175 / 0.18);
-  --ambient-2: oklch(82% 0.12 85 / 0.14);
-  --ambient-3: oklch(72% 0.14 310 / 0.10);
+  --ambient-1: oklch(80% 0.03 80 / 0.16);
+  --ambient-2: oklch(85% 0.025 70 / 0.12);
+  --ambient-3: oklch(75% 0.02 88 / 0.10);
 }
 
 @theme inline {

@@ -70,25 +70,25 @@ export interface DerivedTheme {
 // ── Defaults that mirror globals.css ────────────────────────────────
 
 export const DEFAULT_DARK_PALETTE: ImagePalette = {
-  vibrant: "oklch(76% 0.14 195)",
-  darkVibrant: "oklch(40% 0.10 195)",
-  lightVibrant: "oklch(82% 0.10 195)",
-  muted: "oklch(40% 0.03 270)",
-  darkMuted: "oklch(15% 0.04 270)",
-  lightMuted: "oklch(75% 0.02 270)",
-  baseHue: 270,
-  chroma: 0.04,
+  vibrant: "oklch(80% 0.12 75)",
+  darkVibrant: "oklch(45% 0.09 72)",
+  lightVibrant: "oklch(86% 0.09 78)",
+  muted: "oklch(40% 0.012 70)",
+  darkMuted: "oklch(15% 0.01 70)",
+  lightMuted: "oklch(75% 0.012 72)",
+  baseHue: 70,
+  chroma: 0.012,
   source: "default-dark",
 }
 
 export const DEFAULT_LIGHT_PALETTE: ImagePalette = {
-  vibrant: "oklch(62% 0.16 195)",
-  darkVibrant: "oklch(38% 0.16 195)",
-  lightVibrant: "oklch(78% 0.10 195)",
-  muted: "oklch(73% 0.015 250)",
-  darkMuted: "oklch(45% 0.02 255)",
-  lightMuted: "oklch(95% 0.01 250)",
-  baseHue: 250,
-  chroma: 0.015,
+  vibrant: "oklch(58% 0.13 68)",
+  darkVibrant: "oklch(40% 0.13 66)",
+  lightVibrant: "oklch(80% 0.08 78)",
+  muted: "oklch(74% 0.012 75)",
+  darkMuted: "oklch(45% 0.012 70)",
+  lightMuted: "oklch(95% 0.01 80)",
+  baseHue: 75,
+  chroma: 0.014,
   source: "default-light",
 }
