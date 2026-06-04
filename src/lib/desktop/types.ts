@@ -1,4 +1,5 @@
 import type { ExtensionInfo, QueryResultColumn, SchemaColumn, SchemaTable } from "@/lib/db/types"
+import type { DataSearchHit } from "@/lib/rvbbit/data-search"
 
 export type DesktopWindowKind =
   | "finder"
@@ -11,6 +12,7 @@ export type DesktopWindowKind =
   | "system-objects"
   | "extensions"
   | "rvbbit-cache"
+  | "cache"
   | "connections"
   | "palette"
   | "pg-monitor"
@@ -35,6 +37,7 @@ export type DesktopWindowKind =
   | "costs"
   | "duck"
   | "data-search"
+  | "scry-results"
   | "drift"
   | "model-studio"
 
@@ -73,6 +76,7 @@ export type WindowPayload =
   | SystemObjectsPayload
   | ExtensionsPayload
   | RvbbitCachePayload
+  | CachePayload
   | ConnectionsPayload
   | PalettePayload
   | PgMonitorPayload
@@ -97,6 +101,7 @@ export type WindowPayload =
   | CostsPayload
   | DuckPayload
   | DataSearchPayload
+  | ScryResultsPayload
   | DriftPayload
   | ModelStudioPayload
 
@@ -423,6 +428,13 @@ export interface RvbbitCachePayload {
   initialView?: "receipts" | "embeddings" | "judgments" | "bitmaps" | "specialists"
 }
 
+export interface CachePayload {
+  kind?: "cache"
+  /** Which cache surface to open on: the synth-sql compiler cache or the
+   * content-addressed operator result (memo) cache. */
+  initialView?: "synth" | "memo"
+}
+
 export interface CostsPayload {
   kind?: "costs"
   /**
@@ -449,6 +461,19 @@ export interface DataSearchPayload {
   kind?: "data-search"
   /** Optional starting query, e.g. when opened from a deep-link. */
   initialQuery?: string
+}
+
+/** One step of a Scry cascade ("find X … within those, find Y …"). */
+export interface ScryChainStep {
+  query: string
+}
+
+/** A spawned Scry results window: the cascade that made it + the hits. */
+export interface ScryResultsPayload {
+  kind?: "scry-results"
+  chain: ScryChainStep[]
+  hits: DataSearchHit[]
+  connectionId: string | null
 }
 
 export interface DriftPayload {

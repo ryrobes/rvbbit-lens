@@ -35,6 +35,7 @@ interface DesktopMenuBarProps {
   onOpenNotifications: () => void
   onOpenExtensions: () => void
   onOpenRvbbitCache: () => void
+  onOpenCache: () => void
   onOpenOperators: () => void
   onOpenSpecialists: () => void
   onOpenRouting: () => void
@@ -118,6 +119,7 @@ export function DesktopMenuBar({
   onOpenNotifications,
   onOpenExtensions,
   onOpenRvbbitCache,
+  onOpenCache,
   onOpenOperators,
   onOpenSpecialists,
   onOpenRouting,
@@ -199,7 +201,8 @@ export function DesktopMenuBar({
     { label: "Extensions", onClick: onOpenExtensions },
     ...(hasRvbbit
       ? [
-          { label: "Rvbbit Cache", onClick: onOpenRvbbitCache },
+          { label: "Receipts", onClick: onOpenRvbbitCache },
+          { label: "Cache", onClick: onOpenCache },
           { label: "Costs", onClick: onOpenCosts },
           { label: "Operator Studio", onClick: onOpenOperators },
           { label: "Specialists", onClick: onOpenSpecialists },

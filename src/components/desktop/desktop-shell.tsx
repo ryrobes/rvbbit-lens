@@ -11,6 +11,7 @@ import {
   DollarSign,
   Eye,
   FileCode2,
+  FileText,
   FlowArrow,
   FolderOpen,
   GitBranch,
@@ -23,7 +24,6 @@ import {
   Rocket,
   Search,
   Settings2,
-  Sparkles,
   Table2,
   TreeStructure,
   Wand2,
@@ -45,6 +45,7 @@ import { ViewAppWindow } from "./view-app-window"
 import { ExtensionsWindow } from "./extensions-window"
 import { SystemObjectsWindow } from "./system-objects-window"
 import { RvbbitCacheWindow } from "./rvbbit-cache-window"
+import { CacheWindow } from "./cache-window"
 import { ArtifactWindow } from "./artifact-window"
 import { QueryDocumentWindow } from "./query-document-window"
 import { PaletteWindow } from "./palette-window"
@@ -67,6 +68,10 @@ import { KgExtractionRunsWindow } from "./kg-extraction-runs-window"
 import { KgMergeReviewWindow } from "./kg-merge-review-window"
 import { KgExplorerWindow } from "./kg-explorer-window"
 import { DataSearchWindow } from "./data-search-window"
+import { ScryPrompt } from "./scry-prompt"
+import { ScryResultsWindow } from "./scry-results-window"
+import type { ScryResultsPayload } from "@/lib/desktop/types"
+import type { DataSearchHit } from "@/lib/rvbbit/data-search"
 import { DriftWindow } from "./drift-window"
 import { ModelStudioWindow } from "./model-studio-window"
 import { CapabilitiesWindow } from "./capabilities-window"
@@ -91,6 +96,7 @@ import {
 import type { ConnectionRecord, SchemaSnapshot } from "@/lib/db/types"
 import type {
   RvbbitCachePayload,
+  CachePayload,
   ArtifactPayload,
   DataPayload,
   DataSearchPayload,
@@ -312,6 +318,9 @@ export function DesktopShell() {
   const [wallpaperUrl, setWallpaperUrl] = useState<string | null>(null)
   const [wallpaperError, setWallpaperError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
+  // ⌘K / Ctrl-K toggles the Scry cascade search prompt (a top-layer overlay).
+  const [scryOpen, setScryOpen] = useState(false)
+  const scrySpawnCountRef = useRef(0)
   const stateLoadedRef = useRef(false)
   const wallpaperInputRef = useRef<HTMLInputElement | null>(null)
   const wallpaperObjectUrlRef = useRef<string | null>(null)
@@ -1062,9 +1071,21 @@ export function DesktopShell() {
     openWindow({
       id: randomUUID(),
       kind: "rvbbit-cache",
-      title: "Rvbbit Cache",
+      title: "Receipts",
       x: 200, y: 110, width: 760, height: 500,
       payload: { kind: "rvbbit-cache", initialView: "receipts" } satisfies RvbbitCachePayload,
+    })
+  }, [focus, openWindow, windows])
+
+  const openCache = useCallback(() => {
+    const existing = windows.find((w) => w.kind === "cache")
+    if (existing) return focus(existing.id)
+    openWindow({
+      id: randomUUID(),
+      kind: "cache",
+      title: "Cache",
+      x: 230, y: 130, width: 780, height: 520,
+      payload: { kind: "cache", initialView: "synth" } satisfies CachePayload,
     })
   }, [focus, openWindow, windows])
 
@@ -1457,6 +1478,39 @@ export function DesktopShell() {
     },
     [focus, openWindow, windows, updatePayload],
   )
+
+  // Spawn a FRESH results window per search — no dedupe — so searches accrete
+  // instead of replacing each other. Cascade-offset placement keeps them from
+  // stacking exactly on top of one another.
+  const spawnScryResults = useCallback(
+    (chain: { query: string }[], hits: DataSearchHit[]) => {
+      const n = scrySpawnCountRef.current++
+      const title = chain.map((c) => c.query).join("  ⤷  ") || "Scry"
+      openWindow({
+        id: randomUUID(),
+        kind: "scry-results",
+        title: title.length > 52 ? `${title.slice(0, 50)}…` : title,
+        x: 200 + (n % 6) * 30,
+        y: 120 + (n % 6) * 30,
+        width: 460,
+        height: 540,
+        payload: { kind: "scry-results", chain, hits, connectionId: activeConnectionId } satisfies ScryResultsPayload,
+      })
+      setScryOpen(false)
+    },
+    [openWindow, activeConnectionId],
+  )
+
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if ((e.metaKey || e.ctrlKey) && (e.key === "k" || e.key === "K")) {
+        e.preventDefault()
+        setScryOpen((o) => !o)
+      }
+    }
+    window.addEventListener("keydown", onKey)
+    return () => window.removeEventListener("keydown", onKey)
+  }, [])
 
   const openDrift = useCallback(() => {
     const existing = windows.find((w) => w.kind === "drift")
@@ -2233,6 +2287,13 @@ export function DesktopShell() {
           }}
         />
       ) : null}
+      <ScryPrompt
+        open={scryOpen}
+        onClose={() => setScryOpen(false)}
+        connectionId={activeConnectionId}
+        onSpawnResults={spawnScryResults}
+        onOpenTable={openTableFromFinder}
+      />
       <div
         className="pointer-events-none fixed inset-0 opacity-[0.07]"
         style={{
@@ -2276,6 +2337,7 @@ export function DesktopShell() {
         onOpenNotifications={openNotifications}
         onOpenExtensions={openExtensions}
         onOpenRvbbitCache={openRvbbitCache}
+        onOpenCache={openCache}
         onOpenOperators={openOperators}
         onOpenSpecialists={openSpecialists}
         onOpenRouting={openRouting}
@@ -2342,7 +2404,10 @@ export function DesktopShell() {
           <DesktopIcon label="Connections" icon={Plug} onActivate={openConnections} iconColor="var(--brand-connections)" />
           <DesktopIcon label="Monitor" icon={Activity} onActivate={openPgMonitor} iconColor="var(--brand-pg-monitor)" />
           {hasRvbbit ? (
-            <DesktopIcon label="Rvbbit Cache" icon={Sparkles} sublabel={schema?.rvbbitVersion ?? undefined} onActivate={openRvbbitCache} iconColor="var(--brand-rvbbit-cache)" />
+            <DesktopIcon label="Receipts" icon={FileText} sublabel={schema?.rvbbitVersion ?? undefined} onActivate={openRvbbitCache} iconColor="var(--brand-rvbbit-cache)" />
+          ) : null}
+          {hasRvbbit ? (
+            <DesktopIcon label="Cache" icon={Database} onActivate={openCache} iconColor="var(--brand-cache)" />
           ) : null}
           {hasRvbbit ? (
             <DesktopIcon label="Operators" icon={FlowArrow} onActivate={openOperators} iconColor="var(--brand-operators)" />
@@ -2461,6 +2526,7 @@ export function DesktopShell() {
                   openQueryDocument,
                   openExtensions,
                   openRvbbitCache,
+                  openCache,
                   openConnections,
                   reloadSchema: () => activeConnectionId && void loadSchema(activeConnectionId),
                   reloadConnections: loadConnections,
@@ -2594,6 +2660,7 @@ interface WindowContext {
   openQueryDocument: (payload: QueryDocumentPayload) => void
   openExtensions: () => void
   openRvbbitCache: () => void
+  openCache: () => void
   openConnections: () => void
   openOperatorFlow: (operatorName: string | null, receiptId?: string | null) => void
   openSpecialistDetail: (specialistName: string) => void
@@ -2741,6 +2808,14 @@ function renderWindowContent(
           onOpenOperator={(name) => ctx.openOperatorFlow(name)}
           onOpenSpecialist={ctx.openSpecialistDetail}
           onOpenTable={ctx.openTableFromFinder}
+        />
+      )
+    case "cache":
+      return (
+        <CacheWindow
+          payload={w.payload as CachePayload}
+          activeConnectionId={ctx.activeConnectionId}
+          onOpenOperator={(name) => ctx.openOperatorFlow(name)}
         />
       )
     case "artifact":
@@ -2906,6 +2981,13 @@ function renderWindowContent(
           }
         />
       )
+    case "scry-results":
+      return (
+        <ScryResultsWindow
+          payload={w.payload as ScryResultsPayload}
+          onOpenTable={ctx.openTableFromFinder}
+        />
+      )
     case "drift":
       return (
         <DriftWindow
@@ -3027,7 +3109,8 @@ function iconForKind(kind: DesktopWindowState["kind"]) {
       return Boxes
     case "extensions": return Settings2
     case "system-objects": return Layers
-    case "rvbbit-cache": return Sparkles
+    case "rvbbit-cache": return FileText
+    case "cache": return Database
     case "artifact": return Wand2
     case "query-document": return FileCode2
     case "palette": return PaletteIcon

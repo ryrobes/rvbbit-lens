@@ -112,6 +112,7 @@
   --brand-extensions: oklch(82% 0.02 285);
   --brand-connections: oklch(83% 0.02 290);
   --brand-rvbbit-cache: oklch(82% 0.02 175);
+  --brand-cache: oklch(83% 0.04 95);
   --brand-pg-monitor: oklch(83% 0.02 150);
   --brand-operators: oklch(82% 0.02 168);
   --brand-specialists: oklch(80% 0.02 300);
@@ -232,6 +233,7 @@
   --brand-extensions: oklch(54% 0.025 285);
   --brand-connections: oklch(50% 0.025 290);
   --brand-rvbbit-cache: oklch(54% 0.025 175);
+  --brand-cache: oklch(58% 0.06 95);
   --brand-pg-monitor: oklch(50% 0.025 150);
   --brand-operators: oklch(53% 0.025 168);
   --brand-specialists: oklch(52% 0.025 300);
@@ -297,6 +299,7 @@
   --color-brand-extensions: var(--brand-extensions);
   --color-brand-connections: var(--brand-connections);
   --color-brand-rvbbit-cache: var(--brand-rvbbit-cache);
+  --color-brand-cache: var(--brand-cache);
   --color-brand-pg-monitor: var(--brand-pg-monitor);
   --color-brand-operators: var(--brand-operators);
   --color-brand-specialists: var(--brand-specialists);

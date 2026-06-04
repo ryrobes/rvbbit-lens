@@ -87,11 +87,12 @@ interface OverviewStats {
 }
 
 /**
- * Rvbbit Cache — a dashboard over the cross-cutting cache surfaces
- * the extension maintains (LLM judgments, embedding cache, semantic
- * bitmaps). Per-operator and per-specialist detail lives in their own
- * dedicated windows; this one answers "what's the *cache layer* doing
- * across all of them?" — handy for cost auditing and capacity sizing.
+ * Receipts — a read-only observability dashboard over the cross-cutting
+ * cache/cost surfaces the extension maintains (operator receipts, embedding
+ * cache, semantic bitmaps). It answers "what's the *cache layer* doing across
+ * all of them?" — handy for cost auditing and capacity sizing. The
+ * administrable counterpart (pin/edit/forget synth snippets, purge memo
+ * entries) lives in the dedicated Cache window.
  */
 export function RvbbitCacheWindow({
   payload,
@@ -176,8 +177,8 @@ export function RvbbitCacheWindow({
           {paused ? "paused" : "live"}
         </span>
         <span className="inline-flex items-center gap-1.5 text-foreground">
-          <Sparkles className="h-3.5 w-3.5 text-rvbbit-accent" />
-          Rvbbit Cache
+          <FileText className="h-3.5 w-3.5 text-rvbbit-accent" />
+          Receipts
         </span>
         {!loading && stats ? (
           <>
