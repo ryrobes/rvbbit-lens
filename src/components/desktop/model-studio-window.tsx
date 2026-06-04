@@ -6,6 +6,7 @@ import { fmtAgo, fmtCount } from "./instruments"
 import { Sparkline } from "./sparkline"
 import { SqlEditor } from "./sql-editor"
 import {
+  deployServing,
   dropModel,
   fetchAccuracySeries,
   fetchEvaluations,
@@ -18,6 +19,7 @@ import {
   predictRow,
   runEvaluate,
   setModelEnabled,
+  trainManaged,
   trainModel,
   type AccuracyPoint,
   type FeatureSpec,
@@ -179,6 +181,7 @@ export function ModelStudioWindow({ payload, activeConnectionId, hasRvbbit }: Mo
 function OverviewTab({ model, connectionId, onChanged }: { model: MlModel; connectionId: string; onChanged: () => void }) {
   const [runs, setRuns] = useState<MlRun[]>([])
   const [busy, setBusy] = useState(false)
+  const [deployMsg, setDeployMsg] = useState<string | null>(null)
   useEffect(() => {
     let c = false
     ;(async () => { const r = await fetchRuns(connectionId, model.name); if (!c) setRuns(r) })()
@@ -189,6 +192,13 @@ function OverviewTab({ model, connectionId, onChanged }: { model: MlModel; conne
     setBusy(true); await fn(); onChanged(); setBusy(false)
   }, [onChanged])
 
+  const promote = useCallback(async () => {
+    setBusy(true); setDeployMsg(null)
+    const { jobId, error } = await deployServing(connectionId, model.name)
+    setDeployMsg(error ? `Deploy failed: ${error}` : `Queued serving job ${jobId?.slice(0, 8)} — Warren deploys the sidecar.`)
+    setBusy(false)
+  }, [connectionId, model.name])
+
   return (
     <div className="space-y-3">
       <div className="flex items-center gap-1.5">
@@ -197,9 +207,11 @@ function OverviewTab({ model, connectionId, onChanged }: { model: MlModel; conne
         ) : (
           <LifeBtn label="Disable" busy={busy} onClick={() => act(() => setModelEnabled(connectionId, model.name, false))} />
         )}
+        <LifeBtn label="Deploy serving" busy={busy} onClick={promote} />
         <LifeBtn label="Drop" danger busy={busy}
           onClick={() => { if (confirm(`Drop model "${model.name}" (and its runs + evaluations)?`)) void act(() => dropModel(connectionId, model.name)) }} />
       </div>
+      {deployMsg ? <p className="text-[10px] text-chrome-text/60">{deployMsg}</p> : null}
       <Scorecard model={model} />
       {model.description ? <p className="text-[11px] text-chrome-text/70">{model.description}</p> : null}
 
@@ -553,21 +565,45 @@ function TrainPane({ connectionId, seed, onQueued }: { connectionId: string; see
   const [sourceSql, setSourceSql] = useState(seed?.sourceSql ?? "SELECT * FROM your_training_table")
   const [features, setFeatures] = useState(JSON.stringify(seed?.featureSchema ?? [], null, 0))
   const [opts, setOpts] = useState(JSON.stringify(seed?.trainingOpts ?? { estimator: "random_forest", test_size: 0.25 }, null, 0))
+  const [managed, setManaged] = useState(false)
+  const [hostTarget, setHostTarget] = useState("{}")
   const [msg, setMsg] = useState<string | null>(null)
   const [err, setErr] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
+  const [liveStatus, setLiveStatus] = useState<string | null>(null)
+
+  // Poll the model's latest run so the user can watch a worker pick it up.
+  const pollLive = useCallback(async (modelName: string) => {
+    for (let i = 0; i < 40; i++) {
+      const runs = await fetchRuns(connectionId, modelName)
+      const latest = runs[0]
+      if (latest) {
+        setLiveStatus(`run ${latest.runId.slice(0, 8)}: ${latest.status}${latest.worker ? ` · ${latest.worker}` : ""}${latest.error ? ` · ${latest.error}` : ""}`)
+        if (latest.status === "completed" || latest.status === "failed") { onQueued(); return }
+      }
+      await new Promise((r) => setTimeout(r, 2000))
+    }
+  }, [connectionId, onQueued])
 
   const queue = useCallback(async () => {
-    setBusy(true); setErr(null); setMsg(null)
+    setBusy(true); setErr(null); setMsg(null); setLiveStatus(null)
     let featureSchema: FeatureSpec[] = []
     let trainingOpts: Record<string, unknown> = {}
+    let target_: Record<string, unknown> = {}
     try { featureSchema = JSON.parse(features || "[]") } catch { setErr("feature_schema is not valid JSON"); setBusy(false); return }
     try { trainingOpts = JSON.parse(opts || "{}") } catch { setErr("training_opts is not valid JSON"); setBusy(false); return }
-    const { runId, error } = await trainModel(connectionId, { modelName: name, sourceSql, targetColumn: target, task, featureSchema, trainingOpts })
-    if (error) setErr(error)
-    else { setMsg(`Queued run ${runId?.slice(0, 8)} — a rvbbit-trainer worker must claim it to train.`); onQueued() }
+    try { target_ = JSON.parse(hostTarget || "{}") } catch { setErr("target (host/gpu) is not valid JSON"); setBusy(false); return }
+    if (managed) {
+      const { result, error } = await trainManaged(connectionId, { modelName: name, sourceSql, targetColumn: target, task, featureSchema, trainingOpts, target: target_ })
+      if (error) setErr(error)
+      else { setMsg(`Managed: queued run ${String(result?.run_id ?? "").slice(0, 8)} + Warren training job ${String(result?.training_job_id ?? "").slice(0, 8)}.`); onQueued(); void pollLive(name) }
+    } else {
+      const { runId, error } = await trainModel(connectionId, { modelName: name, sourceSql, targetColumn: target, task, featureSchema, trainingOpts })
+      if (error) setErr(error)
+      else { setMsg(`Queued run ${runId?.slice(0, 8)}.`); onQueued(); void pollLive(name) }
+    }
     setBusy(false)
-  }, [connectionId, name, sourceSql, target, task, features, opts, onQueued])
+  }, [connectionId, name, sourceSql, target, task, features, opts, managed, hostTarget, onQueued, pollLive])
 
   return (
     <div className="space-y-2 p-3">
@@ -588,15 +624,28 @@ function TrainPane({ connectionId, seed, onQueued }: { connectionId: string; see
         <Field label="feature_schema (jsonb)"><textarea value={features} onChange={(e) => setFeatures(e.target.value)} rows={2} className={`${inputCls} font-mono`} placeholder='[{"name":"x","type":"float8"}]' /></Field>
         <Field label="training_opts (jsonb)"><textarea value={opts} onChange={(e) => setOpts(e.target.value)} rows={2} className={`${inputCls} font-mono`} /></Field>
       </div>
+      <div className="flex items-center gap-3">
+        <label className="flex items-center gap-1.5 text-[10px] text-chrome-text/70">
+          <input type="checkbox" checked={managed} onChange={(e) => setManaged(e.target.checked)} />
+          Managed (Warren train + deploy)
+        </label>
+        {managed ? (
+          <label className="flex items-center gap-1 text-[10px] text-chrome-text/55">
+            target
+            <input value={hostTarget} onChange={(e) => setHostTarget(e.target.value)} className={`${inputCls} w-44 font-mono`} placeholder='{"gpu": true}' />
+          </label>
+        ) : null}
+      </div>
       <div className="flex items-center gap-2">
         <button type="button" onClick={queue} disabled={busy || !name || !target}
           className="flex items-center gap-1 rounded-base border border-chrome-border/60 px-2.5 py-1 text-[11px] text-foreground hover:bg-foreground/[0.06] disabled:opacity-50">
-          <Play className="h-3 w-3" /> {busy ? "Queueing…" : "Queue training"}
+          <Play className="h-3 w-3" /> {busy ? "Queueing…" : managed ? "Queue managed (train + deploy)" : "Queue training"}
         </button>
         <CopySql sql={trainModelSqlPreview({ name, sourceSql, target, task, features, opts })} />
       </div>
       {err ? <p className="text-[11px] text-danger">{err}</p> : null}
       {msg ? <p className="text-[11px] text-chrome-text/70">{msg}</p> : null}
+      {liveStatus ? <p className="font-mono text-[10px] text-chrome-text/60">▶ {liveStatus}</p> : null}
       <p className="text-[10px] text-chrome-text/45">Note: training enqueues a run; a <span className="font-mono">rvbbit-trainer</span> worker must be running to fit + register the model.</p>
     </div>
   )

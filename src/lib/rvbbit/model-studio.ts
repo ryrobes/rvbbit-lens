@@ -361,6 +361,46 @@ export function dropModel(connectionId: string, modelName: string, dropOperator 
   return callVoid(connectionId, `SELECT rvbbit.drop_model(${sqlStr(modelName)}, ${dropOperator ? "true" : "false"})`)
 }
 
+/** Managed training: queues a run + a Warren training job (host/GPU target). */
+export function trainManagedSql(opts: Parameters<typeof trainModelSql>[0] & { target?: Record<string, unknown> }): string {
+  return `SELECT rvbbit.train_model_managed(
+  model_name => ${sqlStr(opts.modelName)},
+  source_sql => ${sqlStr(opts.sourceSql)},
+  target_column => ${sqlStr(opts.targetColumn)},
+  task => ${sqlStr(opts.task)},
+  feature_schema => ${sqlStr(JSON.stringify(opts.featureSchema))}::jsonb,
+  training_opts => ${sqlStr(JSON.stringify(opts.trainingOpts))}::jsonb,
+  deploy => true,
+  target => ${sqlStr(JSON.stringify(opts.target ?? {}))}::jsonb
+) AS managed`
+}
+
+export async function trainManaged(
+  connectionId: string,
+  opts: Parameters<typeof trainManagedSql>[0],
+): Promise<{ result?: Record<string, unknown>; error?: string; sql: string }> {
+  const sql = trainManagedSql(opts)
+  const res = await runQuery(connectionId, sql, 1)
+  if (!res.ok) return { error: res.error, sql }
+  return { result: obj(res.rows[0]?.managed), sql }
+}
+
+/** Promote/deploy a model's serving sidecar as a Warren micro-warren. */
+export function deployServingSql(modelName: string, target: Record<string, unknown> = {}): string {
+  return `SELECT rvbbit.deploy_model_serving(${sqlStr(modelName)}, ${sqlStr(JSON.stringify(target))}::jsonb) AS job_id`
+}
+
+export async function deployServing(
+  connectionId: string,
+  modelName: string,
+  target: Record<string, unknown> = {},
+): Promise<{ jobId?: string; error?: string; sql: string }> {
+  const sql = deployServingSql(modelName, target)
+  const res = await runQuery(connectionId, sql, 1)
+  if (!res.ok) return { error: res.error, sql }
+  return { jobId: strOrNull(res.rows[0]?.job_id) ?? undefined, sql }
+}
+
 export const ML_TASKS = [
   "classification", "regression", "tabular_classification", "tabular_regression",
   "forecasting", "anomaly", "survival", "causal", "embedding", "rerank", "custom",
