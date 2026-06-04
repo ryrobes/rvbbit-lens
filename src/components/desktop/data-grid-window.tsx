@@ -112,12 +112,13 @@ type FlowStepRow = {
   step_idx: number
   stage: string
   spec: string | null
+  generated_sql: string | null
   n_rows: number
   rows: Record<string, unknown>[]
 }
 
 const FLOW_STEPS_SQL =
-  "SELECT step_idx, stage, spec, n_rows, rows FROM rvbbit.flow_steps " +
+  "SELECT step_idx, stage, spec, generated_sql, n_rows, rows FROM rvbbit.flow_steps " +
   "WHERE run_id = (SELECT run_id FROM rvbbit.flow_steps ORDER BY created_at DESC LIMIT 1) " +
   "ORDER BY step_idx"
 
@@ -912,6 +913,16 @@ function FlowStepsView({
       <div className="min-h-0 flex-1 overflow-auto p-2">
         {step.spec ? (
           <div className="mb-2 break-all font-mono text-[11px] text-chrome-text/55">{step.spec}</div>
+        ) : null}
+        {step.generated_sql ? (
+          <pre className="mb-2 overflow-x-auto whitespace-pre-wrap rounded border border-chrome-border bg-doc-bg px-2 py-1 font-mono text-[11px] text-rvbbit-accent">
+            {step.generated_sql}
+          </pre>
+        ) : null}
+        {step.n_rows > rows.length ? (
+          <div className="mb-1 text-[11px] text-chrome-text/55">
+            showing first {rows.length} of {step.n_rows} rows
+          </div>
         ) : null}
         {cols.length === 0 ? (
           <div className="text-xs text-chrome-text/55">(no rows)</div>
