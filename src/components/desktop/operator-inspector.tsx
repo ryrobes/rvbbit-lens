@@ -417,6 +417,7 @@ function OperatorMetaEditor({
                 <option value="scalar">scalar</option>
                 <option value="aggregate">aggregate</option>
                 <option value="dimension">dimension</option>
+                <option value="rowset">rowset (pipeline)</option>
               </select>
             </Field>
             <Field label="return type">
@@ -515,6 +516,7 @@ function OutputEditor({
           <option value="yes_no">yes_no</option>
           <option value="score_0_1">score_0_1</option>
           <option value="json">json</option>
+          <option value="sql">sql (synth)</option>
         </select>
       </Field>
     </Section>
