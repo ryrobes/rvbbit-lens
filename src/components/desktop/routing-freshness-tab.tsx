@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useState } from "react"
 import {
   Activity,
   AlertTriangle,
+  Boxes,
   Check,
   Clock,
   Database,
@@ -27,6 +28,9 @@ import {
   recommendPolicy,
   runAccelTickSql,
   setAccelPolicySql,
+  setTableEngineSql,
+  TOGGLE_ENGINES,
+  TOGGLE_LAYOUTS,
   type AccelFreshnessRow,
   type AccelStrategy,
   type AccelTickPlanRow,
@@ -209,6 +213,13 @@ export function RoutingFreshnessTab({ activeConnectionId }: Props) {
                 `policy → ${strategy}`,
               )
             }
+            onToggleEngine={(target, enabled) =>
+              void act(
+                r.tableName,
+                setTableEngineSql(r.tableName, target, enabled),
+                `${target} ${enabled ? "on" : "off"}`,
+              )
+            }
           />
         ))}
       </div>
@@ -224,12 +235,14 @@ function FreshnessLane({
   busy,
   onRefresh,
   onSetPolicy,
+  onToggleEngine,
 }: {
   row: AccelFreshnessRow
   plan: AccelTickPlanRow | null
   busy: boolean
   onRefresh: (kind: "delta" | "full") => void
   onSetPolicy: (strategy: AccelStrategy, target: number | null) => void
+  onToggleEngine: (target: string, enabled: boolean) => void
 }) {
   const rec = recommendPolicy(row)
   const recDiffers = rec.strategy !== row.strategy
@@ -368,7 +381,69 @@ function FreshnessLane({
           </button>
         ) : null}
       </div>
+
+      {/* engines / layouts row — disable a chip to remove that routing pathway
+          (and stop the rebuilder materializing a denied layout). */}
+      <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+        <Boxes className="h-3 w-3 text-chrome-text/45" />
+        <span className="text-[10px] uppercase tracking-wider text-chrome-text/45">engines</span>
+        {TOGGLE_ENGINES.map((eng) => (
+          <EngineChip
+            key={eng}
+            label={eng}
+            on={!row.deniedEngines.includes(eng)}
+            busy={busy}
+            onClick={() => onToggleEngine(eng, row.deniedEngines.includes(eng))}
+          />
+        ))}
+        <span className="mx-0.5 text-chrome-text/25">·</span>
+        <span className="text-[10px] uppercase tracking-wider text-chrome-text/45">layouts</span>
+        {TOGGLE_LAYOUTS.map((lay) => (
+          <EngineChip
+            key={lay}
+            label={lay}
+            on={!row.deniedLayouts.includes(lay)}
+            busy={busy}
+            onClick={() => onToggleEngine(lay, row.deniedLayouts.includes(lay))}
+          />
+        ))}
+        <span className="ml-auto text-[10px] text-chrome-text/35">native always on</span>
+      </div>
     </div>
+  )
+}
+
+function EngineChip({
+  label,
+  on,
+  busy,
+  onClick,
+}: {
+  label: string
+  on: boolean
+  busy: boolean
+  onClick: () => void
+}) {
+  return (
+    <button
+      type="button"
+      disabled={busy}
+      onClick={onClick}
+      title={
+        on
+          ? `${label} enabled — click to disable for this table (removes the pathway)`
+          : `${label} disabled for this table — click to re-enable`
+      }
+      className={cn(
+        "inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-medium transition-colors disabled:opacity-40",
+        on
+          ? "bg-success/15 text-success hover:bg-success/25"
+          : "bg-foreground/[0.06] text-chrome-text/40 line-through hover:bg-foreground/[0.1]",
+      )}
+    >
+      <span className={cn("h-1.5 w-1.5 rounded-full", on ? "bg-success" : "bg-chrome-text/30")} />
+      {label}
+    </button>
   )
 }
 

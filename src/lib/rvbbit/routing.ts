@@ -697,6 +697,25 @@ export interface AccelFreshnessRow {
   minIntervalSecs: number
   explicit: boolean
   active: boolean
+  deniedEngines: string[]
+  deniedLayouts: string[]
+}
+
+// Engines + layouts that can be toggled per table. native/pg_rowstore are the
+// correctness floor and are intentionally absent (never deniable).
+export const TOGGLE_ENGINES = ["duck", "datafusion"] as const
+export const TOGGLE_LAYOUTS = ["vortex", "hive"] as const
+
+function pgArray(v: unknown): string[] {
+  if (Array.isArray(v)) return v.map((x) => String(x))
+  if (v == null) return []
+  const s = String(v).trim()
+  if (s.startsWith("{") && s.endsWith("}")) {
+    const inner = s.slice(1, -1).trim()
+    if (!inner) return []
+    return inner.split(",").map((x) => x.replace(/^"|"$/g, "").trim()).filter(Boolean)
+  }
+  return s ? [s] : []
 }
 
 export interface AccelTickPlanRow {
@@ -714,7 +733,7 @@ const ACCEL_FRESHNESS_SQL =
   "f.lance_accelerated, f.seconds_dirty, f.seconds_since_refresh, f.last_refresh_at, " +
   "f.parquet_rows, f.row_groups, f.drift_rows, f.drift_ratio, f.heap_seq_scans, " +
   "f.last_rebuild_ms, f.last_rebuild_rows, e.strategy, e.freshness_target_secs, " +
-  "e.min_interval_secs, e.explicit, e.active " +
+  "e.min_interval_secs, e.explicit, e.active, e.denied_engines, e.denied_layouts " +
   "FROM rvbbit.accel_freshness f " +
   "JOIN rvbbit.accel_policy_effective e ON e.table_oid = f.table_oid " +
   "ORDER BY (f.drift_rows * (1 + f.heap_seq_scans)) DESC, f.table_name"
@@ -746,6 +765,8 @@ export async function fetchAccelFreshness(
       minIntervalSecs: num(r.min_interval_secs),
       explicit: bool(r.explicit),
       active: bool(r.active),
+      deniedEngines: pgArray(r.denied_engines),
+      deniedLayouts: pgArray(r.denied_layouts),
     })),
   }
 }
@@ -803,6 +824,11 @@ export function setAccelPolicySql(
 /** Run the executor for real (budgeted). */
 export const runAccelTickSql = (budget: number) =>
   `SELECT count(*) FROM rvbbit.accel_tick(${Math.max(1, Math.floor(budget))}, false)`
+
+/** Toggle one engine/layout on or off for a table (reduces routing pathways +
+ *  stops the rebuilder materializing a denied layout). */
+export const setTableEngineSql = (table: string, target: string, enabled: boolean) =>
+  `SELECT rvbbit.set_table_engine(${qIdent(table)}, ${sqlStr(target)}, ${enabled ? "true" : "false"})`
 
 export interface PolicyRecommendation {
   strategy: AccelStrategy
