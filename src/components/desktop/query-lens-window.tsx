@@ -1,6 +1,6 @@
 "use client"
 
-import { useCallback, useEffect, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import {
   Activity,
   AlertTriangle,
@@ -452,15 +452,47 @@ function LensView({
   const [hoveredId, setHoveredId] = useState<string | null>(null)
   const [expandedId, setExpandedId] = useState<string | null>(null)
 
+  // Peak concurrency over the span (max overlapping events) — surfaced in the
+  // header so the chart's lane count has a number to read against.
+  const peakConcurrency = useMemo(() => {
+    const pts: Array<[number, number]> = []
+    for (const e of trace.events) {
+      pts.push([e.startAt, 1])
+      pts.push([Math.max(e.endAt, e.startAt + 1), -1])
+    }
+    pts.sort((a, b) => a[0] - b[0] || a[1] - b[1])
+    let cur = 0
+    let peak = 0
+    for (const p of pts) {
+      cur += p[1]
+      if (cur > peak) peak = cur
+    }
+    return peak
+  }, [trace.events])
+
+  // The chronological list can be thousands of rows; render a capped window
+  // (the flame above already shows everything) plus the expanded event.
+  const TIMELINE_CAP = 60
+  const timelineEvents = useMemo(() => {
+    if (trace.events.length <= TIMELINE_CAP) return trace.events
+    const head = trace.events.slice(0, TIMELINE_CAP)
+    if (expandedId && !head.some((e) => e.id === expandedId)) {
+      const sel = trace.events.find((e) => e.id === expandedId)
+      if (sel) return [sel, ...head]
+    }
+    return head
+  }, [trace.events, expandedId])
+
   return (
     <div className="space-y-2.5 p-2.5">
       <SummaryStrip trace={trace} />
       <Panel
         icon={Activity}
-        title="Trace flame"
+        title="Trace timeline"
         right={
           <span>
-            {fmtMs(trace.span.durationMs)} total · {trace.events.length} events
+            {fmtMs(trace.span.durationMs)} · {trace.events.length} events · peak{" "}
+            {peakConcurrency}× concurrent
           </span>
         }
       >
@@ -479,7 +511,7 @@ function LensView({
         right={<span>chronological</span>}
       >
         <div className="space-y-1">
-          {trace.events.map((e) => (
+          {timelineEvents.map((e) => (
             <EventRow
               key={e.id}
               event={e}
@@ -500,6 +532,12 @@ function LensView({
             />
           ))}
         </div>
+        {timelineEvents.length < trace.events.length ? (
+          <p className="mt-1.5 text-[10px] text-chrome-text/60">
+            Showing first {timelineEvents.length} of {trace.events.length} events — the
+            timeline above plots all of them; click a bar to inspect one here.
+          </p>
+        ) : null}
         <p className="mt-2 text-[10px] leading-snug text-chrome-text/50">
           Sub-call timings are stacked sequentially within their receipt — concurrent
           ensemble or take steps may overlap in reality. Routing events have no
@@ -552,6 +590,8 @@ function SummaryStrip({ trace }: { trace: LensTrace }) {
 
 const ROW_H = 9
 const ROW_GAP = 1
+/** Max packed lanes (= peak concurrency rows) before height is capped. */
+const MAX_LANES = 48
 
 function FlameStrip({
   trace,
@@ -565,66 +605,137 @@ function FlameStrip({
   onPick: (id: string) => void
 }) {
   const [ref, w] = useElementWidth<HTMLDivElement>()
+  const canvasRef = useRef<HTMLCanvasElement | null>(null)
   const events = trace.events
   const span = Math.max(1, trace.span.durationMs)
-  const totalH = events.length * (ROW_H + ROW_GAP)
+  const min = trace.span.min
+
+  // Greedy lane packing (interval scheduling): each event drops into the lowest
+  // lane that is free at its start time. The number of lanes used therefore
+  // equals the *peak concurrency* — so the chart shows parallelism directly and
+  // its height stays bounded no matter how many thousands of events there are
+  // (vs. the old one-row-per-event layout that grew to N×9px and N SVG nodes).
+  const { laneOf, laneCount } = useMemo(() => {
+    const order = events.map((_, i) => i).sort((a, b) => events[a].startAt - events[b].startAt)
+    const laneEnds: number[] = []
+    const laneOf = new Int16Array(events.length)
+    for (const idx of order) {
+      const e = events[idx]
+      let lane = -1
+      const cap = Math.min(laneEnds.length, MAX_LANES)
+      for (let l = 0; l < cap; l++) {
+        if (laneEnds[l] <= e.startAt) {
+          lane = l
+          break
+        }
+      }
+      if (lane === -1) {
+        lane = laneEnds.length < MAX_LANES ? laneEnds.length : MAX_LANES - 1
+        if (laneEnds.length < MAX_LANES) laneEnds.push(0)
+      }
+      laneEnds[lane] = Math.max(e.endAt, e.startAt + 1)
+      laneOf[idx] = lane
+    }
+    return { laneOf, laneCount: Math.max(1, laneEnds.length) }
+  }, [events])
+
+  const height = laneCount * (ROW_H + ROW_GAP) + 2
+
+  // Single canvas, drawn in one O(events) pass — no per-bar DOM/React nodes.
+  useEffect(() => {
+    const cv = canvasRef.current
+    if (!cv || w === 0) return
+    const cs = getComputedStyle(cv)
+    const resolve = (val: string): string => {
+      const m = /var\((--[\w-]+)\)/.exec(val)
+      return m ? cs.getPropertyValue(m[1]).trim() || "#8899aa" : val
+    }
+    const colorCache: Record<string, string> = {}
+    const colorFor = (surface: string): string =>
+      (colorCache[surface] ??= resolve(SURFACE_COLOR[surface as LensSurface]))
+    const foreground = resolve("var(--foreground)")
+
+    const dpr = Math.min(window.devicePixelRatio || 1, 2)
+    cv.width = Math.max(1, Math.floor(w * dpr))
+    cv.height = Math.max(1, Math.floor(height * dpr))
+    cv.style.width = `${w}px`
+    cv.style.height = `${height}px`
+    const ctx = cv.getContext("2d")
+    if (!ctx) return
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+    ctx.clearRect(0, 0, w, height)
+
+    for (let i = 0; i < events.length; i++) {
+      const lane = laneOf[i]
+      const e = events[i]
+      const x = ((e.startAt - min) / span) * w
+      const barW = Math.max(1.5, (e.durationMs / span) * w)
+      const y = lane * (ROW_H + ROW_GAP)
+      const isHover = e.id === hoveredId
+      ctx.globalAlpha = e.linkage === "time" ? 0.3 : isHover ? 1 : 0.88
+      ctx.fillStyle = colorFor(e.surface)
+      ctx.fillRect(x, y, barW, ROW_H - 1)
+      if (isHover) {
+        ctx.globalAlpha = 1
+        ctx.strokeStyle = foreground
+        ctx.lineWidth = 1
+        ctx.strokeRect(x - 0.5, y - 0.5, barW + 1, ROW_H)
+      }
+    }
+    ctx.globalAlpha = 1
+  }, [w, events, laneOf, hoveredId, height, span, min])
+
+  // Hit-test against the packed lanes on mousemove (one handler, not N).
+  const eventAt = useCallback(
+    (clientX: number, clientY: number): LensEvent | null => {
+      const cv = canvasRef.current
+      if (!cv || w === 0) return null
+      const rect = cv.getBoundingClientRect()
+      const mx = clientX - rect.left
+      const my = clientY - rect.top
+      const lane = Math.floor(my / (ROW_H + ROW_GAP))
+      for (let i = 0; i < events.length; i++) {
+        if (laneOf[i] !== lane) continue
+        const e = events[i]
+        const x = ((e.startAt - min) / span) * w
+        const barW = Math.max(1.5, (e.durationMs / span) * w)
+        if (mx >= x - 1.5 && mx <= x + barW + 1.5) return e
+      }
+      return null
+    },
+    [events, laneOf, w, span, min],
+  )
+
+  const hovered = hoveredId ? events.find((e) => e.id === hoveredId) ?? null : null
+  const hoveredX = hovered ? ((hovered.startAt - min) / span) * w : 0
+  const hoveredLane = hovered ? laneOf[events.indexOf(hovered)] : 0
 
   return (
-    <div ref={ref} style={{ height: totalH + 4 }} className="relative w-full">
-      {w > 0 ? (
-        <svg width={w} height={totalH} role="img">
-          {events.map((e, i) => {
-            const x = ((e.startAt - trace.span.min) / span) * w
-            const barW = Math.max(2, (e.durationMs / span) * w)
-            const y = i * (ROW_H + ROW_GAP)
-            const isHover = e.id === hoveredId
-            const isTimeLinked = e.linkage === "time"
-            const color = SURFACE_COLOR[e.surface]
-            const isSub = e.surface === "subcall"
-            return (
-              <g
-                key={e.id}
-                onMouseEnter={() => onHover(e.id)}
-                onMouseLeave={() => onHover(null)}
-                onClick={() => onPick(e.id)}
-                style={{ cursor: "pointer" }}
-              >
-                <rect
-                  x={x}
-                  y={y + (isSub ? 2 : 0)}
-                  width={barW}
-                  height={ROW_H - (isSub ? 4 : 1)}
-                  rx={1.5}
-                  fill={color}
-                  opacity={isTimeLinked ? 0.32 : isHover ? 1 : 0.85}
-                  stroke={isHover ? "var(--foreground)" : isTimeLinked ? color : "none"}
-                  strokeWidth={isHover ? 1 : 0.8}
-                  strokeDasharray={isTimeLinked ? "2 1.5" : undefined}
-                />
-              </g>
-            )
-          })}
-        </svg>
+    <div ref={ref} className="relative w-full" style={{ height }}>
+      <canvas
+        ref={canvasRef}
+        className="block cursor-pointer"
+        onMouseMove={(ev) => {
+          const e = eventAt(ev.clientX, ev.clientY)
+          onHover(e?.id ?? null)
+        }}
+        onMouseLeave={() => onHover(null)}
+        onClick={(ev) => {
+          const e = eventAt(ev.clientX, ev.clientY)
+          if (e) onPick(e.id)
+        }}
+      />
+      {hovered && w > 0 ? (
+        <div
+          className="pointer-events-none absolute z-10 -translate-y-full whitespace-nowrap rounded border border-chrome-border bg-chrome-bg px-1.5 py-0.5 font-mono text-[9px] text-foreground shadow"
+          style={{
+            left: Math.min(Math.max(hoveredX + 4, 4), Math.max(4, w - 220)),
+            top: Math.max(10, hoveredLane * (ROW_H + ROW_GAP) - 2),
+          }}
+        >
+          {eventIdentity(hovered)} · {fmtMs(hovered.durationMs)}
+        </div>
       ) : null}
-      {hoveredId
-        ? (() => {
-            const e = events.find((x) => x.id === hoveredId)
-            if (!e || w === 0) return null
-            const x = ((e.startAt - trace.span.min) / span) * w
-            const i = events.indexOf(e)
-            return (
-              <div
-                className="pointer-events-none absolute z-10 -translate-y-full whitespace-nowrap rounded border border-chrome-border bg-chrome-bg px-1.5 py-0.5 font-mono text-[9px] text-foreground shadow"
-                style={{
-                  left: Math.min(Math.max(x + 4, 8), Math.max(8, w - 200)),
-                  top: i * (ROW_H + ROW_GAP) - 4,
-                }}
-              >
-                {eventIdentity(e)} · {fmtMs(e.durationMs)}
-              </div>
-            )
-          })()
-        : null}
     </div>
   )
 }
