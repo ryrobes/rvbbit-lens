@@ -12,6 +12,8 @@ import { ScryActionButton } from "./scry-shared"
 export function ScryControls({
   onFit,
   onAutoLayout,
+  autoRelayout,
+  onToggleAutoRelayout,
   minimapOpen,
   onToggleMinimap,
   scopeActive,
@@ -22,6 +24,9 @@ export function ScryControls({
 }: {
   onFit: () => void
   onAutoLayout: () => void
+  /** auto re-run the layout whenever the node set changes */
+  autoRelayout: boolean
+  onToggleAutoRelayout: () => void
   minimapOpen: boolean
   onToggleMinimap: () => void
   scopeActive: boolean
@@ -47,6 +52,18 @@ export function ScryControls({
           onClick={onToggleMinimap}
         />
       </div>
+      <label
+        className="flex cursor-pointer select-none items-center gap-1.5 px-1 text-[10px] text-chrome-text"
+        title="Auto re-layout whenever the node set changes (new search, expand, removal)"
+      >
+        <input
+          type="checkbox"
+          checked={autoRelayout}
+          onChange={onToggleAutoRelayout}
+          className="h-3 w-3 accent-[var(--terminal)]"
+        />
+        <span className="font-mono">auto-layout on change</span>
+      </label>
       <div className="flex items-center gap-1">
         {scopeActive ? (
           <ScryActionButton

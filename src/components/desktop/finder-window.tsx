@@ -137,7 +137,13 @@ export function FinderWindow({
           )
         })}
       </div>
-      {hover.target ? <FinderTooltip table={hover.target.table} anchor={hover.target.rect} /> : null}
+      {hover.target ? (
+        <FinderTooltip
+          key={`${hover.target.table.schema}.${hover.target.table.name}`}
+          table={hover.target.table}
+          anchor={hover.target.rect}
+        />
+      ) : null}
     </div>
   )
 }

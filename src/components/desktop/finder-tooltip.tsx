@@ -155,6 +155,7 @@ const CARD_W = 300
 export function FinderTooltip({ table, anchor }: { table: SchemaTable; anchor: DOMRect }) {
   const ref = useRef<HTMLDivElement>(null)
   const [pos, setPos] = useState<{ left: number; top: number; ready: boolean }>({ left: 0, top: 0, ready: false })
+  const [shown, setShown] = useState(false)
 
   // Measure self, then place: right-aligned to the anchor, flipping above if it
   // would overflow the bottom, clamped inside the viewport on both axes.
@@ -173,6 +174,15 @@ export function FinderTooltip({ table, anchor }: { table: SchemaTable; anchor: D
     }
     setPos({ left, top, ready: true })
   }, [anchor])
+
+  // Once positioned, flip to visible on the next frame so the opacity
+  // transition runs as a fade-in. The card is placed at its final spot
+  // instantly (only opacity animates), so it never slides in from 0,0.
+  useEffect(() => {
+    if (!pos.ready) return
+    const id = requestAnimationFrame(() => setShown(true))
+    return () => cancelAnimationFrame(id)
+  }, [pos.ready])
 
   if (typeof document === "undefined") return null
 
@@ -200,9 +210,9 @@ export function FinderTooltip({ table, anchor }: { table: SchemaTable; anchor: D
         left: pos.left,
         top: pos.top,
         width: CARD_W,
-        visibility: pos.ready ? "visible" : "hidden",
+        opacity: shown ? 1 : 0,
       }}
-      className="pointer-events-none z-50 max-h-[80vh] overflow-y-auto rounded-md border border-chrome-border bg-chrome-bg/95 p-2.5 text-chrome-text shadow-lg backdrop-blur-md motion-safe:duration-100"
+      className="pointer-events-none z-50 max-h-[80vh] overflow-y-auto rounded-md border border-chrome-border bg-chrome-bg/95 p-2.5 text-chrome-text shadow-lg backdrop-blur-md motion-safe:transition-opacity motion-safe:duration-100"
     >
       {/* header */}
       <div className="flex items-center gap-1.5">
