@@ -1,7 +1,7 @@
 "use client"
 
 import { useEffect, useMemo, useRef, useState } from "react"
-import { ChevronDown, Filter, Layers, Search, Sigma, SortAscending, SortDescending, TreeStructure, TrendingUp, X } from "@/lib/icons"
+import { ChevronDown, Filter, Layers, Search, Sigma, SortAscending, SortDescending, Sparkles, TreeStructure, TrendingUp, X } from "@/lib/icons"
 import type {
   RollupCompareOp,
   RollupFilter,
@@ -11,8 +11,10 @@ import type {
   RollupMeasure,
   RollupPivot,
   RollupSpec,
+  SemanticProjection,
 } from "@/lib/desktop/types"
 import {
+  aggregateProjection,
   clearColumnFilters,
   clearLimit,
   clearMeasureHaving,
@@ -21,11 +23,13 @@ import {
   cycleMeasureAgg,
   cycleOrderBy,
   filterBadge,
+  groupCountByProjection,
   measureLabel,
   orderDir,
   orderIndex,
   removeGroupBy,
   removeMeasure,
+  removeProjection,
   setColumnFilters,
   setGroupByGrain,
   setLimit,
@@ -133,6 +137,18 @@ export function RollupShelf({ spec, onEdit, onRepivot, onProbeValues, columnKind
         />
       ))}
 
+      {(spec.projections?.length ?? 0) > 0 ? (
+        <>
+          <Divider />
+          {(spec.projections ?? []).map((proj) => {
+            const composed =
+              spec.groupBy.some((t) => t.column.name.toLowerCase() === proj.alias.toLowerCase()) ||
+              spec.measures.some((m) => m.column?.name?.toLowerCase() === proj.alias.toLowerCase())
+            return <SemanticPill key={`p:${proj.id}`} proj={proj} composed={composed} onEdit={onEdit} />
+          })}
+        </>
+      ) : null}
+
       {pivot ? (
         <>
           <Divider />
@@ -148,6 +164,45 @@ export function RollupShelf({ spec, onEdit, onRepivot, onProbeValues, columnKind
 
 function Divider() {
   return <span className="mx-0.5 h-3.5 w-px bg-chrome-border/60" />
+}
+
+/** A semantic-projection pill (rvbbit scalar op). Compose it into the rollup:
+ *  text/bool → "count" (group & count by the value); float8 → "avg". Once
+ *  composed (its column is grouped/aggregated) only remove remains. */
+function SemanticPill({
+  proj,
+  composed,
+  onEdit,
+}: {
+  proj: SemanticProjection
+  composed: boolean
+  onEdit: EditFn
+}) {
+  const numeric = proj.returnType === "float8"
+  return (
+    <span
+      className="inline-flex items-center gap-1 rounded-full border px-1.5 py-0.5 text-[10px]"
+      style={{
+        borderColor: "color-mix(in oklch, var(--brand-operators) 45%, transparent)",
+        backgroundColor: "color-mix(in oklch, var(--brand-operators) 12%, transparent)",
+        color: "var(--brand-operators)",
+      }}
+      title={`rvbbit.${proj.operator}(${proj.column.name})${composed ? "" : ` — click to ${numeric ? "average" : "group & count"}`}`}
+    >
+      <Sparkles className="h-3 w-3" />
+      <span className="font-mono text-foreground/85">{proj.alias}</span>
+      {!composed ? (
+        <button
+          type="button"
+          onClick={() => onEdit((s) => (numeric ? aggregateProjection(s, proj, "avg") : groupCountByProjection(s, proj)))}
+          className="rounded px-1 font-medium uppercase tracking-wider hover:bg-foreground/10"
+        >
+          {numeric ? "avg" : "count"}
+        </button>
+      ) : null}
+      <RemoveBtn onRemove={() => onEdit((s) => removeProjection(s, proj.id))} />
+    </span>
+  )
 }
 
 interface SortInfo { dir: "asc" | "desc" | null; badge: string | null }

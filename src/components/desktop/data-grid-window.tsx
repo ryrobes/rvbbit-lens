@@ -149,6 +149,10 @@ export function DataGridWindow({
   onOpenKgForSource,
 }: DataGridWindowProps) {
   const view = payload.view ?? {}
+  // A semantic-projection window (spec has rvbbit scalar-op projections) is a
+  // per-row LLM op — it never auto-runs; it opens on Explain so the live
+  // EXPLAIN (SEMANTIC) shows the cost estimate before the user materializes it.
+  const isSemanticProjection = ((payload.lineage ? effectiveRollup(payload.lineage) : null)?.projections?.length ?? 0) > 0
   const [draftSql, setDraftSql] = useState<string>(view.sqlDraft ?? payload.sql ?? "")
   // Tracks the last `payload.sql` we've reconciled with the local draft.
   // The sync-and-rerun effect lives further down so it can call runSql.
@@ -167,7 +171,7 @@ export function DataGridWindow({
   const [progress, setProgress] = useState<QueryProgress | null>(null)
   const [explainState, setExplainState] = useState<ExplainState>({ kind: "idle" })
   const [explainBusy, setExplainBusy] = useState(false)
-  const [activeTab, setActiveTab] = useState<NonNullable<DataPayload["view"]>["activeTab"]>(view.activeTab ?? (payload.origin === "table" ? "rows" : "sql"))
+  const [activeTab, setActiveTab] = useState<NonNullable<DataPayload["view"]>["activeTab"]>(view.activeTab ?? (isSemanticProjection ? "explain" : payload.origin === "table" ? "rows" : "sql"))
   const [sqlRailOpen, setSqlRailOpen] = useState<boolean>(view.sqlRailOpen ?? (payload.origin !== "table"))
   const [paramDropHot, setParamDropHot] = useState(false)
   // Pipeline-cascade run state: when the last run was a `… then op(…)` pipeline,
@@ -231,6 +235,9 @@ export function DataGridWindow({
   // hand-typed "SELECT 1" scratch start.
   useEffect(() => {
     if (runState.kind !== "idle" || !activeConnectionId) return
+    // Semantic projections are per-row LLM ops — never auto-materialize; the
+    // Explain tab estimates cost and the user runs explicitly.
+    if (isSemanticProjection) return
     const isAutoRunOrigin = payload.origin === "table" || payload.origin === "derived"
     if (!isAutoRunOrigin) return
     void runSql(payload.sql)
@@ -433,8 +440,14 @@ export function DataGridWindow({
     // OLD query and (winning the run nonce) clobber payload.sql right back.
     // Pinning the baseline here makes that effect a no-op for this change.
     prevCompiledRef.current = compiledSql
+    // Semantic projections never auto-materialize (per-row LLM cost) — show the
+    // updated plan/cost on Explain instead of running.
+    if (isSemanticProjection) {
+      setActiveTab("explain")
+      return
+    }
     if (payload.sql) void runSql(payload.sql)
-  }, [payload.sql, compiledSql, runSql])
+  }, [payload.sql, compiledSql, runSql, isSemanticProjection])
 
   // ── EXPLAIN ───────────────────────────────────────────────────────
   // Plan-only EXPLAIN (FORMAT JSON) never executes the query, so it is
@@ -580,7 +593,7 @@ export function DataGridWindow({
 
   // Re-run when an upstream cascading filter changes (runSignal bumps).
   useEffect(() => {
-    if (runSignal === 0) return
+    if (runSignal === 0 || isSemanticProjection) return
     void runSql(draftSql || payload.sql)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [runSignal])
@@ -590,7 +603,7 @@ export function DataGridWindow({
   // subscription resolved. Skips the initial mount (prev=null) and only
   // fires after at least one run has already recorded the baseline.
   useEffect(() => {
-    if (prevCompiledRef.current === null) return
+    if (prevCompiledRef.current === null || isSemanticProjection) return
     if (prevCompiledRef.current === compiledSql) return
     prevCompiledRef.current = compiledSql
     void runSql(draftSql || payload.sql)

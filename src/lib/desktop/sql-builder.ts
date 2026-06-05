@@ -12,7 +12,12 @@ import type {
   RollupOp,
   RollupOrderTerm,
   RollupSpec,
+  SemanticProjection,
 } from "./types"
+
+/** Row cap for a spawned semantic-projection preview — a per-row LLM op must
+ *  never silently fan out across a whole table. */
+export const PROJECTION_PREVIEW_LIMIT = 200
 
 const NUMERIC_TYPE_IDS = new Set([
   20,    // int8
@@ -83,6 +88,8 @@ export function opAppliesToColumn(op: RollupOp, c: DesktopColumnRef): boolean {
   // Pivot fans a column's distinct values into headers — only sane for
   // (low-cardinality) non-numeric dimensions.
   if (op.kind === "pivot") return !isNumericRef(c)
+  // Semantic ops are offered via availableSemanticOps, not the rollup tiles.
+  if (op.kind === "semantic-op") return false
   switch (op.agg) {
     case "sum":
     case "avg":
@@ -244,6 +251,92 @@ export function rollupSpecFromColumns(columns: DesktopColumnRef[]): RollupSpec {
   return { groupBy, measures }
 }
 
+/** Build one semantic projection (a `rvbbit.<op>(col)` derived column). */
+function makeProjection(
+  column: DesktopColumnRef,
+  operator: string,
+  returnType: SemanticProjection["returnType"],
+  args: string[] | undefined,
+  taken: Set<string>,
+): SemanticProjection {
+  const alias = uniqueAlias(`${operator}_${column.name}`, taken)
+  return {
+    id: `${operator}:${column.name.toLowerCase()}`,
+    column,
+    operator,
+    returnType,
+    args: args && args.length > 0 ? args : undefined,
+    alias,
+  }
+}
+
+/** A fresh pure-projection spec for spawning a semantic projection block. */
+export function projectionSpecFromOp(
+  column: DesktopColumnRef,
+  operator: string,
+  returnType: SemanticProjection["returnType"],
+  args?: string[],
+): RollupSpec {
+  return {
+    groupBy: [],
+    measures: [],
+    projections: [makeProjection(column, operator, returnType, args, new Set())],
+  }
+}
+
+/** The projected column as a draggable/aggregable column ref (its alias). */
+function projectionColumnRef(p: SemanticProjection): DesktopColumnRef {
+  const type =
+    p.returnType === "float8" ? "double precision"
+      : p.returnType === "bool" ? "boolean"
+        : p.returnType === "jsonb" ? "jsonb"
+          : "text"
+  return { name: p.alias, type, role: p.returnType === "float8" ? "metric" : "dimension" }
+}
+
+export function removeProjection(spec: RollupSpec, id: string): RollupSpec {
+  const proj = (spec.projections ?? []).find((p) => p.id === id)
+  const projections = (spec.projections ?? []).filter((p) => p.id !== id)
+  const next: RollupSpec = { ...spec, projections: projections.length > 0 ? projections : undefined }
+  if (!proj) return next
+  // Drop any group-by/measure/order that referenced the removed projection's
+  // alias, so we never emit a dangling column reference.
+  const alias = proj.alias.toLowerCase()
+  next.groupBy = spec.groupBy.filter((t) => t.column.name.toLowerCase() !== alias)
+  next.measures = spec.measures.filter((m) => (m.column?.name ?? "").toLowerCase() !== alias)
+  const orderBy = (spec.orderBy ?? []).filter((o) => o.ref.toLowerCase() !== alias)
+  next.orderBy = orderBy.length > 0 ? orderBy : undefined
+  return next
+}
+
+/**
+ * Compose: group by a projected column + ensure a row count — turns a raw
+ * semantic projection into "count of rows by <semantic value>". The
+ * derived-table wrap in buildRollupQuery renders it.
+ */
+export function groupCountByProjection(spec: RollupSpec, proj: SemanticProjection): RollupSpec {
+  const col = projectionColumnRef(proj)
+  const already = spec.groupBy.some((t) => t.column.name.toLowerCase() === col.name.toLowerCase())
+  const groupBy = already ? spec.groupBy : [...spec.groupBy, { column: col }]
+  const hasCount = spec.measures.some((m) => m.alias === "row_count")
+  const measures = hasCount ? spec.measures : [...spec.measures, rowCountMeasure()]
+  return { ...spec, groupBy, measures }
+}
+
+/** Compose: aggregate a numeric (float8) projection — e.g. avg of a score. */
+export function aggregateProjection(
+  spec: RollupSpec,
+  proj: SemanticProjection,
+  agg: RollupAgg = "avg",
+): RollupSpec {
+  const col = projectionColumnRef(proj)
+  const id = measureId(agg, col)
+  if (spec.measures.some((m) => m.id === id)) return spec
+  const taken = new Set(spec.measures.map((m) => m.alias))
+  const alias = uniqueAlias(aggAliasBase(agg, col), taken)
+  return { ...spec, measures: [...spec.measures, { id, column: col, agg, alias }] }
+}
+
 /**
  * Coerce a possibly-legacy spec into the current shape. Phase-1 windows
  * persisted `groupBy` as bare column refs; wrap those as group terms so
@@ -301,6 +394,20 @@ export function applyRollupOp(
 
   // Pivot is resolved on an async path (it needs distinct values), not here.
   if (op.kind === "pivot") return { spec, changed: false }
+
+  // Semantic op → append a row-level projection (no aggregation).
+  if (op.kind === "semantic-op") {
+    const projections = [...(spec.projections ?? [])]
+    const taken = new Set(projections.map((p) => p.alias))
+    for (const c of columns) {
+      const proj = makeProjection(c, op.operator.name, op.operator.returnType, op.args, taken)
+      if (projections.some((p) => p.id === proj.id)) continue
+      taken.add(proj.alias)
+      projections.push(proj)
+      changed = true
+    }
+    return { spec: { ...spec, projections }, changed }
+  }
 
   for (const c of columns) {
     if (!opAppliesToColumn(op, c)) continue
@@ -639,10 +746,78 @@ function valueSlug(v: string | number | null): string {
 }
 
 /** Render a `RollupSpec` to SQL over a parent block reference. */
+/** `rvbbit.<op>(col::text[, 'literal'…]) AS alias` for a semantic projection. */
+function projectionExpr(p: SemanticProjection): string {
+  // arg1 is the column, cast to text (op arg types are text/jsonb); extra args
+  // are bound literals for multi-arg ops.
+  const argExprs = [`${quoteSqlIdent(p.column.name)}::text`, ...(p.args ?? []).map((a) => sqlLiteral(a))]
+  return `rvbbit.${p.operator}(${argExprs.join(", ")}) AS ${quoteSqlIdent(p.alias)}`
+}
+function renderProjection(p: SemanticProjection): string {
+  return `  ${projectionExpr(p)}`
+}
+
+/**
+ * Derived-table FROM clause that computes the semantic projections over the
+ * source (capped), so an outer query can GROUP BY / aggregate the projected
+ * columns: `(SELECT *, rvbbit.op(col) AS x FROM {block} [WHERE …] LIMIT N) s`.
+ * This is what lets a single block both project a semantic column and
+ * aggregate by it.
+ */
+function buildProjectionFrom(spec: RollupSpec, parentBlockName: string): string {
+  const projections = spec.projections ?? []
+  const where = renderWhere(spec) // applied in the inner so filters run before the LLM projection + LIMIT
+  return [
+    "(",
+    "  SELECT *,",
+    projections.map((p) => `    ${projectionExpr(p)}`).join(",\n"),
+    `  FROM {${parentBlockName}}${where}`,
+    `  LIMIT ${PROJECTION_PREVIEW_LIMIT}`,
+    ") s",
+  ].join("\n")
+}
+
+/**
+ * A pure row-level projection block: the source columns the projections read,
+ * plus each `rvbbit.<op>(col)` derived column, capped to a preview LIMIT so a
+ * per-row LLM op never fans out across a whole table.
+ */
+function buildProjectionQuery(
+  spec: RollupSpec,
+  args: { parentBlockName: string; parentTitle: string },
+): { sql: string; title: string } {
+  const projections = spec.projections ?? []
+  const seen = new Set<string>()
+  const srcCols: DesktopColumnRef[] = []
+  for (const p of projections) {
+    const key = p.column.name.toLowerCase()
+    if (!seen.has(key)) {
+      seen.add(key)
+      srcCols.push(p.column)
+    }
+  }
+  const selectLines = [
+    ...srcCols.map((c) => `  ${quoteSqlIdent(c.name)}`),
+    ...projections.map(renderProjection),
+  ]
+  const sql = [
+    "SELECT",
+    selectLines.join(",\n"),
+    `FROM {${args.parentBlockName}}\nLIMIT ${PROJECTION_PREVIEW_LIMIT};`,
+  ].join("\n")
+  const opLabel = projections.map((p) => p.operator).join(", ")
+  return { sql, title: `${args.parentTitle} · ${opLabel}` }
+}
+
 export function buildRollupQuery(
   spec: RollupSpec,
   args: { parentBlockName: string; parentTitle: string },
 ): { sql: string; title: string } {
+  const hasProjections = (spec.projections?.length ?? 0) > 0
+  // Pure semantic projection (no grouping/aggregation) → projection block.
+  if (hasProjections && spec.groupBy.length === 0 && spec.measures.length === 0) {
+    return buildProjectionQuery(spec, args)
+  }
   if (spec.pivot && spec.pivot.values.length > 0) {
     return buildPivotQuery(spec, spec.pivot, args)
   }
@@ -656,21 +831,38 @@ export function buildRollupQuery(
     ...dims.map(dimSelectLine),
     ...measures.map(renderMeasure),
   ]
-  const where = renderWhere(spec)
+  // With projections, the source is wrapped in a derived table that computes
+  // them (and applies WHERE before the LLM projection); the outer query
+  // GROUP BYs / aggregates the projected columns. Without, it's the plain
+  // block reference and WHERE goes on the outer.
+  const fromClause = hasProjections
+    ? buildProjectionFrom(spec, args.parentBlockName)
+    : `{${args.parentBlockName}}`
+  const where = hasProjections ? "" : renderWhere(spec)
+  // With projections, GROUP BY must be POSITIONAL: rvbbit's planner inlines a
+  // group-by *alias* back to its `rvbbit.op(col)` definition, which pulls the
+  // source column out of the derived table ("col must appear in GROUP BY").
+  // Grouping by SELECT position (dims are emitted first) sidesteps the inline.
   const groupBy = dims.length > 0
-    ? `\nGROUP BY ${dims.map(dimExpr).join(", ")}`
+    ? hasProjections
+      ? `\nGROUP BY ${dims.map((_, i) => i + 1).join(", ")}`
+      : `\nGROUP BY ${dims.map(dimExpr).join(", ")}`
     : ""
   const having = renderHaving(spec, measures)
   const topN = renderTopN(spec, measures)
   // Explicit pill sorts win the ORDER BY; a Top-N limit still caps rows.
   const hasExplicitOrder = (spec.orderBy?.length ?? 0) > 0
-  const orderBy = hasExplicitOrder || !topN ? renderOrderBy({ ...spec, measures }) : topN.orderBy
-  const limit = topN ? topN.limit : ""
+  // Composed (projection) queries omit ORDER BY / Top-N: rvbbit's planner
+  // rewrite breaks both alias- and position-based ORDER BY over a derived
+  // table containing an operator. The grid sorts client-side; the inner LIMIT
+  // already caps the row (and LLM-call) count.
+  const orderBy = hasProjections ? "" : hasExplicitOrder || !topN ? renderOrderBy({ ...spec, measures }) : topN.orderBy
+  const limit = hasProjections ? "" : topN ? topN.limit : ""
 
   const sql = [
     `SELECT`,
     selectLines.join(",\n"),
-    `FROM {${args.parentBlockName}}${where}${groupBy}${having}${orderBy}${limit};`,
+    `FROM ${fromClause}${where}${groupBy}${having}${orderBy}${limit};`,
   ].join("\n")
 
   return { sql, title: titleForRollup(args.parentTitle, spec) }

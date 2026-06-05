@@ -41,6 +41,7 @@ import { DesktopWindow } from "./desktop-window"
 import { FinderWindow } from "./finder-window"
 import { DataGridWindow } from "./data-grid-window"
 import { CsvImportWindow } from "./csv-import-window"
+import { SemanticOpPalette } from "./semantic-op-palette"
 import { ConnectionsWindow } from "./connections-window"
 import { ViewAppsWindow } from "./view-apps-window"
 import { ViewAppBuilderWindow } from "./view-app-builder-window"
@@ -145,6 +146,7 @@ import type {
   PgMonitorPayload,
   QueryDocumentPayload,
   ReactiveBlockState,
+  SemanticOpMeta,
   SystemObjectsPayload,
   ViewAppBuilderPayload,
   ViewAppPayload,
@@ -167,10 +169,12 @@ import {
   effectiveRollup,
   grainTruncExpr,
   previewSqlForTable,
+  projectionSpecFromOp,
   quoteSqlIdent,
   rollupSpecColumns,
   rollupSpecFromColumns,
 } from "@/lib/desktop/sql-builder"
+import { loadSemanticOps } from "@/lib/desktop/semantic-ops"
 import { fetchKgEvidenceBySource, fetchPrimaryKeyColumn } from "@/lib/rvbbit/kg"
 import { buildDesktopRuntimeGraph, paramKey, sameParamValue, sourceSqlForPayload, uniqueBlockName } from "@/lib/desktop/reactive-sql"
 import {
@@ -229,6 +233,9 @@ export function DesktopShell() {
   const [activeConnectionId, setActiveConnectionId] = useState<string | null>(null)
   const [schema, setSchema] = useState<SchemaSnapshot | null>(null)
   const [schemaLoading, setSchemaLoading] = useState(false)
+  // Scalar semantic-operator catalog (rvbbit.operators) for the drag-drop
+  // semantic tiles. Empty on non-rvbbit connections.
+  const [semanticOps, setSemanticOps] = useState<SemanticOpMeta[]>([])
   // ── Workspaces ────────────────────────────────────────────────────
   //
   // Five independent canvases, all kept mounted at once. The live
@@ -517,6 +524,28 @@ export function DesktopShell() {
     }
     void loadSchema(activeConnectionId)
   }, [activeConnectionId, loadSchema])
+
+  // Load the semantic-operator catalog for the active connection (cached).
+  useEffect(() => {
+    if (!activeConnectionId) {
+      setSemanticOps([])
+      return
+    }
+    let cancelled = false
+    loadSemanticOps(activeConnectionId).then((ops) => {
+      if (cancelled) return
+      if (ops.length === 0) {
+        console.warn(
+          "[rvbbit-lens] no scalar semantic operators for this connection — " +
+            "rvbbit.operators is empty or this isn't a rvbbit database. Semantic drop tiles are hidden.",
+        )
+      }
+      setSemanticOps(ops)
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [activeConnectionId])
 
   // ── Local desktop persistence ───────────────────────────────────────
 
@@ -2013,6 +2042,53 @@ export function DesktopShell() {
     })
   }, [openWindow])
 
+  // Drop a scalar semantic op on a column → spawn a row-level projection block
+  // `SELECT col, rvbbit.<op>(col::text) AS … FROM {source} LIMIT 200`, placed
+  // beside the source window. The window opens on the Explain tab and does NOT
+  // auto-run (the projection is a per-row LLM op) — the live EXPLAIN (SEMANTIC)
+  // shows the cost estimate; the user runs it explicitly to materialize.
+  const spawnSemanticProjection = useCallback(
+    (payload: DesktopColumnDragPayload, op: SemanticOpMeta) => {
+      const column = payload.columns[0]
+      if (!column) return
+      const spec = projectionSpecFromOp(column, op.name, op.returnType)
+      const { sql, title } = buildRollupQuery(spec, {
+        parentBlockName: payload.parentBlockName,
+        parentTitle: payload.parentTitle,
+      })
+      const src = windows.find((w) => w.id === payload.parentWindowId)
+      const x = clampWorld(src ? src.x + src.width + 24 : 220)
+      const y = clampWorld(src ? src.y : 140)
+      openWindow({
+        id: randomUUID(),
+        kind: "data",
+        title,
+        x,
+        y,
+        width: 560,
+        height: 420,
+        payload: {
+          kind: "data",
+          title,
+          sql,
+          origin: "derived",
+          view: { activeTab: "explain", sqlRailOpen: false, sqlRailWidthPx: 360 },
+          lineage: {
+            kind: "column-aggregate",
+            parentWindowId: payload.parentWindowId,
+            parentTitle: payload.parentTitle,
+            parentSql: payload.parentSql,
+            relationKey: payload.relationKey,
+            parentBlockName: payload.parentBlockName,
+            columns: [column],
+            rollup: spec,
+          },
+        } satisfies DataPayload,
+      })
+    },
+    [openWindow, windows],
+  )
+
   // Pivot a dragged dimension across columns. Needs the dimension's
   // distinct values (a query round-trip), so this is async: probe the
   // values via a synthetic block that references the parent, then fold a
@@ -2153,7 +2229,17 @@ export function DesktopShell() {
       // from their flat columns); a detached/custom-SQL window yields null.
       const baseSpec = effectiveRollup(lin)
       if (!baseSpec) return w
-      const { spec: nextSpec, changed } = applyRollupOp(baseSpec, payload.columns, op)
+
+      // A scalar semantic op is a row-level projection — a different grain than
+      // a GROUP BY. Dropping one MUTATES this block into a projection over its
+      // source (keeping any prior semantic columns, dropping aggregation), and
+      // flips it to the Explain tab so the per-row LLM cost shows without
+      // auto-running. Vanilla ops fold into the spec as before.
+      const semantic = op.kind === "semantic-op"
+      const startSpec: RollupSpec = semantic
+        ? { groupBy: [], measures: [], projections: baseSpec.projections }
+        : baseSpec
+      const { spec: nextSpec, changed } = applyRollupOp(startSpec, payload.columns, op)
       if (!changed) return w
 
       // Prefer the lineage's parentBlockName; fall back to the drag
@@ -2179,8 +2265,13 @@ export function DesktopShell() {
           title,
           sql,
           // Clear any user SQL edits in the editor draft so the rail
-          // doesn't show stale text after a merge.
-          view: p.view ? { ...p.view, sqlDraft: undefined } : p.view,
+          // doesn't show stale text after a merge; semantic ops also open the
+          // Explain tab (the data-grid effect re-confirms this on the sql change).
+          view: {
+            ...(p.view ?? {}),
+            sqlDraft: undefined,
+            ...(semantic ? { activeTab: "explain" as const } : {}),
+          },
           lineage: { ...lin, parentBlockName, columns: rollupSpecColumns(nextSpec), rollup: nextSpec },
           reactive: nextReactive,
         } satisfies DataPayload,
@@ -2654,6 +2745,9 @@ export function DesktopShell() {
         </div>
       ) : null}
 
+      {/* Semantic-op drop palette — appears while dragging a text column. */}
+      <SemanticOpPalette semanticOps={semanticOps} onSpawn={spawnSemanticProjection} />
+
       {/* CSV file-drop overlay — only while a native file is dragged over the
           desktop. pointer-events-none so it never interferes with the drop. */}
       {fileDragActive ? (
@@ -2784,6 +2878,7 @@ export function DesktopShell() {
                 viewportScale={viewport.scale}
                 columnDropAcceptsFrom={columnDropAcceptsFrom}
                 onColumnMerge={(payload, op) => mergeColumnIntoWindow(w.id, payload, op)}
+                semanticOps={semanticOps}
               >
                 {renderWindowContent(w, {
                   activeConnectionId,

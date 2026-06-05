@@ -12,6 +12,7 @@ import {
   Maximize2,
   Minus,
   Sigma,
+  Sparkles,
   Table2,
   TreeStructure,
   TrendingUp,
@@ -23,11 +24,13 @@ import {
   useActiveColumnDragSource,
 } from "@/lib/desktop/column-drag"
 import { availableRollupOps, isNumericRef } from "@/lib/desktop/sql-builder"
+import { availableSemanticOps, type SemanticOpTile } from "@/lib/desktop/semantic-ops"
 import type {
   DesktopColumnDragPayload,
   DesktopWindowState,
   RollupMeasure,
   RollupOp,
+  SemanticOpMeta,
 } from "@/lib/desktop/types"
 import { cn } from "@/lib/utils"
 
@@ -42,6 +45,7 @@ function rollupOpIcon(op: RollupOp): LucideIcon {
   if (op.kind === "group-by") return op.grain ? Calendar : Layers
   if (op.kind === "order-by") return Table2
   if (op.kind === "pivot") return TreeStructure
+  if (op.kind === "semantic-op") return Table2 // never reached (semantic tiles render separately); for totality
   switch (op.agg) {
     case "sum": return Sigma
     case "avg": return Calculator
@@ -84,6 +88,8 @@ interface DesktopWindowProps {
    * type-aware operation tiles (or the fallback default zone).
    */
   onColumnMerge?: (payload: DesktopColumnDragPayload, op: RollupOp) => void
+  /** Scalar semantic operator catalog (rvbbit.operators) for the on-block tiles. */
+  semanticOps?: SemanticOpMeta[]
 }
 
 const MIN_WIDTH = 320
@@ -106,6 +112,7 @@ export function DesktopWindow({
   viewportScale = 1,
   columnDropAcceptsFrom,
   onColumnMerge,
+  semanticOps,
 }: DesktopWindowProps) {
   const chrome = windowChrome(w.kind)
   const activeColumnDrag = useActiveColumnDragSource()
@@ -123,6 +130,13 @@ export function DesktopWindow({
     : []
   const baseTiles = rollupTiles.filter((t) => t.group !== "pivot")
   const pivotTiles = rollupTiles.filter((t) => t.group === "pivot")
+  // Semantic-op tiles ride in the SAME compatible-target overlay as the rollup
+  // tiles (never the source window — that aborts the drag). On a row-level
+  // target the drop adds the projection in place; on an aggregate target the
+  // host spawns a new projection block (different grain).
+  const semanticTiles: SemanticOpTile[] = columnDragCompatible
+    ? availableSemanticOps(draggedColumns, semanticOps ?? [])
+    : []
   // Default op for a drop on the cluster backdrop (not a specific tile):
   // sum for numeric drags, group-by otherwise — matches the old one-shot.
   const defaultRollupOp: RollupOp = draggedColumns.some(isNumericRef)
@@ -167,6 +181,46 @@ export function DesktopWindow({
       >
         <Icon className="h-4 w-4 shrink-0" style={{ color: accent }} />
         <span className="truncate">{tile.label}</span>
+      </div>
+    )
+  }
+
+  function renderSemanticTile(tile: SemanticOpTile) {
+    const key = `semantic:${tile.op.operator.name}`
+    const hot = hoveredOpKey === key
+    const accent = "var(--brand-operators)"
+    return (
+      <div
+        key={key}
+        title={tile.hint}
+        onDragEnter={(e) => { e.preventDefault(); e.stopPropagation(); setHoveredOpKey(key) }}
+        onDragOver={(e) => {
+          e.preventDefault()
+          e.stopPropagation()
+          e.dataTransfer.dropEffect = "copy"
+          setHoveredOpKey(key)
+        }}
+        onDrop={(e) => {
+          e.preventDefault()
+          e.stopPropagation()
+          resetColumnDragState()
+          const payload = readColumnDragPayload(e.dataTransfer)
+          if (payload && onColumnMerge) onColumnMerge(payload, tile.op)
+        }}
+        className={cn(
+          "col-span-2 flex cursor-copy select-none items-center gap-1.5 rounded-md border px-2 py-1.5 text-[11px] font-medium transition-colors",
+          hot
+            ? "border-transparent text-foreground"
+            : "border-chrome-border/50 bg-foreground/[0.03] text-chrome-text hover:bg-foreground/[0.06]",
+        )}
+        style={hot ? {
+          backgroundColor: `color-mix(in oklch, ${accent} 22%, transparent)`,
+          boxShadow: `inset 0 0 0 1.5px ${accent}`,
+        } : undefined}
+      >
+        <Sparkles className="h-3.5 w-3.5 shrink-0" style={{ color: accent }} />
+        <span className="truncate">{tile.label}</span>
+        <span className="ml-auto font-mono text-[9px] text-chrome-text/45">{tile.returnType}</span>
       </div>
     )
   }
@@ -327,7 +381,7 @@ export function DesktopWindow({
           When focused, the section is opaque enough to read as solid. */}
       <div className="h-[calc(100%-2.25rem)] overflow-hidden">{children}</div>
 
-      {columnDragCompatible && onColumnMerge && rollupTiles.length > 0 ? (
+      {columnDragCompatible && onColumnMerge && (rollupTiles.length > 0 || semanticTiles.length > 0) ? (
         <div
           // Capture layer that swallows a compatible column drag before it
           // bubbles to the canvas. When the drag is *not* compatible the
@@ -381,6 +435,16 @@ export function DesktopWindow({
                   <span className="h-px flex-1 bg-chrome-border/60" />
                 </div>
                 {pivotTiles.map((tile) => renderRollupTile(tile, true))}
+              </>
+            ) : null}
+            {semanticTiles.length > 0 ? (
+              <>
+                <div className="col-span-2 mt-1 flex items-center gap-2 px-1 text-[9px] uppercase tracking-wider" style={{ color: "var(--brand-operators)" }}>
+                  <span className="h-px flex-1" style={{ backgroundColor: "color-mix(in oklch, var(--brand-operators) 50%, transparent)" }} />
+                  semantic
+                  <span className="h-px flex-1" style={{ backgroundColor: "color-mix(in oklch, var(--brand-operators) 50%, transparent)" }} />
+                </div>
+                {semanticTiles.map(renderSemanticTile)}
               </>
             ) : null}
           </div>

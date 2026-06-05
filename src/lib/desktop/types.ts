@@ -293,6 +293,35 @@ export interface RollupSpec {
   limit?: RollupLimit | null
   /** Tableau-style pivot: a dimension's distinct values fan into columns. */
   pivot?: RollupPivot | null
+  /**
+   * Row-level semantic projections (rvbbit scalar operators). Unlike
+   * measures/group-bys these are NOT aggregated — each adds a derived
+   * column `rvbbit.<op>(<col>::text[, args]) AS alias`. A spec with
+   * projections and no groupBy/measures is a pure projection block.
+   */
+  projections?: SemanticProjection[]
+}
+
+/** A scalar semantic operator (rvbbit.operators row) as the drop UI needs it. */
+export interface SemanticOpMeta {
+  name: string
+  argNames: string[]
+  argTypes: string[]
+  returnType: "bool" | "text" | "float8" | "jsonb"
+  description?: string
+}
+
+/** One materialized semantic projection in a {@link RollupSpec}. */
+export interface SemanticProjection {
+  /** Stable identity (`<operator>:<column>`) — dedupe key. */
+  id: string
+  column: DesktopColumnRef
+  operator: string
+  returnType: SemanticOpMeta["returnType"]
+  /** Bound literal args for multi-arg ops; empty for 1-arg ops. */
+  args?: string[]
+  /** SELECT alias, unique within the spec. */
+  alias: string
 }
 
 export type RollupCompareOp = ">" | ">=" | "<" | "<=" | "=" | "!="
@@ -396,6 +425,10 @@ export type RollupOp =
   // measures get spread (one per pivot value); omitted ⇒ all measures.
   // `grain` bins a temporal pivot column.
   | { kind: "pivot"; measureIds?: string[]; grain?: RollupGrain }
+  // Apply a scalar semantic operator to the dragged column as a row-level
+  // projection (spawns a projection block). `args` are bound literals for
+  // multi-arg ops (empty for 1-arg ops).
+  | { kind: "semantic-op"; operator: SemanticOpMeta; args?: string[] }
 
 export interface DataWindowViewState {
   activeTab?: "rows" | "profile" | "chart" | "sql" | "explain" | "steps"
