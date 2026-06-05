@@ -43,7 +43,7 @@ import { RollupShelf, type FilterKind } from "./rollup-shelf"
 import type { QueryResult } from "@/lib/db/types"
 import { cn } from "@/lib/utils"
 import { rowsToCsv } from "@/lib/sql/format"
-import { hasTopLevelThen, wrapFlow, expandFlowResult } from "@/lib/sql/then-rewrite"
+import { hasTopLevelThen, wrapFlow, expandFlowResult, isSynthQuery, inferJsonbColumns } from "@/lib/sql/then-rewrite"
 import {
   buildDesktopRuntimeGraph,
   paramKey,
@@ -259,6 +259,10 @@ export function DataGridWindow({
     // the engine splitter (CASE…THEN / strings / comments are left untouched).
     const isPipeline = hasTopLevelThen(compiled)
     const toRun = isPipeline ? wrapFlow(compiled) : compiled
+    // rvbbit.synth(…) is a text-to-SQL source returning one jsonb column per row;
+    // expand those into real grid columns like a pipeline (but it isn't wrapped and
+    // has no Steps tab).
+    const isSynth = !isPipeline && isSynthQuery(compiled)
     if (isPipeline) {
       setFlowSteps(null)
       setFlowStepsError(null)
@@ -286,8 +290,19 @@ export function DataGridWindow({
         setRunState({ kind: "error", error: body.error, code: body.code, detail: body.detail, hint: body.hint })
         setIsPipelineRun(false)
       } else {
-        // flow() returns a single jsonb column per row; expand it into columns.
-        const finalResult = isPipeline ? expandFlowResult(body) : body
+        // flow() / synth() return a single jsonb column per row; expand into columns.
+        const finalResult = isPipeline || isSynth ? expandFlowResult(body) : body
+        // When a rvbbit.synth() result actually expanded, record the inferred column
+        // shape so the reactive graph can wrap *references* to this block in a typed
+        // projection (drag-out rollups / block.<name> refs see real columns, not
+        // jsonb). Synth-only: a bare-`then` pipeline's compiledSql is not valid SQL
+        // as a subquery (the flow() wrapping is added only at run time), so projecting
+        // over it would be unparseable. When it didn't expand (ordinary query), clear
+        // any stale projection.
+        const jsonbProjection =
+          isSynth && finalResult !== body
+            ? inferJsonbColumns(finalResult.rows as Record<string, unknown>[])
+            : undefined
         setIsPipelineRun(isPipeline)
         setRunState({ kind: "done", result: finalResult })
         // Record the compiled SQL that just succeeded, so the auto-rerun
@@ -297,6 +312,7 @@ export function DataGridWindow({
         onChangePayload((p) => ({
           ...p,
           sql: trimmedSource,
+          jsonbProjection,
           // Keep the rollup shelf in sync with hand-edited SQL: re-parse the
           // run SQL back into a spec where we can, else detach the shelf.
           lineage: p.lineage ? reconcileRollupLineage(p.lineage, trimmedSource) : p.lineage,

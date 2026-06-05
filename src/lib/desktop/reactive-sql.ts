@@ -4,7 +4,9 @@ import type {
   DesktopParamSubscription,
   DesktopParamValue,
   DesktopWindowState,
+  JsonbProjectionColumn,
 } from "./types"
+import { buildJsonbProjection, isSynthQuery } from "@/lib/sql/then-rewrite"
 
 /**
  * The reactive SQL engine — every data window declares a block name and an
@@ -31,6 +33,8 @@ interface RuntimeBlockInput {
   blockName: string
   sourceSql: string
   subscriptions: DesktopParamSubscription[]
+  /** Run-inferred jsonb shape for synth/flow blocks (see DataPayload). */
+  jsonbProjection?: JsonbProjectionColumn[]
 }
 
 export interface DesktopCompiledBlock {
@@ -39,6 +43,11 @@ export interface DesktopCompiledBlock {
   blockName: string
   sourceSql: string
   compiledSql: string
+  /** For synth/flow blocks: a typed projection over compiledSql that exposes the
+   * expanded jsonb columns as real columns. Used when this block is *referenced*
+   * by another (block.<name>) so downstream SQL sees real columns. Undefined for
+   * ordinary blocks (references then inline compiledSql directly). */
+  projectionSql?: string
   refs: DesktopBlockRef[]
   paramRefs: string[]
   subscriptions: DesktopParamSubscription[]
@@ -191,7 +200,10 @@ export function buildDesktopRuntimeGraph(
       }
       const upstreamCompiled = compile(upstream.windowId, [...stack, block.windowId])
       refs.push({ windowId: upstream.windowId, blockName: upstream.blockName, title: upstream.title })
-      const inner = stripTrailingLimitOffset(stripTrailingSqlTerminator(upstreamCompiled.compiledSql))
+      // Synth/flow blocks expose a single jsonb column; inline their *projection*
+      // (real, typed columns) so this block can reference fields like season/n.
+      const upstreamSql = upstreamCompiled.projectionSql ?? upstreamCompiled.compiledSql
+      const inner = stripTrailingLimitOffset(stripTrailingSqlTerminator(upstreamSql))
       return `(\n${indentSql(inner)}\n) AS ${quoteSqlIdent(slugifyBlockName(upstream.blockName))}`
     })
 
@@ -203,30 +215,49 @@ export function buildDesktopRuntimeGraph(
       return quoteSqlLiteral(p.value)
     })
 
+    // A synth block exposes jsonb-derived columns (season, n) that don't exist in
+    // its raw SQL, so a param-subscription filter (`WHERE <field> = …` wrapped around
+    // the raw SQL) would reference a column Postgres can't see and error. So synth
+    // blocks run unfiltered here; a downstream block that references this one filters
+    // the *projection* (real columns) instead.
+    const isJsonbBlock = !!(block.jsonbProjection && block.jsonbProjection.length > 0)
+
     // Implicit self-subscriptions: any param whose sourceBlockName matches
     // *this* block filters the block by (field=value). The intuition is
     // "click on a cell → the window itself narrows to that value"; the
     // narrowed result then cascades into anything that references the
     // block via {X}.
-    const selfSubs: DesktopParamSubscription[] = params
-      .filter((p) => p.sourceBlockName.toLowerCase() === block.blockName.toLowerCase())
-      .map((p) => ({ key: p.key, targetField: p.field }))
+    const selfSubs: DesktopParamSubscription[] = isJsonbBlock
+      ? []
+      : params
+          .filter((p) => p.sourceBlockName.toLowerCase() === block.blockName.toLowerCase())
+          .map((p) => ({ key: p.key, targetField: p.field }))
 
     const sub = applyParamSubscriptions(
       rewritten,
-      mergeSubscriptions(block.subscriptions, selfSubs),
+      isJsonbBlock ? [] : mergeSubscriptions(block.subscriptions, selfSubs),
       paramMap,
     )
     rewritten = sub.sql
     missingParams.push(...sub.missingParams)
 
     const dedupedRefs = dedupeRefs(refs)
+    // A synth block (single jsonb column) carries a typed projection so that
+    // *references* to it inline real columns. Its own compiledSql stays raw — the
+    // window expands the jsonb client-side when it runs itself. The isSynthQuery
+    // re-check guards against a stale jsonbProjection lingering after the source was
+    // edited to a non-synth query (projecting a non-synth shape would mis-alias).
+    const projectionSql =
+      isJsonbBlock && block.jsonbProjection && isSynthQuery(rewritten)
+        ? buildJsonbProjection(stripTrailingSqlTerminator(rewritten), block.jsonbProjection)
+        : undefined
     const next: DesktopCompiledBlock = {
       windowId: block.windowId,
       title: block.title,
       blockName: block.blockName,
       sourceSql: block.sourceSql,
       compiledSql: rewritten,
+      projectionSql,
       refs: dedupedRefs,
       paramRefs: [...new Set(paramRefs)],
       subscriptions: block.subscriptions,
@@ -264,6 +295,7 @@ function dataWindowsToRuntimeInputs(windows: DesktopWindowState[]): RuntimeBlock
       blockName: payload.reactive?.blockName || fallback,
       sourceSql: sourceSqlForPayload(payload),
       subscriptions: payload.reactive?.paramSubscriptions ?? [],
+      jsonbProjection: payload.jsonbProjection,
     }]
   })
 }

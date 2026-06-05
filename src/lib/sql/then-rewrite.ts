@@ -13,6 +13,7 @@
 // is left untouched.
 
 import type { QueryResult, QueryResultColumn } from "@/lib/db/types"
+import type { JsonbProjectionColumn } from "@/lib/desktop/types"
 
 function isWordChar(c: string): boolean {
   return c >= "a" && c <= "z" || c >= "A" && c <= "Z" || c >= "0" && c <= "9" || c === "_"
@@ -106,6 +107,16 @@ export function hasTopLevelThen(sql: string): boolean {
   return false
 }
 
+/**
+ * True if `sql` selects from the executing text-to-SQL source `rvbbit.synth(…)`
+ * (which returns one jsonb column per row, like flow). Matches `rvbbit.synth(`
+ * but NOT `rvbbit.synth_sql(` (that returns the SQL text, not a rowset), so its
+ * results get the same key-expansion treatment as a pipeline.
+ */
+export function isSynthQuery(sql: string): boolean {
+  return /\brvbbit\.synth\s*\(/i.test(sql)
+}
+
 const FLOW_TAGS = ["$rvbbitflow$", "$rvbbit_flow$", "$flowpipe$"]
 
 /**
@@ -130,18 +141,97 @@ export function expandFlowResult(result: QueryResult): QueryResult {
   if (!objs.every((o) => o !== null && typeof o === "object" && !Array.isArray(o))) {
     return result
   }
+  // Tag each expanded column with its INFERRED Postgres type (not a blanket
+  // "jsonb"), so the grid formats it and — critically — the rollup/drag-out UI
+  // classifies numeric fields as aggregatable metrics rather than jsonb dimensions.
+  // The types mirror buildJsonbProjection's casts, so display and derived SQL agree.
+  const inferred = inferJsonbColumns(objs as Record<string, unknown>[])
+  if (inferred.length === 0) return result
+  const columns: QueryResultColumn[] = inferred.map(({ name, kind }) => ({
+    name,
+    dataTypeId: JSONB_KIND_OID[kind],
+    dataTypeName: kind,
+  }))
+  return { ...result, columns, rows: objs as Record<string, unknown>[] }
+}
+
+/** Postgres type OIDs for inferred jsonb-column kinds, so the rollup classifier's
+ * OID-based numeric check (and the type-name regex) both agree. */
+const JSONB_KIND_OID: Record<JsonbProjectionColumn["kind"], number> = {
+  numeric: 1700, // numeric
+  boolean: 16, // bool
+  jsonb: 3802, // jsonb
+  text: 25, // text
+}
+
+/**
+ * Infer the column shape of an expanded jsonb result (the rows produced by
+ * expandFlowResult) so a SQL-level projection can cast each field for
+ * aggregation. Per key: all-number → numeric, all-bool → boolean, any
+ * object/array → jsonb, else text (the safe default for mixed/null).
+ */
+export function inferJsonbColumns(objs: Record<string, unknown>[]): JsonbProjectionColumn[] {
   const keys: string[] = []
   const seen = new Set<string>()
-  for (const o of objs as Record<string, unknown>[]) {
+  for (const o of objs) {
+    if (o === null || typeof o !== "object") continue
     for (const k of Object.keys(o)) {
       if (!seen.has(k)) { seen.add(k); keys.push(k) }
     }
   }
-  if (keys.length === 0) return result
-  const columns: QueryResultColumn[] = keys.map((name) => ({
-    name,
-    dataTypeId: 0,
-    dataTypeName: "jsonb",
-  }))
-  return { ...result, columns, rows: objs as Record<string, unknown>[] }
+  return keys.map((name) => {
+    let sawNum = false
+    let sawBool = false
+    let sawStr = false
+    let sawNested = false
+    for (const o of objs) {
+      const v = (o as Record<string, unknown>)[name]
+      if (v === null || v === undefined) continue
+      if (typeof v === "number") sawNum = true
+      else if (typeof v === "boolean") sawBool = true
+      else if (typeof v === "object") sawNested = true
+      else sawStr = true
+    }
+    const kind: JsonbProjectionColumn["kind"] = sawNested
+      ? "jsonb"
+      : sawStr
+        ? "text"
+        : sawBool && !sawNum
+          ? "boolean"
+          : sawNum && !sawBool
+            ? "numeric"
+            : "text"
+    return { name, kind }
+  })
+}
+
+function quoteSqlIdent(name: string): string {
+  return `"${name.replace(/"/g, '""')}"`
+}
+
+/**
+ * Build a typed projection that lifts a jsonb-returning block's single column
+ * into real columns, e.g.
+ *   SELECT (__v->>'season') AS "season", (__v->>'n')::numeric AS "n"
+ *   FROM ( <innerSql> ) _rvbbit_src(__v)
+ * The single output column is renamed positionally to `__v` via the
+ * `_rvbbit_src(__v)` alias list, so the projection is agnostic to its real name
+ * (both rvbbit.synth and rvbbit.flow emit a column named `value`; `SELECT *` over a
+ * function can surface other names). `innerSql` MUST be valid standalone SQL — used
+ * for rvbbit.synth (it is); a bare-`then` pipeline is not (it needs flow() wrapping)
+ * so those are not projected here.
+ */
+export function buildJsonbProjection(innerSql: string, cols: JsonbProjectionColumn[]): string {
+  const inner = innerSql.trim().replace(/;\s*$/, "")
+  const proj = cols
+    .map((c) => {
+      const key = c.name.replace(/'/g, "''")
+      const alias = quoteSqlIdent(c.name)
+      if (c.kind === "jsonb") return `(__v->'${key}') AS ${alias}`
+      if (c.kind === "numeric") return `(__v->>'${key}')::numeric AS ${alias}`
+      if (c.kind === "boolean") return `(__v->>'${key}')::boolean AS ${alias}`
+      return `(__v->>'${key}') AS ${alias}`
+    })
+    .join(", ")
+  return `SELECT ${proj} FROM (\n${inner}\n) _rvbbit_src(__v)`
 }

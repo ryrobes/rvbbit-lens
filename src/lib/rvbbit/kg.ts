@@ -77,6 +77,9 @@ export interface KgNeighbor {
   edgeConfidence: number | null
   edgeProperties: unknown
   depth: number
+  /** raw kg_nodes.properties for each endpoint — populated by the by-id fetch only */
+  fromProps?: unknown
+  toProps?: unknown
 }
 
 export interface KgEvidenceRow {
@@ -458,6 +461,68 @@ export async function fetchKgNeighbors(
     edgeConfidence: numOrNull(r.edge_confidence),
     edgeProperties: r.edge_properties ?? null,
     depth: num(r.depth),
+  }))
+}
+
+/**
+ * Neighbors of a node BY node_id (robust: depends only on the indexed
+ * subject/object columns, never on label resolution). Each row is one edge with
+ * both endpoints denormalized + their kg_nodes.properties for reconstruction.
+ * Used by Scry's spider expansion. `LIMIT cap+1` is a truncation sentinel.
+ */
+export async function fetchKgNeighborsById(
+  connectionId: string,
+  graphId: string,
+  nodeId: number,
+  maxEdges: number = 60,
+): Promise<KgNeighbor[]> {
+  const cap = Math.max(1, Math.min(200, maxEdges))
+  const res = await runQuery(
+    connectionId,
+    `WITH outbound AS (
+       SELECT e.edge_id, e.subject_node_id AS from_id, e.object_node_id AS to_id,
+              e.predicate, e.confidence, e.properties, 'out'::text AS dir
+       FROM rvbbit.kg_edges e
+       WHERE e.graph_id = ${sqlStr(graphId)} AND e.subject_node_id = ${Number(nodeId)}
+     ),
+     inbound AS (
+       SELECT e.edge_id, e.object_node_id AS from_id, e.subject_node_id AS to_id,
+              e.predicate, e.confidence, e.properties, 'in'::text AS dir
+       FROM rvbbit.kg_edges e
+       WHERE e.graph_id = ${sqlStr(graphId)} AND e.object_node_id = ${Number(nodeId)}
+     ),
+     merged AS (SELECT * FROM outbound UNION ALL SELECT * FROM inbound)
+     SELECT m.edge_id,
+            m.from_id AS from_node_id, fn.kind AS from_kind, fn.label AS from_label,
+            fn.properties AS from_props,
+            m.to_id   AS to_node_id,   tn.kind AS to_kind,   tn.label AS to_label,
+            tn.properties AS to_props,
+            m.predicate, m.dir AS edge_direction,
+            m.confidence AS edge_confidence, m.properties AS edge_properties
+     FROM merged m
+     JOIN rvbbit.kg_nodes fn ON fn.node_id = m.from_id
+     JOIN rvbbit.kg_nodes tn ON tn.node_id = m.to_id
+     ORDER BY m.confidence DESC NULLS LAST, m.edge_id
+     LIMIT ${cap + 1}`,
+  )
+  // Throw on error so callers can distinguish a real failure (retryable) from a
+  // legitimate zero-neighbor leaf node (an empty array).
+  if (!res.ok) throw new Error(res.error || "kg neighbor fetch failed")
+  return res.rows.map((r) => ({
+    edgeId: num(r.edge_id),
+    fromNodeId: num(r.from_node_id),
+    fromKind: String(r.from_kind ?? ""),
+    fromLabel: String(r.from_label ?? ""),
+    toNodeId: num(r.to_node_id),
+    toKind: String(r.to_kind ?? ""),
+    toLabel: String(r.to_label ?? ""),
+    predicate: String(r.predicate ?? ""),
+    direction: r.edge_direction === "in" ? "in" : "out",
+    edgeConfidence: numOrNull(r.edge_confidence),
+    edgeProperties: r.edge_properties ?? null,
+    depth: 1,
+    fromProps: r.from_props ?? null,
+    toProps: r.to_props ?? null,
   }))
 }
 

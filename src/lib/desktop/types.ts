@@ -146,6 +146,23 @@ export interface DataPayload {
    * null and the auto-inferrer takes over again.
    */
   chartSpec?: Record<string, unknown> | null
+  /**
+   * For a rvbbit.synth() block whose single jsonb column the grid expands
+   * client-side, the run-inferred shape of that jsonb — column names + inferred
+   * types. The reactive graph uses this to wrap a reference to this block in a
+   * typed "projection" so downstream SQL (drag-out rollups, block.<name> refs,
+   * EXPLAIN) sees real columns instead of the opaque jsonb column. Undefined for
+   * ordinary blocks and for bare-`then` pipelines (whose compiledSql is not valid
+   * standalone SQL to project over). Updated on each run.
+   */
+  jsonbProjection?: JsonbProjectionColumn[]
+}
+
+/** One expanded column of a jsonb-returning block, with a type inferred from the
+ * result rows so the projection can cast it for GROUP BY / aggregation. */
+export interface JsonbProjectionColumn {
+  name: string
+  kind: "numeric" | "boolean" | "jsonb" | "text"
 }
 
 export interface KgSourceContext {

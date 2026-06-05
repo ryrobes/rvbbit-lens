@@ -68,8 +68,9 @@ import { KgExtractionRunsWindow } from "./kg-extraction-runs-window"
 import { KgMergeReviewWindow } from "./kg-merge-review-window"
 import { KgExplorerWindow } from "./kg-explorer-window"
 import { DataSearchWindow } from "./data-search-window"
-import { ScryPrompt } from "./scry-prompt"
+import { ScryCanvas } from "./scry-canvas"
 import { ScryResultsWindow } from "./scry-results-window"
+import { fetchFieldFocusSql } from "@/lib/desktop/scry-field"
 import type { ScryResultsPayload } from "@/lib/desktop/types"
 import type { DataSearchHit } from "@/lib/rvbbit/data-search"
 import { DriftWindow } from "./drift-window"
@@ -1005,6 +1006,70 @@ export function DesktopShell() {
     })
   }, [activeConnectionId, openWindow])
 
+  // Open a single FIELD as a focused query: value distribution (categorical) or
+  // a numeric summary (sum/avg/min/max). Async — detects the column type first.
+  const openField = useCallback(
+    async (schema: string, rel: string, col: string) => {
+      if (!activeConnectionId) return
+      const sql = await fetchFieldFocusSql(activeConnectionId, schema, rel, col)
+      openWindow({
+        id: randomUUID(),
+        kind: "data",
+        title: `${schema}.${rel}.${col}`,
+        x: 130 + Math.random() * 80,
+        y: 100 + Math.random() * 80,
+        width: 720,
+        height: 520,
+        payload: {
+          kind: "data",
+          title: `${schema}.${rel}.${col}`,
+          sql,
+          origin: "query",
+          view: { activeTab: "rows", sqlRailOpen: true, sqlRailWidthPx: 360 },
+        } satisfies DataPayload,
+      })
+    },
+    [activeConnectionId, openWindow],
+  )
+
+  // P4 graduation: open a data window per distinct table from a batch (Scry's
+  // "send to desktop" set), cascade-placed and deduped against already-open
+  // table windows so nothing double-opens.
+  const graduateTables = useCallback(
+    (tables: { schema: string; rel: string }[]) => {
+      if (!activeConnectionId) return
+      let n = 0
+      for (const t of tables) {
+        const already = windows.some(
+          (w) =>
+            w.kind === "data" &&
+            (w.payload as DataPayload | undefined)?.table?.schema === t.schema &&
+            (w.payload as DataPayload | undefined)?.table?.name === t.rel,
+        )
+        if (already) continue
+        openWindow({
+          id: randomUUID(),
+          kind: "data",
+          title: `${t.schema}.${t.rel}`,
+          x: 140 + (n % 12) * 30,
+          y: 110 + (n % 12) * 30,
+          width: 800,
+          height: 520,
+          payload: {
+            kind: "data",
+            title: `${t.schema}.${t.rel}`,
+            sql: previewSqlForTable(t.schema, t.rel),
+            origin: "table",
+            table: { schema: t.schema, name: t.rel },
+            view: { activeTab: "rows", sqlRailOpen: false, sqlRailWidthPx: 360 },
+          } satisfies DataPayload,
+        })
+        n++
+      }
+    },
+    [activeConnectionId, openWindow, windows],
+  )
+
   const openViewApps = useCallback(() => {
     const existing = windows.find((w) => w.kind === "view-apps")
     if (existing) return focus(existing.id)
@@ -1500,17 +1565,6 @@ export function DesktopShell() {
     },
     [openWindow, activeConnectionId],
   )
-
-  useEffect(() => {
-    function onKey(e: KeyboardEvent) {
-      if ((e.metaKey || e.ctrlKey) && (e.key === "k" || e.key === "K")) {
-        e.preventDefault()
-        setScryOpen((o) => !o)
-      }
-    }
-    window.addEventListener("keydown", onKey)
-    return () => window.removeEventListener("keydown", onKey)
-  }, [])
 
   const openDrift = useCallback(() => {
     const existing = windows.find((w) => w.kind === "drift")
@@ -2226,9 +2280,11 @@ export function DesktopShell() {
         }
       }
 
+      // ⌘K / Ctrl-K toggles Scry (the cascade search canvas). Intentionally
+      // fires even inside inputs so it can also close Scry from the HUD field.
       if (cmd && e.key === "k") {
         e.preventDefault()
-        openSqlScratch()
+        setScryOpen((o) => !o)
         return
       }
       if (cmd && e.key === "n") {
@@ -2287,12 +2343,14 @@ export function DesktopShell() {
           }}
         />
       ) : null}
-      <ScryPrompt
+      <ScryCanvas
         open={scryOpen}
         onClose={() => setScryOpen(false)}
         connectionId={activeConnectionId}
         onSpawnResults={spawnScryResults}
         onOpenTable={openTableFromFinder}
+        onOpenField={openField}
+        onGraduate={graduateTables}
       />
       <div
         className="pointer-events-none fixed inset-0 opacity-[0.07]"
@@ -2520,6 +2578,7 @@ export function DesktopShell() {
                   busy,
                   setBusy,
                   openTableFromFinder,
+                  openField,
                   openViewAppBuilder,
                   openViewApp,
                   openArtifact,
@@ -2654,6 +2713,7 @@ interface WindowContext {
   busy: boolean
   setBusy: (b: boolean) => void
   openTableFromFinder: (schema: string, name: string) => void
+  openField: (schema: string, rel: string, col: string) => void
   openViewAppBuilder: (seed?: ViewAppBuilderPayload) => void
   openViewApp: (appId: string) => void
   openArtifact: (artifactId: string) => void
@@ -2976,6 +3036,7 @@ function renderWindowContent(
           activeConnectionId={ctx.activeConnectionId}
           hasRvbbit={ctx.hasRvbbit}
           onOpenTable={ctx.openTableFromFinder}
+          onOpenField={ctx.openField}
           onOpenCatalogGraph={(seedKind, seedLabel) =>
             ctx.openKgExplorer("db_catalog", seedKind, seedLabel)
           }

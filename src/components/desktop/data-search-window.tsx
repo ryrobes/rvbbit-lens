@@ -21,6 +21,8 @@ interface DataSearchWindowProps {
   hasRvbbit: boolean
   /** Open the underlying table in a Data window. */
   onOpenTable: (schema: string, name: string) => void
+  /** Open a single field as a focused query (distribution / numeric summary). */
+  onOpenField: (schema: string, rel: string, col: string) => void
   /** Open the db_catalog graph (optionally seeded at a node) in the KG Explorer. */
   onOpenCatalogGraph: (seedKind?: string | null, seedLabel?: string | null) => void
 }
@@ -37,6 +39,7 @@ export function DataSearchWindow({
   activeConnectionId,
   hasRvbbit,
   onOpenTable,
+  onOpenField,
   onOpenCatalogGraph,
 }: DataSearchWindowProps) {
   const [q, setQ] = useState(payload.initialQuery ?? "")
@@ -232,6 +235,7 @@ export function DataSearchWindow({
                 key={`${h.kind}:${h.nodeId}`}
                 hit={h}
                 onOpenTable={onOpenTable}
+                onOpenField={onOpenField}
                 onOpenGraph={onOpenCatalogGraph}
               />
             ))}
@@ -245,10 +249,12 @@ export function DataSearchWindow({
 function HitRow({
   hit,
   onOpenTable,
+  onOpenField,
   onOpenGraph,
 }: {
   hit: DataSearchHit
   onOpenTable: (schema: string, name: string) => void
+  onOpenField: (schema: string, rel: string, col: string) => void
   onOpenGraph: (seedKind?: string | null, seedLabel?: string | null) => void
 }) {
   const isTable = hit.kind === "db_table"
@@ -264,9 +270,15 @@ function HitRow({
         </span>
         <button
           type="button"
-          onClick={() => onOpenTable(hit.schema, hit.rel)}
+          onClick={() =>
+            isTable || !hit.col ? onOpenTable(hit.schema, hit.rel) : onOpenField(hit.schema, hit.rel, hit.col)
+          }
           className="min-w-0 flex-1 truncate text-left font-mono text-[12px] text-foreground hover:underline"
-          title={`Open ${hit.schema}.${hit.rel}`}
+          title={
+            isTable || !hit.col
+              ? `Open ${hit.schema}.${hit.rel}`
+              : `Open field ${hit.schema}.${hit.rel}.${hit.col}`
+          }
         >
           <span className="text-chrome-text/55">{hit.schema}.</span>
           {isTable ? (

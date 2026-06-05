@@ -360,7 +360,7 @@ function AboutDialog({
 
   return (
     <div
-      className="fixed inset-0 z-[100] grid place-items-center bg-overlay backdrop-blur-sm"
+      className="fixed inset-0 z-[130] grid place-items-center bg-overlay backdrop-blur-sm"
       style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}
       onMouseDown={onClose}
     >
