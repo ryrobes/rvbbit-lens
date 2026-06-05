@@ -27,6 +27,14 @@ function sslOption(mode: SslMode | undefined): PoolConfig["ssl"] {
  * CSV importer to spin up a *dedicated* `Client` (statement_timeout disabled
  * for a long COPY) so a big import never ties up one of the pool's 5 slots.
  */
+/** Default statement_timeout (ms) for interactive queries. Configurable via
+ *  RVBBIT_QUERY_TIMEOUT_MS; 0 disables it entirely. Semantic queries that warm
+ *  large tables can run for many minutes, so the default is generous (30m). */
+export const DEFAULT_STATEMENT_TIMEOUT_MS = (() => {
+  const raw = Number(process.env.RVBBIT_QUERY_TIMEOUT_MS)
+  return Number.isFinite(raw) && raw >= 0 ? raw : 1_800_000
+})()
+
 export function buildClientConfig(
   c: ConnectionRecord,
   opts: { statementTimeout?: number; applicationName?: string } = {},
@@ -38,7 +46,7 @@ export function buildClientConfig(
   return {
     ...base,
     ssl: sslOption(c.sslMode),
-    statement_timeout: opts.statementTimeout ?? 600_000,
+    statement_timeout: opts.statementTimeout ?? DEFAULT_STATEMENT_TIMEOUT_MS,
     application_name: opts.applicationName ?? "rvbbit-lens",
   }
 }

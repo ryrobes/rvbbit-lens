@@ -163,6 +163,8 @@ export function DataGridWindow({
   // than next to that effect) so the external-SQL sync effect can pin it.
   const prevCompiledRef = useRef<string | null>(null)
   const [runState, setRunState] = useState<RunState>({ kind: "idle" })
+  // Live progress for a running query (polled from a separate connection).
+  const [progress, setProgress] = useState<QueryProgress | null>(null)
   const [explainState, setExplainState] = useState<ExplainState>({ kind: "idle" })
   const [explainBusy, setExplainBusy] = useState(false)
   const [activeTab, setActiveTab] = useState<NonNullable<DataPayload["view"]>["activeTab"]>(view.activeTab ?? (payload.origin === "table" ? "rows" : "sql"))
@@ -277,6 +279,7 @@ export function DataGridWindow({
       setFlowStepsError(null)
       setActiveStep(0)
     }
+    setProgress(null)
     setRunState({ kind: "running", sql: compiled, startedAt: Date.now() })
     try {
       const res = await fetch("/api/db/query", {
@@ -656,6 +659,43 @@ export function DataGridWindow({
   const error = runState.kind === "error" ? runState : null
   const isRunning = runState.kind === "running"
 
+  // Live progress while a query runs — polled from a SEPARATE connection so we
+  // can see it (the main connection is blocked). pg_stat_activity gives
+  // elapsed/state/wait; rvbbit.receipt_queue_depth() gives in-flight semantic
+  // calls. Replaces a blind "Running query...".
+  useEffect(() => {
+    // progress is reset at run-start and only rendered while running, so we
+    // don't clear it here (avoids a synchronous setState in the effect).
+    if (!isRunning || !activeConnectionId) return
+    let cancelled = false
+    let timer: ReturnType<typeof setTimeout>
+    const poll = async () => {
+      try {
+        const res = await fetch("/api/db/query-progress", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ connectionId: activeConnectionId }),
+        })
+        const j = (await res.json()) as (QueryProgress & { ok?: boolean }) | null
+        if (!cancelled && j?.ok) {
+          setProgress({
+            elapsedMs: j.elapsedMs ?? null,
+            wait: j.wait ?? null,
+            state: j.state ?? null,
+          })
+        }
+      } catch {
+        /* transient — keep polling */
+      }
+      if (!cancelled) timer = setTimeout(poll, 700)
+    }
+    timer = setTimeout(poll, 400) // small delay so the query registers in pg_stat_activity
+    return () => {
+      cancelled = true
+      clearTimeout(timer)
+    }
+  }, [isRunning, activeConnectionId])
+
   // The editable rollup spec the shelf shows — null when this isn't a
   // column-aggregate window, or when the SQL was hand-edited into a shape
   // we can't model (detached: rollup === null).
@@ -723,72 +763,91 @@ export function DataGridWindow({
           <div className="flex-1 overflow-hidden">
             <SqlEditor value={draftSql} onChange={setDraftSql} onRun={onRun} />
           </div>
-          <RunStatus runState={runState} />
+          <RunStatus runState={runState} progress={progress} />
         </aside>
       ) : null}
 
       <section className="flex flex-1 flex-col overflow-hidden">
-        <div className="flex items-center gap-1 border-b border-chrome-border bg-chrome-bg/30 px-2 py-1">
-          <button
-            type="button"
-            onClick={() => setSqlRailOpen((o) => !o)}
-            className="grid h-7 w-7 place-items-center rounded text-chrome-text hover:bg-foreground/[0.06] hover:text-foreground"
-            title={sqlRailOpen ? "Hide SQL editor" : "Show SQL editor"}
-          >
-            {sqlRailOpen ? <PanelLeftClose className="h-3.5 w-3.5" /> : <PanelLeftOpen className="h-3.5 w-3.5" />}
-          </button>
-          <Tab label="Rows" icon={Table2} active={activeTab === "rows"} onClick={() => setActiveTab("rows")} />
-          <Tab label="Profile" icon={Sigma} active={activeTab === "profile"} onClick={() => setActiveTab("profile")} />
-          <Tab label="Chart" icon={BarChart3} active={activeTab === "chart"} onClick={() => setActiveTab("chart")} />
-          <Tab label="SQL" icon={FileCode2} active={activeTab === "sql"} onClick={() => setActiveTab("sql")} />
-          <Tab label="Explain" icon={TreeStructure} active={activeTab === "explain"} onClick={() => setActiveTab("explain")} />
-          {isPipelineRun ? (
-            <Tab label="Steps" icon={GitBranch} active={activeTab === "steps"} onClick={() => setActiveTab("steps")} />
-          ) : null}
-
-          <button
-            type="button"
-            draggable
-            onDragStart={handleBlockDragStart}
-            onClick={onRenameBlock}
-            title={`Block name — drag onto canvas to spawn SELECT * FROM {${blockName}}, click to rename. Reference this block from any other window's SQL as {${blockName}}.`}
-            className="ml-2 inline-flex cursor-grab items-center gap-1 rounded border border-main/30 bg-main/10 px-1.5 py-0.5 text-[10px] text-main hover:border-main/60 active:cursor-grabbing"
-          >
-            <GitBranch className="h-3 w-3" />
-            {`{${blockName}}`}
-          </button>
-
-          <NotifyChannelControl
-            channel={payload.notifyChannel}
-            onChange={(ch) =>
-              onChangePayload((p) => ({ ...p, notifyChannel: ch }))
-            }
-          />
-
-          {subscriptions.length > 0 ? (
-            <span className="ml-1 inline-flex items-center gap-1 rounded-full border border-rvbbit-accent/30 bg-rvbbit-bg/40 px-1.5 py-0.5 text-[10px] text-rvbbit-accent" title={subscriptions.map((s) => s.key).join(", ")}>
-              {subscriptions.length} filter{subscriptions.length === 1 ? "" : "s"}
-            </span>
-          ) : null}
-
-          {payload.sourceContext && onOpenKgForSource ? (
+        <div className="flex h-9 shrink-0 items-center border-b border-chrome-border bg-chrome-bg/30 pl-1 pr-2">
+          {/* Left group scrolls horizontally when narrow rather than wrapping —
+              keeps the rail a fixed height and every tab reachable. */}
+          <div className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
             <button
               type="button"
-              onClick={() => onOpenKgForSource(payload.sourceContext!)}
-              className="ml-1 inline-flex items-center gap-1 rounded-full border border-chrome-border/60 bg-background px-2 py-0.5 text-[10px] hover:border-chrome-border hover:bg-foreground/[0.06]"
-              style={{ color: "var(--brand-kg)" }}
-              title={`Open the KG node(s) tied to ${payload.sourceContext.sourceTable}#${payload.sourceContext.sourcePk}`}
+              onClick={() => setSqlRailOpen((o) => !o)}
+              className="grid h-7 w-7 shrink-0 place-items-center rounded text-chrome-text hover:bg-foreground/[0.06] hover:text-foreground"
+              title={sqlRailOpen ? "Hide SQL editor" : "Show SQL editor"}
             >
-              <TreeStructure className="h-3 w-3" />
-              <span>open in KG</span>
+              {sqlRailOpen ? <PanelLeftClose className="h-3.5 w-3.5" /> : <PanelLeftOpen className="h-3.5 w-3.5" />}
             </button>
-          ) : null}
+            {/* Run lives in the SQL panel's toolbar when it's open; surface it
+                here when the panel is collapsed so it's always one click away. */}
+            {!sqlRailOpen ? (
+              <button
+                type="button"
+                onClick={onRun}
+                disabled={isRunning}
+                className="grid h-7 w-7 shrink-0 place-items-center rounded text-rvbbit-accent hover:bg-rvbbit-accent/15 disabled:opacity-40"
+                title="Run (⌘↩)"
+              >
+                {isRunning ? <Clock className="h-3.5 w-3.5 animate-pulse" /> : <Play className="h-3.5 w-3.5" />}
+              </button>
+            ) : null}
+            <Tab label="Rows" icon={Table2} active={activeTab === "rows"} onClick={() => setActiveTab("rows")} />
+            <Tab label="Profile" icon={Sigma} active={activeTab === "profile"} onClick={() => setActiveTab("profile")} />
+            <Tab label="Chart" icon={BarChart3} active={activeTab === "chart"} onClick={() => setActiveTab("chart")} />
+            <Tab label="SQL" icon={FileCode2} active={activeTab === "sql"} onClick={() => setActiveTab("sql")} />
+            <Tab label="Explain" icon={TreeStructure} active={activeTab === "explain"} onClick={() => setActiveTab("explain")} />
+            {isPipelineRun ? (
+              <Tab label="Steps" icon={GitBranch} active={activeTab === "steps"} onClick={() => setActiveTab("steps")} />
+            ) : null}
 
-          <div className="flex-1" />
+            <button
+              type="button"
+              draggable
+              onDragStart={handleBlockDragStart}
+              onClick={onRenameBlock}
+              title={`Block name — drag onto canvas to spawn SELECT * FROM {${blockName}}, click to rename. Reference this block from any other window's SQL as {${blockName}}.`}
+              className="ml-1 inline-flex shrink-0 cursor-grab items-center gap-1 whitespace-nowrap rounded border border-main/30 bg-main/10 px-1.5 py-0.5 text-[10px] text-main hover:border-main/60 active:cursor-grabbing"
+            >
+              <GitBranch className="h-3 w-3" />
+              {`{${blockName}}`}
+            </button>
 
+            <div className="shrink-0">
+              <NotifyChannelControl
+                channel={payload.notifyChannel}
+                onChange={(ch) =>
+                  onChangePayload((p) => ({ ...p, notifyChannel: ch }))
+                }
+              />
+            </div>
+
+            {subscriptions.length > 0 ? (
+              <span className="inline-flex shrink-0 items-center gap-1 whitespace-nowrap rounded-full border border-rvbbit-accent/30 bg-rvbbit-bg/40 px-1.5 py-0.5 text-[10px] text-rvbbit-accent" title={subscriptions.map((s) => s.key).join(", ")}>
+                {subscriptions.length} filter{subscriptions.length === 1 ? "" : "s"}
+              </span>
+            ) : null}
+
+            {payload.sourceContext && onOpenKgForSource ? (
+              <button
+                type="button"
+                onClick={() => onOpenKgForSource(payload.sourceContext!)}
+                className="inline-flex shrink-0 items-center gap-1 whitespace-nowrap rounded-full border border-chrome-border/60 bg-background px-2 py-0.5 text-[10px] hover:border-chrome-border hover:bg-foreground/[0.06]"
+                style={{ color: "var(--brand-kg)" }}
+                title={`Open the KG node(s) tied to ${payload.sourceContext.sourceTable}#${payload.sourceContext.sourcePk}`}
+              >
+                <TreeStructure className="h-3 w-3" />
+                <span>open in KG</span>
+              </button>
+            ) : null}
+          </div>
+
+          {/* Right cluster is pinned + never wraps, so the row/ms readout can't
+              push the rail to multiple lines. */}
           {result ? (
-            <>
-              <span className="text-[11px] text-chrome-text">
+            <div className="flex shrink-0 items-center gap-1 pl-2">
+              <span className="whitespace-nowrap text-[11px] tabular-nums text-chrome-text">
                 {result.rowCount} rows · {result.durationMs}ms{result.truncated ? " · truncated" : ""}
               </span>
               <Button size="sm" variant="ghost" onClick={() => exportCsv(result, w.title)} title="Export CSV">
@@ -803,7 +862,7 @@ export function DataGridWindow({
                 <Boxes className="h-3.5 w-3.5" />
                 <span className="text-xs">Save app</span>
               </Button>
-            </>
+            </div>
           ) : null}
         </div>
 
@@ -844,10 +903,10 @@ export function DataGridWindow({
             )
           ) : null}
           {activeTab === "rows" && !result ? (
-            <EmptyResult error={error} running={isRunning} onRun={onRun} />
+            <EmptyResult error={error} running={isRunning} progress={progress} onRun={onRun} />
           ) : null}
           {activeTab === "profile" && result ? <ProfileView result={result} /> : null}
-          {activeTab === "profile" && !result ? <EmptyResult error={error} running={isRunning} onRun={onRun} /> : null}
+          {activeTab === "profile" && !result ? <EmptyResult error={error} running={isRunning} progress={progress} onRun={onRun} /> : null}
           {activeTab === "chart" && result ? (
             <ChartView
               result={result}
@@ -868,7 +927,7 @@ export function DataGridWindow({
             />
           ) : null}
           {activeTab === "chart" && !result ? (
-            <EmptyResult error={error} running={isRunning} onRun={onRun} />
+            <EmptyResult error={error} running={isRunning} progress={progress} onRun={onRun} />
           ) : null}
           {activeTab === "sql" ? (
             <div className="h-full bg-doc-bg group-data-[focused=false]/window:bg-doc-bg/70">
@@ -1160,7 +1219,7 @@ function Tab({
       type="button"
       onClick={onClick}
       className={cn(
-        "flex items-center gap-1.5 rounded border px-2 py-1 text-[11px]",
+        "flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded border px-2 py-1 text-[11px]",
         active
           ? "border-main/40 bg-main/15 text-foreground"
           : "border-transparent text-chrome-text hover:bg-foreground/[0.05] hover:text-foreground",
@@ -1172,14 +1231,37 @@ function Tab({
   )
 }
 
-function RunStatus({ runState }: { runState: RunState }) {
+interface QueryProgress {
+  elapsedMs: number | null
+  wait: string | null
+  state: string | null
+}
+
+function fmtDur(ms: number): string {
+  if (ms < 1000) return `${Math.round(ms)}ms`
+  if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`
+  const m = Math.floor(ms / 60_000)
+  return `${m}m${Math.round((ms % 60_000) / 1000)}s`
+}
+
+/** One-line live description of a running query for the status bar. */
+function progressLabel(p: QueryProgress | null): string {
+  if (!p) return "Running…"
+  const bits: string[] = ["Running"]
+  if (p.elapsedMs != null) bits.push(fmtDur(p.elapsedMs))
+  if (p.wait) bits.push(`waiting: ${p.wait}`)
+  else if (p.state && p.state !== "active") bits.push(p.state)
+  return bits.join(" · ")
+}
+
+function RunStatus({ runState, progress }: { runState: RunState; progress: QueryProgress | null }) {
   if (runState.kind === "idle") return null
   return (
     <div className="border-t border-chrome-border bg-chrome-bg/40 px-3 py-1.5 text-[11px] text-chrome-text">
       {runState.kind === "running" ? (
         <span className="inline-flex items-center gap-1.5">
           <Clock className="h-3 w-3 animate-pulse" />
-          Running...
+          {progressLabel(progress)}
         </span>
       ) : null}
       {runState.kind === "done" ? (
@@ -1197,17 +1279,27 @@ function RunStatus({ runState }: { runState: RunState }) {
 function EmptyResult({
   error,
   running,
+  progress,
   onRun,
 }: {
   error: { error: string; code?: string; detail?: string; hint?: string } | null
   running: boolean
+  progress?: QueryProgress | null
   onRun: () => void
 }) {
   if (running) {
     return (
       <div className="grid h-full place-items-center text-xs text-chrome-text">
-        <Clock className="mb-2 h-5 w-5 animate-pulse" />
-        Running query...
+        <div className="text-center">
+          <Clock className="mx-auto mb-2 h-5 w-5 animate-pulse" />
+          <div>
+            Running query
+            {progress?.elapsedMs != null ? <span className="tabular-nums"> · {fmtDur(progress.elapsedMs)}</span> : "…"}
+          </div>
+          {progress?.wait ? (
+            <div className="mt-1 text-[10px] text-chrome-text/60">waiting on {progress.wait}</div>
+          ) : null}
+        </div>
       </div>
     )
   }
