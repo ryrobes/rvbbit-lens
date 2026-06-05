@@ -11,6 +11,7 @@ import {
   DollarSign,
   Eye,
   FileCode2,
+  FileCsv,
   FileText,
   FlowArrow,
   FolderOpen,
@@ -34,10 +35,12 @@ import { PhosphorIconProvider } from "@/components/icon-provider"
 import { DesktopIcon } from "./desktop-icon"
 import { DesktopMenuBar } from "./desktop-menu-bar"
 import { LineageOverlay } from "./lineage-overlay"
+import { ContextMenu, type ContextMenuState } from "./context-menu"
 import { DesktopParamsSurface } from "./desktop-params-surface"
 import { DesktopWindow } from "./desktop-window"
 import { FinderWindow } from "./finder-window"
 import { DataGridWindow } from "./data-grid-window"
+import { CsvImportWindow } from "./csv-import-window"
 import { ConnectionsWindow } from "./connections-window"
 import { ViewAppsWindow } from "./view-apps-window"
 import { ViewAppBuilderWindow } from "./view-app-builder-window"
@@ -98,6 +101,7 @@ import type { ConnectionRecord, SchemaSnapshot } from "@/lib/db/types"
 import type {
   RvbbitCachePayload,
   CachePayload,
+  CsvImportPayload,
   ArtifactPayload,
   DataPayload,
   DataSearchPayload,
@@ -155,6 +159,7 @@ interface WorkspaceTransition {
   dir: "forward" | "backward"
 }
 import { randomUUID } from "@/lib/uuid"
+import { putImportFile } from "@/lib/import/file-store"
 import { listViewApps } from "@/lib/desktop/view-apps"
 import {
   applyRollupOp,
@@ -240,6 +245,7 @@ export function DesktopShell() {
   const [wsTransition, setWsTransition] = useState<WorkspaceTransition | null>(null)
   const [runSignals, setRunSignals] = useState<Record<string, number>>({})
   const [viewport, setViewport] = useState<DesktopViewportState>(DEFAULT_VIEWPORT)
+  const [ctxMenu, setCtxMenu] = useState<ContextMenuState | null>(null)
 
   // ── LISTEN/NOTIFY feed ──────────────────────────────────────────────
   const [notifications, setNotifications] = useState<NotifyEvent[]>([])
@@ -1154,6 +1160,58 @@ export function DesktopShell() {
     })
   }, [focus, openWindow, windows])
 
+  const openSqlWith = useCallback(
+    (sql: string, title: string) => {
+      if (!activeConnectionId) {
+        openConnections()
+        return
+      }
+      openWindow({
+        id: randomUUID(),
+        kind: "data",
+        title,
+        x: 120 + Math.random() * 60,
+        y: 90 + Math.random() * 60,
+        width: 760,
+        height: 460,
+        payload: {
+          kind: "data",
+          title,
+          sql,
+          origin: "query",
+          view: { activeTab: "rows", sqlRailOpen: true, sqlRailWidthPx: 360 },
+        } satisfies DataPayload,
+      })
+    },
+    [activeConnectionId, openConnections, openWindow],
+  )
+
+  const openSqlScratchAtPos = useCallback(
+    (x: number, y: number) => {
+      if (!activeConnectionId) {
+        openConnections()
+        return
+      }
+      openWindow({
+        id: randomUUID(),
+        kind: "data",
+        title: "Untitled SQL",
+        x,
+        y,
+        width: 760,
+        height: 480,
+        payload: {
+          kind: "data",
+          title: "Untitled SQL",
+          sql: "-- Write SQL and press Cmd+Enter\nSELECT 1;",
+          origin: "query",
+          view: { activeTab: "sql", sqlRailOpen: true, sqlRailWidthPx: 360 },
+        } satisfies DataPayload,
+      })
+    },
+    [activeConnectionId, openConnections, openWindow],
+  )
+
   const openPgMonitor = useCallback(() => {
     const existing = windows.find((w) => w.kind === "pg-monitor")
     if (existing) return focus(existing.id)
@@ -1863,6 +1921,64 @@ export function DesktopShell() {
     y: (screen.y - viewport.y) / viewport.scale,
   }), [viewport.x, viewport.y, viewport.scale])
 
+  // ── CSV file drop → importer ──────────────────────────────────────
+  // Native OS file drops are distinct from the internal column/block
+  // HTML5 drags (which carry custom MIME types); we branch on the "Files"
+  // type so the two never collide. `fileDragDepth` is the canonical
+  // enter/leave counter that keeps the drop overlay stable while the
+  // cursor moves across child elements.
+  const [fileDragActive, setFileDragActive] = useState(false)
+  const [dropNotice, setDropNotice] = useState<string | null>(null)
+  const fileDragDepth = useRef(0)
+
+  useEffect(() => {
+    if (!dropNotice) return
+    const t = setTimeout(() => setDropNotice(null), 4000)
+    return () => clearTimeout(t)
+  }, [dropNotice])
+
+  const openCsvImport = useCallback(
+    (file: File, pos?: { x: number; y: number }) => {
+      const id = randomUUID()
+      putImportFile(id, file)
+      const n = windows.filter((w) => w.kind === "csv-import").length
+      const defaultSchema = schema?.schemas?.includes("public")
+        ? "public"
+        : schema?.schemas?.[0]
+      openWindow({
+        id,
+        kind: "csv-import",
+        title: file.name.length > 40 ? `${file.name.slice(0, 38)}…` : file.name,
+        x: pos ? pos.x : 180 + (n % 6) * 28,
+        y: pos ? pos.y : 110 + (n % 6) * 28,
+        width: 720,
+        height: 560,
+        payload: {
+          kind: "csv-import",
+          fileName: file.name,
+          fileSize: file.size,
+          lastModified: file.lastModified,
+          defaultSchema,
+        } satisfies CsvImportPayload,
+      })
+    },
+    [openWindow, schema, windows],
+  )
+
+  const handleFilesDropped = useCallback(
+    (fileList: FileList, pos: { x: number; y: number }) => {
+      const files = Array.from(fileList).filter(isCsvLikeFile)
+      if (files.length === 0) {
+        setDropNotice("Drop a .csv, .tsv, or .txt file to import it.")
+        return
+      }
+      files.forEach((file, i) => {
+        openCsvImport(file, { x: pos.x + i * 28, y: pos.y + i * 28 })
+      })
+    },
+    [openCsvImport],
+  )
+
   const openColumnAggregate = useCallback((payload: DesktopColumnDragPayload, at: { x: number; y: number }) => {
     const rollup = rollupSpecFromColumns(payload.columns)
     const { sql, title } = buildRollupQuery(rollup, {
@@ -2230,7 +2346,26 @@ export function DesktopShell() {
     })
   }, [openWindow])
 
+  const handleCanvasDragEnter = useCallback((e: React.DragEvent<HTMLElement>) => {
+    if (!hasFileDragPayload(e.dataTransfer)) return
+    fileDragDepth.current += 1
+    setFileDragActive(true)
+  }, [])
+
+  const handleCanvasDragLeave = useCallback((e: React.DragEvent<HTMLElement>) => {
+    if (!hasFileDragPayload(e.dataTransfer)) return
+    fileDragDepth.current = Math.max(0, fileDragDepth.current - 1)
+    if (fileDragDepth.current === 0) setFileDragActive(false)
+  }, [])
+
   const handleCanvasDragOver = useCallback((e: React.DragEvent<HTMLElement>) => {
+    // Native file drag → accept (the importer). Checked first so it can't be
+    // shadowed by the internal-payload veto below.
+    if (hasFileDragPayload(e.dataTransfer)) {
+      e.preventDefault()
+      e.dataTransfer.dropEffect = "copy"
+      return
+    }
     if (!hasColumnDragPayload(e.dataTransfer) && !hasBlockDragPayload(e.dataTransfer)) return
     e.preventDefault()
     e.dataTransfer.dropEffect = "copy"
@@ -2238,6 +2373,13 @@ export function DesktopShell() {
 
   const handleCanvasDrop = useCallback((e: React.DragEvent<HTMLElement>) => {
     const pos = screenToWorld({ x: e.clientX, y: e.clientY })
+    if (hasFileDragPayload(e.dataTransfer)) {
+      e.preventDefault()
+      fileDragDepth.current = 0
+      setFileDragActive(false)
+      handleFilesDropped(e.dataTransfer.files, pos)
+      return
+    }
     const col = readColumnDragPayload(e.dataTransfer)
     if (col) {
       e.preventDefault()
@@ -2249,7 +2391,7 @@ export function DesktopShell() {
       e.preventDefault()
       openBlockReference(blk, pos)
     }
-  }, [openBlockReference, openColumnAggregate, screenToWorld])
+  }, [openBlockReference, openColumnAggregate, screenToWorld, handleFilesDropped])
 
   // ── Keyboard shortcuts ─────────────────────────────────────────────
 
@@ -2327,13 +2469,65 @@ export function DesktopShell() {
     if (e.target === e.currentTarget) blurAll()
   }, [blurAll])
 
+  const handleDesktopContextMenu = useCallback(
+    (e: React.MouseEvent) => {
+      // Right-clicks inside a window keep the native menu (copy/paste in editors);
+      // window-part context menus are future work, keyed off the same data attr.
+      if ((e.target as HTMLElement).closest("[data-rvbbit-window]")) return
+      e.preventDefault()
+      const world = screenToWorld({ x: e.clientX, y: e.clientY })
+      setCtxMenu({
+        x: e.clientX,
+        y: e.clientY,
+        items: [
+          {
+            id: "new-sql",
+            label: "New SQL Block",
+            icon: FileCode2,
+            onSelect: () => openSqlScratchAtPos(world.x, world.y),
+          },
+          {
+            id: "finder",
+            label: "Open Finder",
+            icon: FolderOpen,
+            onSelect: openFinder,
+          },
+          {
+            id: "scry",
+            label: "Open Scry",
+            icon: Eye,
+            onSelect: () => setScryOpen(true),
+          },
+          {
+            id: "wallpaper",
+            label: "Change Wallpaper…",
+            icon: PaletteIcon,
+            separatorBefore: true,
+            onSelect: onPickWallpaper,
+          },
+          {
+            id: "lineage",
+            label: lineageVisible ? "Hide Dependency Lines" : "Show Dependency Lines",
+            icon: GitBranch,
+            checked: lineageVisible,
+            onSelect: () => setLineage(!lineageVisible),
+          },
+        ],
+      })
+    },
+    [screenToWorld, openSqlScratchAtPos, openFinder, onPickWallpaper, lineageVisible, setLineage],
+  )
+
   return (
     <PhosphorIconProvider>
     <div
       className="rvbbit-lens-desktop relative h-screen w-screen overflow-hidden bg-background text-foreground"
+      onDragEnter={handleCanvasDragEnter}
+      onDragLeave={handleCanvasDragLeave}
       onDragOver={handleCanvasDragOver}
       onDrop={handleCanvasDrop}
       onMouseDown={handleDesktopMouseDown}
+      onContextMenu={handleDesktopContextMenu}
     >
       {wallpaperUrl ? (
         <div
@@ -2407,6 +2601,7 @@ export function DesktopShell() {
         onOpenQueryLens={() => openQueryLens()}
         onOpenDataSearch={() => openDataSearch()}
         onOpenDrift={() => openDrift()}
+        onOpenSql={openSqlWith}
         onOpenModelStudio={() => openModelStudio()}
         onOpenCatalogGraph={() => openKgExplorer("db_catalog")}
         onOpenKgBrowser={() => openKgBrowser()}
@@ -2445,9 +2640,29 @@ export function DesktopShell() {
         <LineageOverlay windows={windows} params={desktopParams} />
       ) : null}
 
+      <ContextMenu state={ctxMenu} onClose={() => setCtxMenu(null)} />
+
       {wallpaperError ? (
         <div className="pointer-events-auto fixed left-1/2 top-12 z-40 -translate-x-1/2 rounded-base border border-danger/60 bg-danger/15 px-3 py-1 text-[11px] text-danger">
           {wallpaperError}
+        </div>
+      ) : null}
+
+      {dropNotice ? (
+        <div className="pointer-events-auto fixed left-1/2 top-12 z-40 -translate-x-1/2 rounded-base border border-warning/60 bg-warning/15 px-3 py-1 text-[11px] text-warning">
+          {dropNotice}
+        </div>
+      ) : null}
+
+      {/* CSV file-drop overlay — only while a native file is dragged over the
+          desktop. pointer-events-none so it never interferes with the drop. */}
+      {fileDragActive ? (
+        <div className="pointer-events-none fixed inset-0 z-[55] grid place-items-center bg-background/40 backdrop-blur-[1px]">
+          <div className="flex flex-col items-center gap-3 rounded-xl border-2 border-dashed border-rvbbit-accent/70 bg-chrome-bg/80 px-10 py-8 text-center shadow-2xl">
+            <FileCsv className="h-10 w-10 text-rvbbit-accent" weight="duotone" />
+            <div className="text-[13px] font-medium text-foreground">Drop to import CSV</div>
+            <div className="text-[11px] text-chrome-text/60">.csv · .tsv · .txt</div>
+          </div>
         </div>
       ) : null}
 
@@ -2878,6 +3093,17 @@ function renderWindowContent(
           onOpenOperator={(name) => ctx.openOperatorFlow(name)}
         />
       )
+    case "csv-import":
+      return (
+        <CsvImportWindow
+          windowId={w.id}
+          payload={w.payload as CsvImportPayload}
+          activeConnectionId={ctx.activeConnectionId}
+          schema={ctx.schema}
+          onReloadSchema={ctx.reloadSchema}
+          onOpenTable={ctx.openTableFromFinder}
+        />
+      )
     case "artifact":
       return <ArtifactWindow payload={w.payload as ArtifactPayload} activeConnectionId={ctx.activeConnectionId} />
     case "query-document":
@@ -3159,10 +3385,30 @@ function renderWindowContent(
   }
 }
 
+/** A native OS file drag carries the synthetic "Files" type — distinct from
+ *  our internal column/block custom-MIME drags, so the two never collide. */
+function hasFileDragPayload(dt: DataTransfer): boolean {
+  return Array.from(dt.types).includes("Files")
+}
+
+/** Accept by extension first (MIME types for CSV are wildly inconsistent
+ *  across OSes), then fall back to the common text MIME tags. */
+function isCsvLikeFile(f: File): boolean {
+  if (/\.(csv|tsv|tab|txt)$/i.test(f.name)) return true
+  const t = f.type
+  return (
+    t === "text/csv" ||
+    t === "text/tab-separated-values" ||
+    t === "application/csv" ||
+    t === "text/plain"
+  )
+}
+
 function iconForKind(kind: DesktopWindowState["kind"]) {
   switch (kind) {
     case "finder": return FolderOpen
     case "data": return Table2
+    case "csv-import": return FileCsv
     case "connections": return Plug
     case "view-apps":
     case "view-app":

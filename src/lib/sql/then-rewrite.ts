@@ -133,7 +133,7 @@ export function wrapFlow(sql: string): string {
  * rvbbit.flow() returns one jsonb column ("value") per row. Expand those objects
  * into real columns (union of keys, first-seen order) for display in the grid.
  */
-export function expandFlowResult(result: QueryResult): QueryResult {
+export function expandFlowResult(result: QueryResult, cols?: JsonbProjectionColumn[]): QueryResult {
   if (result.columns.length !== 1) return result
   const col = result.columns[0].name
   const objs = result.rows.map((r) => r[col])
@@ -141,16 +141,17 @@ export function expandFlowResult(result: QueryResult): QueryResult {
   if (!objs.every((o) => o !== null && typeof o === "object" && !Array.isArray(o))) {
     return result
   }
-  // Tag each expanded column with its INFERRED Postgres type (not a blanket
-  // "jsonb"), so the grid formats it and — critically — the rollup/drag-out UI
-  // classifies numeric fields as aggregatable metrics rather than jsonb dimensions.
-  // The types mirror buildJsonbProjection's casts, so display and derived SQL agree.
-  const inferred = inferJsonbColumns(objs as Record<string, unknown>[])
-  if (inferred.length === 0) return result
-  const columns: QueryResultColumn[] = inferred.map(({ name, kind }) => ({
-    name,
-    dataTypeId: JSONB_KIND_OID[kind],
-    dataTypeName: kind,
+  // Tag each expanded column with its Postgres type (not a blanket "jsonb") so the
+  // grid formats it and the rollup/drag-out UI classifies numeric fields as
+  // aggregatable metrics. Prefer the compiler's AUTHORITATIVE schema (synth_schema)
+  // when supplied; otherwise infer from the rows. Display types mirror
+  // buildJsonbProjection's casts, so the grid and the derived SQL agree.
+  const schema = cols && cols.length > 0 ? cols : inferJsonbColumns(objs as Record<string, unknown>[])
+  if (schema.length === 0) return result
+  const columns: QueryResultColumn[] = schema.map((c) => ({
+    name: c.name,
+    dataTypeId: JSONB_KIND_OID[c.kind],
+    dataTypeName: c.pgType ?? c.kind,
   }))
   return { ...result, columns, rows: objs as Record<string, unknown>[] }
 }
@@ -228,10 +229,55 @@ export function buildJsonbProjection(innerSql: string, cols: JsonbProjectionColu
       const key = c.name.replace(/'/g, "''")
       const alias = quoteSqlIdent(c.name)
       if (c.kind === "jsonb") return `(__v->'${key}') AS ${alias}`
+      // Authoritative cast when the compiler gave us the exact Postgres type
+      // (rvbbit.synth_schema) — exact for bigint/date/etc., not a numeric guess.
+      const pg = c.pgType && safePgType(c.pgType) ? c.pgType : null
+      if (pg) return `(__v->>'${key}')::${pg} AS ${alias}`
       if (c.kind === "numeric") return `(__v->>'${key}')::numeric AS ${alias}`
       if (c.kind === "boolean") return `(__v->>'${key}')::boolean AS ${alias}`
       return `(__v->>'${key}') AS ${alias}`
     })
     .join(", ")
   return `SELECT ${proj} FROM (\n${inner}\n) _rvbbit_src(__v)`
+}
+
+/** A Postgres type name is safe to inline in a `::cast` if it's a canonical type
+ * name (letters, digits, spaces, and `()[],` for modifiers/arrays). The value comes
+ * from the server's catalog (regtype::text), so this is defense-in-depth. */
+function safePgType(t: string): boolean {
+  return /^[a-zA-Z][a-zA-Z0-9 _]*(\(\d+(,\s*\d+)?\))?(\s*\[\])?$/.test(t.trim())
+}
+
+/** Map a Postgres type name to the coarse projection kind for UI classification. */
+export function pgTypeToKind(type: string): JsonbProjectionColumn["kind"] {
+  const t = type.toLowerCase().trim()
+  if (t === "boolean" || t === "bool") return "boolean"
+  if (t === "jsonb" || t === "json" || t.endsWith("[]") || t.includes("record")) return "jsonb"
+  if (
+    /\b(int|integer|bigint|smallint|numeric|decimal|double|real|float|money)\b/.test(t) ||
+    t.includes("number")
+  ) {
+    return "numeric"
+  }
+  return "text"
+}
+
+/** Build projection columns from rvbbit.synth_schema's authoritative output. */
+export function columnsFromServerSchema(
+  rows: { column_name: string; data_type: string }[],
+): JsonbProjectionColumn[] {
+  return rows.map((r) => ({
+    name: r.column_name,
+    kind: pgTypeToKind(r.data_type),
+    pgType: r.data_type,
+  }))
+}
+
+/** Extract the intent literal from a `rvbbit.synth('…')` query so the lens can ask
+ * the server for its authoritative schema. Handles doubled single-quote escapes.
+ * Returns null if it can't be confidently extracted (caller falls back to
+ * inferring types from the result rows). */
+export function extractSynthIntent(sql: string): string | null {
+  const m = /\brvbbit\.synth\s*\(\s*'((?:[^']|'')*)'/i.exec(sql)
+  return m ? m[1].replace(/''/g, "'") : null
 }

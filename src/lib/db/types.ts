@@ -95,12 +95,50 @@ export interface SchemaColumn {
 export interface SchemaTable {
   schema: string
   name: string
+  /** pg_class oid — the join key for the instrument-stats batch. */
+  oid?: number
   kind: "table" | "view" | "matview" | "foreign" | "partition" | "other"
   rowEstimate: number | null
   sizeBytes: number | null
   comment: string | null
   columns: SchemaColumn[]
+  /** true iff the table's access method is rvbbit (pg_class.relam), NOT a schema-name guess. */
   isRvbbit?: boolean
+
+  // ── Finder "instrument panel" fields (all optional; absent ⇒ render neutral) ──
+  /** resolved real row count: crawl count(*) → rvbbit parquet rows → reltuples; never -1. */
+  rows?: number | null
+  rowsSource?: "live" | "crawl" | "estimate" | null
+  /** ISO timestamp the crawl row count was taken (qualifies a "crawl" rows count). */
+  profiledAt?: string | null
+  colCount?: number
+  // rvbbit-accelerated only:
+  parquetRows?: number | null
+  parquetBytes?: number | null
+  rgCount?: number | null
+  coldCount?: number | null
+  // ── per-tier on-disk footprint (storage-breakdown tooltip) ──
+  // heapBytes + hotParquetBytes + coldBytes + indexBytes + toastBytes are
+  // physically disjoint and sum to the table's footprint. vortexBytes/variantBytes
+  // are REDUNDANT accelerator copies — shown separately, never added to the total.
+  heapBytes?: number | null
+  hotParquetBytes?: number | null
+  coldBytes?: number | null
+  indexBytes?: number | null
+  toastBytes?: number | null
+  vortexBytes?: number | null
+  variantBytes?: number | null
+  freshness?: "fresh" | "stale" | "na"
+  generation?: number | null
+  lastCompactAt?: string | null
+  lanceEnabled?: boolean
+  /** distinct queries that touched this table in the last 7d (usage heat). */
+  heat?: number | null
+  /** max drift severity (0–1) vs the previous crawl; null ⇒ no prior run / no change. */
+  driftSeverity?: number | null
+  /** drift signal names, e.g. ["rows_up","null_spike","type_change"]. */
+  driftFlags?: string[] | null
+  driftChangeType?: string | null
 }
 
 export interface SchemaSnapshot {

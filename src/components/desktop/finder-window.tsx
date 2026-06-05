@@ -1,6 +1,6 @@
 "use client"
 
-import { useMemo, useState } from "react"
+import { useMemo, useRef, useState } from "react"
 import {
   ChevronDown,
   ChevronRight,
@@ -10,13 +10,18 @@ import {
   RefreshCw,
   Search,
   Sparkles,
-  Table2,
   Loader2,
 } from "@/lib/icons"
 import { Input } from "@/components/ui/input"
 import { Button } from "@/components/ui/button"
 import type { SchemaSnapshot, SchemaTable } from "@/lib/db/types"
 import { cn } from "@/lib/utils"
+import { Sparkline } from "./sparkline"
+import { useTableTimeline } from "@/lib/rvbbit/use-table-timeline"
+import type { TimelineTick } from "@/lib/rvbbit/time-travel"
+import { driftSeverityColor } from "@/lib/rvbbit/drift-flags"
+import { fmtAgo, fmtBytes, fmtRows, iconForTable } from "@/lib/rvbbit/finder-format"
+import { DriftChips, FinderTooltip, useFinderHoverCard } from "./finder-tooltip"
 
 interface FinderWindowProps {
   schema: SchemaSnapshot | null
@@ -37,6 +42,7 @@ export function FinderWindow({
 }: FinderWindowProps) {
   const [search, setSearch] = useState("")
   const [openSchemas, setOpenSchemas] = useState<Set<string>>(() => new Set(["public", "rvbbit"]))
+  const hover = useFinderHoverCard()
 
   const grouped = useMemo(() => groupTables(schema?.tables ?? [], search), [schema?.tables, search])
 
@@ -83,7 +89,7 @@ export function FinderWindow({
         </span>
       </div>
 
-      <div className="flex-1 overflow-y-auto">
+      <div className="flex-1 overflow-y-auto" onScroll={hover.dismiss}>
         {!schema && loading ? (
           <div className="flex h-32 items-center justify-center text-xs text-chrome-text/70">
             <Loader2 className="mr-2 h-3 w-3 animate-spin" /> Loading schema...
@@ -116,7 +122,14 @@ export function FinderWindow({
               {isOpen ? (
                 <div className="space-y-px pb-1">
                   {tables.map((t) => (
-                    <TableRow key={`${t.schema}.${t.name}`} table={t} onOpen={() => onOpenTable(t.schema, t.name)} />
+                    <TableRow
+                      key={`${t.schema}.${t.name}`}
+                      table={t}
+                      connectionId={activeConnectionId}
+                      onOpen={() => onOpenTable(t.schema, t.name)}
+                      onHover={hover.open}
+                      onHoverEnd={hover.close}
+                    />
                   ))}
                 </div>
               ) : null}
@@ -124,35 +137,278 @@ export function FinderWindow({
           )
         })}
       </div>
+      {hover.target ? <FinderTooltip table={hover.target.table} anchor={hover.target.rect} /> : null}
     </div>
   )
 }
 
-function TableRow({ table, onOpen }: { table: SchemaTable; onOpen: () => void }) {
-  const isRvbbit = table.isRvbbit
+function TableRow({
+  table,
+  connectionId,
+  onOpen,
+  onHover,
+  onHoverEnd,
+}: {
+  table: SchemaTable
+  connectionId: string | null
+  onOpen: () => void
+  onHover: (table: SchemaTable, el: HTMLElement) => void
+  onHoverEnd: () => void
+}) {
+  const [expanded, setExpanded] = useState(false)
+  const isRvbbit = !!table.isRvbbit
+  const Icon = iconForTable(table)
   return (
-    <button
-      type="button"
-      onClick={onOpen}
-      onDoubleClick={onOpen}
-      className={cn(
-        "flex w-full items-center gap-1.5 px-4 py-1 text-left text-xs hover:bg-foreground/[0.05]",
-        "text-foreground",
-      )}
-    >
-      <Table2 className={cn("h-3 w-3 shrink-0", isRvbbit ? "text-rvbbit-accent" : "text-chrome-text/80")} />
-      <span className="truncate flex-1">{table.name}</span>
-      <span className="text-[10px] text-chrome-text/60">
-        {table.kind === "view" ? "view" : table.kind === "matview" ? "mv" : table.rowEstimate != null ? fmtRows(table.rowEstimate) : ""}
-      </span>
-    </button>
+    <div>
+      <div className="group flex items-center gap-1 px-2 py-1 text-xs hover:bg-foreground/[0.05]">
+        {/* expand affordance — only rvbbit tables have a time-travel history */}
+        {isRvbbit ? (
+          <button
+            type="button"
+            onClick={() => setExpanded((e) => !e)}
+            title="time-travel history"
+            className="grid h-3.5 w-3.5 shrink-0 place-items-center text-chrome-text/35 hover:text-foreground"
+          >
+            {expanded ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
+          </button>
+        ) : (
+          <span className="w-3.5 shrink-0" />
+        )}
+        <Icon className={cn("h-3 w-3 shrink-0", isRvbbit ? "text-rvbbit-accent" : "text-chrome-text/70")} />
+        <button
+          type="button"
+          onClick={onOpen}
+          onDoubleClick={onOpen}
+          title={table.comment || `${table.schema}.${table.name}`}
+          className="min-w-0 flex-1 truncate text-left text-foreground hover:underline"
+        >
+          {table.name}
+        </button>
+        <span
+          tabIndex={0}
+          onMouseEnter={(e) => onHover(table, e.currentTarget)}
+          onMouseLeave={onHoverEnd}
+          onFocus={(e) => onHover(table, e.currentTarget)}
+          onBlur={onHoverEnd}
+          aria-label={hoverFallbackTitle(table)}
+          className="rounded outline-none focus-visible:ring-1 focus-visible:ring-rvbbit-accent/50"
+        >
+          <RowBadges table={table} />
+        </span>
+      </div>
+      {expanded && isRvbbit ? <TableTimelinePanel table={table} connectionId={connectionId} /> : null}
+      {/* Heap tables have no expand panel, so surface their drift flags inline
+          (rvbbit tables show the same chips inside the time-travel panel). */}
+      {!isRvbbit && (table.driftFlags?.length ?? 0) > 0 ? (
+        <div className="px-7 pb-1 pl-9">
+          <DriftChips flags={table.driftFlags!} />
+        </div>
+      ) : null}
+    </div>
   )
 }
 
-function fmtRows(n: number): string {
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
-  if (n >= 1_000) return `${(n / 1_000).toFixed(0)}K`
-  return String(n)
+function RowBadges({ table }: { table: SchemaTable }) {
+  const isRvbbit = !!table.isRvbbit
+  // All provenance/detail now lives in the hover card (FinderTooltip); the badges
+  // stay as compact glanceable glyphs with NO native title= (avoids a second
+  // tooltip popping over the card).
+  return (
+    <div className="flex shrink-0 items-center gap-1.5">
+      {table.colCount != null ? (
+        <span className="text-[9px] tabular-nums text-chrome-text/35">{table.colCount}c</span>
+      ) : null}
+      {isRvbbit && table.freshness && table.freshness !== "na" ? (
+        <span
+          className="h-[5px] w-[5px] shrink-0 rounded-full"
+          style={{ backgroundColor: table.freshness === "fresh" ? "var(--success)" : "var(--warning)" }}
+        />
+      ) : null}
+      {isRvbbit && table.rgCount != null && table.rgCount > 0 ? (
+        <TierBar rgCount={table.rgCount} coldCount={table.coldCount ?? 0} />
+      ) : null}
+      {table.lanceEnabled ? <span className="text-[9px] text-rvbbit-accent">✦</span> : null}
+      {table.driftSeverity != null && table.driftSeverity > 0 ? (
+        <span
+          className="h-[5px] w-[5px] shrink-0 rounded-full ring-1 ring-foreground/10"
+          style={{ backgroundColor: driftSeverityColor(table.driftSeverity) }}
+        />
+      ) : null}
+      {table.heat != null && table.heat > 0 ? (
+        <span
+          className="h-[5px] w-[5px] shrink-0 rounded-full"
+          style={{ backgroundColor: "var(--chart-5)", opacity: table.heat >= 10 ? 1 : table.heat >= 3 ? 0.7 : 0.4 }}
+        />
+      ) : null}
+      <span className="w-12 text-right text-[10px] tabular-nums text-chrome-text/60">{rowsLabel(table)}</span>
+    </div>
+  )
+}
+
+function rowsLabel(t: SchemaTable): string {
+  if (t.kind === "view") return "view"
+  if (t.kind === "matview") return "mv"
+  if (t.rows == null) return "·"
+  return (t.rowsSource === "estimate" ? "~" : "") + fmtRows(t.rows)
+}
+
+/** Concise a11y / no-JS fallback for the hover trigger (the rich card has the rest). */
+function hoverFallbackTitle(t: SchemaTable): string {
+  const parts: string[] = [`${t.schema}.${t.name}`]
+  if (t.rows != null) parts.push(`${t.rows.toLocaleString()} rows`)
+  const disk =
+    (t.heapBytes ?? 0) + (t.hotParquetBytes ?? 0) + (t.coldBytes ?? 0) + (t.indexBytes ?? 0) + (t.toastBytes ?? 0)
+  if (disk > 0) parts.push(`${fmtBytes(disk)} on disk`)
+  return parts.join(" · ")
+}
+
+function TierBar({ rgCount, coldCount }: { rgCount: number; coldCount: number }) {
+  const cold = Math.min(Math.max(coldCount, 0), rgCount)
+  const hot = rgCount - cold
+  const label = cold > 0 ? `${cold}/${rgCount}` : null
+  if (rgCount > 12) {
+    const hotPct = Math.round((hot / rgCount) * 100)
+    return (
+      <span className="flex items-center gap-1">
+        <span className="flex h-1.5 w-6 overflow-hidden rounded-full">
+          <span className="h-full" style={{ width: `${hotPct}%`, backgroundColor: "var(--rvbbit-accent)" }} />
+          <span className="h-full flex-1" style={{ backgroundColor: "var(--info)" }} />
+        </span>
+        {label ? <span className="text-[9px] text-chrome-text/40">{label}</span> : null}
+      </span>
+    )
+  }
+  return (
+    <span className="flex items-center gap-1">
+      <span className="flex h-1.5 items-center gap-[1px]">
+        {Array.from({ length: rgCount }).map((_, i) => (
+          <span
+            key={i}
+            className="h-1.5 w-[3px] rounded-[1px]"
+            style={{ backgroundColor: i < hot ? "var(--rvbbit-accent)" : "var(--info)" }}
+          />
+        ))}
+      </span>
+      {label ? <span className="text-[9px] text-chrome-text/40">{label}</span> : null}
+    </span>
+  )
+}
+
+function TableTimelinePanel({ table, connectionId }: { table: SchemaTable; connectionId: string | null }) {
+  const { ticks, loading } = useTableTimeline(connectionId, { schema: table.schema, name: table.name }, true)
+  return (
+    <div className="px-7 pb-1.5 pt-0.5">
+      <div className="rounded border border-chrome-border/40 bg-foreground/[0.02] px-2 py-1.5">
+        {loading ? (
+          <div className="flex h-7 items-center gap-1.5 text-[10px] text-chrome-text/50">
+            <Loader2 className="h-3 w-3 animate-spin" /> loading history…
+          </div>
+        ) : ticks.length === 0 ? (
+          <div className="text-[10px] text-chrome-text/40">no time-travel history yet</div>
+        ) : (
+          <TimelineScrubber ticks={ticks} />
+        )}
+        {ticks.length > 0 ? (
+          <div className="mt-1 flex flex-wrap items-center gap-x-2 text-[9px] text-chrome-text/50">
+            <span>gen {table.generation ?? ticks[0]?.generation ?? "—"}</span>
+            {table.lastCompactAt ? <span>· compacted {fmtAgo(table.lastCompactAt)}</span> : null}
+            {table.rgCount != null ? (
+              <span>
+                · {table.rgCount} rg{table.coldCount ? ` (${table.coldCount} cold)` : ""}
+              </span>
+            ) : null}
+            {table.parquetBytes ? <span>· {fmtBytes(table.parquetBytes)}</span> : null}
+          </div>
+        ) : null}
+        {(table.driftFlags?.length ?? 0) > 0 ? (
+          <div className="mt-1">
+            <DriftChips flags={table.driftFlags!} />
+          </div>
+        ) : null}
+      </div>
+    </div>
+  )
+}
+
+/**
+ * Drag (or hover) across a table's time-travel history and the row count +
+ * marker move live "as of" that generation — nothing is committed, it's pure
+ * exploration. Reuses the lazy-fetched timeline + the Sparkline visual.
+ */
+function TimelineScrubber({ ticks }: { ticks: TimelineTick[] }) {
+  const series = useMemo(() => ticks.slice().reverse(), [ticks]) // oldest → newest (left → right)
+  const values = useMemo(() => series.map((t) => t.visibleRowsEstimate), [series])
+  const max = useMemo(() => Math.max(1, ...values), [values])
+  const [idx, setIdx] = useState<number | null>(null) // null ⇒ "now" (latest)
+  const ref = useRef<HTMLDivElement | null>(null)
+  const n = series.length
+  const H = 30
+
+  const active = idx == null ? n - 1 : Math.max(0, Math.min(n - 1, idx))
+  const tick = series[active]
+  const markerPct = n > 1 ? (active / (n - 1)) * 100 : 50
+  // mirror Sparkline.buildPath's toY (padTop=2, inner=H-4) so the dot rides the curve
+  const PAD = 2
+  const inner = Math.max(1, H - PAD * 2)
+  const dotTop = tick ? PAD + inner - (tick.visibleRowsEstimate / max) * inner : H / 2
+
+  const scrub = (clientX: number) => {
+    const el = ref.current
+    if (!el || n === 0) return
+    const rect = el.getBoundingClientRect()
+    const frac = rect.width > 0 ? (clientX - rect.left) / rect.width : 0
+    setIdx(Math.max(0, Math.min(n - 1, Math.round(frac * (n - 1)))))
+  }
+
+  return (
+    <div>
+      <div
+        ref={ref}
+        className="relative cursor-ew-resize touch-none select-none"
+        onPointerDown={(e) => {
+          e.currentTarget.setPointerCapture(e.pointerId)
+          scrub(e.clientX)
+        }}
+        onPointerMove={(e) => scrub(e.clientX)}
+        onPointerUp={() => setIdx(null)}
+        onPointerLeave={() => setIdx(null)}
+        title="drag to scrub the row count over time"
+      >
+        <Sparkline values={values} height={H} color="var(--rvbbit-accent)" yMin={0} yMax={max} />
+        {n > 0 ? (
+          <>
+            <div
+              className="pointer-events-none absolute inset-y-0 w-px bg-terminal/50"
+              style={{ left: `${markerPct}%` }}
+            />
+            <div
+              className="pointer-events-none absolute h-1.5 w-1.5 -translate-x-1/2 -translate-y-1/2 rounded-full bg-terminal ring-2 ring-block-bg"
+              style={{ left: `${markerPct}%`, top: dotTop }}
+            />
+          </>
+        ) : null}
+      </div>
+      <div className="mt-1 flex items-baseline gap-1.5 font-mono text-[9px] text-chrome-text/55">
+        <span className="tabular-nums text-foreground">{tick ? tick.visibleRowsEstimate.toLocaleString() : "—"}</span>
+        <span>rows</span>
+        <span className="ml-auto">
+          {tick ? `${idx == null ? "now" : "as of"} ${fmtDateTime(tick.committedAt)} · gen ${tick.generation}` : ""}
+        </span>
+      </div>
+    </div>
+  )
+}
+
+function fmtDateTime(iso: string): string {
+  const d = new Date(iso)
+  if (!Number.isFinite(d.getTime())) return iso
+  return d.toLocaleString(undefined, {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  })
 }
 
 function groupTables(tables: SchemaTable[], search: string) {

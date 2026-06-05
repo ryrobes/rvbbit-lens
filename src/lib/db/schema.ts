@@ -2,6 +2,7 @@ import "server-only"
 
 import { getPool } from "./pool"
 import type { ExtensionInfo, SchemaColumn, SchemaSnapshot, SchemaTable } from "./types"
+import { loadFinderStats } from "./finder-stats"
 
 const TABLE_QUERY = `
 SELECT
@@ -18,9 +19,17 @@ SELECT
   END                                               AS kind,
   c.reltuples::bigint                               AS row_estimate,
   pg_total_relation_size(c.oid)::bigint             AS size_bytes,
-  obj_description(c.oid, 'pg_class')                AS comment
+  -- COALESCE: pg_*_relation_size returns NULL for a relation whose file is gone
+  -- (e.g. concurrent DROP); without it the tier silently vanishes from the total.
+  COALESCE(pg_relation_size(c.oid), 0)::bigint      AS heap_bytes,
+  COALESCE(pg_indexes_size(c.oid), 0)::bigint       AS index_bytes,
+  CASE WHEN c.reltoastrelid <> 0
+       THEN COALESCE(pg_relation_size(c.reltoastrelid), 0) ELSE 0 END::bigint AS toast_bytes,
+  obj_description(c.oid, 'pg_class')                AS comment,
+  (am.amname = 'rvbbit')                            AS relam_is_rvbbit
 FROM pg_class c
 JOIN pg_namespace n ON n.oid = c.relnamespace
+LEFT JOIN pg_am am ON am.oid = c.relam
 WHERE c.relkind IN ('r','v','m','f','p')
   AND n.nspname NOT IN ('pg_catalog','information_schema')
   AND n.nspname NOT LIKE 'pg_toast%'
@@ -74,7 +83,7 @@ export async function loadSchema(connectionId: string): Promise<SchemaSnapshot> 
   const { pool } = await getPool(connectionId)
   const client = await pool.connect()
   try {
-    const [tablesResult, columnsResult, dbResult, schemasResult, extResult] = await Promise.all([
+    const [tablesResult, columnsResult, dbResult, schemasResult, extResult, finderStats] = await Promise.all([
       client.query(TABLE_QUERY),
       client.query(COLUMN_QUERY),
       client.query<{ database: string }>("SELECT current_database() AS database"),
@@ -86,6 +95,7 @@ export async function loadSchema(connectionId: string): Promise<SchemaSnapshot> 
          ORDER BY nspname`,
       ),
       client.query<ExtensionInfo>(EXTENSION_QUERY),
+      loadFinderStats(client),
     ])
 
     // Group columns by oid for O(n) join.
@@ -115,17 +125,71 @@ export async function loadSchema(connectionId: string): Promise<SchemaSnapshot> 
       kind: SchemaTable["kind"]
       row_estimate: string | number | null
       size_bytes: string | number | null
+      heap_bytes: string | number | null
+      index_bytes: string | number | null
+      toast_bytes: string | number | null
       comment: string | null
-    }>).map((t) => ({
-      schema: t.schema,
-      name: t.name,
-      kind: t.kind,
-      rowEstimate: t.row_estimate == null ? null : Number(t.row_estimate),
-      sizeBytes: t.size_bytes == null ? null : Number(t.size_bytes),
-      comment: t.comment,
-      columns: colsByTable.get(String(t.oid)) ?? [],
-      isRvbbit: t.schema === "rvbbit" || t.schema === "pg_rvbbit",
-    }))
+      relam_is_rvbbit: boolean | null
+    }>).map((t) => {
+      const numOrNull = (v: string | number | null) => (v == null ? null : Number(v))
+      const cols = colsByTable.get(String(t.oid)) ?? []
+      const isRvbbit = t.relam_is_rvbbit === true
+      const st = finderStats.byOid.get(String(t.oid))
+      const reltuples = t.row_estimate == null ? null : Number(t.row_estimate)
+      // PG14+ uses -1 as the "never analyzed" sentinel — clamp to null so we
+      // never render a literal -1.
+      const heapEst = reltuples != null && reltuples >= 0 ? reltuples : null
+      // Real count(*) from the crawl wins; then live rvbbit parquet rows; then
+      // the heap estimate.
+      let rows: number | null = null
+      let rowsSource: SchemaTable["rowsSource"] = null
+      if (st?.crawlRows != null) {
+        rows = st.crawlRows
+        rowsSource = "crawl"
+      } else if (isRvbbit && st?.parquetRows != null) {
+        rows = st.parquetRows
+        rowsSource = "live"
+      } else if (heapEst != null) {
+        rows = heapEst
+        rowsSource = "estimate"
+      }
+      return {
+        schema: t.schema,
+        name: t.name,
+        oid: Number(t.oid),
+        kind: t.kind,
+        rowEstimate: reltuples,
+        sizeBytes: t.size_bytes == null ? null : Number(t.size_bytes),
+        comment: t.comment,
+        columns: cols,
+        colCount: cols.length,
+        isRvbbit,
+        rows,
+        rowsSource,
+        profiledAt: st?.profiledAt ?? null,
+        parquetRows: st?.parquetRows ?? null,
+        parquetBytes: st?.parquetBytes ?? null,
+        rgCount: st?.rgCount ?? null,
+        coldCount: st?.coldCount ?? null,
+        // pg-native footprint (universal — every table); cold copies handled below.
+        heapBytes: numOrNull(t.heap_bytes),
+        indexBytes: numOrNull(t.index_bytes),
+        toastBytes: numOrNull(t.toast_bytes),
+        // rvbbit row-group split + redundant accelerator copies.
+        hotParquetBytes: st?.hotParquetBytes ?? null,
+        coldBytes: st?.coldBytes ?? null,
+        vortexBytes: st?.vortexBytes ?? null,
+        variantBytes: st?.variantBytes ?? null,
+        freshness: !isRvbbit ? "na" : st ? (st.shadowDirty ? "stale" : "fresh") : "na",
+        generation: st?.generation ?? null,
+        lastCompactAt: st?.lastCompactAt ?? null,
+        lanceEnabled: !!st?.lanceUrl,
+        heat: st?.heat ?? null,
+        driftSeverity: st?.driftSeverity ?? null,
+        driftFlags: st?.driftFlags ?? null,
+        driftChangeType: st?.driftChangeType ?? null,
+      }
+    })
 
     const extensions = extResult.rows
     const rvbbitExt = extensions.find((e) => e.name === "rvbbit" || e.name === "pg_rvbbit") ?? null

@@ -4,6 +4,7 @@ import { useEffect, useState } from "react"
 import { Activity, CaretRight, ChevronDown, Database, Plug, Plus } from "@/lib/icons"
 import { cn } from "@/lib/utils"
 import { RvbbitLogo } from "./rvbbit-logo"
+import { SchedulerTray } from "./scheduler-tray"
 import { APP_NAME, APP_VERSION } from "@/lib/version"
 import {
   FONT_SCALE_LABELS,
@@ -47,6 +48,8 @@ interface DesktopMenuBarProps {
   onOpenQueryLens: () => void
   onOpenDataSearch: () => void
   onOpenDrift: () => void
+  /** Open a SQL window with given content (deep-links from the scheduler tray). */
+  onOpenSql: (sql: string, title: string) => void
   onOpenModelStudio: () => void
   onOpenCatalogGraph: () => void
   onOpenKgBrowser: () => void
@@ -131,6 +134,7 @@ export function DesktopMenuBar({
   onOpenQueryLens,
   onOpenDataSearch,
   onOpenDrift,
+  onOpenSql,
   onOpenModelStudio,
   onOpenCatalogGraph,
   onOpenKgBrowser,
@@ -306,6 +310,14 @@ export function DesktopMenuBar({
           occupancy={workspaceOccupancy}
           onSwitch={onSwitchWorkspace}
         />
+        <span className="text-chrome-text/30">·</span>
+        <SchedulerTray
+          activeConnectionId={activeConnectionId}
+          hasRvbbit={hasRvbbit}
+          onOpenSql={onOpenSql}
+          onOpenDrift={onOpenDrift}
+        />
+        <MenuBarClock />
         <span className="text-chrome-text/30">·</span>
         {hasRvbbit ? (
           <span className="rounded-full border border-rvbbit-accent/60 bg-rvbbit-bg/40 px-2 py-0.5 text-[10px] uppercase tracking-wide text-rvbbit-accent">
@@ -533,6 +545,32 @@ function SubmenuEntry({
         </div>
       ) : null}
     </div>
+  )
+}
+
+// ── Menu-bar clock (local time, no seconds) ────────────────────────
+
+function MenuBarClock() {
+  // null until mounted so SSR and client agree (no hydration mismatch); ticking is
+  // done in timer callbacks (not synchronously in the effect body).
+  const [now, setNow] = useState<Date | null>(null)
+  useEffect(() => {
+    const tick = () => setNow(new Date())
+    const first = setTimeout(tick, 0)
+    const id = setInterval(tick, 20_000) // no seconds shown — a coarse tick is plenty
+    return () => {
+      clearTimeout(first)
+      clearInterval(id)
+    }
+  }, [])
+  if (!now) return null
+  const date = now.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" })
+  const time = now.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit", hour12: true })
+  return (
+    <span className="hidden items-center gap-1.5 tabular-nums sm:inline-flex" title={now.toString()}>
+      <span className="text-chrome-text/55">{date}</span>
+      <span className="text-foreground">{time}</span>
+    </span>
   )
 }
 

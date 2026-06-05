@@ -15,6 +15,7 @@ import {
   type ObjectHistoryPoint,
 } from "@/lib/rvbbit/catalog-drift"
 import type { DriftPayload } from "@/lib/desktop/types"
+import { FLAG_META, TONE_CLASS } from "@/lib/rvbbit/drift-flags"
 
 interface DriftWindowProps {
   payload: DriftPayload
@@ -23,35 +24,7 @@ interface DriftWindowProps {
   onOpenTable: (schema: string, name: string) => void
 }
 
-// Flag → short label + visual tone. Tones map to chip classes below.
-const FLAG_META: Record<string, { label: string; tone: "danger" | "warn" | "add" | "info" | "muted" }> = {
-  added: { label: "added", tone: "add" },
-  dropped: { label: "dropped", tone: "danger" },
-  type_change: { label: "type", tone: "danger" },
-  became_nullable: { label: "→ nullable", tone: "warn" },
-  became_not_null: { label: "→ not null", tone: "warn" },
-  pk_change: { label: "pk", tone: "warn" },
-  fk_change: { label: "fk", tone: "warn" },
-  null_spike: { label: "null spike", tone: "danger" },
-  new_values: { label: "new values", tone: "info" },
-  lost_values: { label: "lost values", tone: "warn" },
-  dist_shift: { label: "dist shift", tone: "info" },
-  ndv_up: { label: "ndv ↑", tone: "muted" },
-  ndv_down: { label: "ndv ↓", tone: "muted" },
-  rows_up: { label: "rows ↑", tone: "muted" },
-  rows_down: { label: "rows ↓", tone: "muted" },
-  range_shift: { label: "range", tone: "muted" },
-  embed_drift: { label: "char drift", tone: "info" },
-  comment_change: { label: "comment", tone: "muted" },
-}
-
-const TONE_CLASS: Record<string, string> = {
-  danger: "bg-danger/15 text-danger",
-  warn: "bg-amber-500/15 text-amber-500",
-  add: "bg-emerald-500/15 text-emerald-500",
-  info: "bg-[var(--brand-kg)]/15 text-[var(--brand-kg)]",
-  muted: "bg-foreground/[0.07] text-chrome-text/70",
-}
+// FLAG_META + TONE_CLASS now live in @/lib/rvbbit/drift-flags (shared with the Finder).
 
 export function DriftWindow({ payload, activeConnectionId, hasRvbbit, onOpenTable }: DriftWindowProps) {
   const [runs, setRuns] = useState<CatalogRun[]>([])

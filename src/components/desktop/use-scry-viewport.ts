@@ -30,6 +30,15 @@ export interface UseScryViewport {
    * the point isn't centered under it.
    */
   centerOnWorld: (wx: number, wy: number, rightInset?: number) => void
+  /**
+   * Frame a world bounding box into the visible region: pick the scale that fits
+   * (within the zoom clamp) and pan to center it. `rightInset`/`topInset` reserve
+   * the rail + HUD bands so the graph isn't framed under them.
+   */
+  fitToWorld: (
+    box: { minX: number; minY: number; maxX: number; maxY: number },
+    opts?: { padding?: number; rightInset?: number; topInset?: number },
+  ) => void
 }
 
 export function useScryViewport(open: boolean): UseScryViewport {
@@ -108,6 +117,25 @@ export function useScryViewport(open: boolean): UseScryViewport {
     })
   }, [])
 
+  const fitToWorld = useCallback<UseScryViewport["fitToWorld"]>((box, opts) => {
+    const padding = opts?.padding ?? 80
+    const rightInset = opts?.rightInset ?? 0
+    const topInset = opts?.topInset ?? 0
+    const w = typeof window !== "undefined" ? window.innerWidth : 1280
+    const h = typeof window !== "undefined" ? window.innerHeight : 720
+    const availW = Math.max(1, w - rightInset - padding * 2)
+    const availH = Math.max(1, h - topInset - padding * 2)
+    const bw = Math.max(1, box.maxX - box.minX) // 1-node box has 0 extent → guard
+    const bh = Math.max(1, box.maxY - box.minY)
+    const scale = Math.min(SCRY_MAX_SCALE, Math.max(SCRY_MIN_SCALE, Math.min(availW / bw, availH / bh)))
+    const cx = (box.minX + box.maxX) / 2
+    const cy = (box.minY + box.maxY) / 2
+    // center the box in the inset-reduced region (left of the rail, below the HUD)
+    const screenCx = (w - rightInset) / 2
+    const screenCy = (h + topInset) / 2
+    setViewport(clampScryViewport({ x: screenCx - cx * scale, y: screenCy - cy * scale, scale }))
+  }, [])
+
   return {
     viewport,
     containerRef,
@@ -117,5 +145,6 @@ export function useScryViewport(open: boolean): UseScryViewport {
     onCanvasPointerMove,
     onCanvasPointerUp,
     centerOnWorld,
+    fitToWorld,
   }
 }

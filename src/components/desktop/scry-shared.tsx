@@ -1,4 +1,8 @@
+"use client"
+
+import type { ReactNode } from "react"
 import { Hash, Table2 } from "@/lib/icons"
+import { cn } from "@/lib/utils"
 import type { DataSearchHit } from "@/lib/rvbbit/data-search"
 
 /** `schema.rel` for a table hit, `schema.rel.col` for a column hit. */
@@ -16,6 +20,56 @@ export function KindBadge({ kind }: { kind: DataSearchHit["kind"] }) {
     >
       <Icon className="h-2.5 w-2.5" />
     </span>
+  )
+}
+
+/**
+ * Small Warm-Ink action button shared by the Scry control cluster (and reusable
+ * by node toolbars). Stops pointerdown so clicking it never arms a canvas pan.
+ */
+export function ScryActionButton({
+  label,
+  icon,
+  onClick,
+  active,
+  disabled,
+  danger,
+  title,
+}: {
+  label?: string
+  icon: ReactNode
+  onClick: () => void
+  active?: boolean
+  disabled?: boolean
+  danger?: boolean
+  title?: string
+}) {
+  return (
+    <button
+      type="button"
+      disabled={disabled}
+      title={title}
+      onPointerDown={(e) => {
+        e.stopPropagation()
+        e.preventDefault()
+      }}
+      onPointerUp={(e) => e.stopPropagation()}
+      onClick={(e) => {
+        e.stopPropagation()
+        onClick()
+      }}
+      className={cn(
+        "flex items-center gap-1 rounded border px-1.5 py-0.5 text-[10px] transition-colors disabled:opacity-40",
+        active
+          ? "bg-terminal/20 text-foreground"
+          : "bg-block-bg text-chrome-text hover:text-foreground",
+        danger ? "hover:bg-danger/15" : "hover:bg-terminal/15",
+      )}
+      style={{ borderColor: active ? "var(--terminal)" : "var(--chrome-border)" }}
+    >
+      {icon}
+      {label ? <span className="font-mono">{label}</span> : null}
+    </button>
   )
 }
 

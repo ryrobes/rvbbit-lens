@@ -12,11 +12,19 @@ export function ScryHud({
   cascade,
   onClose,
   addedCount = 0,
+  bloomOverflow = 0,
+  scopeActive = false,
+  onExitScope,
 }: {
   cascade: UseScryCascade
   onClose: () => void
   /** count of tables transferred to the desktop this session */
   addedCount?: number
+  /** hits beyond the bloom cap (still listed in the rail) */
+  bloomOverflow?: number
+  /** a subgraph scope is active */
+  scopeActive?: boolean
+  onExitScope?: () => void
 }) {
   const { stages, finalHits, finalError, canRefine } = cascade
   const relCount = new Set(finalHits.map((h) => `${h.schema}.${h.rel}`)).size
@@ -85,6 +93,24 @@ export function ScryHud({
             "type to scry the catalog"
           )}
         </span>
+        {bloomOverflow > 0 ? (
+          <span
+            className="rounded-full border border-chrome-border/60 px-1.5 py-0.5 text-[9px] text-chrome-text/55"
+            title={`${bloomOverflow} hits past the canvas cap — all are listed in the rail`}
+          >
+            +{bloomOverflow} in rail
+          </span>
+        ) : null}
+        {scopeActive ? (
+          <button
+            type="button"
+            onClick={onExitScope}
+            title="Exit subgraph scope (c)"
+            className="rounded-full border border-terminal/50 bg-terminal/10 px-1.5 py-0.5 text-[9px] text-terminal hover:bg-terminal/20"
+          >
+            scope · exit
+          </button>
+        ) : null}
         <span className="ml-auto flex items-center gap-2">
           <button
             type="button"

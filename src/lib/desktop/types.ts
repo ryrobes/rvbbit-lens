@@ -4,6 +4,7 @@ import type { DataSearchHit } from "@/lib/rvbbit/data-search"
 export type DesktopWindowKind =
   | "finder"
   | "data"
+  | "csv-import"
   | "query-document"
   | "artifact"
   | "view-app"
@@ -68,6 +69,7 @@ export interface DesktopWindowState {
 export type WindowPayload =
   | FinderPayload
   | DataPayload
+  | CsvImportPayload
   | QueryDocumentPayload
   | ArtifactPayload
   | ViewAppPayload
@@ -108,6 +110,21 @@ export type WindowPayload =
 export interface FinderPayload {
   kind?: "finder"
   selectedSchema?: string
+}
+
+/**
+ * CSV importer window. The dropped `File` itself lives in the transient
+ * file-store (keyed by window id) since a File can't be serialized into a
+ * persisted payload; only its descriptive metadata travels here so a
+ * restored window can show which file it was (and prompt a re-drop).
+ */
+export interface CsvImportPayload {
+  kind?: "csv-import"
+  fileName: string
+  fileSize: number
+  lastModified?: number
+  /** Schema pre-selected when the import was launched (defaults to "public"). */
+  defaultSchema?: string
 }
 
 export interface DataPayload {
@@ -158,11 +175,15 @@ export interface DataPayload {
   jsonbProjection?: JsonbProjectionColumn[]
 }
 
-/** One expanded column of a jsonb-returning block, with a type inferred from the
- * result rows so the projection can cast it for GROUP BY / aggregation. */
+/** One expanded column of a jsonb-returning block. `kind` is the coarse class used
+ * to classify the column (numeric metric vs dimension); `pgType`, when present, is
+ * the AUTHORITATIVE Postgres type captured by the compiler (rvbbit.synth_schema) so
+ * the projection casts exactly (`::bigint`, `::date`, …) instead of guessing from
+ * sampled rows. Absent for flow blocks (which still infer from data). */
 export interface JsonbProjectionColumn {
   name: string
   kind: "numeric" | "boolean" | "jsonb" | "text"
+  pgType?: string
 }
 
 export interface KgSourceContext {

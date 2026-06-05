@@ -2,7 +2,7 @@
 
 import { useRef } from "react"
 import type { PointerEvent as ReactPointerEvent, ReactNode } from "react"
-import { Check, Eye, GitBranch, Loader2, Maximize2 } from "@/lib/icons"
+import { Check, Eye, GitBranch, Loader2, Maximize2, Target, Trash2 } from "@/lib/icons"
 import { cn } from "@/lib/utils"
 import type { ScryNode } from "@/lib/desktop/scry-scene"
 import { hitLabel, KindBadge, ScoreBar } from "./scry-shared"
@@ -31,6 +31,16 @@ interface ScryNodeBoxProps {
   /** cached preview entry (undefined until first toggled) */
   preview?: PreviewEntry
   onTogglePreview: (node: ScryNode) => void
+  /** isolate this node's connected component (scope-within) */
+  onScope: (id: string) => void
+  /** remove this node + its edges from the canvas */
+  onRemove: (id: string) => void
+  /** dimmed because a scope is active and this node is outside it */
+  dimmed?: boolean
+  /** a layout/fit commit is in flight — tween position changes (off during drag) */
+  animating?: boolean
+  /** expansion refused because the graph is at the node cap */
+  capped?: boolean
 }
 
 export function ScryNodeBox({
@@ -48,6 +58,11 @@ export function ScryNodeBox({
   previewed,
   preview,
   onTogglePreview,
+  onScope,
+  onRemove,
+  dimmed,
+  animating,
+  capped,
 }: ScryNodeBoxProps) {
   const drag = useRef<{ id: number; sx: number; sy: number; ox: number; oy: number; moved: boolean } | null>(null)
 
@@ -84,6 +99,11 @@ export function ScryNodeBox({
         height: node.h,
         // lift previewed/selected cards so their expanded panel isn't occluded
         zIndex: previewed ? 30 : selected ? 20 : undefined,
+        // out-of-scope nodes dim back and stop intercepting pointers
+        opacity: dimmed ? 0.22 : undefined,
+        pointerEvents: dimmed ? "none" : undefined,
+        // tween position only during a layout/fit commit — never during drag
+        transition: animating ? "left .3s ease, top .3s ease, opacity .2s ease" : undefined,
       }}
     >
       <div
@@ -112,6 +132,11 @@ export function ScryNodeBox({
           <span className="text-[9px] uppercase tracking-wider text-chrome-text/55">
             {node.hit.kind === "db_table" ? "table" : "column"}
             {truncated ? <span className="ml-1 text-terminal/70">+more</span> : null}
+            {capped ? (
+              <span className="ml-1 text-warning" title="graph at node cap — remove or scope to expand further">
+                cap
+              </span>
+            ) : null}
           </span>
           <ScoreBar score={node.hit.score} />
         </div>
@@ -166,6 +191,8 @@ export function ScryNodeBox({
             onClick={() => onAddToDesktop(node)}
             icon={added ? <Check className="h-3 w-3 opacity-70" /> : <Maximize2 className="h-3 w-3" />}
           />
+          <NodeAction label="scope" onClick={() => onScope(node.id)} icon={<Target className="h-3 w-3" />} />
+          <NodeAction label="remove" danger onClick={() => onRemove(node.id)} icon={<Trash2 className="h-3 w-3" />} />
         </div>
       ) : null}
     </div>
@@ -177,11 +204,13 @@ function NodeAction({
   icon,
   onClick,
   disabled,
+  danger,
 }: {
   label: string
   icon: ReactNode
   onClick: () => void
   disabled?: boolean
+  danger?: boolean
 }) {
   return (
     <button
@@ -197,8 +226,11 @@ function NodeAction({
         e.stopPropagation()
         onClick()
       }}
-      className="flex items-center gap-1 rounded border bg-block-bg px-1.5 py-0.5 text-[10px] text-foreground shadow-sm transition-colors hover:bg-terminal/15 disabled:opacity-60"
-      style={{ borderColor: "var(--terminal)" }}
+      className={cn(
+        "flex items-center gap-1 rounded border bg-block-bg px-1.5 py-0.5 text-[10px] text-foreground shadow-sm transition-colors disabled:opacity-60",
+        danger ? "hover:bg-danger/20" : "hover:bg-terminal/15",
+      )}
+      style={{ borderColor: danger ? "color-mix(in oklch, var(--danger) 55%, var(--terminal))" : "var(--terminal)" }}
     >
       {icon}
       <span className="font-mono">{label}</span>

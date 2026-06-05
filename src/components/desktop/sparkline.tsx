@@ -36,10 +36,12 @@ export function Sparkline({
   yMax,
   className,
 }: SparklineProps) {
-  const series = values.slice(-maxPoints)
+  // Slice inside the memo so the deps are the stable `values` ref + scalars —
+  // otherwise `values.slice()` made a fresh array every render and the memo
+  // never held (buildPath re-ran on every parent re-render).
   const { d, area, lastY, hasPoints } = useMemo(
-    () => buildPath(series, height, yMin, yMax),
-    [series, height, yMin, yMax],
+    () => buildPath(values.slice(-maxPoints), height, yMin, yMax),
+    [values, maxPoints, height, yMin, yMax],
   )
 
   return (

@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react"
 import type { ScryNode } from "@/lib/desktop/scry-scene"
+import { MAX_OPEN_PREVIEWS, MAX_PREVIEW_CACHE } from "@/lib/desktop/scry-limits"
 import { fetchColumnPreview, fetchNodeMeta, fetchTablePreview, type NodeMeta, type PreviewData } from "@/lib/desktop/scry-preview"
 
 export interface PreviewEntry {
@@ -22,6 +23,20 @@ export function useScryPreview(args: { connectionId: string | null; open: boolea
   const [cache, setCache] = useState<Map<string, PreviewEntry>>(new Map())
   const cacheRef = useRef(cache)
   cacheRef.current = cache
+  const previewedRef = useRef(previewed)
+  previewedRef.current = previewed
+
+  // Bound the cache: evict oldest entries (Map preserves insertion order) that
+  // aren't currently open. Previews are re-fetchable, so this loses nothing.
+  const evictCache = (m: Map<string, PreviewEntry>): Map<string, PreviewEntry> => {
+    if (m.size <= MAX_PREVIEW_CACHE) return m
+    const open = previewedRef.current
+    for (const k of m.keys()) {
+      if (m.size <= MAX_PREVIEW_CACHE) break
+      if (!open.has(k)) m.delete(k)
+    }
+    return m
+  }
   const connRef = useRef(args.connectionId)
   connRef.current = args.connectionId
   const inflight = useRef<Set<string>>(new Set())
@@ -44,12 +59,12 @@ export function useScryPreview(args: { connectionId: string | null; open: boolea
     if (node.hit.kind === "db_column" && !node.hit.col) {
       // stamp a visible error rather than silently leaving no cache entry
       // (which would render an indefinite spinner)
-      setCache((m) => new Map(m).set(id, { meta: null, preview: null, loading: false, error: "column name unavailable" }))
+      setCache((m) => evictCache(new Map(m).set(id, { meta: null, preview: null, loading: false, error: "column name unavailable" })))
       return
     }
     const mySession = sessionRef.current
     inflight.current.add(id)
-    setCache((m) => new Map(m).set(id, { meta: null, preview: null, loading: true, error: null }))
+    setCache((m) => evictCache(new Map(m).set(id, { meta: null, preview: null, loading: true, error: null })))
     void (async () => {
       try {
         const [meta, preview] = await Promise.all([
@@ -59,16 +74,16 @@ export function useScryPreview(args: { connectionId: string | null; open: boolea
             : fetchColumnPreview(conn, node.hit.schema, node.hit.rel, node.hit.col as string),
         ])
         if (sessionRef.current !== mySession) return
-        setCache((m) => new Map(m).set(id, { meta, preview, loading: false, error: null }))
+        setCache((m) => evictCache(new Map(m).set(id, { meta, preview, loading: false, error: null })))
       } catch (e) {
         if (sessionRef.current !== mySession) return
         setCache((m) =>
-          new Map(m).set(id, {
+          evictCache(new Map(m).set(id, {
             meta: null,
             preview: null,
             loading: false,
             error: e instanceof Error ? e.message : String(e),
-          }),
+          })),
         )
       } finally {
         if (sessionRef.current === mySession) inflight.current.delete(id)
@@ -85,6 +100,13 @@ export function useScryPreview(args: { connectionId: string | null; open: boolea
           next.delete(id) // collapse — keep the cache for an instant re-open
         } else {
           next.add(id)
+          // perf cap: too many open panels is the heaviest DOM cost — LRU-close
+          // the oldest still-open panel (insertion order). Re-openable instantly.
+          while (next.size > MAX_OPEN_PREVIEWS) {
+            const oldest = next.values().next().value
+            if (oldest === undefined || oldest === id) break
+            next.delete(oldest)
+          }
           // fetch on first open, or to RETRY a previously-failed entry
           const entry = cacheRef.current.get(id)
           if (!entry || entry.error) fetchFor(node)

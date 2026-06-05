@@ -43,7 +43,16 @@ import { RollupShelf, type FilterKind } from "./rollup-shelf"
 import type { QueryResult } from "@/lib/db/types"
 import { cn } from "@/lib/utils"
 import { rowsToCsv } from "@/lib/sql/format"
-import { hasTopLevelThen, wrapFlow, expandFlowResult, isSynthQuery, inferJsonbColumns } from "@/lib/sql/then-rewrite"
+import {
+  hasTopLevelThen,
+  wrapFlow,
+  expandFlowResult,
+  isSynthQuery,
+  inferJsonbColumns,
+  columnsFromServerSchema,
+  extractSynthIntent,
+} from "@/lib/sql/then-rewrite"
+import type { JsonbProjectionColumn } from "@/lib/desktop/types"
 import {
   buildDesktopRuntimeGraph,
   paramKey,
@@ -290,18 +299,50 @@ export function DataGridWindow({
         setRunState({ kind: "error", error: body.error, code: body.code, detail: body.detail, hint: body.hint })
         setIsPipelineRun(false)
       } else {
-        // flow() / synth() return a single jsonb column per row; expand into columns.
-        const finalResult = isPipeline || isSynth ? expandFlowResult(body) : body
-        // When a rvbbit.synth() result actually expanded, record the inferred column
-        // shape so the reactive graph can wrap *references* to this block in a typed
-        // projection (drag-out rollups / block.<name> refs see real columns, not
-        // jsonb). Synth-only: a bare-`then` pipeline's compiledSql is not valid SQL
-        // as a subquery (the flow() wrapping is added only at run time), so projecting
-        // over it would be unparseable. When it didn't expand (ordinary query), clear
-        // any stale projection.
+        // For a rvbbit.synth() block, ask the compiler for the AUTHORITATIVE column
+        // schema (synth_schema — exact Postgres types, captured at compile time) so
+        // the grid types and the projection casts are precise instead of guessed from
+        // sampled rows. Falls back to inference if it can't be fetched.
+        let synthCols: JsonbProjectionColumn[] | undefined
+        if (isSynth) {
+          const intent = extractSynthIntent(compiled)
+          if (intent) {
+            try {
+              const sres = await fetch("/api/db/query", {
+                method: "POST",
+                headers: { "content-type": "application/json" },
+                body: JSON.stringify({
+                  connectionId: activeConnectionId,
+                  sql: `SELECT column_name, data_type FROM rvbbit.synth_schema('${intent.replace(/'/g, "''")}')`,
+                  rowLimit: 500,
+                  readOnly: false,
+                }),
+              })
+              const sbody = (await sres.json()) as {
+                ok: boolean
+                rows?: { column_name: string; data_type: string }[]
+              }
+              if (runNonceRef.current !== myNonce) return
+              if (sbody.ok && sbody.rows && sbody.rows.length > 0) {
+                synthCols = columnsFromServerSchema(sbody.rows)
+              }
+            } catch {
+              /* fall back to inference */
+            }
+          }
+        }
+        // flow() / synth() return a single jsonb column per row; expand into columns
+        // (using the authoritative synth schema when we have it).
+        const finalResult = isPipeline || isSynth ? expandFlowResult(body, synthCols) : body
+        // Record the column shape so the reactive graph can wrap *references* to this
+        // block in a typed projection (drag-out rollups / block.<name> refs see real
+        // columns, not jsonb). Synth-only: a bare-`then` pipeline's compiledSql is not
+        // valid SQL as a subquery, so projecting over it would be unparseable. Prefer
+        // the authoritative schema; fall back to inference. Cleared for ordinary
+        // queries.
         const jsonbProjection =
           isSynth && finalResult !== body
-            ? inferJsonbColumns(finalResult.rows as Record<string, unknown>[])
+            ? synthCols ?? inferJsonbColumns(finalResult.rows as Record<string, unknown>[])
             : undefined
         setIsPipelineRun(isPipeline)
         setRunState({ kind: "done", result: finalResult })
