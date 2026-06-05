@@ -103,87 +103,109 @@ export function QueryLensOverview({
         </div>
       </section>
 
-      {/* timeseries — two bar panels side by side */}
-      <div className="grid grid-cols-2 gap-2.5">
-        <Panel
-          icon={FlowArrow}
-          title="Queries by hour"
-          right={<span>{hourly.length}h buckets</span>}
-        >
-          <HourlyBars
-            data={hourly}
-            valueFn={(p) => p.queries}
-            barColor="var(--rvbbit-accent)"
-            errorOverlayFn={(p) => p.errors}
-            unitLabel="queries"
-          />
-        </Panel>
-        <Panel
-          icon={Sparkles}
-          title="Cost by hour"
-          right={
-            <span>
-              <span className="font-mono tabular-nums text-foreground">
-                ${hero.totalCostUsd.toFixed(4)}
-              </span>{" "}
-              total
-            </span>
-          }
-        >
-          <HourlyBars
-            data={hourly}
-            valueFn={(p) => p.cost}
-            barColor="var(--chart-3)"
-            unitLabel="USD"
-            unitFn={(v) => (v > 0 ? `$${v.toFixed(4)}` : "$0")}
-          />
-        </Panel>
-      </div>
-
-      {/* breakdowns */}
-      <div className="grid grid-cols-2 gap-2.5">
-        <Panel
-          icon={Brain}
-          title="Top operators"
-          right={<span>by call volume</span>}
-        >
-          {topOperators.length === 0 ? (
-            <EmptyHint label="no operator activity in window" />
-          ) : (
-            <HBars
-              rows={topOperators.map<HBarRow>((o) => ({
-                label: `rvbbit.${o.operator}`,
-                value: o.calls,
-                valueLabel: fmtCount(o.calls),
-                sub: o.cost > 0 ? `$${o.cost.toFixed(4)}` : `p95 ${fmtMs(o.p95)}`,
-                color:
-                  o.errors > 0
-                    ? "var(--danger)"
-                    : "var(--rvbbit-accent)",
-                title:
-                  `${o.calls} call(s) · p95 ${fmtMs(o.p95)}` +
-                  (o.errors > 0 ? ` · ${o.errors} err` : "") +
-                  (o.cost > 0 ? ` · $${o.cost.toFixed(4)}` : ""),
-              }))}
+      {/* two stacked columns: left = volume-over-time + operators, right = cost + queries */}
+      <div className="grid grid-cols-2 items-start gap-2.5">
+        {/* left column */}
+        <div className="space-y-2.5">
+          <Panel
+            icon={FlowArrow}
+            title="Queries by hour"
+            right={<span>{hourly.length}h buckets</span>}
+          >
+            <HourlyBars
+              data={hourly}
+              valueFn={(p) => p.queries}
+              barColor="var(--rvbbit-accent)"
+              errorOverlayFn={(p) => p.errors}
+              unitLabel="queries"
             />
-          )}
-        </Panel>
+          </Panel>
+          <Panel
+            icon={Activity}
+            title="Semantic calls by hour"
+            right={
+              <span>
+                <span className="font-mono tabular-nums text-foreground">
+                  {fmtCount(hero.receipts)}
+                </span>{" "}
+                calls
+              </span>
+            }
+          >
+            <HourlyBars
+              data={hourly}
+              valueFn={(p) => p.receipts}
+              barColor="var(--chart-2)"
+              errorOverlayFn={(p) => p.errors}
+              unitLabel="calls"
+            />
+          </Panel>
+          <Panel
+            icon={Brain}
+            title="Top operators"
+            right={<span>by call volume</span>}
+          >
+            {topOperators.length === 0 ? (
+              <EmptyHint label="no operator activity in window" />
+            ) : (
+              <HBars
+                rows={topOperators.map<HBarRow>((o) => ({
+                  label: `rvbbit.${o.operator}`,
+                  value: o.calls,
+                  valueLabel: fmtCount(o.calls),
+                  sub: o.cost > 0 ? `$${o.cost.toFixed(4)}` : `p95 ${fmtMs(o.p95)}`,
+                  color:
+                    o.errors > 0
+                      ? "var(--danger)"
+                      : "var(--rvbbit-accent)",
+                  title:
+                    `${o.calls} call(s) · p95 ${fmtMs(o.p95)}` +
+                    (o.errors > 0 ? ` · ${o.errors} err` : "") +
+                    (o.cost > 0 ? ` · $${o.cost.toFixed(4)}` : ""),
+                }))}
+              />
+            )}
+          </Panel>
+        </div>
 
-        <Panel
-          icon={GitBranch}
-          title="Recent queries"
-          right={<span>newest first · click to inspect</span>}
-        >
-          {topQueries.length === 0 ? (
-            <EmptyHint label="no query_id-attributed traffic" />
-          ) : (
-            <ul className="space-y-1">
-              {topQueries.map((q) => (
-                <TopQueryRow key={q.queryId} q={q} onClick={() => onPickQuery(q.queryId)} />
-              ))}
-            </ul>
-          )}
-        </Panel>
+        {/* right column */}
+        <div className="space-y-2.5">
+          <Panel
+            icon={Sparkles}
+            title="Cost by hour"
+            right={
+              <span>
+                <span className="font-mono tabular-nums text-foreground">
+                  ${hero.totalCostUsd.toFixed(4)}
+                </span>{" "}
+                total
+              </span>
+            }
+          >
+            <HourlyBars
+              data={hourly}
+              valueFn={(p) => p.cost}
+              barColor="var(--chart-3)"
+              unitLabel="USD"
+              unitFn={(v) => (v > 0 ? `$${v.toFixed(4)}` : "$0")}
+            />
+          </Panel>
+          <Panel
+            icon={GitBranch}
+            title="Recent queries"
+            right={<span>newest first · click to inspect</span>}
+          >
+            {topQueries.length === 0 ? (
+              <EmptyHint label="no query_id-attributed traffic" />
+            ) : (
+              <ul className="space-y-1">
+                {topQueries.map((q) => (
+                  <TopQueryRow key={q.queryId} q={q} onClick={() => onPickQuery(q.queryId)} />
+                ))}
+              </ul>
+            )}
+          </Panel>
+        </div>
       </div>
 
       <p className="px-1 text-[10px] leading-snug text-chrome-text/40">
