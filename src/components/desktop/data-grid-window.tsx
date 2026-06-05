@@ -682,6 +682,7 @@ export function DataGridWindow({
             elapsedMs: j.elapsedMs ?? null,
             wait: j.wait ?? null,
             state: j.state ?? null,
+            operators: Array.isArray(j.operators) ? j.operators : [],
           })
         }
       } catch {
@@ -1231,10 +1232,16 @@ function Tab({
   )
 }
 
+interface OpCount {
+  operator: string
+  calls: number
+}
+
 interface QueryProgress {
   elapsedMs: number | null
   wait: string | null
   state: string | null
+  operators: OpCount[]
 }
 
 function fmtDur(ms: number): string {
@@ -1244,14 +1251,49 @@ function fmtDur(ms: number): string {
   return `${m}m${Math.round((ms % 60_000) / 1000)}s`
 }
 
+function fmtNum(n: number): string {
+  return n.toLocaleString("en-US")
+}
+
 /** One-line live description of a running query for the status bar. */
 function progressLabel(p: QueryProgress | null): string {
   if (!p) return "Running…"
   const bits: string[] = ["Running"]
   if (p.elapsedMs != null) bits.push(fmtDur(p.elapsedMs))
+  const ops = p.operators ?? []
+  if (ops.length > 0) {
+    bits.push(ops.slice(0, 3).map((o) => `${o.operator} ${fmtNum(o.calls)}`).join(", "))
+  }
   if (p.wait) bits.push(`waiting: ${p.wait}`)
   else if (p.state && p.state !== "active") bits.push(p.state)
   return bits.join(" · ")
+}
+
+/** Small live bar viz of per-operator semantic-call counts during a query. */
+function OpCountsViz({ operators }: { operators: OpCount[] }) {
+  if (!operators || operators.length === 0) return null
+  const max = Math.max(...operators.map((o) => o.calls), 1)
+  return (
+    <div className="mx-auto mt-3 w-56 space-y-1.5 text-left">
+      <div className="text-[10px] uppercase tracking-wide text-chrome-text/50">semantic calls</div>
+      {operators.slice(0, 6).map((o) => (
+        <div key={o.operator} className="flex items-center gap-2">
+          <span className="w-20 shrink-0 truncate font-mono text-[10px] text-chrome-text/80" title={o.operator}>
+            {o.operator}
+          </span>
+          <span className="relative h-2 flex-1 overflow-hidden rounded-sm bg-chrome-border/40">
+            <span
+              className="absolute inset-y-0 left-0 rounded-sm bg-chart-1/80"
+              style={{ width: `${Math.max(4, (o.calls / max) * 100)}%` }}
+            />
+          </span>
+          <span className="w-12 shrink-0 text-right font-mono text-[10px] tabular-nums text-chrome-text/80">
+            {fmtNum(o.calls)}
+          </span>
+        </div>
+      ))}
+    </div>
+  )
 }
 
 function RunStatus({ runState, progress }: { runState: RunState; progress: QueryProgress | null }) {
@@ -1299,6 +1341,7 @@ function EmptyResult({
           {progress?.wait ? (
             <div className="mt-1 text-[10px] text-chrome-text/60">waiting on {progress.wait}</div>
           ) : null}
+          {progress?.operators ? <OpCountsViz operators={progress.operators} /> : null}
         </div>
       </div>
     )

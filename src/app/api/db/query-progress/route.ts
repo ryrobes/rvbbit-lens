@@ -7,14 +7,14 @@ export const runtime = "nodejs"
 // connection while the main query is in flight. pg_stat_activity is server
 // state (visible across connections) — unlike rvbbit.receipts/cost_events,
 // which are transaction-isolated and invisible until the query commits. Gives
-// elapsed time, state, and what the backend is waiting on (so "stuck on IO"
-// vs "active/CPU-bound" is visible). Works on any connection (core catalog).
+// elapsed time, state, what the backend is waiting on, and the backend pid so
+// we can attribute live semantic-call counts to it. Works on any connection.
 const PROGRESS_SQL = `
-SELECT round(extract(epoch FROM (clock_timestamp() - query_start)) * 1000)::bigint AS elapsed_ms,
+SELECT pid,
+       round(extract(epoch FROM (clock_timestamp() - query_start)) * 1000)::bigint AS elapsed_ms,
        state,
        nullif(coalesce(wait_event_type, '') ||
-              CASE WHEN wait_event IS NOT NULL THEN ':' || wait_event ELSE '' END, '') AS wait,
-       left(query, 240) AS q
+              CASE WHEN wait_event IS NOT NULL THEN ':' || wait_event ELSE '' END, '') AS wait
 FROM pg_stat_activity
 WHERE datname = current_database()
   AND application_name = 'rvbbit-lens'
@@ -22,6 +22,14 @@ WHERE datname = current_database()
   AND pid <> pg_backend_pid()
 ORDER BY query_start ASC
 LIMIT 1`
+
+// Per-operator semantic-call tally for the running backend, from a tiny
+// shared-memory counter the operator bumps as it works (rvbbit.live_call_counts).
+// This is the ONE signal that's visible mid-query — receipts are in-txn. The
+// function is rvbbit-version-specific, so this is best-effort: if it's absent
+// (older extension), we just omit the counts and the timer still works.
+const countsSql = (pid: number) =>
+  `SELECT operator, calls FROM rvbbit.live_call_counts() WHERE pid = ${pid} AND calls > 0 ORDER BY calls DESC`
 
 export async function POST(req: Request) {
   const body = (await req.json().catch(() => null)) as { connectionId?: string } | null
@@ -34,12 +42,31 @@ export async function POST(req: Request) {
       readOnly: true,
     })
     const row = (result.rows ?? [])[0] as Record<string, unknown> | undefined
+
+    let operators: { operator: string; calls: number }[] = []
+    const pid = row?.pid == null ? null : Number(row.pid)
+    if (pid != null && Number.isFinite(pid)) {
+      try {
+        const counts = await executeQuery(body.connectionId, countsSql(pid), {
+          rowLimit: 50,
+          readOnly: true,
+        })
+        operators = (counts.rows ?? []).map((r) => ({
+          operator: String((r as Record<string, unknown>).operator ?? ""),
+          calls: Number((r as Record<string, unknown>).calls ?? 0),
+        }))
+      } catch {
+        /* function absent on this extension version — omit counts */
+      }
+    }
+
     return NextResponse.json({
       ok: true,
       active: !!row,
       elapsedMs: row?.elapsed_ms == null ? null : Number(row.elapsed_ms),
       state: row?.state == null ? null : String(row.state),
       wait: row?.wait == null ? null : String(row.wait),
+      operators,
     })
   } catch (err) {
     return NextResponse.json({ ok: false, error: (err as Error).message }, { status: 200 })
