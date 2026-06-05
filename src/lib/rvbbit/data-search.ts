@@ -25,7 +25,7 @@ export interface DataSearchHit {
   rel: string
   /** null for table hits, the column name for column hits */
   col: string | null
-  /** cosine score in [0,1], or null when only the ILIKE fallback ran */
+  /** normalized hybrid relevance in [0,1] (RRF-fused dense+lexical; top hit = 1.0) */
   score: number | null
   doc: string
 }

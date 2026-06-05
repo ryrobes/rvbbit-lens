@@ -1,14 +1,33 @@
 "use client"
 
-import { useCallback, useEffect, useMemo, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { AlertTriangle, FileCsv, RefreshCw, Upload } from "@/lib/icons"
 import { cn } from "@/lib/utils"
 import type { CsvImportPayload } from "@/lib/desktop/types"
 import type { SchemaSnapshot } from "@/lib/db/types"
-import type { CsvDialect, CsvEncoding, ImportColumn, InspectResult, PgType } from "@/lib/import/types"
+import type {
+  CsvDialect,
+  CsvEncoding,
+  DateLayout,
+  ImportColumn,
+  ImportConfig,
+  ImportProgress,
+  ImportRunResult,
+  InspectResult,
+  PgType,
+} from "@/lib/import/types"
 import { dropImportFile, peekImportFile } from "@/lib/import/file-store"
 import { PG_TYPE_OPTIONS, identNeedsQuote, sanitizeIdent } from "@/lib/import/csv-infer"
 import { buildCreateTableSql, includedColumns } from "@/lib/import/ddl"
+import { DATE_LAYOUTS, dateLayoutLabel, normalizeToIso } from "@/lib/import/date-formats"
+
+/** A date/timestamptz column's effective format — `hasTime` is derived from
+ *  the (possibly user-changed) target type, so flipping date↔timestamptz works
+ *  without mutating the stored format. Null for non-date columns. */
+function effectiveDateFormat(c: ImportColumn) {
+  if ((c.type !== "date" && c.type !== "timestamptz") || !c.dateFormat) return null
+  return { layout: c.dateFormat.layout, hasTime: c.type === "timestamptz" }
+}
 
 interface CsvImportWindowProps {
   windowId: string
@@ -20,12 +39,14 @@ interface CsvImportWindowProps {
 }
 
 /** Head slice we read + send to the inspector. Bounded so a 2GB drop only
- *  ever touches this much in the browser. Enough rows for solid inference. */
-const SAMPLE_BYTES = 1024 * 1024
+ *  ever touches this much in the browser. 2MB is enough rows for solid
+ *  inference even on very wide files (e.g. ~8KB/row → ~250 rows). */
+const SAMPLE_BYTES = 2 * 1024 * 1024
 const RAW_LINES = 60
 
 type Tab = "columns" | "preview" | "sql" | "raw"
 type Status = "reading" | "inspecting" | "ready" | "error"
+type RunPhase = "config" | "preparing" | "importing" | "done" | "failed"
 
 const DELIMITER_OPTIONS: { value: string; label: string }[] = [
   { value: ",", label: "Comma ," },
@@ -46,9 +67,9 @@ export function CsvImportWindow({
   payload,
   activeConnectionId,
   schema,
+  onReloadSchema,
+  onOpenTable,
 }: CsvImportWindowProps) {
-  // onReloadSchema + onOpenTable are wired in Phase 3 (refresh Finder + open
-  // the new table after the load completes).
   const [file] = useState<File | null>(() => peekImportFile(windowId) ?? null)
   const missing = file == null
 
@@ -144,6 +165,31 @@ export function CsvImportWindow({
     setColumns((cols) => cols.map((c, i) => (i === index ? { ...c, ...patch } : c)))
   }, [])
 
+  // Changing the type keeps the date format in sync: entering date/timestamptz
+  // seeds an ISO format if none was detected; leaving it drops the format.
+  const changeType = useCallback((index: number, t: PgType) => {
+    setColumns((cols) =>
+      cols.map((c, i) => {
+        if (i !== index) return c
+        const isDate = t === "date" || t === "timestamptz"
+        const dateFormat = !isDate
+          ? undefined
+          : c.dateFormat ?? { layout: "iso" as const, hasTime: t === "timestamptz" }
+        return { ...c, type: t, dateFormat }
+      }),
+    )
+  }, [])
+
+  const changeDateLayout = useCallback((index: number, layout: DateLayout) => {
+    setColumns((cols) =>
+      cols.map((c, i) =>
+        i === index && c.dateFormat
+          ? { ...c, dateFormat: { ...c.dateFormat, layout, ambiguous: false } }
+          : c,
+      ),
+    )
+  }, [])
+
   const reinspect = useCallback(() => {
     if (sample && file) void doInspect(sample, file.size, dialect ?? undefined)
   }, [sample, file, dialect, doInspect])
@@ -167,6 +213,122 @@ export function CsvImportWindow({
     if (included.length === 0 || !tableName) return null
     return buildCreateTableSql({ schema: targetSchema, table: tableName, accessMethod, columns })
   }, [included.length, tableName, targetSchema, accessMethod, columns])
+
+  // ── Run (Phase 3: create + stream-COPY) ───────────────────────────
+  const [runPhase, setRunPhase] = useState<RunPhase>("config")
+  const [progress, setProgress] = useState<ImportProgress | null>(null)
+  const [runResult, setRunResult] = useState<ImportRunResult | null>(null)
+  const [runError, setRunError] = useState<string | null>(null)
+  const abortRef = useRef<AbortController | null>(null)
+
+  const importDisabledReason = !activeConnectionId
+    ? "No active connection"
+    : !tableName.trim()
+      ? "Name the target table"
+      : duplicateNames.size > 0
+        ? "Resolve duplicate column names"
+        : included.length === 0
+          ? "Select at least one column"
+          : null
+
+  const startImport = useCallback(async () => {
+    if (!file || !activeConnectionId || !dialect) return
+    const config: ImportConfig = {
+      connectionId: activeConnectionId,
+      schema: targetSchema,
+      table: tableName.trim(),
+      accessMethod,
+      dialect,
+      columns,
+    }
+    setRunError(null)
+    setProgress(null)
+    setRunResult(null)
+    setRunPhase("preparing")
+    try {
+      const prep = await fetch("/api/db/import/prepare", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ config }),
+      })
+      const pj = (await prep.json()) as { ok: true; importId: string } | { ok: false; error: string }
+      if (!pj.ok) {
+        setRunError(pj.error)
+        setRunPhase("failed")
+        return
+      }
+      const ac = new AbortController()
+      abortRef.current = ac
+      setRunPhase("importing")
+      const res = await fetch(`/api/db/import/run?id=${pj.importId}`, {
+        method: "POST",
+        body: file,
+        signal: ac.signal,
+      })
+      if (!res.body) throw new Error("no response stream")
+      const reader = res.body.getReader()
+      const decoder = new TextDecoder()
+      let buf = ""
+      for (;;) {
+        const { done, value } = await reader.read()
+        if (done) break
+        buf += decoder.decode(value, { stream: true })
+        const lines = buf.split("\n")
+        buf = lines.pop() ?? ""
+        for (const ln of lines) {
+          if (!ln.trim()) continue
+          const f = JSON.parse(ln) as { type: string } & Record<string, unknown>
+          if (f.type === "progress") {
+            setProgress(f as unknown as ImportProgress)
+          } else if (f.type === "done") {
+            const result = f as unknown as ImportRunResult
+            setRunResult(result)
+            setProgress({
+              bytesRead: file.size,
+              rowsRead: result.rowsRead,
+              rowsLoaded: result.rowsLoaded,
+              rowsRejected: result.rowsRejected,
+            })
+            setRunPhase("done")
+            onReloadSchema()
+          } else if (f.type === "error") {
+            setRunError(String(f.error ?? "import failed"))
+            setRunPhase("failed")
+          }
+        }
+      }
+    } catch (e) {
+      if (e instanceof DOMException && e.name === "AbortError") {
+        setRunPhase("config") // user cancelled
+      } else {
+        setRunError(e instanceof Error ? e.message : String(e))
+        setRunPhase("failed")
+      }
+    } finally {
+      abortRef.current = null
+    }
+  }, [file, activeConnectionId, dialect, targetSchema, tableName, accessMethod, columns, onReloadSchema])
+
+  const cancelImport = useCallback(() => abortRef.current?.abort(), [])
+  const resetRun = useCallback(() => {
+    setRunPhase("config")
+    setProgress(null)
+    setRunResult(null)
+    setRunError(null)
+  }, [])
+
+  const downloadRejects = useCallback(() => {
+    if (!runResult || runResult.rejects.length === 0) return
+    const esc = (s: string) => (/[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s)
+    const lines = ["row,reason,sample", ...runResult.rejects.map((r) => `${r.row},${esc(r.reason)},${esc(r.sample)}`)]
+    const blob = new Blob([lines.join("\n")], { type: "text/csv;charset=utf-8" })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement("a")
+    a.href = url
+    a.download = `${tableName || "import"}_rejects.csv`
+    a.click()
+    URL.revokeObjectURL(url)
+  }, [runResult, tableName])
 
   // ── Render ────────────────────────────────────────────────────────
   if (missing) {
@@ -224,7 +386,13 @@ export function CsvImportWindow({
 
           <div className="min-h-0 flex-1 overflow-auto">
             {tab === "columns" ? (
-              <ColumnsTab columns={columns} duplicateNames={duplicateNames} onUpdate={updateColumn} />
+              <ColumnsTab
+                columns={columns}
+                duplicateNames={duplicateNames}
+                onUpdate={updateColumn}
+                onChangeType={changeType}
+                onChangeLayout={changeDateLayout}
+              />
             ) : tab === "preview" ? (
               <PreviewTab columns={included} rows={inspect?.sampleRows ?? []} />
             ) : tab === "sql" ? (
@@ -234,10 +402,25 @@ export function CsvImportWindow({
             )}
           </div>
 
-          <Footer
-            inspect={inspect}
+          <RunBar
+            phase={runPhase}
+            progress={progress}
+            result={runResult}
+            error={runError}
+            fileSize={file?.size ?? 0}
+            estimatedRows={inspect?.estimatedRows ?? null}
             includedCount={included.length}
             duplicateCount={duplicateNames.size}
+            warning={inspect?.warnings[0]}
+            warningCount={inspect?.warnings.length ?? 0}
+            disabledReason={importDisabledReason}
+            schema={targetSchema}
+            table={tableName}
+            onImport={startImport}
+            onCancel={cancelImport}
+            onOpenTable={() => onOpenTable(targetSchema, tableName.trim())}
+            onDownloadRejects={downloadRejects}
+            onReset={resetRun}
           />
         </>
       )}
@@ -512,16 +695,21 @@ function ColumnsTab({
   columns,
   duplicateNames,
   onUpdate,
+  onChangeType,
+  onChangeLayout,
 }: {
   columns: ImportColumn[]
   duplicateNames: Set<string>
   onUpdate: (index: number, patch: Partial<ImportColumn>) => void
+  onChangeType: (index: number, type: PgType) => void
+  onChangeLayout: (index: number, layout: DateLayout) => void
 }) {
   return (
     <div className="divide-y divide-chrome-border/30">
       {columns.map((c, i) => {
         const dup = c.include && duplicateNames.has(c.targetName)
         const quoted = c.include && identNeedsQuote(c.targetName)
+        const isDate = c.type === "date" || c.type === "timestamptz"
         return (
           <div
             key={c.sourceIndex}
@@ -534,33 +722,31 @@ function ColumnsTab({
               title={c.include ? "Exclude column" : "Include column"}
               className="accent-rvbbit-accent"
             />
-            <span className="w-32 shrink-0 truncate text-[10px] text-chrome-text/45" title={c.sourceName}>
+            <span className="w-28 shrink-0 truncate text-[10px] text-chrome-text/45" title={c.sourceName}>
               {c.sourceName}
             </span>
             <span className="text-chrome-text/30">→</span>
-            <div className="relative">
-              <input
-                value={c.targetName}
-                disabled={!c.include}
-                onChange={(e) => onUpdate(i, { targetName: e.target.value })}
-                spellCheck={false}
-                className={cn(
-                  "h-6 w-40 rounded border bg-secondary-background px-2 font-mono text-[11px] text-foreground outline-none focus:ring-2 focus:ring-ring",
-                  dup ? "border-danger/70" : quoted ? "border-warning/60" : "border-chrome-border",
-                )}
-                title={
-                  dup
-                    ? "Duplicate column name"
-                    : quoted
-                      ? "Will be quoted in SQL (not a bare identifier)"
-                      : undefined
-                }
-              />
-            </div>
+            <input
+              value={c.targetName}
+              disabled={!c.include}
+              onChange={(e) => onUpdate(i, { targetName: e.target.value })}
+              spellCheck={false}
+              className={cn(
+                "h-6 w-36 rounded border bg-secondary-background px-2 font-mono text-[11px] text-foreground outline-none focus:ring-2 focus:ring-ring",
+                dup ? "border-danger/70" : quoted ? "border-warning/60" : "border-chrome-border",
+              )}
+              title={
+                dup
+                  ? "Duplicate column name"
+                  : quoted
+                    ? "Will be quoted in SQL (not a bare identifier)"
+                    : undefined
+              }
+            />
             <select
               value={c.type}
               disabled={!c.include}
-              onChange={(e) => onUpdate(i, { type: e.target.value as PgType })}
+              onChange={(e) => onChangeType(i, e.target.value as PgType)}
               className={cn(
                 "h-6 rounded border border-chrome-border bg-secondary-background px-1.5 font-mono text-[10px] outline-none focus:ring-2 focus:ring-ring",
                 c.type === c.inferredType ? "text-foreground" : "text-rvbbit-accent",
@@ -573,10 +759,32 @@ function ColumnsTab({
                 </option>
               ))}
             </select>
+            {isDate && c.dateFormat ? (
+              <select
+                value={c.dateFormat.layout}
+                disabled={!c.include}
+                onChange={(e) => onChangeLayout(i, e.target.value as DateLayout)}
+                className={cn(
+                  "h-6 rounded border bg-secondary-background px-1 text-[10px] outline-none focus:ring-2 focus:ring-ring",
+                  c.dateFormat.ambiguous ? "border-warning/70 text-warning" : "border-chrome-border text-chrome-text/70",
+                )}
+                title={
+                  c.dateFormat.ambiguous
+                    ? "Ambiguous M/D vs D/M order — every sampled day was ≤ 12. Verify this is right."
+                    : "Source date format (normalized to ISO on import)"
+                }
+              >
+                {DATE_LAYOUTS.map((l) => (
+                  <option key={l} value={l}>
+                    {dateLayoutLabel(l)}
+                  </option>
+                ))}
+              </select>
+            ) : null}
             <Check checked={c.nullable} onChange={(b) => onUpdate(i, { nullable: b })}>
               <span className="text-[10px] text-chrome-text/55">null</span>
             </Check>
-            <span className="ml-auto max-w-[180px] truncate text-[10px] text-chrome-text/35" title={c.sampleValues.join(" · ")}>
+            <span className="ml-auto max-w-[150px] truncate text-[10px] text-chrome-text/35" title={c.sampleValues.join(" · ")}>
               {c.sampleValues.slice(0, 3).join(" · ")}
             </span>
           </div>
@@ -607,18 +815,42 @@ function PreviewTab({ columns, rows }: { columns: ImportColumn[]; rows: string[]
         {rows.map((r, ri) => (
           <tr key={ri} className="border-b border-chrome-border/20 hover:bg-foreground/[0.03]">
             {columns.map((c) => (
-              <td key={c.sourceIndex} className="max-w-[220px] truncate px-2 py-1 font-mono text-foreground/85" title={r[c.sourceIndex] ?? ""}>
-                {r[c.sourceIndex] === "" || r[c.sourceIndex] == null ? (
-                  <span className="text-chrome-text/30">∅</span>
-                ) : (
-                  r[c.sourceIndex]
-                )}
-              </td>
+              <PreviewCell key={c.sourceIndex} column={c} raw={r[c.sourceIndex]} />
             ))}
           </tr>
         ))}
       </tbody>
     </table>
+  )
+}
+
+/** One preview cell. Date/timestamp columns show the *normalized* ISO value
+ *  (what actually gets stored), accent-tinted; a value that won't parse under
+ *  the chosen format is shown raw + danger-tinted (it'd be quarantined). */
+function PreviewCell({ column, raw }: { column: ImportColumn; raw: string | undefined }) {
+  if (raw === "" || raw == null) {
+    return <td className="px-2 py-1 font-mono text-chrome-text/30">∅</td>
+  }
+  const fmt = effectiveDateFormat(column)
+  if (fmt && fmt.layout !== "iso") {
+    const iso = normalizeToIso(raw, fmt)
+    if (iso) {
+      return (
+        <td className="max-w-[220px] truncate px-2 py-1 font-mono text-rvbbit-accent" title={`${raw} → ${iso}`}>
+          {iso}
+        </td>
+      )
+    }
+    return (
+      <td className="max-w-[220px] truncate px-2 py-1 font-mono text-danger" title={`Won't parse as ${fmt.layout} — this row would be quarantined`}>
+        {raw}
+      </td>
+    )
+  }
+  return (
+    <td className="max-w-[220px] truncate px-2 py-1 font-mono text-foreground/85" title={raw}>
+      {raw}
+    </td>
   )
 }
 
@@ -653,34 +885,143 @@ function RawTab({ lines }: { lines: string[] | null }) {
 
 // ── Footer + shared ─────────────────────────────────────────────────
 
-function Footer({
-  inspect,
+function RunBar({
+  phase,
+  progress,
+  result,
+  error,
+  fileSize,
+  estimatedRows,
   includedCount,
   duplicateCount,
+  warning,
+  warningCount,
+  disabledReason,
+  schema,
+  table,
+  onImport,
+  onCancel,
+  onOpenTable,
+  onDownloadRejects,
+  onReset,
 }: {
-  inspect: InspectResult | null
+  phase: RunPhase
+  progress: ImportProgress | null
+  result: ImportRunResult | null
+  error: string | null
+  fileSize: number
+  estimatedRows: number | null
   includedCount: number
   duplicateCount: number
+  warning: string | undefined
+  warningCount: number
+  disabledReason: string | null
+  schema: string
+  table: string
+  onImport: () => void
+  onCancel: () => void
+  onOpenTable: () => void
+  onDownloadRejects: () => void
+  onReset: () => void
 }) {
-  const warning = inspect?.warnings[0]
+  const base = "flex items-center gap-2 border-t border-chrome-border bg-chrome-bg/40 px-3 py-1.5 text-[11px]"
+
+  if (phase === "importing" || phase === "preparing") {
+    const pct = fileSize > 0 && progress ? Math.min(100, Math.round((progress.bytesRead / fileSize) * 100)) : 0
+    return (
+      <div className={cn(base, "text-chrome-text/70")}>
+        <div className="relative h-1.5 w-28 overflow-hidden rounded-full bg-foreground/[0.08]">
+          <div className="absolute inset-y-0 left-0 rounded-full bg-rvbbit-accent transition-[width]" style={{ width: `${pct}%` }} />
+        </div>
+        <span className="font-mono tabular-nums text-foreground">{pct}%</span>
+        {progress ? (
+          <span className="font-mono tabular-nums text-chrome-text/60">
+            {fmtCount(progress.rowsLoaded)} loaded
+            {progress.rowsRejected > 0 ? ` · ${fmtCount(progress.rowsRejected)} rejected` : ""}
+          </span>
+        ) : (
+          <span>preparing…</span>
+        )}
+        <button
+          type="button"
+          onClick={onCancel}
+          className="ml-auto rounded border border-chrome-border px-2 py-0.5 text-[10px] text-chrome-text/70 hover:bg-foreground/[0.08] hover:text-foreground"
+        >
+          Cancel
+        </button>
+      </div>
+    )
+  }
+
+  if (phase === "done" && result) {
+    return (
+      <div className={cn(base, "flex-wrap text-chrome-text/70")}>
+        <span className="inline-flex items-center gap-1 text-success">✓ Loaded {fmtCount(result.rowsLoaded)} rows</span>
+        {result.rowsRejected > 0 ? (
+          <span className="text-warning">· {fmtCount(result.rowsRejected)} rejected</span>
+        ) : null}
+        <span className="text-chrome-text/45">· {(result.durationMs / 1000).toFixed(1)}s</span>
+        <div className="ml-auto flex items-center gap-1.5">
+          {result.rejects.length > 0 ? (
+            <button type="button" onClick={onDownloadRejects} className="rounded border border-chrome-border px-2 py-0.5 text-[10px] text-chrome-text/70 hover:bg-foreground/[0.08] hover:text-foreground">
+              Rejects{result.rejectsTruncated ? " (sample)" : ""}
+            </button>
+          ) : null}
+          <button type="button" onClick={onReset} className="rounded border border-chrome-border px-2 py-0.5 text-[10px] text-chrome-text/70 hover:bg-foreground/[0.08] hover:text-foreground">
+            Import another
+          </button>
+          <button type="button" onClick={onOpenTable} className="rounded bg-rvbbit-accent/15 px-2 py-0.5 text-[10px] font-medium text-rvbbit-accent hover:bg-rvbbit-accent/25">
+            Open table →
+          </button>
+        </div>
+      </div>
+    )
+  }
+
+  if (phase === "failed") {
+    return (
+      <div className={cn(base, "text-danger")}>
+        <AlertTriangle className="h-3 w-3 shrink-0" />
+        <span className="truncate" title={error ?? undefined}>{error ?? "Import failed"}</span>
+        <button type="button" onClick={onReset} className="ml-auto rounded border border-danger/50 px-2 py-0.5 text-[10px] text-danger hover:bg-danger/10">
+          Back
+        </button>
+      </div>
+    )
+  }
+
+  // config phase — summary + the Import button
   return (
-    <div className="flex items-center gap-2 border-t border-chrome-border bg-chrome-bg/40 px-3 py-1 text-[10px] text-chrome-text/55">
+    <div className={cn(base, "text-chrome-text/55")}>
       {duplicateCount > 0 ? (
         <span className="text-danger">
           {duplicateCount} duplicate column name{duplicateCount === 1 ? "" : "s"}
         </span>
       ) : warning ? (
-        <span className="inline-flex items-center gap-1 text-chrome-text/60" title={inspect?.warnings.join("\n")}>
+        <span className="inline-flex items-center gap-1 text-chrome-text/60" title={warning}>
           <AlertTriangle className="h-3 w-3 text-warning" />
           {warning}
-          {inspect && inspect.warnings.length > 1 ? ` (+${inspect.warnings.length - 1})` : ""}
+          {warningCount > 1 ? ` (+${warningCount - 1})` : ""}
         </span>
       ) : (
-        <span>ready</span>
+        <span className="font-mono tabular-nums">
+          {includedCount} col{includedCount === 1 ? "" : "s"}
+        </span>
       )}
-      <span className="ml-auto font-mono tabular-nums">
-        {includedCount} col{includedCount === 1 ? "" : "s"}
-      </span>
+      <div className="ml-auto flex items-center gap-2">
+        <span className="font-mono tabular-nums text-chrome-text/45">
+          {schema}.{table || "…"}
+        </span>
+        <button
+          type="button"
+          onClick={onImport}
+          disabled={disabledReason != null}
+          title={disabledReason ?? undefined}
+          className="rounded bg-rvbbit-accent/15 px-2.5 py-1 text-[11px] font-medium text-rvbbit-accent hover:bg-rvbbit-accent/25 disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          Import{estimatedRows != null ? ` ~${fmtCount(estimatedRows)} rows` : ""} →
+        </button>
+      </div>
     </div>
   )
 }

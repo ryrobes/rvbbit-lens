@@ -25,6 +25,22 @@ export type PgType =
 /** Table storage. `heap` = standard Postgres; `rvbbit` = `CREATE TABLE … USING rvbbit`. */
 export type AccessMethod = "heap" | "rvbbit"
 
+/**
+ * Recognized date/datetime layouts the importer can normalize to ISO before
+ * loading. `iso` = already `YYYY-MM-DD[…]`; `ymd` = year-first numeric;
+ * `mdy`/`dmy` = US/EU numeric order; `monthname-*` = textual month.
+ */
+export type DateLayout = "iso" | "ymd" | "mdy" | "dmy" | "monthname-mdy" | "monthname-dmy"
+
+/** The source date format detected for (or chosen on) a date/timestamptz column. */
+export interface DateColumnFormat {
+  layout: DateLayout
+  /** Column carries a time component → target timestamptz, else date. */
+  hasTime: boolean
+  /** True when MDY vs DMY couldn't be resolved from the sample (every day ≤ 12). */
+  ambiguous?: boolean
+}
+
 export type CsvEncoding = "utf-8" | "utf-16le" | "latin1"
 
 /**
@@ -57,6 +73,12 @@ export interface ImportColumn {
   type: PgType
   /** What the sniffer guessed from the sample (lets the UI offer "reset to inferred"). */
   inferredType: PgType
+  /**
+   * For `date`/`timestamptz` columns whose source isn't already ISO, the
+   * detected source layout — used to normalize each value to ISO before COPY.
+   * Absent for ISO/non-date columns. User-editable (e.g. to flip MDY↔DMY).
+   */
+  dateFormat?: DateColumnFormat
   nullable: boolean
   /** Whether to include this column in the import (lets the user drop junk columns). */
   include: boolean
@@ -94,12 +116,28 @@ export type ImportPhase = "creating" | "copying" | "done" | "error"
 
 /** A progress frame streamed back from the run route (newline-delimited JSON). */
 export interface ImportProgress {
-  phase: ImportPhase
   bytesRead: number
-  totalBytes: number
   rowsRead: number
   rowsLoaded: number
   rowsRejected: number
-  message?: string
-  error?: string
+}
+
+/** A quarantined row — surfaced in the summary + downloadable report. */
+export interface RejectRow {
+  /** 1-based data row number (excludes the header). */
+  row: number
+  reason: string
+  /** The original cells, joined for context (truncated). */
+  sample: string
+}
+
+/** Final outcome of a run (the `done` frame). */
+export interface ImportRunResult {
+  rowsRead: number
+  rowsLoaded: number
+  rowsRejected: number
+  durationMs: number
+  /** Capped sample of rejects for the report; `rejectsTruncated` if more exist. */
+  rejects: RejectRow[]
+  rejectsTruncated: boolean
 }

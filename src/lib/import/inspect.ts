@@ -8,7 +8,7 @@
 import { parse } from "csv-parse/sync"
 import type { CsvDialect, ImportColumn, InspectResult } from "./types"
 import { detectDelimiter, detectEncoding, decodeSample, detectHasHeader } from "./csv-dialect"
-import { sanitizeIdent, sniffColumnType } from "./csv-infer"
+import { inferColumn, sanitizeIdent } from "./csv-infer"
 
 /** Rows shown in the preview grid (sniffing uses every sampled row). */
 const PREVIEW_ROWS = 100
@@ -23,6 +23,24 @@ export interface InspectInput {
   hints?: Partial<CsvDialect>
 }
 
+/**
+ * Cut `text` at the last newline that occurs *outside* a quoted field, so a
+ * truncated sample ends on a complete record. A simple quote-parity toggle is
+ * correct for RFC-4180 doubled-quote escaping (`""` flips twice → net even).
+ * Returns the original text if no safe boundary is found (e.g. a single row
+ * larger than the whole sample).
+ */
+function trimToLastRecordBoundary(text: string, quote: string): string {
+  let inQuotes = false
+  let lastBoundary = -1
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i]
+    if (ch === quote) inQuotes = !inQuotes
+    else if (ch === "\n" && !inQuotes) lastBoundary = i
+  }
+  return lastBoundary >= 0 ? text.slice(0, lastBoundary + 1) : text
+}
+
 export function inspectCsv({ bytes, totalBytes, hints }: InspectInput): InspectResult {
   const warnings: string[] = []
   const sampledBytes = bytes.length
@@ -32,12 +50,18 @@ export function inspectCsv({ bytes, totalBytes, hints }: InspectInput): InspectR
   const encoding = hints?.encoding ?? detected.encoding
   if (detected.bomLength > 0) warnings.push(`Stripped a ${encoding} byte-order mark.`)
 
-  const text = decodeSample(bytes, encoding)
+  const fullText = decodeSample(bytes, encoding)
 
-  const delimiter = hints?.delimiter ?? detectDelimiter(text)
+  const delimiter = hints?.delimiter ?? detectDelimiter(fullText)
   const quote = hints?.quote ?? '"'
   const nullToken = hints?.nullToken ?? ""
   const trimWhitespace = hints?.trimWhitespace ?? false
+
+  // A truncated sample almost always cuts mid-row — often inside a quoted
+  // field — which leaves a dangling opening quote that the parser rejects
+  // ("Quote Not Closed"). Trim back to the last record boundary that sits
+  // outside any quoted field so we only ever parse complete rows.
+  const text = truncated ? trimToLastRecordBoundary(fullText, quote) : fullText
 
   let rows: string[][]
   try {
@@ -52,9 +76,6 @@ export function inspectCsv({ bytes, totalBytes, hints }: InspectInput): InspectR
     rows = []
     warnings.push(`Parse error: ${e instanceof Error ? e.message : String(e)}`)
   }
-
-  // The last row of a truncated sample is almost certainly a half-read line.
-  if (truncated && rows.length > 1) rows.pop()
 
   const parsedRowCount = rows.length
   const hasHeader = hints?.hasHeader ?? detectHasHeader(rows)
@@ -94,7 +115,7 @@ export function inspectCsv({ bytes, totalBytes, hints }: InspectInput): InspectR
     if (targetName !== sourceName) renamed++
 
     const colValues = dataRows.map((r) => r[i] ?? "")
-    const inferredType = sniffColumnType(colValues, nullTokens)
+    const { type: inferredType, dateFormat } = inferColumn(colValues, nullTokens)
     const sampleValues = colValues.filter((v) => v.trim() !== "").slice(0, SAMPLE_CELLS)
 
     columns.push({
@@ -103,6 +124,7 @@ export function inspectCsv({ bytes, totalBytes, hints }: InspectInput): InspectR
       targetName,
       type: inferredType,
       inferredType,
+      dateFormat,
       nullable: true, // import-friendly default; the user can tighten to NOT NULL
       include: true,
       sampleValues,

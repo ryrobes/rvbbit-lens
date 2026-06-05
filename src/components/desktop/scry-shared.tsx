@@ -73,14 +73,18 @@ export function ScryActionButton({
   )
 }
 
-/** Amber-phosphor similarity meter. `null` score = the ILIKE fallback ran. */
+/**
+ * Amber-phosphor relevance meter. The hybrid `data_search` always returns a
+ * normalized RRF score, so the null branch below is just a defensive fallback
+ * for malformed/empty rows (not a live "lexical-only" signal).
+ */
 export function ScoreBar({ score }: { score: number | null }) {
   if (score == null) {
-    return <span className="text-[9px] uppercase tracking-wide text-chrome-text/35">ilike</span>
+    return <span className="text-[9px] uppercase tracking-wide text-chrome-text/35">lex</span>
   }
   const pct = Math.max(0, Math.min(100, Math.round(score * 100)))
   return (
-    <span className="flex items-center gap-1" title={`similarity ${pct}%`}>
+    <span className="flex items-center gap-1" title={`relevance ${pct}%`}>
       <span className="h-1 w-10 overflow-hidden rounded-full bg-foreground/[0.08]">
         <span className="block h-full rounded-full bg-terminal" style={{ width: `${pct}%` }} />
       </span>

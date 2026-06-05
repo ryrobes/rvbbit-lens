@@ -1,6 +1,6 @@
 import "server-only"
 
-import { Pool, type PoolConfig } from "pg"
+import { Pool, type ClientConfig, type PoolConfig } from "pg"
 import type { ConnectionRecord, SslMode } from "./types"
 import { getConnection } from "./registry"
 
@@ -22,29 +22,29 @@ function sslOption(mode: SslMode | undefined): PoolConfig["ssl"] {
   }
 }
 
-function buildPoolConfig(c: ConnectionRecord): PoolConfig {
-  if (c.connectionString && c.connectionString.length > 0) {
-    return {
-      connectionString: c.connectionString,
-      ssl: sslOption(c.sslMode),
-      max: 5,
-      idleTimeoutMillis: 30_000,
-      statement_timeout: 600_000,
-      application_name: "rvbbit-lens",
-    }
-  }
+/**
+ * Base connection config shared by the pool and one-off clients. Used by the
+ * CSV importer to spin up a *dedicated* `Client` (statement_timeout disabled
+ * for a long COPY) so a big import never ties up one of the pool's 5 slots.
+ */
+export function buildClientConfig(
+  c: ConnectionRecord,
+  opts: { statementTimeout?: number; applicationName?: string } = {},
+): ClientConfig {
+  const base: ClientConfig =
+    c.connectionString && c.connectionString.length > 0
+      ? { connectionString: c.connectionString }
+      : { host: c.host, port: c.port, database: c.database, user: c.user, password: c.password }
   return {
-    host: c.host,
-    port: c.port,
-    database: c.database,
-    user: c.user,
-    password: c.password,
+    ...base,
     ssl: sslOption(c.sslMode),
-    max: 5,
-    idleTimeoutMillis: 30_000,
-    statement_timeout: 600_000,
-    application_name: "rvbbit-lens",
+    statement_timeout: opts.statementTimeout ?? 600_000,
+    application_name: opts.applicationName ?? "rvbbit-lens",
   }
+}
+
+function buildPoolConfig(c: ConnectionRecord): PoolConfig {
+  return { ...buildClientConfig(c), max: 5, idleTimeoutMillis: 30_000 }
 }
 
 function signatureOf(c: ConnectionRecord): string {

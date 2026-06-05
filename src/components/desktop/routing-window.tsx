@@ -43,6 +43,7 @@ import {
 import { RoutingProfileTab } from "./routing-profile-tab"
 import { RoutingExplainTab } from "./routing-explain-tab"
 import { RoutingTrainTab } from "./routing-train-tab"
+import { RoutingFreshnessTab } from "./routing-freshness-tab"
 
 interface RoutingWindowProps {
   activeConnectionId: string | null
@@ -56,9 +57,10 @@ const REFRESH_OPTIONS_MS = [
   { ms: 30_000, label: "30s" },
 ]
 
-type TabKey = "flow" | "profile" | "explain" | "train"
+type TabKey = "flow" | "freshness" | "profile" | "explain" | "train"
 const TABS: { key: TabKey; label: string }[] = [
   { key: "flow", label: "Flow" },
+  { key: "freshness", label: "Freshness" },
   { key: "profile", label: "Profile" },
   { key: "explain", label: "Explain" },
   { key: "train", label: "Train" },
@@ -257,6 +259,8 @@ export function RoutingWindow({ activeConnectionId, hasRvbbit }: RoutingWindowPr
       <div className="min-h-0 flex-1 overflow-auto">
         {tab === "flow" ? (
           <FlowTab flow={flow} profileData={profileData} loading={loading} />
+        ) : tab === "freshness" ? (
+          <RoutingFreshnessTab activeConnectionId={activeConnectionId} />
         ) : tab === "profile" ? (
           <RoutingProfileTab data={profileData} />
         ) : tab === "explain" ? (

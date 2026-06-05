@@ -206,3 +206,7 @@ export function isCatalogJob(j: CronJob): boolean {
 export function isSemanticJob(j: CronJob): boolean {
   return /\brvbbit\./i.test(j.command)
 }
+/** Does this job run the accelerator freshness heartbeat? */
+export function isAccelTickJob(j: CronJob): boolean {
+  return /accel_tick/i.test(j.command) || j.jobname === "rvbbit_accel_tick"
+}

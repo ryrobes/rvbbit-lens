@@ -7,7 +7,8 @@
  * the user widen than to guess a type that rejects rows on load.
  */
 
-import type { PgType } from "./types"
+import type { DateColumnFormat, PgType } from "./types"
+import { detectDateColumn } from "./date-formats"
 
 /** Order matters for the picker UI: narrowest → widest, text last. */
 export const PG_TYPE_OPTIONS: PgType[] = [
@@ -21,12 +22,9 @@ export const PG_TYPE_OPTIONS: PgType[] = [
   "text",
 ]
 
-const INT_RE = /^[+-]?\d+$/
+export const INT_RE = /^[+-]?\d+$/
 // Requires a decimal point or exponent (pure ints are caught by INT_RE first).
-const FLOAT_RE = /^[+-]?(\d+\.\d*|\.\d+|\d+(\.\d+)?e[+-]?\d+|\d+\.\d*e[+-]?\d+)$/i
-const DATE_RE = /^\d{4}-\d{2}-\d{2}$/
-const TS_RE =
-  /^\d{4}-\d{2}-\d{2}[ t]\d{2}:\d{2}(:\d{2}(\.\d+)?)?\s?([+-]\d{2}(:?\d{2})?|z)?$/i
+export const FLOAT_RE = /^[+-]?(\d+\.\d*|\.\d+|\d+(\.\d+)?e[+-]?\d+|\d+\.\d*e[+-]?\d+)$/i
 
 const BOOL_TRUE = new Set(["true", "t", "yes", "y"])
 const BOOL_FALSE = new Set(["false", "f", "no", "n"])
@@ -45,40 +43,67 @@ function fitsRange(s: string, min: bigint, max: bigint): boolean {
   }
 }
 
+function isBoolish(v: string): boolean {
+  const l = v.toLowerCase()
+  return BOOL_TRUE.has(l) || BOOL_FALSE.has(l)
+}
+
+/** Normalize a boolean-ish token to the Postgres COPY literal, or null. */
+export function boolToken(v: string): "t" | "f" | null {
+  const l = v.toLowerCase()
+  if (BOOL_TRUE.has(l)) return "t"
+  if (BOOL_FALSE.has(l)) return "f"
+  return null
+}
+
+export function fitsInt4(s: string): boolean {
+  return fitsRange(s, INT4_MIN, INT4_MAX)
+}
+export function fitsInt8(s: string): boolean {
+  return fitsRange(s, INT8_MIN, INT8_MAX)
+}
+
 /**
- * Infer the narrowest Postgres type that fits every non-null sample value.
- * `nullTokens` are treated as absent (skipped). An all-null/empty column is
- * `text`.
+ * Infer the narrowest Postgres type that fits every non-null sample value,
+ * plus a source date format when the column is a (possibly non-ISO) date /
+ * timestamp. `nullTokens` are treated as absent. An all-null/empty column is
+ * `text`. Order: boolean → int → float → date/timestamp → text.
  */
-export function sniffColumnType(values: string[], nullTokens: Set<string> = new Set([""])): PgType {
+export function inferColumn(
+  values: string[],
+  nullTokens: Set<string> = new Set([""]),
+): { type: PgType; dateFormat?: DateColumnFormat } {
   const vals: string[] = []
   for (const raw of values) {
     const v = raw.trim()
     if (nullTokens.has(v)) continue
     vals.push(v)
   }
-  if (vals.length === 0) return "text"
+  if (vals.length === 0) return { type: "text" }
 
   // boolean — textual only (0/1 stay integer so we don't hijack int columns)
-  if (vals.every((v) => { const l = v.toLowerCase(); return BOOL_TRUE.has(l) || BOOL_FALSE.has(l) })) {
-    return "boolean"
-  }
+  if (vals.every(isBoolish)) return { type: "boolean" }
 
   // integers
   if (vals.every((v) => INT_RE.test(v))) {
-    if (vals.every((v) => fitsRange(v, INT4_MIN, INT4_MAX))) return "integer"
-    if (vals.every((v) => fitsRange(v, INT8_MIN, INT8_MAX))) return "bigint"
-    return "numeric" // integers too big for int8 → arbitrary precision
+    if (vals.every((v) => fitsRange(v, INT4_MIN, INT4_MAX))) return { type: "integer" }
+    if (vals.every((v) => fitsRange(v, INT8_MIN, INT8_MAX))) return { type: "bigint" }
+    return { type: "numeric" } // integers too big for int8 → arbitrary precision
   }
 
   // decimals / floats
-  if (vals.every((v) => INT_RE.test(v) || FLOAT_RE.test(v))) return "double precision"
+  if (vals.every((v) => INT_RE.test(v) || FLOAT_RE.test(v))) return { type: "double precision" }
 
-  // dates before timestamps (a bare date also half-matches the looser TS shape)
-  if (vals.every((v) => DATE_RE.test(v))) return "date"
-  if (vals.every((v) => DATE_RE.test(v) || TS_RE.test(v))) return "timestamptz"
+  // dates / timestamps (ISO + common US/EU/month-name forms)
+  const dateFormat = detectDateColumn(values, nullTokens)
+  if (dateFormat) return { type: dateFormat.hasTime ? "timestamptz" : "date", dateFormat }
 
-  return "text"
+  return { type: "text" }
+}
+
+/** Type-only inference (used where the date format isn't needed). */
+export function sniffColumnType(values: string[], nullTokens: Set<string> = new Set([""])): PgType {
+  return inferColumn(values, nullTokens).type
 }
 
 /**

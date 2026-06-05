@@ -24,6 +24,7 @@ import {
   CREATE_EXTENSION_SQL,
   detectCronState,
   exec,
+  isAccelTickJob,
   isCatalogJob,
   isSemanticJob,
   listCronJobs,
@@ -61,6 +62,9 @@ interface EditState {
 }
 
 const CRAWL_COMMAND = "SELECT rvbbit.catalog_crawl();"
+// The accelerator freshness heartbeat. Runs every minute; the policy-aware
+// rvbbit.accel_tick() decides which dirty, high-value tables to refresh.
+const ACCEL_TICK_COMMAND = "SELECT rvbbit.accel_tick(4);"
 
 export function SchedulerTray({ activeConnectionId, hasRvbbit, onOpenSql, onOpenDrift }: SchedulerTrayProps) {
   const [open, setOpen] = useState(false)
@@ -183,6 +187,7 @@ export function SchedulerTray({ activeConnectionId, hasRvbbit, onOpenSql, onOpen
 
   const status = useMemo(() => trayStatus(state, jobs), [state, jobs])
   const crawlJob = jobs.find(isCatalogJob)
+  const accelTickJob = jobs.find(isAccelTickJob)
 
   return (
     <div ref={wrapRef} className="relative" style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}>
@@ -271,6 +276,19 @@ export function SchedulerTray({ activeConnectionId, hasRvbbit, onOpenSql, onOpen
                       void mutate(scheduleSql("rvbbit_catalog_refresh", "0 3 * * *", CRAWL_COMMAND))
                     }
                   />
+                ) : null}
+
+                {/* accelerator freshness heartbeat preset */}
+                {hasRvbbit ? (
+                  <div className="mt-1">
+                    <AccelTickPreset
+                      job={accelTickJob}
+                      busy={busy}
+                      onSchedule={() =>
+                        void mutate(scheduleSql("rvbbit_accel_tick", "* * * * *", ACCEL_TICK_COMMAND))
+                      }
+                    />
+                  </div>
                 ) : null}
 
                 <div className="mb-1.5 mt-2 flex items-center px-1">
@@ -411,6 +429,38 @@ function CrawlPreset({ job, busy, onSchedule }: { job?: CronJob; busy: boolean; 
         className="ml-auto rounded bg-rvbbit-accent/15 px-2 py-0.5 text-[11px] font-medium text-rvbbit-accent hover:bg-rvbbit-accent/25 disabled:opacity-40"
       >
         Schedule crawl
+      </button>
+    </div>
+  )
+}
+
+// ── Accelerator freshness heartbeat preset ──────────────────────────
+
+function AccelTickPreset({ job, busy, onSchedule }: { job?: CronJob; busy: boolean; onSchedule: () => void }) {
+  if (job) {
+    return (
+      <div className="flex items-center gap-2 rounded-md border border-rvbbit-accent/30 bg-rvbbit-bg/30 px-2.5 py-1.5">
+        <Zap className="h-3.5 w-3.5 shrink-0 text-rvbbit-accent" />
+        <span className="text-[11px] text-chrome-text/80">
+          Accelerator heartbeat — <span className="text-foreground">{describeCron(job.schedule)}</span>
+        </span>
+        <span className={cn("ml-auto h-1.5 w-1.5 rounded-full", job.active ? "bg-success" : "bg-chrome-text/40")} />
+      </div>
+    )
+  }
+  return (
+    <div className="flex items-center gap-2 rounded-md border border-chrome-border bg-secondary-background/40 px-2.5 py-1.5">
+      <Zap className="h-3.5 w-3.5 shrink-0 text-chrome-text/60" />
+      <span className="text-[11px] text-chrome-text/70">
+        Keep accelerators fresh — policy-driven delta/full refresh of dirty tables.
+      </span>
+      <button
+        type="button"
+        disabled={busy}
+        onClick={onSchedule}
+        className="ml-auto rounded bg-rvbbit-accent/15 px-2 py-0.5 text-[11px] font-medium text-rvbbit-accent hover:bg-rvbbit-accent/25 disabled:opacity-40"
+      >
+        Schedule heartbeat
       </button>
     </div>
   )

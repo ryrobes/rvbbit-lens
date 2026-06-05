@@ -658,3 +658,176 @@ export function routeSpeedup(reason: string | null | undefined): number | null {
   const m = reason.match(/([\d.]+)x faster/)
   return m ? Number(m[1]) : null
 }
+
+// ── Accelerator freshness (the cockpit) ─────────────────────────────
+//
+// One lane per accelerated rvbbit table, fusing the freshness rollup
+// (rvbbit.accel_freshness) with the effective policy (accel_policy_effective).
+// Staleness is correctness-safe (a dirty table just falls back to a slow heap
+// scan), so this is a value-vs-cost view, not a coherence one.
+
+export type AccelStrategy = "manual" | "scheduled" | "target" | "demand" | "continuous"
+export const ACCEL_STRATEGIES: AccelStrategy[] = [
+  "manual",
+  "scheduled",
+  "target",
+  "demand",
+  "continuous",
+]
+
+export interface AccelFreshnessRow {
+  tableName: string
+  dirty: boolean
+  authoritative: boolean
+  opRunning: boolean
+  lance: boolean
+  secondsDirty: number | null
+  secondsSinceRefresh: number | null
+  lastRefreshAt: number
+  parquetRows: number
+  rowGroups: number
+  driftRows: number
+  driftRatio: number | null
+  heapSeqScans: number
+  lastRebuildMs: number | null
+  lastRebuildRows: number | null
+  // policy
+  strategy: AccelStrategy
+  targetSecs: number | null
+  minIntervalSecs: number
+  explicit: boolean
+  active: boolean
+}
+
+export interface AccelTickPlanRow {
+  tableName: string
+  action: string // delta | full | skip
+  reason: string
+  status: string // planned | deferred | skip
+  driftRows: number
+  driftRatio: number | null
+  secondsDirty: number | null
+}
+
+const ACCEL_FRESHNESS_SQL =
+  "SELECT f.table_name, f.shadow_heap_dirty, f.parquet_authoritative, f.op_running, " +
+  "f.lance_accelerated, f.seconds_dirty, f.seconds_since_refresh, f.last_refresh_at, " +
+  "f.parquet_rows, f.row_groups, f.drift_rows, f.drift_ratio, f.heap_seq_scans, " +
+  "f.last_rebuild_ms, f.last_rebuild_rows, e.strategy, e.freshness_target_secs, " +
+  "e.min_interval_secs, e.explicit, e.active " +
+  "FROM rvbbit.accel_freshness f " +
+  "JOIN rvbbit.accel_policy_effective e ON e.table_oid = f.table_oid " +
+  "ORDER BY (f.drift_rows * (1 + f.heap_seq_scans)) DESC, f.table_name"
+
+export async function fetchAccelFreshness(
+  connectionId: string,
+): Promise<{ rows: AccelFreshnessRow[]; error?: string }> {
+  const res = await runQuery(connectionId, ACCEL_FRESHNESS_SQL)
+  if (!res.ok) return { rows: [], error: res.error }
+  return {
+    rows: res.rows.map((r) => ({
+      tableName: String(r.table_name ?? ""),
+      dirty: bool(r.shadow_heap_dirty),
+      authoritative: bool(r.parquet_authoritative),
+      opRunning: bool(r.op_running),
+      lance: bool(r.lance_accelerated),
+      secondsDirty: numOrNull(r.seconds_dirty),
+      secondsSinceRefresh: numOrNull(r.seconds_since_refresh),
+      lastRefreshAt: epoch(r.last_refresh_at),
+      parquetRows: num(r.parquet_rows),
+      rowGroups: num(r.row_groups),
+      driftRows: num(r.drift_rows),
+      driftRatio: numOrNull(r.drift_ratio),
+      heapSeqScans: num(r.heap_seq_scans),
+      lastRebuildMs: numOrNull(r.last_rebuild_ms),
+      lastRebuildRows: numOrNull(r.last_rebuild_rows),
+      strategy: (String(r.strategy ?? "manual") as AccelStrategy) ?? "manual",
+      targetSecs: numOrNull(r.freshness_target_secs),
+      minIntervalSecs: num(r.min_interval_secs),
+      explicit: bool(r.explicit),
+      active: bool(r.active),
+    })),
+  }
+}
+
+/** Dry-run plan = the "projected consequence" of a tick (no execution). */
+export async function fetchAccelTickPlan(
+  connectionId: string,
+  budget: number | null,
+): Promise<{ rows: AccelTickPlanRow[]; error?: string }> {
+  const b = budget == null ? "NULL" : String(Math.max(0, Math.floor(budget)))
+  const res = await runQuery(
+    connectionId,
+    "SELECT table_name, action, reason, status, drift_rows, drift_ratio, seconds_dirty " +
+      `FROM rvbbit.accel_tick(${b}, true)`,
+  )
+  if (!res.ok) return { rows: [], error: res.error }
+  return {
+    rows: res.rows.map((r) => ({
+      tableName: String(r.table_name ?? ""),
+      action: String(r.action ?? ""),
+      reason: String(r.reason ?? ""),
+      status: String(r.status ?? ""),
+      driftRows: num(r.drift_rows),
+      driftRatio: numOrNull(r.drift_ratio),
+      secondsDirty: numOrNull(r.seconds_dirty),
+    })),
+  }
+}
+
+/** Run an accelerator mutation; returns ok/err for a toast. */
+export async function execAccel(
+  connectionId: string,
+  sql: string,
+): Promise<{ ok: boolean; error?: string }> {
+  const res = await runQuery(connectionId, sql)
+  return res.ok ? { ok: true } : { ok: false, error: res.error }
+}
+
+const qIdent = (table: string) => `'${table.replace(/'/g, "''")}'::regclass`
+
+export const accelRefreshSql = (table: string) =>
+  `SELECT rvbbit.refresh_acceleration(${qIdent(table)}, true)`
+export const accelRebuildSql = (table: string) =>
+  `SELECT rvbbit.rebuild_acceleration(${qIdent(table)}, true)`
+export const clearAccelPolicySql = (table: string) =>
+  `SELECT rvbbit.clear_accel_policy(${qIdent(table)})`
+export function setAccelPolicySql(
+  table: string,
+  strategy: AccelStrategy,
+  targetSecs: number | null,
+): string {
+  const t = targetSecs == null ? "NULL" : String(Math.max(1, Math.floor(targetSecs)))
+  return `SELECT rvbbit.set_accel_policy(${qIdent(table)}, ${sqlStr(strategy)}, ${t})`
+}
+/** Run the executor for real (budgeted). */
+export const runAccelTickSql = (budget: number) =>
+  `SELECT count(*) FROM rvbbit.accel_tick(${Math.max(1, Math.floor(budget))}, false)`
+
+export interface PolicyRecommendation {
+  strategy: AccelStrategy
+  targetSecs: number | null
+  why: string
+}
+
+/**
+ * Suggest a policy from the value signals. Hot + cheap-to-keep-fresh → a tight
+ * freshness target; never-queried → leave manual; expensive (Lance) → relax.
+ */
+export function recommendPolicy(r: AccelFreshnessRow): PolicyRecommendation {
+  if (r.heapSeqScans === 0 && !r.dirty) {
+    return { strategy: "manual", targetSecs: null, why: "never queried on the slow path — not worth auto-refreshing" }
+  }
+  if (r.lance) {
+    return { strategy: "target", targetSecs: 1800, why: "Lance is a full overwrite — keep fresh, but on a relaxed 30m target" }
+  }
+  const hot = r.heapSeqScans >= 5
+  const cheapDelta = (r.driftRatio ?? 1) < 0.5
+  if (hot && cheapDelta) {
+    return { strategy: "target", targetSecs: 300, why: "queried on the slow path and cheap to delta — keep within ~5 min" }
+  }
+  if (hot) {
+    return { strategy: "scheduled", targetSecs: null, why: "queried on the slow path — refresh whenever dirty" }
+  }
+  return { strategy: "demand", targetSecs: null, why: "low traffic — only refresh when it's actually being hit" }
+}
