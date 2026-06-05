@@ -171,8 +171,8 @@ export function QueryLensOverview({
 
         <Panel
           icon={GitBranch}
-          title="Top queries"
-          right={<span>by cost · click to inspect</span>}
+          title="Recent queries"
+          right={<span>newest first · click to inspect</span>}
         >
           {topQueries.length === 0 ? (
             <EmptyHint label="no query_id-attributed traffic" />

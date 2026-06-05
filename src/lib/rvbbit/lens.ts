@@ -720,7 +720,11 @@ export async function fetchLensOverview(
        WHERE query_id IS NOT NULL
          AND invocation_at > ${windowExpr}
        GROUP BY query_id
-       ORDER BY total_cost DESC NULLS LAST, total_ms DESC
+       -- Most-recent first so the list reflects what the user just ran. Ordering
+       -- by total_cost hid free local/GPU operators (about/rerank, cost 0) and
+       -- fully-errored queries (also cost 0) below the top-N, making the panel
+       -- look frozen even as new queries landed.
+       ORDER BY max(invocation_at) DESC
        LIMIT 12`,
     ),
   ])
