@@ -35,6 +35,13 @@ import {
   type McpToolLite,
 } from "@/lib/rvbbit/mcp"
 import { mapTrace } from "@/lib/rvbbit/operator-graph"
+import {
+  clearOperatorLayout,
+  fetchOperatorLayout,
+  saveOperatorLayout,
+  type NodePos,
+  type OperatorLayout,
+} from "@/lib/rvbbit/operator-layout"
 import { OperatorGraph, type GraphMode } from "./operator-graph"
 import { OperatorInspector } from "./operator-inspector"
 import { OperatorReceiptTimeline } from "./operator-receipt-timeline"
@@ -85,6 +92,7 @@ export function OperatorFlowWindow({
   const [running, setRunning] = useState(false)
   const [runError, setRunError] = useState<string | null>(null)
   const [historyRefresh, setHistoryRefresh] = useState(0)
+  const [layout, setLayout] = useState<OperatorLayout>({})
 
   // Load the operator (or start a blank one).
   useEffect(() => {
@@ -233,6 +241,45 @@ export function OperatorFlowWindow({
     setRunning(false)
   }, [activeConnectionId, op, tryInputs])
 
+  // Canvas node positions (UI-only, lens-side table). Loaded once the
+  // operator is persisted; unsaved drafts drag locally without persisting.
+  const opName = op?.name ?? ""
+  useEffect(() => {
+    let cancelled = false
+    const run = async () => {
+      if (!activeConnectionId || !opName || !persisted) {
+        if (!cancelled) setLayout({})
+        return
+      }
+      const res = await fetchOperatorLayout(activeConnectionId, opName)
+      if (!cancelled) setLayout(res.layout)
+    }
+    void run()
+    return () => {
+      cancelled = true
+    }
+  }, [activeConnectionId, opName, persisted])
+
+  const onMoveNode = useCallback(
+    (id: string, pos: NodePos) => {
+      setLayout((prev) => {
+        const next = { ...prev, [id]: pos }
+        if (activeConnectionId && opName && persisted) {
+          void saveOperatorLayout(activeConnectionId, opName, next)
+        }
+        return next
+      })
+    },
+    [activeConnectionId, opName, persisted],
+  )
+
+  const onTidy = useCallback(() => {
+    setLayout({})
+    if (activeConnectionId && opName && persisted) {
+      void clearOperatorLayout(activeConnectionId, opName)
+    }
+  }, [activeConnectionId, opName, persisted])
+
   const receipt = useMemo(
     () => receipts.find((r) => r.receipt_id === receiptId) ?? null,
     [receipts, receiptId],
@@ -321,6 +368,16 @@ export function OperatorFlowWindow({
         <div className="flex-1" />
         {mode === "build" ? (
           <>
+            {Object.keys(layout).length > 0 ? (
+              <button
+                type="button"
+                onClick={onTidy}
+                title="Reset node positions to the automatic layout"
+                className="inline-flex h-6 items-center gap-1 rounded border border-chrome-border px-1.5 text-[10px] text-chrome-text/80 hover:border-rvbbit-accent/40 hover:text-foreground"
+              >
+                Tidy
+              </button>
+            ) : null}
             {dirty ? <span className="text-[10px] text-chart-3">● unsaved</span> : null}
             {saveError ? (
               <span className="max-w-[240px] truncate text-[10px] text-danger" title={saveError}>
@@ -385,6 +442,9 @@ export function OperatorFlowWindow({
               receipt={mode === "run" ? receipt : null}
               selectedNodeId={selectedNodeId}
               onSelectNode={setSelectedNodeId}
+              editable={mode === "build"}
+              positions={layout}
+              onMoveNode={onMoveNode}
             />
           </div>
           {mode === "run" && receipt ? (

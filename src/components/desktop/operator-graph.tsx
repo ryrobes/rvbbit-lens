@@ -1,6 +1,6 @@
 "use client"
 
-import { useMemo } from "react"
+import { useCallback, useMemo, useRef, useState } from "react"
 import {
   AlertTriangle,
   Brain,
@@ -23,6 +23,7 @@ import type {
   SubCall,
   Validator,
 } from "@/lib/rvbbit/operators"
+import type { NodePos } from "@/lib/rvbbit/operator-layout"
 import {
   buildOperatorGraph,
   mapTrace,
@@ -49,6 +50,12 @@ interface OperatorGraphProps {
   receipt?: OperatorReceipt | null
   selectedNodeId: string | null
   onSelectNode: (id: string | null) => void
+  /** Build mode → nodes can be dragged to reposition. */
+  editable?: boolean
+  /** Stored UI-only position overrides, keyed by node id. */
+  positions?: Record<string, NodePos>
+  /** Called on drag end with the node's new canvas position. */
+  onMoveNode?: (id: string, pos: NodePos) => void
 }
 
 export function OperatorGraph({
@@ -57,6 +64,9 @@ export function OperatorGraph({
   receipt,
   selectedNodeId,
   onSelectNode,
+  editable = false,
+  positions,
+  onMoveNode,
 }: OperatorGraphProps) {
   const graph = useMemo(() => buildOperatorGraph(op), [op])
   const trace = useMemo(
@@ -64,16 +74,98 @@ export function OperatorGraph({
     [mode, op, receipt],
   )
 
-  const nodeX = (col: number) => PAD_X + col * COL_SPAN
-  const nodeY = (row: number) => PAD_Y + (row - graph.rowMin) * ROW_SPAN
-  const width = PAD_X * 2 + graph.cols * COL_SPAN - COL_GAP
-  const height = PAD_Y * 2 + (graph.rowMax - graph.rowMin + 1) * ROW_SPAN - ROW_GAP
+  const canvasRef = useRef<HTMLDivElement>(null)
+  const [drag, setDrag] = useState<{ id: string; x: number; y: number } | null>(null)
+  const dragRef = useRef<{
+    id: string
+    offX: number
+    offY: number
+    sx: number
+    sy: number
+    x: number
+    y: number
+    moved: boolean
+  } | null>(null)
 
-  const center = (n: OpNode) => ({
-    x: nodeX(n.col) + NODE_W / 2,
-    y: nodeY(n.row) + NODE_H / 2,
-  })
-  const byId = new Map(graph.nodes.map((n) => [n.id, n]))
+  // Auto-layout grid position (the deterministic default).
+  const gridX = (col: number) => PAD_X + col * COL_SPAN
+  const gridY = (row: number) => PAD_Y + (row - graph.rowMin) * ROW_SPAN
+  // Resolved position = live drag → stored override → grid default.
+  const posOf = useCallback(
+    (n: OpNode): NodePos => {
+      if (drag && drag.id === n.id) return { x: drag.x, y: drag.y }
+      return positions?.[n.id] ?? { x: gridX(n.col), y: gridY(n.row) }
+    },
+    // gridX/gridY depend only on graph.rowMin which is stable per graph
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [drag, positions, graph],
+  )
+
+  const posById = new Map(graph.nodes.map((n) => [n.id, posOf(n)]))
+
+  // Canvas spans the auto-layout default and any dragged-out nodes.
+  let maxX = PAD_X * 2 + graph.cols * COL_SPAN - COL_GAP
+  let maxY = PAD_Y * 2 + (graph.rowMax - graph.rowMin + 1) * ROW_SPAN - ROW_GAP
+  for (const p of posById.values()) {
+    maxX = Math.max(maxX, p.x + NODE_W + PAD_X)
+    maxY = Math.max(maxY, p.y + NODE_H + PAD_Y)
+  }
+  const width = maxX
+  const height = maxY
+
+  // Pointer → canvas-local coords, scale- and scroll-aware.
+  const pointerToCanvas = useCallback((clientX: number, clientY: number): NodePos => {
+    const el = canvasRef.current
+    if (!el) return { x: clientX, y: clientY }
+    const rect = el.getBoundingClientRect()
+    const sx = rect.width / el.offsetWidth || 1
+    const sy = rect.height / el.offsetHeight || 1
+    return { x: (clientX - rect.left) / sx, y: (clientY - rect.top) / sy }
+  }, [])
+
+  const beginDrag = useCallback(
+    (nodeId: string, base: NodePos, e: React.PointerEvent) => {
+      if (!editable) return
+      e.preventDefault()
+      const p = pointerToCanvas(e.clientX, e.clientY)
+      dragRef.current = {
+        id: nodeId,
+        offX: p.x - base.x,
+        offY: p.y - base.y,
+        sx: e.clientX,
+        sy: e.clientY,
+        x: base.x,
+        y: base.y,
+        moved: false,
+      }
+      setDrag({ id: nodeId, x: base.x, y: base.y })
+
+      const onMove = (ev: PointerEvent) => {
+        const info = dragRef.current
+        if (!info) return
+        const c = pointerToCanvas(ev.clientX, ev.clientY)
+        info.x = Math.max(0, Math.round(c.x - info.offX))
+        info.y = Math.max(0, Math.round(c.y - info.offY))
+        if (!info.moved && Math.hypot(ev.clientX - info.sx, ev.clientY - info.sy) > 4) {
+          info.moved = true
+        }
+        setDrag({ id: info.id, x: info.x, y: info.y })
+      }
+      const onUp = () => {
+        window.removeEventListener("pointermove", onMove)
+        window.removeEventListener("pointerup", onUp)
+        const info = dragRef.current
+        dragRef.current = null
+        setDrag(null)
+        if (!info) return
+        if (info.moved) onMoveNode?.(info.id, { x: info.x, y: info.y })
+        else onSelectNode(selectedNodeId === info.id ? null : info.id)
+      }
+      window.addEventListener("pointermove", onMove)
+      window.addEventListener("pointerup", onUp)
+    },
+    [editable, pointerToCanvas, onMoveNode, onSelectNode, selectedNodeId],
+  )
 
   /**
    * Per-node trace status. In build mode, every node is `idle` (we
@@ -94,14 +186,24 @@ export function OperatorGraph({
 
   return (
     <div className="h-full w-full overflow-auto p-2">
-      <div className="relative" style={{ width, height }}>
-        {/* regions behind everything */}
+      <div ref={canvasRef} className="relative" style={{ width, height }}>
+        {/* regions behind everything — bbox of their contained nodes so
+            they keep enclosing the nodes after a drag. */}
         {graph.regions.map((r) => {
+          const inside = graph.nodes.filter(
+            (n) => n.col >= r.col0 && n.col <= r.col1 && n.row >= r.row0 && n.row <= r.row1,
+          )
+          const ps = inside.map((n) => posById.get(n.id)).filter((p): p is NodePos => !!p)
+          if (ps.length === 0) return null
+          const minX = Math.min(...ps.map((p) => p.x))
+          const minY = Math.min(...ps.map((p) => p.y))
+          const maxXr = Math.max(...ps.map((p) => p.x + NODE_W))
+          const maxYr = Math.max(...ps.map((p) => p.y + NODE_H))
           const outerPad = r.kind === "retry" ? 14 : 6
-          const rx = nodeX(r.col0) - outerPad
-          const ry = nodeY(r.row0) - outerPad - 16
-          const rw = (r.col1 - r.col0) * COL_SPAN + NODE_W + outerPad * 2
-          const rh = (r.row1 - r.row0) * ROW_SPAN + NODE_H + outerPad * 2 + 16
+          const rx = minX - outerPad
+          const ry = minY - outerPad - 16
+          const rw = maxXr - minX + outerPad * 2
+          const rh = maxYr - minY + outerPad * 2 + 16
           const isRetry = r.kind === "retry"
           const regionColor = isRetry ? "var(--chart-3)" : "var(--rvbbit-accent)"
           return (
@@ -168,8 +270,8 @@ export function OperatorGraph({
             </marker>
           </defs>
           {graph.edges.map((e, i) => {
-            const a = byId.get(e.from)
-            const b = byId.get(e.to)
+            const a = posById.get(e.from)
+            const b = posById.get(e.to)
             if (!a || !b) return null
             const downstreamStatus = statusOf(e.to)
             const upstreamStatus = statusOf(e.from)
@@ -199,10 +301,10 @@ export function OperatorGraph({
 
             if (e.kind === "loop") {
               // arc up and over the retry region, right → left
-              const sx = nodeX(a.col) + NODE_W / 2
-              const sy = nodeY(a.row)
-              const ex = nodeX(b.col) + NODE_W / 2
-              const ey = nodeY(b.row)
+              const sx = a.x + NODE_W / 2
+              const sy = a.y
+              const ex = b.x + NODE_W / 2
+              const ey = b.y
               const top = Math.min(sy, ey) - 38
               return (
                 <path
@@ -215,10 +317,10 @@ export function OperatorGraph({
                 />
               )
             }
-            const sx = nodeX(a.col) + NODE_W
-            const sy = center(a).y
-            const ex = nodeX(b.col)
-            const ey = center(b).y
+            const sx = a.x + NODE_W
+            const sy = a.y + NODE_H / 2
+            const ex = b.x
+            const ey = b.y + NODE_H / 2
             const mx = (sx + ex) / 2
             return (
               <path
@@ -234,26 +336,32 @@ export function OperatorGraph({
         </svg>
 
         {/* nodes */}
-        {graph.nodes.map((n) => (
-          <NodeBox
-            key={n.id}
-            op={op}
-            node={n}
-            mode={mode}
-            receipt={receipt ?? null}
-            calls={trace?.get(n.id) ?? null}
-            status={statusOf(n.id)}
-            selected={selectedNodeId === n.id}
-            onSelect={() => onSelectNode(selectedNodeId === n.id ? null : n.id)}
-            style={{
-              position: "absolute",
-              left: nodeX(n.col),
-              top: nodeY(n.row),
-              width: NODE_W,
-              height: NODE_H,
-            }}
-          />
-        ))}
+        {graph.nodes.map((n) => {
+          const p = posById.get(n.id) ?? { x: 0, y: 0 }
+          return (
+            <NodeBox
+              key={n.id}
+              op={op}
+              node={n}
+              mode={mode}
+              receipt={receipt ?? null}
+              calls={trace?.get(n.id) ?? null}
+              status={statusOf(n.id)}
+              selected={selectedNodeId === n.id}
+              editable={editable}
+              dragging={drag?.id === n.id}
+              onSelect={() => onSelectNode(selectedNodeId === n.id ? null : n.id)}
+              onPointerDownNode={(e) => beginDrag(n.id, p, e)}
+              style={{
+                position: "absolute",
+                left: p.x,
+                top: p.y,
+                width: NODE_W,
+                height: NODE_H,
+              }}
+            />
+          )
+        })}
       </div>
     </div>
   )
@@ -351,7 +459,10 @@ function NodeBox({
   calls,
   status,
   selected,
+  editable,
+  dragging,
   onSelect,
+  onPointerDownNode,
   style,
 }: {
   op: RvbbitOperator
@@ -361,7 +472,10 @@ function NodeBox({
   calls: SubCall[] | null
   status: TraceStatus
   selected: boolean
+  editable: boolean
+  dragging: boolean
   onSelect: () => void
+  onPointerDownNode: (e: React.PointerEvent) => void
   style: React.CSSProperties
 }) {
   const view = describeNode(op, node.ref, receipt, mode)
@@ -383,15 +497,19 @@ function NodeBox({
   return (
     <button
       type="button"
-      onClick={onSelect}
+      onClick={editable ? undefined : onSelect}
+      onPointerDown={editable ? onPointerDownNode : undefined}
       style={{
         ...style,
         borderColor: ss.borderColor,
         boxShadow: ss.shadow,
+        touchAction: editable ? "none" : undefined,
+        zIndex: dragging ? 20 : undefined,
       }}
       className={cn(
         "group flex flex-col overflow-hidden rounded-md border-2 bg-secondary-background text-left transition",
         "hover:ring-1 hover:ring-main/30",
+        editable ? (dragging ? "cursor-grabbing" : "cursor-grab") : "",
         dimmed && "opacity-55",
       )}
     >
