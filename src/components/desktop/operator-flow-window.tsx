@@ -16,6 +16,7 @@ import { Button } from "@/components/ui/button"
 import {
   emptyOperator,
   fetchOperators,
+  fetchReceiptById,
   fetchReceipts,
   fetchSpecialists,
   runOperator,
@@ -37,6 +38,7 @@ import { mapTrace } from "@/lib/rvbbit/operator-graph"
 import { OperatorGraph, type GraphMode } from "./operator-graph"
 import { OperatorInspector } from "./operator-inspector"
 import { OperatorReceiptTimeline } from "./operator-receipt-timeline"
+import { OperatorHistoryShelf } from "./operator-history-shelf"
 import type { OperatorFlowPayload } from "@/lib/desktop/types"
 
 interface OperatorFlowWindowProps {
@@ -82,6 +84,7 @@ export function OperatorFlowWindow({
   const [tryInputs, setTryInputs] = useState<string[]>([])
   const [running, setRunning] = useState(false)
   const [runError, setRunError] = useState<string | null>(null)
+  const [historyRefresh, setHistoryRefresh] = useState(0)
 
   // Load the operator (or start a blank one).
   useEffect(() => {
@@ -149,21 +152,36 @@ export function OperatorFlowWindow({
   }, [mode, loadReceipts])
 
   // Caller pushed a new deep-link target (e.g. clicking another receipt
-  // in Query Lens while this window is already open). Deferred via a
-  // local async to satisfy the set-state-in-effect lint rule.
+  // in Query Lens while this window is already open). Fetch it by id so
+  // even an old run (outside the recent page) is available to replay.
   useEffect(() => {
-    if (!payload.receiptId) return
+    if (!payload.receiptId || !activeConnectionId) return
     let cancelled = false
     const run = async () => {
       if (cancelled) return
       setReceiptId(payload.receiptId!)
       setMode("run")
+      const { receipt: r } = await fetchReceiptById(activeConnectionId, payload.receiptId!)
+      if (cancelled || !r) return
+      setReceipts((prev) =>
+        prev.some((x) => x.receipt_id === r.receipt_id) ? prev : [r, ...prev],
+      )
     }
     void run()
     return () => {
       cancelled = true
     }
-  }, [payload.receiptId])
+  }, [payload.receiptId, activeConnectionId])
+
+  // A row picked from the history shelf — merge it in (it may be older
+  // than the recent page) and replay it read-only in run mode.
+  const onSelectReceipt = useCallback((r: OperatorReceipt) => {
+    setReceipts((prev) =>
+      prev.some((x) => x.receipt_id === r.receipt_id) ? prev : [r, ...prev],
+    )
+    setReceiptId(r.receipt_id)
+    setMode("run")
+  }, [])
 
   useEffect(() => {
     if (!op || tryInputs.length === op.arg_names.length) return
@@ -211,6 +229,7 @@ export function OperatorFlowWindow({
     const fresh = await fetchReceipts(activeConnectionId, op.name)
     setReceipts(fresh.receipts)
     setReceiptId(fresh.receipts[0]?.receipt_id ?? null)
+    setHistoryRefresh((n) => n + 1)
     setRunning(false)
   }, [activeConnectionId, op, tryInputs])
 
@@ -378,6 +397,14 @@ export function OperatorFlowWindow({
               />
             </div>
           ) : null}
+          <OperatorHistoryShelf
+            connectionId={activeConnectionId}
+            operatorName={op.name}
+            enabled={persisted}
+            activeReceiptId={mode === "run" ? receiptId : null}
+            refreshSignal={historyRefresh}
+            onSelect={onSelectReceipt}
+          />
         </div>
         <aside className="w-[320px] shrink-0 border-l border-chrome-border">
           {mode === "build" ? (

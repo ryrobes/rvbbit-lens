@@ -259,6 +259,13 @@ export function CapabilitiesWindow({
     })
   }, [join, selectedTags, selectedSources, search])
 
+  // Heaviest VRAM reservation among the visible packs — the gauge on each
+  // card is normalized to this, so the bars read as relative "weight".
+  const maxVram = useMemo(
+    () => visible.reduce((m, e) => Math.max(m, e.catalog.vram_required_bytes ?? 0), 0),
+    [visible],
+  )
+
   const totalCatalog = catalog?.capabilities.length ?? 0
   const totalRegistered = join?.entries.filter((e) => e.flags.registered).length ?? 0
   const totalUsed = join?.entries.filter((e) => e.flags.used).length ?? 0
@@ -607,6 +614,7 @@ export function CapabilitiesWindow({
                 key={e.catalog.id}
                 entry={e}
                 warrenNodes={uniqueNodesFromInventory(warrenInventory)}
+                maxVram={maxVram}
                 onOpen={() => onOpenCapability(e.catalog.id)}
               />
             ))}
@@ -778,10 +786,12 @@ function filterBySearchOnly<T extends { catalog: JoinedCatalogEntry["catalog"] }
 function CapabilityCard({
   entry,
   warrenNodes,
+  maxVram,
   onOpen,
 }: {
   entry: JoinedCatalogEntry
   warrenNodes: WarrenInventoryRow[]
+  maxVram: number
   onOpen: () => void
 }) {
   const { catalog, installed, installedRuntime, flags } = entry
@@ -823,7 +833,7 @@ function CapabilityCard({
       type="button"
       onClick={onOpen}
       className={cn(
-        "group flex flex-col rounded-md border p-2.5 text-left transition",
+        "group relative flex flex-col overflow-hidden rounded-md border p-2.5 pl-3.5 text-left transition",
         active
           ? "border-brand-capability/60 bg-brand-capability/[0.07] shadow-[0_0_0_1px_var(--brand-capability)] ring-1 ring-brand-capability/30 hover:bg-brand-capability/[0.1]"
           : flags.registered
@@ -831,6 +841,8 @@ function CapabilityCard({
             : "border-chrome-border bg-secondary-background/40 hover:border-brand-capability/40 hover:bg-secondary-background/70",
       )}
     >
+      <WeightBar bytes={vramRequired} max={maxVram} />
+
       {/* title row */}
       <div className="flex items-start gap-1.5">
         <Package className="mt-0.5 h-3.5 w-3.5 shrink-0 text-brand-capability" />
@@ -933,6 +945,36 @@ function CapabilityCard({
       {/* the SQL operators this pack unlocks — what people shop for */}
       <OperatorChips operators={opChips} />
     </button>
+  )
+}
+
+/**
+ * Slim vertical "weight" gauge on the card's left edge: VRAM reservation
+ * normalized to the heaviest visible pack, filling bottom-up. CPU packs
+ * (no GPU reservation) show the same bar, greyed and empty — a quick
+ * at-a-glance sense of how heavy each capability is to host.
+ */
+function WeightBar({ bytes, max }: { bytes: number | null; max: number }) {
+  const isGpu = bytes != null && bytes > 0
+  const ratio = isGpu && max > 0 ? Math.min(1, bytes / max) : 0
+  return (
+    <div
+      className="absolute bottom-1 left-1 top-1 w-[3px] overflow-hidden rounded-full bg-foreground/[0.06]"
+      title={
+        isGpu
+          ? `${fmtBytes(bytes)} VRAM — relative to the heaviest visible pack`
+          : "CPU — no GPU reservation"
+      }
+    >
+      <div
+        className="absolute inset-x-0 bottom-0 rounded-full"
+        style={{
+          height: isGpu ? `${Math.max(5, ratio * 100)}%` : "100%",
+          background: isGpu ? "var(--brand-capability)" : "var(--chrome-text)",
+          opacity: isGpu ? 0.55 : 0.14,
+        }}
+      />
+    </div>
   )
 }
 

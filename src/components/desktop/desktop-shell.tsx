@@ -569,17 +569,32 @@ export function DesktopShell() {
     }
   }, [activeConnectionId])
 
-  // Refresh the semantic-op catalog when operators change in this session
-  // (the operator/capability UIs dispatch this), so newly-added ops show up in
-  // the drop tiles without a browser reload.
+  // Refresh the semantic-op catalog when operators change. Two triggers:
+  //  (1) in-session operator/capability edits dispatch `operators-changed`;
+  //  (2) the window regaining focus (throttled) — so operators added OUT OF
+  //      BAND (psql, migrations, another tab) appear in the drop tiles without
+  //      a manual reload. The catalog is loaded once at session start, so
+  //      external adds would otherwise stay invisible until a hard reload.
   useEffect(() => {
+    if (!activeConnectionId) return
+    let lastRefresh = 0
     const refresh = () => {
-      if (!activeConnectionId) return
       invalidateSemanticOps(activeConnectionId)
       loadSemanticOps(activeConnectionId).then(setSemanticOps)
     }
-    window.addEventListener("rvbbit-lens:operators-changed", refresh)
-    return () => window.removeEventListener("rvbbit-lens:operators-changed", refresh)
+    const onChanged = () => refresh()
+    const onFocus = () => {
+      const now = Date.now()
+      if (now - lastRefresh < 4000) return // throttle: at most once / 4s
+      lastRefresh = now
+      refresh()
+    }
+    window.addEventListener("rvbbit-lens:operators-changed", onChanged)
+    window.addEventListener("focus", onFocus)
+    return () => {
+      window.removeEventListener("rvbbit-lens:operators-changed", onChanged)
+      window.removeEventListener("focus", onFocus)
+    }
   }, [activeConnectionId])
 
   // ── Local desktop persistence ───────────────────────────────────────

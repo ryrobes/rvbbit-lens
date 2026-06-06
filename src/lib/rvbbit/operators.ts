@@ -249,6 +249,29 @@ export async function fetchOperators(
   return { operators: res.rows.map(coerceOperator) }
 }
 
+const RECEIPT_COLUMNS =
+  "receipt_id::text AS receipt_id, operator, inputs, output, error, model, " +
+  "n_tokens_in, n_tokens_out, cost_usd, latency_ms, sub_calls, " +
+  "query_id::text AS query_id, invocation_at"
+
+function coerceReceipt(r: Record<string, unknown>, operatorName = ""): OperatorReceipt {
+  return {
+    receipt_id: String(r.receipt_id ?? ""),
+    operator: String(r.operator ?? operatorName),
+    inputs: (r.inputs as Record<string, unknown> | null) ?? null,
+    output: r.output == null ? null : String(r.output),
+    error: r.error == null ? null : String(r.error),
+    model: r.model == null ? null : String(r.model),
+    n_tokens_in: Number(r.n_tokens_in ?? 0),
+    n_tokens_out: Number(r.n_tokens_out ?? 0),
+    cost_usd: r.cost_usd == null ? null : Number(r.cost_usd),
+    latency_ms: Number(r.latency_ms ?? 0),
+    sub_calls: (r.sub_calls as SubCall[] | null) ?? null,
+    query_id: r.query_id == null ? null : String(r.query_id),
+    invocation_at: String(r.invocation_at ?? ""),
+  }
+}
+
 export async function fetchReceipts(
   connectionId: string,
   operatorName: string,
@@ -256,30 +279,110 @@ export async function fetchReceipts(
 ): Promise<{ receipts: OperatorReceipt[]; error?: string }> {
   const res = await runQuery(
     connectionId,
-    `SELECT receipt_id::text AS receipt_id, operator, inputs, output, error, model, ` +
-      `n_tokens_in, n_tokens_out, cost_usd, latency_ms, sub_calls, ` +
-      `query_id::text AS query_id, invocation_at ` +
+    `SELECT ${RECEIPT_COLUMNS} ` +
       `FROM rvbbit.receipts WHERE operator = ${sqlStr(operatorName)} ` +
       `ORDER BY invocation_at DESC LIMIT ${Math.max(1, Math.min(200, limit))}`,
   )
   if (!res.ok) return { receipts: [], error: res.error }
-  return {
-    receipts: res.rows.map((r) => ({
-      receipt_id: String(r.receipt_id ?? ""),
-      operator: String(r.operator ?? operatorName),
-      inputs: (r.inputs as Record<string, unknown> | null) ?? null,
-      output: r.output == null ? null : String(r.output),
-      error: r.error == null ? null : String(r.error),
-      model: r.model == null ? null : String(r.model),
-      n_tokens_in: Number(r.n_tokens_in ?? 0),
-      n_tokens_out: Number(r.n_tokens_out ?? 0),
-      cost_usd: r.cost_usd == null ? null : Number(r.cost_usd),
-      latency_ms: Number(r.latency_ms ?? 0),
-      sub_calls: (r.sub_calls as SubCall[] | null) ?? null,
-      query_id: r.query_id == null ? null : String(r.query_id),
-      invocation_at: String(r.invocation_at ?? ""),
-    })),
+  return { receipts: res.rows.map((r) => coerceReceipt(r, operatorName)) }
+}
+
+export async function fetchReceiptById(
+  connectionId: string,
+  receiptId: string,
+): Promise<{ receipt: OperatorReceipt | null; error?: string }> {
+  const res = await runQuery(
+    connectionId,
+    `SELECT ${RECEIPT_COLUMNS} FROM rvbbit.receipts ` +
+      `WHERE receipt_id = ${sqlStr(receiptId)}::uuid LIMIT 1`,
+  )
+  if (!res.ok) return { receipt: null, error: res.error }
+  return { receipt: res.rows[0] ? coerceReceipt(res.rows[0]) : null }
+}
+
+// ── Paginated / filtered history (the executions shelf) ──────────────
+
+export type ReceiptStatusFilter = "all" | "ok" | "error"
+
+export interface ReceiptPageOpts {
+  status?: ReceiptStatusFilter
+  /** null = all time; otherwise restrict to the last N hours. */
+  windowHours?: number | null
+  /** ILIKE over inputs / output / error text. */
+  search?: string
+  /** Keyset cursor: invocation_at of the last row of the previous page. */
+  before?: string | null
+  limit?: number
+}
+
+/** `\`, `%` and `_` are LIKE metacharacters — neutralize them so a raw
+ *  search string matches literally. */
+function escapeLike(s: string): string {
+  return s.replace(/[\\%_]/g, (c) => `\\${c}`)
+}
+
+function receiptWhere(operatorName: string, opts: ReceiptPageOpts): string {
+  const clauses = [`operator = ${sqlStr(operatorName)}`]
+  if (opts.status === "ok") clauses.push("error IS NULL")
+  else if (opts.status === "error") clauses.push("error IS NOT NULL")
+  if (opts.windowHours != null && opts.windowHours > 0) {
+    clauses.push(`invocation_at > now() - interval '${Math.floor(opts.windowHours)} hours'`)
   }
+  const q = (opts.search ?? "").trim()
+  if (q.length > 0) {
+    const like = sqlStr(`%${escapeLike(q)}%`)
+    clauses.push(
+      `(inputs::text ILIKE ${like} OR coalesce(output, '') ILIKE ${like} ` +
+        `OR coalesce(error, '') ILIKE ${like})`,
+    )
+  }
+  return clauses.join(" AND ")
+}
+
+/**
+ * One page of executions for the history shelf. Keyset-paginated on
+ * `invocation_at` (matching the `(operator, invocation_at)` index) so it
+ * stays fast across thousands of runs. `nextCursor` is null at the end.
+ */
+export async function fetchReceiptsPage(
+  connectionId: string,
+  operatorName: string,
+  opts: ReceiptPageOpts = {},
+): Promise<{ receipts: OperatorReceipt[]; nextCursor: string | null; error?: string }> {
+  const limit = Math.max(1, Math.min(200, opts.limit ?? 50))
+  const where = receiptWhere(operatorName, opts)
+  const cursor =
+    opts.before && opts.before.length > 0
+      ? ` AND invocation_at < ${sqlStr(opts.before)}::timestamptz`
+      : ""
+  const res = await runQuery(
+    connectionId,
+    `SELECT ${RECEIPT_COLUMNS} FROM rvbbit.receipts WHERE ${where}${cursor} ` +
+      `ORDER BY invocation_at DESC LIMIT ${limit + 1}`,
+  )
+  if (!res.ok) return { receipts: [], nextCursor: null, error: res.error }
+  const rows = res.rows.map((r) => coerceReceipt(r, operatorName))
+  const hasMore = rows.length > limit
+  const page = hasMore ? rows.slice(0, limit) : rows
+  return {
+    receipts: page,
+    nextCursor: hasMore ? page[page.length - 1].invocation_at : null,
+  }
+}
+
+/** Total matching the current filters — drives the shelf's "N runs" count. */
+export async function fetchReceiptCount(
+  connectionId: string,
+  operatorName: string,
+  opts: ReceiptPageOpts = {},
+): Promise<number> {
+  const res = await runQuery(
+    connectionId,
+    `SELECT count(*)::bigint AS n FROM rvbbit.receipts ` +
+      `WHERE ${receiptWhere(operatorName, opts)}`,
+  )
+  if (!res.ok || res.rows.length === 0) return 0
+  return Number(res.rows[0].n ?? 0)
 }
 
 /**
