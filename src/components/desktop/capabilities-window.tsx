@@ -1,9 +1,10 @@
 "use client"
 
-import { useCallback, useEffect, useMemo, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import {
   AlertTriangle,
   CheckCircle2,
+  ChevronDown,
   Cpu,
   Globe,
   Package,
@@ -13,6 +14,7 @@ import {
   RefreshCw,
   Rocket,
   Search,
+  Tag,
   X,
 } from "@/lib/icons"
 import { cn } from "@/lib/utils"
@@ -38,6 +40,7 @@ import {
   type WarrenInventoryRow,
 } from "@/lib/rvbbit/warren"
 import { Sparkline } from "./sparkline"
+import { OperatorChips, type OpChip } from "./capability-operators"
 import {
   fmtAgo,
   fmtCount,
@@ -232,10 +235,11 @@ export function CapabilitiesWindow({
     if (!join) return [] as JoinedCatalogEntry[]
     let v = join.entries
     if (selectedTags.size > 0) {
+      // OR semantics — keep an entry if it carries any of the selected tags.
       v = v.filter((e) => {
         const tags = new Set(e.catalog.tags ?? [])
-        for (const t of selectedTags) if (!tags.has(t)) return false
-        return true
+        for (const t of selectedTags) if (tags.has(t)) return true
+        return false
       })
     }
     if (selectedSources.size > 0) {
@@ -520,53 +524,23 @@ export function CapabilitiesWindow({
               className="h-7 w-full rounded border border-chrome-border bg-secondary-background pl-7 pr-2 text-[12px] text-foreground outline-none focus:ring-2 focus:ring-ring"
             />
           </div>
-          {selectedTags.size > 0 ? (
-            <button
-              type="button"
-              onClick={() => setSelectedTags(new Set())}
-              className="inline-flex items-center gap-1 rounded border border-chrome-border bg-secondary-background px-2 py-1 text-[10px] text-chrome-text hover:text-foreground"
-            >
-              <X className="h-3 w-3" />
-              clear {selectedTags.size}
-            </button>
+          {allTags.length > 0 ? (
+            <TagFilterDropdown
+              tags={allTags}
+              liveCounts={liveTagCounts}
+              selected={selectedTags}
+              onToggle={(tag) =>
+                setSelectedTags((prev) => {
+                  const next = new Set(prev)
+                  if (next.has(tag)) next.delete(tag)
+                  else next.add(tag)
+                  return next
+                })
+              }
+              onClear={() => setSelectedTags(new Set())}
+            />
           ) : null}
         </div>
-        {allTags.length > 0 ? (
-          <div className="flex flex-wrap items-center gap-1">
-            {allTags.map(([tag, total]) => {
-              const liveCount = liveTagCounts.get(tag) ?? 0
-              const active = selectedTags.has(tag)
-              const dimmed = !active && liveCount === 0
-              return (
-                <button
-                  key={tag}
-                  type="button"
-                  onClick={() =>
-                    setSelectedTags((prev) => {
-                      const next = new Set(prev)
-                      if (next.has(tag)) next.delete(tag)
-                      else next.add(tag)
-                      return next
-                    })
-                  }
-                  className={cn(
-                    "inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] transition",
-                    active
-                      ? "border-brand-capability/50 bg-brand-capability/15 text-brand-capability"
-                      : "border-chrome-border bg-secondary-background text-chrome-text hover:text-foreground",
-                    dimmed ? "opacity-40" : "",
-                  )}
-                  title={`${tag} — ${total} total, ${liveCount} match current search`}
-                >
-                  <span>{tag}</span>
-                  <span className="font-mono tabular-nums text-chrome-text/55">
-                    {liveCount}
-                  </span>
-                </button>
-              )
-            })}
-          </div>
-        ) : null}
         {allSources.length > 1 ? (
           <div className="flex flex-wrap items-center gap-1 border-t border-chrome-border/35 pt-1.5">
             <span className="mr-1 text-[9px] uppercase tracking-wider text-chrome-text/45">
@@ -643,6 +617,131 @@ export function CapabilitiesWindow({
   )
 }
 
+// ── tag filter ──────────────────────────────────────────────────────
+
+/**
+ * Multi-select tag filter, collapsed into a single control beside the
+ * search box so the catalog's long tag list no longer eats a row of
+ * wrapping chips. Each row shows how many currently-searched packs carry
+ * the tag; click-away or Escape closes.
+ */
+function TagFilterDropdown({
+  tags,
+  liveCounts,
+  selected,
+  onToggle,
+  onClear,
+}: {
+  tags: [string, number][]
+  liveCounts: Map<string, number>
+  selected: Set<string>
+  onToggle: (tag: string) => void
+  onClear: () => void
+}) {
+  const [open, setOpen] = useState(false)
+  const ref = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    if (!open) return
+    const onDown = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false)
+    }
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setOpen(false)
+    }
+    window.addEventListener("mousedown", onDown)
+    window.addEventListener("keydown", onKey)
+    return () => {
+      window.removeEventListener("mousedown", onDown)
+      window.removeEventListener("keydown", onKey)
+    }
+  }, [open])
+
+  const count = selected.size
+
+  return (
+    <div ref={ref} className="relative shrink-0">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className={cn(
+          "inline-flex h-7 items-center gap-1.5 rounded border px-2 text-[11px] transition",
+          count > 0
+            ? "border-brand-capability/50 bg-brand-capability/15 text-brand-capability"
+            : "border-chrome-border bg-secondary-background text-chrome-text hover:text-foreground",
+        )}
+        title="Filter by tags"
+      >
+        <Tag className="h-3 w-3" />
+        <span>Tags</span>
+        {count > 0 ? (
+          <span className="rounded-full bg-brand-capability/25 px-1.5 font-mono text-[10px] tabular-nums">
+            {count}
+          </span>
+        ) : null}
+        <ChevronDown className={cn("h-3 w-3 transition-transform", open ? "rotate-180" : "")} />
+      </button>
+
+      {open ? (
+        <div className="absolute right-0 z-30 mt-1 w-60 overflow-hidden rounded-md border border-chrome-border bg-chrome-bg/95 shadow-lg backdrop-blur-md">
+          <div className="flex items-center justify-between border-b border-chrome-border/60 px-2 py-1.5 text-[9px] uppercase tracking-wider text-chrome-text/55">
+            <span>{tags.length} tags</span>
+            {count > 0 ? (
+              <button
+                type="button"
+                onClick={onClear}
+                className="inline-flex items-center gap-1 normal-case tracking-normal text-chrome-text/70 hover:text-foreground"
+              >
+                <X className="h-3 w-3" />
+                clear {count}
+              </button>
+            ) : null}
+          </div>
+          <div className="max-h-[280px] overflow-y-auto py-1">
+            {tags.map(([tag, total]) => {
+              const live = liveCounts.get(tag) ?? 0
+              const checked = selected.has(tag)
+              const dimmed = !checked && live === 0
+              return (
+                <button
+                  key={tag}
+                  type="button"
+                  onClick={() => onToggle(tag)}
+                  className={cn(
+                    "flex w-full items-center gap-2 px-2 py-1 text-left text-[11px] transition-colors hover:bg-foreground/[0.06]",
+                    dimmed ? "opacity-45" : "",
+                  )}
+                  title={`${tag} — ${total} total, ${live} match current search`}
+                >
+                  <span
+                    className={cn(
+                      "grid h-3.5 w-3.5 shrink-0 place-items-center rounded-[3px] border",
+                      checked
+                        ? "border-brand-capability bg-brand-capability text-chrome-bg"
+                        : "border-chrome-border",
+                    )}
+                  >
+                    {checked ? <CheckCircle2 className="h-3 w-3" /> : null}
+                  </span>
+                  <span
+                    className={cn(
+                      "min-w-0 flex-1 truncate",
+                      checked ? "text-brand-capability" : "text-chrome-text",
+                    )}
+                  >
+                    {tag}
+                  </span>
+                  <span className="font-mono tabular-nums text-chrome-text/45">{live}</span>
+                </button>
+              )
+            })}
+          </div>
+        </div>
+      ) : null}
+    </div>
+  )
+}
+
 // ── helpers ─────────────────────────────────────────────────────────
 
 function filterBySearchOnly<T extends { catalog: JoinedCatalogEntry["catalog"] }>(
@@ -687,6 +786,18 @@ function CapabilityCard({
 }) {
   const { catalog, installed, installedRuntime, flags } = entry
   const states = flagsToStates(flags)
+  // Installed *and* live — a registered backend that's healthy, in use, or a
+  // ready runtime. These get the prominent treatment.
+  const active =
+    flags.registered && (flags.used || flags.healthy === true || flags.runtimeReady)
+  // The SQL operators this pack registers. Prefer the rich inline-manifest
+  // defs; fall back to bare names from the catalog row.
+  const opDefs = catalog.manifest?.operators ?? []
+  const opByName = new Map(opDefs.map((d) => [d.name, d]))
+  const opChips: OpChip[] =
+    catalog.operators.length > 0
+      ? catalog.operators.map((n) => opByName.get(n) ?? { name: n })
+      : opDefs
   const testCount = catalog.acceptance_tests.length
   const vramRequired = catalog.vram_required_bytes
   const gpuPlacement = catalog.gpu_placement ?? "single_gpu"
@@ -712,9 +823,12 @@ function CapabilityCard({
       type="button"
       onClick={onOpen}
       className={cn(
-        "group flex flex-col rounded-md border border-chrome-border bg-secondary-background/40 p-2.5 text-left transition",
-        "hover:border-brand-capability/40 hover:bg-secondary-background/70",
-        flags.registered ? "ring-1 ring-brand-capability/20" : "",
+        "group flex flex-col rounded-md border p-2.5 text-left transition",
+        active
+          ? "border-brand-capability/60 bg-brand-capability/[0.07] shadow-[0_0_0_1px_var(--brand-capability)] ring-1 ring-brand-capability/30 hover:bg-brand-capability/[0.1]"
+          : flags.registered
+            ? "border-chrome-border bg-secondary-background/50 ring-1 ring-brand-capability/15 hover:border-brand-capability/40 hover:bg-secondary-background/70"
+            : "border-chrome-border bg-secondary-background/40 hover:border-brand-capability/40 hover:bg-secondary-background/70",
       )}
     >
       {/* title row */}
@@ -815,6 +929,9 @@ function CapabilityCard({
           <span className="text-success">{installedRuntime.status}</span>
         </div>
       ) : null}
+
+      {/* the SQL operators this pack unlocks — what people shop for */}
+      <OperatorChips operators={opChips} />
     </button>
   )
 }
