@@ -302,24 +302,41 @@ export interface RollupSpec {
   projections?: SemanticProjection[]
 }
 
-/** A scalar semantic operator (rvbbit.operators row) as the drop UI needs it. */
+/** Coarse role of a semantic operator — drives where it lives in the drop
+ *  overlay's shape bands and how a drop is interpreted:
+ *  scalar→per-row projection, aggregate→measure, dimension→group-by,
+ *  rowset/query→whole-result transform. */
+export type SemanticOpShape = "scalar" | "aggregate" | "dimension" | "rowset" | "query"
+
+/** A semantic operator (rvbbit.operators row) as the drop UI needs it. */
 export interface SemanticOpMeta {
   name: string
+  shape: SemanticOpShape
   argNames: string[]
   argTypes: string[]
   returnType: "bool" | "text" | "float8" | "jsonb"
   description?: string
 }
 
+/**
+ * A bound extra argument for a multi-arg semantic op (everything past the
+ * dragged column). Either a typed literal (`'positive,negative'`) or a
+ * reference to another column in the same relation (`rvbbit.contradicts(a, b)`
+ * where both are columns).
+ */
+export type SemanticArg =
+  | { kind: "literal"; value: string }
+  | { kind: "column"; column: string }
+
 /** One materialized semantic projection in a {@link RollupSpec}. */
 export interface SemanticProjection {
-  /** Stable identity (`<operator>:<column>`) — dedupe key. */
+  /** Stable identity (`<operator>:<column>[:<args>]`) — dedupe key. */
   id: string
   column: DesktopColumnRef
   operator: string
   returnType: SemanticOpMeta["returnType"]
-  /** Bound literal args for multi-arg ops; empty for 1-arg ops. */
-  args?: string[]
+  /** Bound extra args (literal or column ref) for multi-arg ops; absent for 1-arg ops. */
+  args?: SemanticArg[]
   /** SELECT alias, unique within the spec. */
   alias: string
 }
@@ -426,9 +443,9 @@ export type RollupOp =
   // `grain` bins a temporal pivot column.
   | { kind: "pivot"; measureIds?: string[]; grain?: RollupGrain }
   // Apply a scalar semantic operator to the dragged column as a row-level
-  // projection (spawns a projection block). `args` are bound literals for
-  // multi-arg ops (empty for 1-arg ops).
-  | { kind: "semantic-op"; operator: SemanticOpMeta; args?: string[] }
+  // projection (spawns a projection block). `args` are the bound extra args
+  // (literal or column ref) for multi-arg ops (absent for 1-arg ops).
+  | { kind: "semantic-op"; operator: SemanticOpMeta; args?: SemanticArg[] }
 
 export interface DataWindowViewState {
   activeTab?: "rows" | "profile" | "chart" | "sql" | "explain" | "steps"
@@ -807,4 +824,7 @@ export interface DesktopColumnDragPayload {
   parentSql: string
   relationKey: string
   columns: DesktopColumnRef[]
+  /** All columns of the source relation — lets a multi-arg semantic-op bind
+   *  step offer sibling columns (e.g. contradicts(a, b) with both as columns). */
+  sourceColumns?: DesktopColumnRef[]
 }

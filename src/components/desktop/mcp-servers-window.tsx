@@ -168,7 +168,7 @@ export function McpServersWindow({
           <>
             <span className="text-chrome-text/40">·</span>
             <span>
-              <span className="font-medium text-emerald-400">{reachableCount}</span> active
+              <span className="font-medium text-success">{reachableCount}</span> active
             </span>
             <span className="text-chrome-text/40">·</span>
             <span>
@@ -548,7 +548,7 @@ function ServerCard({
         ) : server.totalErrors > 0 ? (
           <span className="text-warning">{server.totalErrors} historical err</span>
         ) : (
-          <span className="text-emerald-400/80">no errors</span>
+          <span className="text-success/80">no errors</span>
         )}
         <span className="text-chrome-text/30">·</span>
         <span>{calls.length > 0 ? `${Math.round(avgMs)}ms avg` : "—"}</span>
@@ -570,7 +570,7 @@ function ServerCard({
 function StatusDot({ status }: { status: ServerStatus }) {
   const color =
     status === "active"
-      ? "bg-emerald-400"
+      ? "bg-success"
       : status === "failing"
         ? "bg-danger"
         : status === "idle"

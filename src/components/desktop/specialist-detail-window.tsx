@@ -571,7 +571,7 @@ export function SpecialistDetailWindow({
               ) : (
                 <>
                   <div className="mb-1 flex items-center gap-2 text-[10px] text-chrome-text/55">
-                    <span className="rounded-full bg-emerald-400/15 px-1.5 text-emerald-400">ok</span>
+                    <span className="rounded-full bg-success/15 px-1.5 text-success">ok</span>
                     <span className="tabular-nums">{testResult.latencyMs}ms round-trip</span>
                   </div>
                   <pre className="max-h-52 overflow-auto whitespace-pre-wrap break-words rounded border border-chrome-border bg-doc-bg p-2 font-mono text-[10px] text-foreground">
@@ -714,7 +714,7 @@ function HealthPill({ health }: { health: SpecialistHealth | null }) {
       className={cn(
         "inline-flex items-center gap-1 rounded-full px-1.5 py-0.5 text-[10px]",
         health.reachable
-          ? "bg-emerald-400/15 text-emerald-400"
+          ? "bg-success/15 text-success"
           : "bg-danger/15 text-danger",
       )}
       title={health.error ?? health.endpoint}
@@ -722,7 +722,7 @@ function HealthPill({ health }: { health: SpecialistHealth | null }) {
       <span
         className={cn(
           "h-1.5 w-1.5 rounded-full",
-          health.reachable ? "bg-emerald-400" : "bg-danger",
+          health.reachable ? "bg-success" : "bg-danger",
         )}
       />
       {health.reachable ? `reachable · ${health.latency_ms ?? "?"}ms` : "unreachable"}

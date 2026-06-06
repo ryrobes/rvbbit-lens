@@ -1,6 +1,8 @@
 "use client"
 
 import { Loader2, Sparkles, X } from "@/lib/icons"
+import { cn } from "@/lib/utils"
+import type { ScrySourceId } from "@/lib/desktop/scry"
 import type { UseScryCascade } from "./use-scry-cascade"
 
 /**
@@ -15,6 +17,8 @@ export function ScryHud({
   bloomOverflow = 0,
   scopeActive = false,
   onExitScope,
+  source = "catalog",
+  onSetSource,
 }: {
   cascade: UseScryCascade
   onClose: () => void
@@ -25,6 +29,9 @@ export function ScryHud({
   /** a subgraph scope is active */
   scopeActive?: boolean
   onExitScope?: () => void
+  /** active layer: "catalog" (structure) vs "data" (derived KG) */
+  source?: ScrySourceId
+  onSetSource?: (s: ScrySourceId) => void
 }) {
   const { stages, finalHits, finalError, canRefine } = cascade
   const relCount = new Set(finalHits.map((h) => `${h.schema}.${h.rel}`)).size
@@ -37,6 +44,26 @@ export function ScryHud({
       <div className="flex items-center gap-2 border-b border-chrome-border/60 px-3 py-2">
         <Sparkles className="h-3.5 w-3.5 text-terminal" />
         <span className="font-mono text-[11px] uppercase tracking-[0.18em] text-terminal/80">scry</span>
+        {onSetSource ? (
+          <span
+            className="ml-1 inline-flex overflow-hidden rounded border border-chrome-border/60"
+            title="structure = schema/fingerprints · data = entities/relationships derived from the data itself"
+          >
+            {(["catalog", "data"] as ScrySourceId[]).map((s) => (
+              <button
+                key={s}
+                type="button"
+                onClick={() => onSetSource(s)}
+                className={cn(
+                  "px-2 py-0.5 font-mono text-[9px] uppercase tracking-wide transition-colors",
+                  source === s ? "bg-terminal/20 text-terminal" : "text-chrome-text/45 hover:text-foreground",
+                )}
+              >
+                {s === "data" ? "data" : "structure"}
+              </button>
+            ))}
+          </span>
+        ) : null}
         <span className="ml-auto text-[10px] text-chrome-text/45">
           {addedCount > 0 ? `${addedCount} on desktop · ` : ""}drag to pan · scroll to zoom · esc to exit
         </span>
@@ -88,7 +115,9 @@ export function ScryHud({
           {finalError ? (
             <span className="text-danger">{finalError}</span>
           ) : finalHits.length > 0 ? (
-            `${finalHits.length} nodes · ${relCount} relations`
+            `${finalHits.length} ${source === "data" ? "entities" : "nodes"} · ${relCount} relations`
+          ) : source === "data" ? (
+            "type to scry the data — entities & relationships pulled from the rows"
           ) : (
             "type to scry the catalog"
           )}

@@ -40,6 +40,7 @@ function readResolvedTokens(): ResolvedTokens {
     readVar("--chart-3", "oklch(80% 0.16 85)"),
     readVar("--chart-4", "oklch(70% 0.20 310)"),
     readVar("--chart-5", "oklch(72% 0.17 25)"),
+    readVar("--chart-6", "oklch(74% 0.19 350)"),
   ]
   const rootFontSize = (() => {
     if (typeof window === "undefined") return 14

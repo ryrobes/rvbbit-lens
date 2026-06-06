@@ -34,6 +34,7 @@ export function useScryCascade(
   connectionId: string | null,
   open: boolean,
   onSubmit: (chain: { query: string }[], hits: DataSearchHit[]) => void,
+  graph: string = "db_catalog",
 ): UseScryCascade {
   const [stages, setStagesState] = useState<ScryStage[]>([emptyStage()])
   // Mirror in a ref so the async re-flow + key handlers read the latest stages.
@@ -82,14 +83,21 @@ export function useScryCascade(
           continue
         }
         patch(i, { loading: true })
-        const { hits, error } = await runScryStage(connectionId, q, scope)
+        const { hits, error } = await runScryStage(connectionId, q, scope, graph)
         if (runRef.current !== myRun) return
         patch(i, { hits, loading: false, error })
         scope = scopeFromHits(hits)
       }
     },
-    [connectionId, patch],
+    [connectionId, patch, graph],
   )
+
+  // Re-flow the whole chain against the new graph when the source toggles.
+  const recomputeRef = useRef(recompute)
+  recomputeRef.current = recompute
+  useEffect(() => {
+    if (open) void recomputeRef.current(0)
+  }, [graph, open])
 
   const scheduleRecompute = useCallback(
     (from: number) => {

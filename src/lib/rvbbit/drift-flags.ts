@@ -29,8 +29,8 @@ export const FLAG_META: Record<string, { label: string; tone: DriftTone }> = {
 
 export const TONE_CLASS: Record<string, string> = {
   danger: "bg-danger/15 text-danger",
-  warn: "bg-amber-500/15 text-amber-500",
-  add: "bg-emerald-500/15 text-emerald-500",
+  warn: "bg-warning/15 text-warning",
+  add: "bg-success/15 text-success",
   info: "bg-[var(--brand-kg)]/15 text-[var(--brand-kg)]",
   muted: "bg-foreground/[0.07] text-chrome-text/70",
 }
@@ -38,6 +38,6 @@ export const TONE_CLASS: Record<string, string> = {
 /** Severity (0–1) → a dot color, mirroring the Drift window's SeverityBar thresholds. */
 export function driftSeverityColor(sev: number): string {
   if (sev >= 0.7) return "var(--danger)"
-  if (sev >= 0.4) return "rgb(245 158 11)" // amber
+  if (sev >= 0.4) return "var(--warning)"
   return "var(--brand-kg)"
 }

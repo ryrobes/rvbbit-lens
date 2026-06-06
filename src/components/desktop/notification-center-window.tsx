@@ -268,9 +268,9 @@ function TestNotifyForm({ activeConnectionId }: { activeConnectionId: string | n
 function StatusDot({ status }: { status: NotifyConnectionStatus }) {
   const color =
     status === "open"
-      ? "bg-emerald-400"
+      ? "bg-success"
       : status === "connecting"
-        ? "bg-amber-400"
+        ? "bg-warning"
         : status === "error"
           ? "bg-danger"
           : "bg-chrome-text/40"

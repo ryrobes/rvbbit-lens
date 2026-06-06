@@ -257,7 +257,7 @@ function FreshnessLane({
         {row.lance ? (
           <span
             title="Lance vector dataset — refresh is a full overwrite (expensive)"
-            className="inline-flex items-center gap-1 rounded bg-fuchsia-500/15 px-1.5 py-0.5 text-[10px] text-fuchsia-300"
+            className="inline-flex items-center gap-1 rounded bg-chart-4/15 px-1.5 py-0.5 text-[10px] text-chart-4"
           >
             <Sparkles className="h-2.5 w-2.5" /> lance
           </span>

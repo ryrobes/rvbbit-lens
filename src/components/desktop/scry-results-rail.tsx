@@ -4,7 +4,7 @@ import { Download } from "@/lib/icons"
 import { cn } from "@/lib/utils"
 import type { DataSearchHit } from "@/lib/rvbbit/data-search"
 import { nodeId } from "@/lib/desktop/scry-scene"
-import { hitLabel, KindBadge, ScoreBar } from "./scry-shared"
+import { displayLabel, KindBadge, ScoreBar } from "./scry-shared"
 
 /**
  * A fixed, non-zoomable results rail on the right edge — a live, transparent
@@ -18,6 +18,7 @@ export function ScryResultsRail({
   onFocus,
   graduateCount,
   onGraduateAll,
+  dataLayer,
 }: {
   hits: DataSearchHit[]
   selectedId: string | null
@@ -26,6 +27,8 @@ export function ScryResultsRail({
   graduateCount: number
   /** graduate the explored set to the desktop and exit Scry */
   onGraduateAll: () => void
+  /** data-derived KG layer — hits are entities (no backing table to graduate) */
+  dataLayer?: boolean
 }) {
   return (
     <div className="pointer-events-auto fixed right-3 top-[9vh] bottom-3 z-[121] flex w-[280px] max-w-[40vw] flex-col overflow-hidden rounded-lg border border-chrome-border/60 bg-chrome-bg/70 shadow-2xl backdrop-blur">
@@ -51,8 +54,16 @@ export function ScryResultsRail({
                     sel ? "bg-terminal/15" : "hover:bg-foreground/[0.05]",
                   )}
                 >
-                  <KindBadge kind={h.kind} />
-                  <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-foreground">{hitLabel(h)}</span>
+                  <KindBadge kind={h.kind} dataLayer={dataLayer} />
+                  <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-foreground">{displayLabel(h, dataLayer)}</span>
+                  {dataLayer && h.frequency > 0 ? (
+                    <span
+                      className="shrink-0 font-mono text-[9px] tabular-nums text-terminal/70"
+                      title={`seen in ${h.frequency} source row${h.frequency === 1 ? "" : "s"} · ${h.degree} connection${h.degree === 1 ? "" : "s"}`}
+                    >
+                      {h.frequency}×
+                    </span>
+                  ) : null}
                   <ScoreBar score={h.score} />
                 </button>
               </li>
@@ -60,7 +71,7 @@ export function ScryResultsRail({
           })}
         </ul>
       )}
-      {graduateCount > 0 ? (
+      {graduateCount > 0 && !dataLayer ? (
         <button
           type="button"
           onClick={onGraduateAll}

@@ -30,6 +30,8 @@ export function useScrySpider(args: {
   open: boolean
   /** live read of the current hit-node ids, for cross-population dedupe */
   hitIds: () => Set<string>
+  /** KG graph_id to spider neighbors in (catalog vs data layer) */
+  graph?: string
 }): UseScrySpider {
   const [spider, setSpider] = useState<SpiderState>(emptySpider)
   const spiderRef = useRef(spider)
@@ -49,14 +51,16 @@ export function useScrySpider(args: {
   hitIdsRef.current = args.hitIds
   const connRef = useRef(args.connectionId)
   connRef.current = args.connectionId
+  const graphRef = useRef(args.graph ?? CATALOG_GRAPH)
+  graphRef.current = args.graph ?? CATALOG_GRAPH
   // Monotonic session id, bumped on every open/close transition. An expand
   // captures it at start and drops its result if the session changed — immune
   // to rapid close/reopen during an in-flight fetch (a plain "is open" boolean
   // is not, since it reads true again after a reopen).
   const sessionRef = useRef(0)
 
-  // Reset the whole spider on EVERY open/close transition — each Scry session
-  // starts clean.
+  // Reset the whole spider on EVERY open/close transition AND on a source/graph
+  // switch — each session (and each layer) starts clean.
   useEffect(() => {
     sessionRef.current++
     setSpider(emptySpider())
@@ -66,7 +70,7 @@ export function useScrySpider(args: {
     setCapped(new Set())
     inflight.current = new Set()
     removed.current = new Set()
-  }, [args.open])
+  }, [args.open, args.graph])
 
   const expand = useCallback((source: ScryNode) => {
     const sid = source.id
@@ -88,7 +92,7 @@ export function useScrySpider(args: {
     void (async () => {
       let ok = false
       try {
-        const neighbors = await fetchKgNeighborsById(conn, CATALOG_GRAPH, source.hit.nodeId, MAX_EDGES)
+        const neighbors = await fetchKgNeighborsById(conn, graphRef.current, source.hit.nodeId, MAX_EDGES)
         if (sessionRef.current !== mySession) return // closed/reopened mid-fetch — drop it
         if (removed.current.has(sid)) return // source was removed mid-fetch — don't resurrect it
         const { next, truncated: tr } = mergeNeighbors(
@@ -97,6 +101,7 @@ export function useScrySpider(args: {
           neighbors,
           hitIdsRef.current(),
           MAX_EDGES,
+          graphRef.current !== CATALOG_GRAPH,
         )
         setSpider(next)
         if (tr) setTruncated((s) => new Set(s).add(sid))

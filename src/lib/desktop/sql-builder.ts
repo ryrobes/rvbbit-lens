@@ -12,6 +12,7 @@ import type {
   RollupOp,
   RollupOrderTerm,
   RollupSpec,
+  SemanticArg,
   SemanticProjection,
 } from "./types"
 
@@ -251,17 +252,25 @@ export function rollupSpecFromColumns(columns: DesktopColumnRef[]): RollupSpec {
   return { groupBy, measures }
 }
 
+/** Dedup key fragment for a projection's bound args, so the same op on the same
+ *  column with *different* binds (a different criterion, or a different sibling
+ *  column) counts as distinct. */
+function argsKey(args: SemanticArg[] | undefined): string {
+  if (!args || args.length === 0) return ""
+  return ":" + args.map((a) => (a.kind === "column" ? `c=${a.column}` : `l=${a.value}`)).join("|").toLowerCase()
+}
+
 /** Build one semantic projection (a `rvbbit.<op>(col)` derived column). */
 function makeProjection(
   column: DesktopColumnRef,
   operator: string,
   returnType: SemanticProjection["returnType"],
-  args: string[] | undefined,
+  args: SemanticArg[] | undefined,
   taken: Set<string>,
 ): SemanticProjection {
   const alias = uniqueAlias(`${operator}_${column.name}`, taken)
   return {
-    id: `${operator}:${column.name.toLowerCase()}`,
+    id: `${operator}:${column.name.toLowerCase()}${argsKey(args)}`,
     column,
     operator,
     returnType,
@@ -275,13 +284,41 @@ export function projectionSpecFromOp(
   column: DesktopColumnRef,
   operator: string,
   returnType: SemanticProjection["returnType"],
-  args?: string[],
+  args?: SemanticArg[],
 ): RollupSpec {
   return {
     groupBy: [],
     measures: [],
     projections: [makeProjection(column, operator, returnType, args, new Set())],
   }
+}
+
+/**
+ * Frequency table for a DIMENSION operator dropped on a text column: fan the
+ * column out through the op (one row → a set of canonical labels) and GROUP BY
+ * the label to count rows per bucket. Source rows are capped to the preview
+ * LIMIT first so a per-row LLM op never fans out across a whole table.
+ *
+ *   SELECT t.label AS <op>, count(*) AS n
+ *   FROM (SELECT * FROM {block} LIMIT 200) b,
+ *        LATERAL rvbbit.<op>(b."col"::text) AS t(label)
+ *   GROUP BY 1 ORDER BY n DESC
+ */
+export function buildDimensionRollup(
+  operator: string,
+  column: DesktopColumnRef,
+  args: { parentBlockName: string; parentTitle: string },
+): { sql: string; title: string } {
+  const col = quoteSqlIdent(column.name)
+  const out = quoteSqlIdent(operator)
+  const sql = [
+    `SELECT t.label AS ${out}, count(*) AS n`,
+    `FROM (SELECT * FROM {${args.parentBlockName}} LIMIT ${PROJECTION_PREVIEW_LIMIT}) b,`,
+    `     LATERAL rvbbit.${operator}(b.${col}::text) AS t(label)`,
+    `GROUP BY 1`,
+    `ORDER BY n DESC;`,
+  ].join("\n")
+  return { sql, title: `${args.parentTitle} · ${operator}` }
 }
 
 /** The projected column as a draggable/aggregable column ref (its alias). */
@@ -748,9 +785,13 @@ function valueSlug(v: string | number | null): string {
 /** Render a `RollupSpec` to SQL over a parent block reference. */
 /** `rvbbit.<op>(col::text[, 'literal'…]) AS alias` for a semantic projection. */
 function projectionExpr(p: SemanticProjection): string {
-  // arg1 is the column, cast to text (op arg types are text/jsonb); extra args
-  // are bound literals for multi-arg ops.
-  const argExprs = [`${quoteSqlIdent(p.column.name)}::text`, ...(p.args ?? []).map((a) => sqlLiteral(a))]
+  // arg0 is the dragged column, cast to text (op arg types are text/jsonb).
+  // Extra args are either a bound literal or a reference to a sibling column
+  // (also cast to text) — e.g. rvbbit.contradicts(claim::text, evidence::text).
+  const extra = (p.args ?? []).map((a) =>
+    a.kind === "column" ? `${quoteSqlIdent(a.column)}::text` : sqlLiteral(a.value),
+  )
+  const argExprs = [`${quoteSqlIdent(p.column.name)}::text`, ...extra]
   return `rvbbit.${p.operator}(${argExprs.join(", ")}) AS ${quoteSqlIdent(p.alias)}`
 }
 function renderProjection(p: SemanticProjection): string {

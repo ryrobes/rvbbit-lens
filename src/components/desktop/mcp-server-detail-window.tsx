@@ -419,7 +419,7 @@ function StatusPill({ server }: { server: McpServerOverview }) {
   const status = serverStatus(server)
   const tone =
     status === "active"
-      ? "bg-emerald-400/15 text-emerald-400"
+      ? "bg-success/15 text-success"
       : status === "failing"
         ? "bg-danger/15 text-danger"
         : status === "idle"
@@ -435,8 +435,8 @@ function StatusPill({ server }: { server: McpServerOverview }) {
 function ProbePill({ probe }: { probe: McpProbe }) {
   if (probe.reachable) {
     return (
-      <span className="inline-flex items-center gap-1 rounded-full bg-emerald-400/15 px-1.5 py-0.5 text-[10px] text-emerald-400">
-        <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
+      <span className="inline-flex items-center gap-1 rounded-full bg-success/15 px-1.5 py-0.5 text-[10px] text-success">
+        <span className="h-1.5 w-1.5 rounded-full bg-success" />
         reachable · {probe.latencyMs ?? "?"}ms · {probe.nTools ?? 0} tools
       </span>
     )
@@ -803,7 +803,7 @@ function ToolTester({
               <span
                 className={cn(
                   "rounded-full px-1.5",
-                  result.isError ? "bg-danger/15 text-danger" : "bg-emerald-400/15 text-emerald-400",
+                  result.isError ? "bg-danger/15 text-danger" : "bg-success/15 text-success",
                 )}
               >
                 {result.isError ? "tool error" : "ok"}

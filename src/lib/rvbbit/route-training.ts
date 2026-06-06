@@ -158,6 +158,7 @@ function engineMsFromColumns(r: Record<string, unknown>): EngineMs {
   return {
     rvbbit_native: numOrNull(r.native_ms),
     duck_vector: numOrNull(r.duck_ms),
+    duck_vortex: numOrNull(r.duck_vortex_ms),
     duck_hive: numOrNull(r.duck_hive_ms),
     datafusion_vector: numOrNull(r.datafusion_ms),
     datafusion_hive: numOrNull(r.datafusion_hive_ms),
@@ -285,6 +286,7 @@ export async function fetchRejectedShapes(
     const engineTimes: EngineMs = {
       rvbbit_native: numOrNull(cands.rvbbit_native ?? cands.native),
       duck_vector: numOrNull(cands.duck_vector ?? cands.duck),
+      duck_vortex: numOrNull(cands.duck_vortex),
       duck_hive: numOrNull(cands.duck_hive),
       datafusion_vector: numOrNull(cands.datafusion_vector ?? cands.datafusion),
       datafusion_hive: numOrNull(cands.datafusion_hive ?? cands.df_hive),

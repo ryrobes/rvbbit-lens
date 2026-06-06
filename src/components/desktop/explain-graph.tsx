@@ -500,7 +500,7 @@ function PlanNodeBox({
           </span>
         ) : isSeqScan ? (
           <span
-            className="ml-auto shrink-0 rounded bg-amber-400/20 px-1 text-[8px] uppercase text-amber-400"
+            className="ml-auto shrink-0 rounded bg-warning/20 px-1 text-[8px] uppercase text-warning"
             title="Sequential scan"
           >
             seq

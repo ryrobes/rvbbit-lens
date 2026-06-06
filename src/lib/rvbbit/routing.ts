@@ -18,6 +18,7 @@
 export type EngineId =
   | "rvbbit_native"
   | "duck_vector"
+  | "duck_vortex"
   | "duck_hive"
   | "datafusion_vector"
   | "datafusion_hive"
@@ -43,6 +44,12 @@ export const ENGINES: EngineMeta[] = [
     label: "duck",
     color: "var(--chart-3)",
     blurb: "DuckDB over authoritative rvbbit parquet row groups",
+  },
+  {
+    id: "duck_vortex",
+    label: "duck vortex",
+    color: "var(--chart-6)",
+    blurb: "DuckDB over the Vortex columnar layout",
   },
   {
     id: "duck_hive",
@@ -106,6 +113,7 @@ function engineMsFromRow(r: Record<string, unknown>): EngineMs {
   return {
     rvbbit_native: numOrNull(r.native_ms),
     duck_vector: numOrNull(r.duck_ms),
+    duck_vortex: numOrNull(r.duck_vortex_ms),
     duck_hive: numOrNull(r.duck_hive_ms),
     datafusion_vector: numOrNull(r.datafusion_ms),
     datafusion_hive: numOrNull(r.datafusion_hive_ms),
@@ -117,6 +125,7 @@ function engineMediansFromRow(r: Record<string, unknown>): EngineMs {
   return {
     rvbbit_native: numOrNull(r.native_median_ms),
     duck_vector: numOrNull(r.duck_median_ms),
+    duck_vortex: numOrNull(r.duck_vortex_median_ms),
     duck_hive: numOrNull(r.duck_hive_median_ms),
     datafusion_vector: numOrNull(r.datafusion_median_ms),
     datafusion_hive: numOrNull(r.datafusion_hive_median_ms),
@@ -128,6 +137,7 @@ function engineObservationsFromRow(r: Record<string, unknown>): Record<EngineId,
   return {
     rvbbit_native: numOrNull(r.native_observations),
     duck_vector: numOrNull(r.duck_observations),
+    duck_vortex: numOrNull(r.duck_vortex_observations),
     duck_hive: numOrNull(r.duck_hive_observations),
     datafusion_vector: numOrNull(r.datafusion_observations),
     datafusion_hive: numOrNull(r.datafusion_hive_observations),
@@ -136,18 +146,6 @@ function engineObservationsFromRow(r: Record<string, unknown>): Record<EngineId,
 }
 
 // ── Row types ───────────────────────────────────────────────────────
-
-export interface RouteDecision {
-  decidedAt: number
-  candidate: string
-  route: string
-  routeSource: string
-  reason: string
-  confidence: number | null
-  cacheHit: boolean
-  rewritten: boolean
-  shapeFamily: string
-}
 
 export interface RouteExecution {
   executedAt: number
@@ -169,15 +167,11 @@ export interface DecisionSummaryRow {
   rewritten: number
 }
 
-export interface RuntimeSummaryRow {
-  shapeFamily: string
+export interface EngineRuntimeRow {
   candidate: string
-  executions: number
+  runs: number
   medianMs: number
   p95Ms: number
-  okCount: number
-  errorCount: number
-  lastReason: string
 }
 
 export interface LogStatus {
@@ -323,41 +317,38 @@ function sqlStr(s: string): string {
 const ACTIVE_PROFILE_SUBQUERY =
   "(SELECT name FROM rvbbit.route_profiles ORDER BY active DESC, updated_at DESC LIMIT 1)"
 
-// ── Live telemetry ──────────────────────────────────────────────────
+// ── Time window ─────────────────────────────────────────────────────
+//
+// The Flow tab is time-bounded, not row-capped: every chart aggregates
+// the raw route_decisions / route_executions tables server-side within
+// the selected window, so counts and percentiles stay accurate no matter
+// how much telemetry has accrued.
 
-export async function fetchRouteDecisions(
-  connectionId: string,
-): Promise<{ rows: RouteDecision[]; error?: string }> {
-  const res = await runQuery(
-    connectionId,
-    "SELECT decided_at, candidate, route, route_source, reason, confidence, " +
-      "cache_hit, rewritten, shape_family FROM rvbbit.route_decisions " +
-      "ORDER BY decided_at DESC LIMIT 500",
-  )
-  if (!res.ok) return { rows: [], error: res.error }
-  return {
-    rows: res.rows.map((r) => ({
-      decidedAt: epoch(r.decided_at),
-      candidate: normalizeCandidate(String(r.candidate ?? "")),
-      route: String(r.route ?? ""),
-      routeSource: String(r.route_source ?? ""),
-      reason: String(r.reason ?? ""),
-      confidence: numOrNull(r.confidence),
-      cacheHit: bool(r.cache_hit),
-      rewritten: bool(r.rewritten),
-      shapeFamily: String(r.shape_family ?? ""),
-    })),
-  }
+export const ROUTE_WINDOW_OPTIONS = [
+  { hours: 1, label: "1h" },
+  { hours: 3, label: "3h" },
+  { hours: 12, label: "12h" },
+  { hours: 24, label: "24h" },
+] as const
+
+/** `col >= now() - interval 'N hours'`, with N clamped to a sane range. */
+function windowClause(col: string, hours: number): string {
+  const h = Math.max(1, Math.min(720, Math.floor(hours)))
+  return `${col} >= now() - interval '${h} hours'`
 }
+
+// ── Live telemetry ──────────────────────────────────────────────────
 
 export async function fetchRouteExecutions(
   connectionId: string,
+  windowHours: number,
 ): Promise<{ rows: RouteExecution[]; error?: string }> {
   const res = await runQuery(
     connectionId,
     "SELECT executed_at, candidate, route_source, elapsed_ms, rows_returned, " +
       "cache_hit, status, shape_family, reason FROM rvbbit.route_executions " +
-      "ORDER BY executed_at DESC LIMIT 500",
+      "WHERE " + windowClause("executed_at", windowHours) +
+      " ORDER BY executed_at DESC LIMIT 500",
   )
   if (!res.ok) return { rows: [], error: res.error }
   return {
@@ -375,14 +366,19 @@ export async function fetchRouteExecutions(
   }
 }
 
+/** Per-(candidate, source) decision counts within the window. Drives the
+ *  flow diagram and each engine card's decision/cache totals. */
 export async function fetchDecisionSummary(
   connectionId: string,
+  windowHours: number,
 ): Promise<DecisionSummaryRow[]> {
   const res = await runQuery(
     connectionId,
-    "SELECT candidate, route_source, sum(decisions) AS decisions, " +
-      "sum(cache_hits) AS cache_hits, sum(rewritten_count) AS rewritten " +
-      "FROM rvbbit.route_decision_summary GROUP BY candidate, route_source",
+    "SELECT candidate, route_source, count(*) AS decisions, " +
+      "count(*) FILTER (WHERE cache_hit) AS cache_hits, " +
+      "count(*) FILTER (WHERE rewritten) AS rewritten " +
+      "FROM rvbbit.route_decisions WHERE " + windowClause("decided_at", windowHours) +
+      " GROUP BY candidate, route_source",
   )
   if (!res.ok) return []
   return res.rows.map((r) => ({
@@ -394,25 +390,26 @@ export async function fetchDecisionSummary(
   }))
 }
 
-export async function fetchRuntimeSummary(
+/** Per-engine execution count + latency percentiles within the window —
+ *  computed server-side so they aren't distorted by any row cap. */
+export async function fetchEngineRuntime(
   connectionId: string,
-): Promise<RuntimeSummaryRow[]> {
+  windowHours: number,
+): Promise<EngineRuntimeRow[]> {
   const res = await runQuery(
     connectionId,
-    "SELECT shape_family, candidate, executions, median_ms, p95_ms, ok_count, " +
-      "error_count, last_reason FROM rvbbit.route_runtime_summary " +
-      "ORDER BY p95_ms DESC NULLS LAST LIMIT 200",
+    "SELECT candidate, count(*) AS runs, " +
+      "percentile_cont(0.5) WITHIN GROUP (ORDER BY elapsed_ms) AS median_ms, " +
+      "percentile_cont(0.95) WITHIN GROUP (ORDER BY elapsed_ms) AS p95_ms " +
+      "FROM rvbbit.route_executions WHERE " + windowClause("executed_at", windowHours) +
+      " GROUP BY candidate",
   )
   if (!res.ok) return []
   return res.rows.map((r) => ({
-    shapeFamily: String(r.shape_family ?? ""),
     candidate: normalizeCandidate(String(r.candidate ?? "")),
-    executions: num(r.executions),
+    runs: num(r.runs),
     medianMs: num(r.median_ms),
     p95Ms: num(r.p95_ms),
-    okCount: num(r.ok_count),
-    errorCount: num(r.error_count),
-    lastReason: String(r.last_reason ?? ""),
   }))
 }
 
@@ -474,7 +471,7 @@ export async function fetchProfileEntries(connectionId: string): Promise<Profile
   const res = await runQuery(
     connectionId,
     "SELECT shape_key, choice, confidence, observations, native_ms, duck_ms, " +
-      "duck_hive_ms, datafusion_ms, datafusion_hive_ms, pg_ms, reason " +
+      "duck_vortex_ms, duck_hive_ms, datafusion_ms, datafusion_hive_ms, pg_ms, reason " +
       "FROM rvbbit.route_profile_entries " +
       `WHERE profile_name = ${ACTIVE_PROFILE_SUBQUERY} ` +
       "ORDER BY confidence DESC NULLS LAST",
@@ -494,9 +491,10 @@ export async function fetchShapeSummary(connectionId: string): Promise<ShapeSumm
   const res = await runQuery(
     connectionId,
     "SELECT shape_family, observations, best_candidate, best_median_ms, " +
-      "native_median_ms, duck_median_ms, duck_hive_median_ms, " +
+      "native_median_ms, duck_median_ms, duck_vortex_median_ms, duck_hive_median_ms, " +
       "datafusion_median_ms, datafusion_hive_median_ms, pg_median_ms, " +
-      "native_observations, duck_observations, duck_hive_observations, " +
+      "native_observations, duck_observations, duck_vortex_observations, " +
+      "duck_hive_observations, " +
       "datafusion_observations, datafusion_hive_observations, pg_observations, " +
       "observed_gain, needs_exploration FROM rvbbit.route_shape_summary " +
       "ORDER BY observations DESC",
@@ -517,7 +515,7 @@ export async function fetchShapeSummary(connectionId: string): Promise<ShapeSumm
 export async function fetchProfilePoints(connectionId: string): Promise<ProfilePoint[]> {
   const res = await runQuery(
     connectionId,
-    "SELECT shape_family, table_rows, native_ms, duck_ms, duck_hive_ms, " +
+    "SELECT shape_family, table_rows, native_ms, duck_ms, duck_vortex_ms, duck_hive_ms, " +
       "datafusion_ms, datafusion_hive_ms, pg_ms " +
       `FROM rvbbit.route_profile_points WHERE profile_name = ${ACTIVE_PROFILE_SUBQUERY}`,
   )
@@ -565,10 +563,9 @@ export async function fetchColumnarTables(connectionId: string): Promise<Columna
 // ── Aggregate bundles (one per window data-load) ────────────────────
 
 export interface FlowData {
-  decisions: RouteDecision[]
   executions: RouteExecution[]
   decisionSummary: DecisionSummaryRow[]
-  runtimeSummary: RuntimeSummaryRow[]
+  engineRuntime: EngineRuntimeRow[]
   logStatus: LogStatus | null
 }
 

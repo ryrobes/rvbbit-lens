@@ -80,6 +80,13 @@ export interface KgNeighbor {
   /** raw kg_nodes.properties for each endpoint — populated by the by-id fetch only */
   fromProps?: unknown
   toProps?: unknown
+  /** incident-edge count for each endpoint — the connectedness signal */
+  fromDegree?: number
+  toDegree?: number
+  /** distinct source rows mentioning each endpoint — the frequency that drives
+   *  data-layer node size/heat (kept consistent with bloom hits) */
+  fromFrequency?: number
+  toFrequency?: number
 }
 
 export interface KgEvidenceRow {
@@ -491,19 +498,41 @@ export async function fetchKgNeighborsById(
        FROM rvbbit.kg_edges e
        WHERE e.graph_id = ${sqlStr(graphId)} AND e.object_node_id = ${Number(nodeId)}
      ),
-     merged AS (SELECT * FROM outbound UNION ALL SELECT * FROM inbound)
-     SELECT m.edge_id,
-            m.from_id AS from_node_id, fn.kind AS from_kind, fn.label AS from_label,
-            fn.properties AS from_props,
-            m.to_id   AS to_node_id,   tn.kind AS to_kind,   tn.label AS to_label,
-            tn.properties AS to_props,
-            m.predicate, m.dir AS edge_direction,
-            m.confidence AS edge_confidence, m.properties AS edge_properties
-     FROM merged m
-     JOIN rvbbit.kg_nodes fn ON fn.node_id = m.from_id
-     JOIN rvbbit.kg_nodes tn ON tn.node_id = m.to_id
-     ORDER BY m.confidence DESC NULLS LAST, m.edge_id
-     LIMIT ${cap + 1}`,
+     merged AS (SELECT * FROM outbound UNION ALL SELECT * FROM inbound),
+     -- trim to the cap FIRST, then compute endpoint degrees only for the kept rows
+     -- (a hub node can have far more incident edges than the cap; computing degree in
+     -- the projected SELECT would run it for every edge before LIMIT prunes).
+     trimmed AS (
+       SELECT m.edge_id,
+              m.from_id, fn.kind AS from_kind, fn.label AS from_label, fn.properties AS from_props,
+              m.to_id,   tn.kind AS to_kind,   tn.label AS to_label,   tn.properties AS to_props,
+              m.predicate, m.dir, m.confidence, m.properties AS edge_properties
+       FROM merged m
+       JOIN rvbbit.kg_nodes fn ON fn.node_id = m.from_id
+       JOIN rvbbit.kg_nodes tn ON tn.node_id = m.to_id
+       ORDER BY m.confidence DESC NULLS LAST, m.edge_id
+       LIMIT ${cap + 1}
+     )
+     SELECT t.edge_id,
+            t.from_id AS from_node_id, t.from_kind, t.from_label, t.from_props,
+            (SELECT count(*) FROM rvbbit.kg_edges e2
+              WHERE e2.graph_id = ${sqlStr(graphId)}
+                AND (e2.subject_node_id = t.from_id OR e2.object_node_id = t.from_id)) AS from_degree,
+            (SELECT count(DISTINCT ev.source_pk) FROM rvbbit.kg_evidence ev
+              JOIN rvbbit.kg_edges e4 ON e4.edge_id = ev.edge_id
+              WHERE ev.graph_id = ${sqlStr(graphId)}
+                AND (e4.subject_node_id = t.from_id OR e4.object_node_id = t.from_id)) AS from_frequency,
+            t.to_id AS to_node_id, t.to_kind, t.to_label, t.to_props,
+            (SELECT count(*) FROM rvbbit.kg_edges e3
+              WHERE e3.graph_id = ${sqlStr(graphId)}
+                AND (e3.subject_node_id = t.to_id OR e3.object_node_id = t.to_id)) AS to_degree,
+            (SELECT count(DISTINCT ev.source_pk) FROM rvbbit.kg_evidence ev
+              JOIN rvbbit.kg_edges e5 ON e5.edge_id = ev.edge_id
+              WHERE ev.graph_id = ${sqlStr(graphId)}
+                AND (e5.subject_node_id = t.to_id OR e5.object_node_id = t.to_id)) AS to_frequency,
+            t.predicate, t.dir AS edge_direction,
+            t.confidence AS edge_confidence, t.edge_properties
+     FROM trimmed t`,
   )
   // Throw on error so callers can distinguish a real failure (retryable) from a
   // legitimate zero-neighbor leaf node (an empty array).
@@ -523,6 +552,10 @@ export async function fetchKgNeighborsById(
     depth: 1,
     fromProps: r.from_props ?? null,
     toProps: r.to_props ?? null,
+    fromDegree: num(r.from_degree),
+    toDegree: num(r.to_degree),
+    fromFrequency: num(r.from_frequency),
+    toFrequency: num(r.to_frequency),
   }))
 }
 

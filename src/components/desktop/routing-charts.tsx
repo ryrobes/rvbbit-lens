@@ -162,7 +162,6 @@ export function FlowDiagram({
   const padX = 104
   const nodeW = 9
   const gap = 13
-  const minGhost = 9
 
   const model = useMemo(() => {
     const grand = links.reduce((s, l) => s + l.value, 0)
@@ -174,10 +173,12 @@ export function FlowDiagram({
 
     const tgtTotals = new Map<string, number>()
     for (const l of links) tgtTotals.set(l.target, (tgtTotals.get(l.target) ?? 0) + l.value)
-    const ghosts = ENGINES.filter((e) => (tgtTotals.get(e.id) ?? 0) <= 0).length
+    // Only engines that actually received routing in this window. Idle ones
+    // are omitted entirely — they reappear the moment they get a decision.
+    const activeEngines = ENGINES.filter((e) => (tgtTotals.get(e.id) ?? 0) > 0)
 
     const availLeft = height - (sources.length - 1) * gap
-    const availRight = height - (ENGINES.length - 1) * gap - ghosts * minGhost
+    const availRight = height - Math.max(0, activeEngines.length - 1) * gap
     const unit = Math.max(0, Math.min(availLeft, availRight)) / grand
     if (unit <= 0) return null
 
@@ -193,12 +194,13 @@ export function FlowDiagram({
       y: srcTop + sources.slice(0, i).reduce((s, [, t]) => s + t * unit + gap, 0),
     }))
 
-    // right column — all four engines, idle ones drawn as ghosts
-    const tgtSized = ENGINES.map((e) => {
+    // right column — only engines with routing this window, sized by volume
+    const tgtSized = activeEngines.map((e) => {
       const total = tgtTotals.get(e.id) ?? 0
-      return { engine: e, total, h: total > 0 ? total * unit : minGhost }
+      return { engine: e, total, h: total * unit }
     })
-    const tgtContentH = tgtSized.reduce((s, t) => s + t.h, 0) + (ENGINES.length - 1) * gap
+    const tgtContentH =
+      tgtSized.reduce((s, t) => s + t.h, 0) + Math.max(0, tgtSized.length - 1) * gap
     const tgtTop = (height - tgtContentH) / 2
     const tgtNodes = tgtSized.map((t, i) => ({
       ...t,
@@ -304,7 +306,7 @@ export function FlowDiagram({
                 height={Math.max(2, n.h)}
                 rx={1.5}
                 fill={n.engine.color}
-                opacity={n.total > 0 ? 0.9 : 0.28}
+                opacity={0.9}
               />
               <text
                 x={w - padX + 6}
@@ -312,24 +314,21 @@ export function FlowDiagram({
                 textAnchor="start"
                 fontSize={9}
                 className="font-mono"
-                fill={n.total > 0 ? "var(--foreground)" : "var(--chrome-text)"}
-                opacity={n.total > 0 ? 1 : 0.5}
+                fill="var(--foreground)"
               >
                 {n.engine.label}
               </text>
-              {n.total > 0 ? (
-                <text
-                  x={w - padX + 6}
-                  y={n.y + n.h / 2 + 13}
-                  textAnchor="start"
-                  fontSize={8}
-                  className="font-mono"
-                  fill="var(--chrome-text)"
-                  opacity={0.6}
-                >
-                  {n.total} routed
-                </text>
-              ) : null}
+              <text
+                x={w - padX + 6}
+                y={n.y + n.h / 2 + 13}
+                textAnchor="start"
+                fontSize={8}
+                className="font-mono"
+                fill="var(--chrome-text)"
+                opacity={0.6}
+              >
+                {n.total} routed
+              </text>
             </g>
           ))}
         </svg>

@@ -28,6 +28,12 @@ export interface DataSearchHit {
   /** normalized hybrid relevance in [0,1] (RRF-fused dense+lexical; top hit = 1.0) */
   score: number | null
   doc: string
+  /** # incident KG edges (subject+object) — the node's connectedness / "hub-ness" */
+  degree: number
+  /** # DISTINCT source rows that mention this entity (distinct evidence source_pk) —
+   *  the real "semantic frequency": how many reports a concept recurs across, after
+   *  embedding entity-resolution merges near-duplicate mentions. Drives size/heat. */
+  frequency: number
 }
 
 export interface CatalogStatus {
@@ -101,13 +107,42 @@ export async function searchData(
   query: string,
   k: number = 25,
   kinds: CatalogKind[] | null = null,
+  graph: string = CATALOG_GRAPH,
 ): Promise<{ hits: DataSearchHit[]; error?: string }> {
   if (!query.trim()) return { hits: [] }
   const lim = Math.max(1, Math.min(200, k))
+  const g = sqlStr(graph)
+  // Wrap data_search to attach, per hit: DEGREE (incident edges = connectedness) and
+  // FREQUENCY (distinct source rows mentioning the entity = recurrence across reports).
+  // Both are single hash-joinable aggregates over the existing kg_edges/kg_evidence
+  // indexes, so this works against the shipped extension with no migration.
   const res = await runQuery(
     connectionId,
-    `SELECT node_id, kind, schema_name, rel_name, col_name, score, doc
-     FROM rvbbit.data_search(${sqlStr(query.trim())}, ${lim}, ${sqlTextArray(kinds)}, ${sqlStr(CATALOG_GRAPH)})`,
+    `WITH s AS (
+       SELECT node_id, kind, schema_name, rel_name, col_name, score, doc
+         FROM rvbbit.data_search(${sqlStr(query.trim())}, ${lim}, ${sqlTextArray(kinds)}, ${g})),
+     deg AS (
+       SELECT s.node_id, count(e.edge_id) AS degree
+         FROM s
+         JOIN rvbbit.kg_edges e
+           ON e.graph_id = ${g}
+          AND (e.subject_node_id = s.node_id OR e.object_node_id = s.node_id)
+        GROUP BY s.node_id),
+     freq AS (
+       SELECT s.node_id, count(DISTINCT ev.source_pk) AS frequency
+         FROM s
+         JOIN rvbbit.kg_edges e
+           ON e.graph_id = ${g}
+          AND (e.subject_node_id = s.node_id OR e.object_node_id = s.node_id)
+         JOIN rvbbit.kg_evidence ev
+           ON ev.graph_id = ${g} AND ev.edge_id = e.edge_id
+        GROUP BY s.node_id)
+     SELECT s.node_id, s.kind, s.schema_name, s.rel_name, s.col_name, s.score, s.doc,
+            COALESCE(d.degree, 0) AS degree, COALESCE(f.frequency, 0) AS frequency
+       FROM s
+       LEFT JOIN deg d ON d.node_id = s.node_id
+       LEFT JOIN freq f ON f.node_id = s.node_id
+      ORDER BY s.score DESC NULLS LAST`,
   )
   if (!res.ok) return { hits: [], error: res.error }
   return {
@@ -119,6 +154,8 @@ export async function searchData(
       col: strOrNull(r.col_name),
       score: numOrNull(r.score),
       doc: String(r.doc ?? ""),
+      degree: num(r.degree),
+      frequency: num(r.frequency),
     })),
   }
 }

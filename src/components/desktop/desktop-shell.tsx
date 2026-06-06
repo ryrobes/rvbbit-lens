@@ -42,6 +42,9 @@ import { FinderWindow } from "./finder-window"
 import { DataGridWindow } from "./data-grid-window"
 import { CsvImportWindow } from "./csv-import-window"
 import { SemanticOpPalette } from "./semantic-op-palette"
+import { SemanticBindPopover } from "./semantic-bind-popover"
+import { RowsetOpPalette } from "./rowset-op-palette"
+import { RowsetPromptPopover } from "./rowset-prompt-popover"
 import { ConnectionsWindow } from "./connections-window"
 import { ViewAppsWindow } from "./view-apps-window"
 import { ViewAppBuilderWindow } from "./view-app-builder-window"
@@ -146,6 +149,7 @@ import type {
   PgMonitorPayload,
   QueryDocumentPayload,
   ReactiveBlockState,
+  SemanticArg,
   SemanticOpMeta,
   SystemObjectsPayload,
   ViewAppBuilderPayload,
@@ -165,6 +169,7 @@ import { putImportFile } from "@/lib/import/file-store"
 import { listViewApps } from "@/lib/desktop/view-apps"
 import {
   applyRollupOp,
+  buildDimensionRollup,
   buildRollupQuery,
   effectiveRollup,
   grainTruncExpr,
@@ -174,7 +179,7 @@ import {
   rollupSpecColumns,
   rollupSpecFromColumns,
 } from "@/lib/desktop/sql-builder"
-import { loadSemanticOps } from "@/lib/desktop/semantic-ops"
+import { invalidateSemanticOps, loadSemanticOps } from "@/lib/desktop/semantic-ops"
 import { fetchKgEvidenceBySource, fetchPrimaryKeyColumn } from "@/lib/rvbbit/kg"
 import { buildDesktopRuntimeGraph, paramKey, sameParamValue, sourceSqlForPayload, uniqueBlockName } from "@/lib/desktop/reactive-sql"
 import {
@@ -236,6 +241,23 @@ export function DesktopShell() {
   // Scalar semantic-operator catalog (rvbbit.operators) for the drag-drop
   // semantic tiles. Empty on non-rvbbit connections.
   const [semanticOps, setSemanticOps] = useState<SemanticOpMeta[]>([])
+  // Multi-arg semantic op awaiting its literal args (the drop-site bind step).
+  const [pendingBind, setPendingBind] = useState<{
+    payload: DesktopColumnDragPayload
+    op: SemanticOpMeta
+    at: { x: number; y: number }
+    targetWindowId?: string
+  } | null>(null)
+  // Rowset (pipeline) op awaiting its natural-language prompt — a block was
+  // dropped on a rowset tile and we're collecting the instruction. When
+  // `inPlace` is set, the stage chains onto that window's own block instead of
+  // spawning a new derived block.
+  const [pendingRowset, setPendingRowset] = useState<{
+    payload: DesktopBlockDragPayload
+    op: SemanticOpMeta
+    at: { x: number; y: number }
+    inPlace?: boolean
+  } | null>(null)
   // ── Workspaces ────────────────────────────────────────────────────
   //
   // Five independent canvases, all kept mounted at once. The live
@@ -545,6 +567,19 @@ export function DesktopShell() {
     return () => {
       cancelled = true
     }
+  }, [activeConnectionId])
+
+  // Refresh the semantic-op catalog when operators change in this session
+  // (the operator/capability UIs dispatch this), so newly-added ops show up in
+  // the drop tiles without a browser reload.
+  useEffect(() => {
+    const refresh = () => {
+      if (!activeConnectionId) return
+      invalidateSemanticOps(activeConnectionId)
+      loadSemanticOps(activeConnectionId).then(setSemanticOps)
+    }
+    window.addEventListener("rvbbit-lens:operators-changed", refresh)
+    return () => window.removeEventListener("rvbbit-lens:operators-changed", refresh)
   }, [activeConnectionId])
 
   // ── Local desktop persistence ───────────────────────────────────────
@@ -2048,10 +2083,10 @@ export function DesktopShell() {
   // auto-run (the projection is a per-row LLM op) — the live EXPLAIN (SEMANTIC)
   // shows the cost estimate; the user runs it explicitly to materialize.
   const spawnSemanticProjection = useCallback(
-    (payload: DesktopColumnDragPayload, op: SemanticOpMeta) => {
+    (payload: DesktopColumnDragPayload, op: SemanticOpMeta, args?: SemanticArg[]) => {
       const column = payload.columns[0]
       if (!column) return
-      const spec = projectionSpecFromOp(column, op.name, op.returnType)
+      const spec = projectionSpecFromOp(column, op.name, op.returnType, args)
       const { sql, title } = buildRollupQuery(spec, {
         parentBlockName: payload.parentBlockName,
         parentTitle: payload.parentTitle,
@@ -2082,6 +2117,47 @@ export function DesktopShell() {
             parentBlockName: payload.parentBlockName,
             columns: [column],
             rollup: spec,
+          },
+        } satisfies DataPayload,
+      })
+    },
+    [openWindow, windows],
+  )
+
+  // Drop a DIMENSION op on a text column → spawn a frequency table: fan the
+  // column out through the op and GROUP BY the label. Origin "query" so it does
+  // NOT auto-run (per-row LLM) — opens on the SQL tab for the user to run.
+  const spawnDimensionRollup = useCallback(
+    (payload: DesktopColumnDragPayload, op: SemanticOpMeta, _at: { x: number; y: number }) => {
+      const column = payload.columns[0]
+      if (!column) return
+      const { sql, title } = buildDimensionRollup(op.name, column, {
+        parentBlockName: payload.parentBlockName,
+        parentTitle: payload.parentTitle,
+      })
+      const src = windows.find((w) => w.id === payload.parentWindowId)
+      const x = clampWorld(src ? src.x + src.width + 24 : 240)
+      const y = clampWorld(src ? src.y + 56 : 180)
+      openWindow({
+        id: randomUUID(),
+        kind: "data",
+        title,
+        x,
+        y,
+        width: 460,
+        height: 480,
+        payload: {
+          kind: "data",
+          title,
+          sql,
+          origin: "query", // not "derived" → mount effect won't auto-run it
+          view: { activeTab: "sql", sqlRailOpen: true, sqlRailWidthPx: 360 },
+          lineage: {
+            kind: "block-ref",
+            parentWindowId: payload.parentWindowId,
+            parentTitle: payload.parentTitle,
+            parentSql: "",
+            relationKey: payload.parentBlockName,
           },
         } satisfies DataPayload,
       })
@@ -2278,6 +2354,129 @@ export function DesktopShell() {
       }
     }))
   }, [pivotColumnInWindow])
+
+  // A semantic op was dropped on a column. 1-arg ops apply immediately; ops
+  // with extra (text) args open the drop-site bind popover first. A drop on a
+  // target window mutates that block in place; a drop with no target (the
+  // palette) spawns a new projection block.
+  const applySemanticDrop = useCallback(
+    (payload: DesktopColumnDragPayload, op: SemanticOpMeta, args: SemanticArg[] | undefined, targetWindowId?: string) => {
+      if (targetWindowId) {
+        mergeColumnIntoWindow(targetWindowId, payload, { kind: "semantic-op", operator: op, args })
+      } else {
+        spawnSemanticProjection(payload, op, args)
+      }
+    },
+    [mergeColumnIntoWindow, spawnSemanticProjection],
+  )
+
+  const requestSemanticDrop = useCallback(
+    (payload: DesktopColumnDragPayload, op: SemanticOpMeta, at: { x: number; y: number }, targetWindowId?: string) => {
+      // Dimension ops fan out → always spawn a frequency table (never an
+      // in-place projection merge), and they're single-arg so no bind step.
+      if (op.shape === "dimension") {
+        spawnDimensionRollup(payload, op, at)
+        return
+      }
+      if (op.argNames.length > 1) {
+        setPendingBind({ payload, op, at, targetWindowId })
+      } else {
+        applySemanticDrop(payload, op, undefined, targetWindowId)
+      }
+    },
+    [applySemanticDrop, spawnDimensionRollup],
+  )
+
+  const completeSemanticBind = useCallback(
+    (args: SemanticArg[]) => {
+      if (!pendingBind) return
+      applySemanticDrop(pendingBind.payload, pendingBind.op, args, pendingBind.targetWindowId)
+      setPendingBind(null)
+    },
+    [pendingBind, applySemanticDrop],
+  )
+
+  // Spawn a new pipelined block from a rowset-op drop: SELECT * FROM {block}
+  // then op('<prompt>'). Non-destructive (a derived block), and NOT auto-run —
+  // it opens on the SQL tab so the user reviews/runs it (rowset stages make LLM
+  // calls). The data grid's run path detects the top-level THEN and wraps it as
+  // rvbbit.flow($$…$$).
+  const spawnRowsetStage = useCallback(
+    (payload: DesktopBlockDragPayload, op: SemanticOpMeta, prompt: string, at: { x: number; y: number }) => {
+      const safe = prompt.replace(/'/g, "''") // single-quote escape for the SQL literal
+      const title = `${payload.title} → ${op.name}`
+      const sql = `SELECT *\nFROM {${payload.blockName}}\nthen ${op.name}('${safe}')`
+      openWindow({
+        id: randomUUID(),
+        kind: "data",
+        title,
+        x: clampWorld(at.x),
+        y: clampWorld(at.y),
+        width: 760,
+        height: 520,
+        payload: {
+          kind: "data",
+          title,
+          sql,
+          origin: "derived",
+          view: { activeTab: "sql", sqlRailOpen: true, sqlRailWidthPx: 380 },
+          lineage: {
+            kind: "block-ref",
+            parentWindowId: payload.windowId,
+            parentTitle: payload.title,
+            parentSql: "",
+            relationKey: payload.blockName,
+          },
+        } satisfies DataPayload,
+      })
+    },
+    [openWindow],
+  )
+
+  // Chain a `then op('<prompt>')` stage onto a window's OWN block, in place —
+  // appending even if the block already ends in a THEN. Switches to the SQL tab
+  // and does NOT auto-run (the data grid skips auto-run for pipelines).
+  const chainRowsetInPlace = useCallback(
+    (windowId: string, op: SemanticOpMeta, prompt: string) => {
+      const safe = prompt.replace(/'/g, "''")
+      setWindows((ws) => ws.map((win) => {
+        if (win.id !== windowId || win.kind !== "data") return win
+        const p = win.payload as DataPayload
+        const base = (p.sql ?? "").trim().replace(/;\s*$/, "")
+        if (!base) return win
+        const sql = `${base}\nthen ${op.name}('${safe}')`
+        return {
+          ...win,
+          payload: {
+            ...p,
+            sql,
+            view: { ...(p.view ?? {}), activeTab: "sql", sqlRailOpen: true, sqlDraft: undefined },
+          } satisfies DataPayload,
+        }
+      }))
+    },
+    [setWindows],
+  )
+
+  const requestRowsetStage = useCallback(
+    (payload: DesktopBlockDragPayload, op: SemanticOpMeta, at: { x: number; y: number }, inPlace?: boolean) => {
+      setPendingRowset({ payload, op, at, inPlace })
+    },
+    [],
+  )
+
+  const completeRowsetStage = useCallback(
+    (prompt: string) => {
+      if (!pendingRowset) return
+      if (pendingRowset.inPlace) {
+        chainRowsetInPlace(pendingRowset.payload.windowId, pendingRowset.op, prompt)
+      } else {
+        spawnRowsetStage(pendingRowset.payload, pendingRowset.op, prompt, pendingRowset.at)
+      }
+      setPendingRowset(null)
+    },
+    [pendingRowset, spawnRowsetStage, chainRowsetInPlace],
+  )
 
   // Apply a pure transform to a column-aggregate window's rollup spec
   // (rollup-shelf edits: remove a pill, cycle an aggregate, clear pivot).
@@ -2746,7 +2945,29 @@ export function DesktopShell() {
       ) : null}
 
       {/* Semantic-op drop palette — appears while dragging a text column. */}
-      <SemanticOpPalette semanticOps={semanticOps} onSpawn={spawnSemanticProjection} />
+      <SemanticOpPalette semanticOps={semanticOps} onDropOp={requestSemanticDrop} />
+      {pendingBind ? (
+        <SemanticBindPopover
+          op={pendingBind.op}
+          columnName={pendingBind.payload.columns[0]?.name ?? "column"}
+          availableColumns={pendingBind.payload.sourceColumns ?? pendingBind.payload.columns}
+          at={pendingBind.at}
+          onSubmit={completeSemanticBind}
+          onCancel={() => setPendingBind(null)}
+        />
+      ) : null}
+
+      {/* Rowset-op pipeline palette — appears while dragging a result block. */}
+      <RowsetOpPalette semanticOps={semanticOps} onDropOp={requestRowsetStage} />
+      {pendingRowset ? (
+        <RowsetPromptPopover
+          op={pendingRowset.op}
+          blockTitle={pendingRowset.payload.title}
+          at={pendingRowset.at}
+          onSubmit={completeRowsetStage}
+          onCancel={() => setPendingRowset(null)}
+        />
+      ) : null}
 
       {/* CSV file-drop overlay — only while a native file is dragged over the
           desktop. pointer-events-none so it never interferes with the drop. */}
@@ -2879,6 +3100,8 @@ export function DesktopShell() {
                 columnDropAcceptsFrom={columnDropAcceptsFrom}
                 onColumnMerge={(payload, op) => mergeColumnIntoWindow(w.id, payload, op)}
                 semanticOps={semanticOps}
+                onSemanticDrop={requestSemanticDrop}
+                onRowsetChain={(payload, op, at) => requestRowsetStage(payload, op, at, true)}
               >
                 {renderWindowContent(w, {
                   activeConnectionId,

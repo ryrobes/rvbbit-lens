@@ -1,7 +1,7 @@
 "use client"
 
 import type { ReactNode } from "react"
-import { Hash, Table2 } from "@/lib/icons"
+import { Hash, Table2, TreeStructure } from "@/lib/icons"
 import { cn } from "@/lib/utils"
 import type { DataSearchHit } from "@/lib/rvbbit/data-search"
 
@@ -10,8 +10,32 @@ export function hitLabel(h: DataSearchHit): string {
   return h.col ? `${h.schema}.${h.rel}.${h.col}` : `${h.schema}.${h.rel}`
 }
 
-/** Tiny kind glyph — table vs column — shared by the prompt and the window. */
-export function KindBadge({ kind }: { kind: DataSearchHit["kind"] }) {
+/**
+ * Label to show on a node/rail row. The DATA layer's hits are KG entities living
+ * in a synthetic "data" graph, so their `schema.rel` qualifier is noise — we show
+ * the bare entity name. The structure layer keeps the fully-qualified identifier.
+ */
+export function displayLabel(h: DataSearchHit, dataLayer = false): string {
+  if (dataLayer) return h.rel || h.doc || hitLabel(h)
+  return hitLabel(h)
+}
+
+/**
+ * Tiny kind glyph. Structure layer: table vs column. Data layer: every hit is an
+ * extracted entity, so it gets one amber "entity" glyph (a graph node) — the
+ * visual tell that you're exploring meaning, not schema.
+ */
+export function KindBadge({ kind, dataLayer = false }: { kind: DataSearchHit["kind"]; dataLayer?: boolean }) {
+  if (dataLayer) {
+    return (
+      <span
+        title="entity — extracted from the data"
+        className="grid h-4 w-4 shrink-0 place-items-center rounded-sm bg-terminal/15 text-terminal/80"
+      >
+        <TreeStructure className="h-2.5 w-2.5" />
+      </span>
+    )
+  }
   const Icon = kind === "db_table" ? Table2 : Hash
   return (
     <span

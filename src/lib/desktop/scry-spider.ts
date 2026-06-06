@@ -11,7 +11,7 @@
 
 import type { CatalogKind, DataSearchHit } from "@/lib/rvbbit/data-search"
 import type { KgNeighbor } from "@/lib/rvbbit/kg"
-import { nodeCenter, nodeId, SCRY_NODE_H, SCRY_NODE_W, type ScryEdge, type ScryNode } from "./scry-scene"
+import { nodeBox, nodeCenter, nodeId, type ScryEdge, type ScryNode } from "./scry-scene"
 
 export interface SpiderState {
   /** spider-only nodes, keyed by ScryNode id (no duplicates of hit nodes) */
@@ -22,12 +22,24 @@ export interface SpiderState {
 
 export const emptySpider = (): SpiderState => ({ nodes: new Map(), edges: new Map() })
 
-/** Reconstruct a renderable hit from a raw kg_node endpoint (props ?? label split). */
-function reconstructHit(id: number, kind: string, label: string, props: unknown): DataSearchHit {
+/** Reconstruct a renderable hit from a raw kg_node endpoint (props ?? label split).
+ *  `degree` (connectedness) and `frequency` (distinct source rows) flow through so
+ *  spider nodes size/heat consistently with bloom hits. */
+function reconstructHit(id: number, kind: string, label: string, props: unknown, dataLayer = false, degree = 0, frequency = 0): DataSearchHit {
   const p = (props ?? {}) as Record<string, unknown>
-  const parts = String(label ?? "").split(".")
   const str = (v: unknown): string | undefined => (typeof v === "string" && v ? v : undefined)
   const doc = str(p.search_doc) ?? str(p.doc) ?? ""
+  // Data layer: kg labels are free-text entities — unqualified and frequently
+  // containing periods ("around 9 p.m. when it got dark"). Splitting on "." would
+  // shred them into "schema/rel/col" garbage, so keep the whole label as the entity.
+  if (dataLayer) {
+    // Use the endpoint's REAL kg kind (typically 'entity') so the reconstructed id
+    // `${kind}:${nodeId}` matches the bloom hit's id — otherwise a spidered neighbor
+    // that is also a search hit dedupes wrong and renders twice with a floating edge.
+    const k = (kind as CatalogKind) || "db_column"
+    return { nodeId: id, kind: k, schema: "data", rel: label || "?", col: null, score: null, doc: doc || label, degree, frequency }
+  }
+  const parts = String(label ?? "").split(".")
   if (kind === "db_table") {
     return {
       nodeId: id,
@@ -37,6 +49,8 @@ function reconstructHit(id: number, kind: string, label: string, props: unknown)
       col: null,
       score: null,
       doc,
+      degree,
+      frequency,
     }
   }
   // anything non-table renders with the column glyph (safe fallback)
@@ -49,18 +63,22 @@ function reconstructHit(id: number, kind: string, label: string, props: unknown)
     col: str(p.name) ?? str(p.col) ?? parts[2] ?? label,
     score: null,
     doc,
+    degree,
+    frequency,
   }
 }
 
 /** The endpoint of a neighbor edge that is NOT the source we expanded. */
 function farEndpoint(n: KgNeighbor, srcNodeId: number) {
   return n.fromNodeId === srcNodeId
-    ? { id: n.toNodeId, kind: n.toKind, label: n.toLabel, props: n.toProps }
-    : { id: n.fromNodeId, kind: n.fromKind, label: n.fromLabel, props: n.fromProps }
+    ? { id: n.toNodeId, kind: n.toKind, label: n.toLabel, props: n.toProps, degree: n.toDegree ?? 0, frequency: n.toFrequency ?? 0 }
+    : { id: n.fromNodeId, kind: n.fromKind, label: n.fromLabel, props: n.fromProps, degree: n.fromDegree ?? 0, frequency: n.fromFrequency ?? 0 }
 }
 
-/** Radial fan of `count` slots around a source node, packed into rings. */
-export function placeNeighbors(source: ScryNode, count: number): { x: number; y: number }[] {
+/** Radial fan around a source, packed into WIDTH-AWARE rings: each node consumes
+ *  arc proportional to its box width, so variable-size data cards (hubs are wider)
+ *  don't collide and the placement matches the size we actually render. */
+export function placeNeighbors(source: ScryNode, boxes: { w: number; h: number }[]): { x: number; y: number }[] {
   const c = nodeCenter(source)
   const out: { x: number; y: number }[] = []
   const R0 = 240
@@ -68,18 +86,31 @@ export function placeNeighbors(source: ScryNode, count: number): { x: number; y:
   const GAP = 44
   let placed = 0
   let ring = 0
-  while (placed < count) {
+  while (placed < boxes.length) {
     const radius = R0 + ring * STEP
-    const capacity = Math.max(1, Math.floor((2 * Math.PI * radius) / (SCRY_NODE_W + GAP)))
-    const n = Math.min(capacity, count - placed)
-    for (let j = 0; j < n; j++) {
-      const a = (j / n) * Math.PI * 2 - Math.PI / 2 + (ring % 2) * (Math.PI / n)
+    const circ = 2 * Math.PI * radius
+    // greedily fit nodes whose (w+GAP) arc-lengths sum ≤ circumference; ≥1 per ring
+    let used = 0
+    let count = 0
+    for (let i = placed; i < boxes.length; i++) {
+      if (count > 0 && used + boxes[i].w + GAP > circ) break
+      used += boxes[i].w + GAP
+      count++
+    }
+    count = Math.max(1, count)
+    const denom = used || 1
+    let acc = 0
+    for (let j = 0; j < count; j++) {
+      const { w, h } = boxes[placed + j]
+      const aCenter = ((acc + (w + GAP) / 2) / denom) * Math.PI * 2 - Math.PI / 2
+      acc += w + GAP
+      const a = aCenter + (ring % 2) * ((Math.PI / count) * 0.5)
       out.push({
-        x: c.x + Math.cos(a) * radius - SCRY_NODE_W / 2,
-        y: c.y + Math.sin(a) * radius - SCRY_NODE_H / 2,
+        x: c.x + Math.cos(a) * radius - w / 2,
+        y: c.y + Math.sin(a) * radius - h / 2,
       })
     }
-    placed += n
+    placed += count
     ring++
   }
   return out
@@ -97,6 +128,7 @@ export function mergeNeighbors(
   neighbors: KgNeighbor[],
   hitIds: Set<string>,
   maxEdges: number,
+  dataLayer = false,
 ): { next: SpiderState; truncated: boolean } {
   const truncated = neighbors.length > maxEdges
   const sliced = neighbors.slice(0, maxEdges)
@@ -113,21 +145,22 @@ export function mergeNeighbors(
   for (const n of sliced) {
     const far = farEndpoint(n, source.hit.nodeId)
     if (far.id === source.hit.nodeId) continue // self-loop
-    const hit = reconstructHit(far.id, far.kind, far.label, far.props)
+    const hit = reconstructHit(far.id, far.kind, far.label, far.props, dataLayer, far.degree, far.frequency)
     const id = nodeId(hit)
     if (hitIds.has(id) || nodes.has(id) || seen.has(id)) continue
     seen.add(id)
     fresh.push({ id, hit })
   }
-  const positions = placeNeighbors(source, fresh.length)
+  const boxes = fresh.map((f) => nodeBox(f.hit, dataLayer))
+  const positions = placeNeighbors(source, boxes)
   fresh.forEach((f, i) => {
     nodes.set(f.id, {
       id: f.id,
       hit: f.hit,
       x: positions[i].x,
       y: positions[i].y,
-      w: SCRY_NODE_W,
-      h: SCRY_NODE_H,
+      w: boxes[i].w,
+      h: boxes[i].h,
       pinned: false,
     })
   })
@@ -136,7 +169,7 @@ export function mergeNeighbors(
   for (const n of sliced) {
     const far = farEndpoint(n, source.hit.nodeId)
     if (far.id === source.hit.nodeId) continue
-    const farId = nodeId(reconstructHit(far.id, far.kind, far.label, far.props))
+    const farId = nodeId(reconstructHit(far.id, far.kind, far.label, far.props, dataLayer, far.degree, far.frequency))
     const key = `e:${n.edgeId}`
     if (edges.has(key)) continue
     const [from, to] = n.direction === "out" ? [source.id, farId] : [farId, source.id]

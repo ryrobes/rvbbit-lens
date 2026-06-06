@@ -231,7 +231,7 @@ export function SpecialistsWindow({
           <>
             <span className="text-chrome-text/40">·</span>
             <span>
-              <span className="font-medium text-emerald-400">{reachable}</span> reachable
+              <span className="font-medium text-success">{reachable}</span> reachable
             </span>
             <span className="text-chrome-text/40">·</span>
             <span>
@@ -527,7 +527,7 @@ function SpecialistCard({
         {errors > 0 ? (
           <span className="text-danger">{errors} err · {(errRate * 100).toFixed(0)}%</span>
         ) : (
-          <span className="text-emerald-400/80">no errors</span>
+          <span className="text-success/80">no errors</span>
         )}
         <span className="text-chrome-text/30">·</span>
         <span>{operators} ops</span>
@@ -661,7 +661,7 @@ function HealthDot({ health }: { health: SpecialistHealth | null }) {
   const color = !health
     ? "bg-chrome-text/30"
     : health.reachable
-      ? "bg-emerald-400"
+      ? "bg-success"
       : "bg-danger"
   return (
     <span

@@ -58,6 +58,9 @@ export function ResultGrid({
       parentSql: columnDragSource.parentSql,
       relationKey: columnDragSource.relationKey,
       columns: cols,
+      // Full source column set so a multi-arg semantic bind can offer sibling
+      // columns (e.g. contradicts(a, b) with b bound to another column).
+      sourceColumns: columnDragSource.columns,
     }
     writeColumnDragPayload(e.dataTransfer, payload)
     setActiveColumnDragSource({

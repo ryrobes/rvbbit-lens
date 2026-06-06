@@ -423,7 +423,7 @@ function FlagChips({ flags }: { flags: string[] }) {
 
 function SeverityBar({ severity }: { severity: number }) {
   const pct = Math.max(0, Math.min(100, Math.round(severity * 100)))
-  const color = severity >= 0.7 ? "var(--danger)" : severity >= 0.4 ? "rgb(245 158 11)" : "var(--brand-kg)"
+  const color = severity >= 0.7 ? "var(--danger)" : severity >= 0.4 ? "var(--warning)" : "var(--brand-kg)"
   return (
     <div className="h-1 w-12 shrink-0 overflow-hidden rounded-full bg-foreground/[0.06]">
       <div className="h-full rounded-full" style={{ width: `${pct}%`, background: color }} />

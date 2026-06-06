@@ -18,22 +18,21 @@ import {
   fmtMs,
   Metric,
   Panel,
-  percentile,
 } from "./instruments"
 import { EngineDot, EnginePill, FlowDiagram, type FlowLink } from "./routing-charts"
 import {
   ENGINES,
   fetchColumnarTables,
   fetchDecisionSummary,
+  fetchEngineRuntime,
   fetchLogStatus,
   fetchObservationGroups,
   fetchProfileEntries,
   fetchProfilePoints,
-  fetchRouteDecisions,
   fetchRouteExecutions,
   fetchRouteProfile,
-  fetchRuntimeSummary,
   fetchShapeSummary,
+  ROUTE_WINDOW_OPTIONS,
   type ColumnarTable,
   type FlowData,
   type LogStatus,
@@ -79,29 +78,27 @@ export function RoutingWindow({ activeConnectionId, hasRvbbit }: RoutingWindowPr
   const [error, setError] = useState<string | null>(null)
   const [paused, setPaused] = useState(false)
   const [intervalMs, setIntervalMs] = useState(5000)
+  const [windowHours, setWindowHours] = useState<number>(ROUTE_WINDOW_OPTIONS[0].hours)
   const [updatedAt, setUpdatedAt] = useState(0)
   const loading = updatedAt === 0
 
   const pollFlow = useCallback(async () => {
     if (!activeConnectionId) return
-    const [decisions, executions, decisionSummary, runtimeSummary, logStatus] =
-      await Promise.all([
-        fetchRouteDecisions(activeConnectionId),
-        fetchRouteExecutions(activeConnectionId),
-        fetchDecisionSummary(activeConnectionId),
-        fetchRuntimeSummary(activeConnectionId),
-        fetchLogStatus(activeConnectionId),
-      ])
-    setError(decisions.error ?? executions.error ?? null)
+    const [executions, decisionSummary, engineRuntime, logStatus] = await Promise.all([
+      fetchRouteExecutions(activeConnectionId, windowHours),
+      fetchDecisionSummary(activeConnectionId, windowHours),
+      fetchEngineRuntime(activeConnectionId, windowHours),
+      fetchLogStatus(activeConnectionId),
+    ])
+    setError(executions.error ?? null)
     setFlow({
-      decisions: decisions.rows,
       executions: executions.rows,
       decisionSummary,
-      runtimeSummary,
+      engineRuntime,
       logStatus,
     })
     setUpdatedAt(Date.now())
-  }, [activeConnectionId])
+  }, [activeConnectionId, windowHours])
 
   const loadProfile = useCallback(async () => {
     if (!activeConnectionId) return
@@ -150,8 +147,10 @@ export function RoutingWindow({ activeConnectionId, hasRvbbit }: RoutingWindowPr
   }
 
   const profileName = profileData?.profile?.name ?? null
-  const totalDecisions = flow?.decisions.length ?? 0
-  const totalRuns = flow?.executions.length ?? 0
+  const totalDecisions = (flow?.decisionSummary ?? []).reduce((s, d) => s + d.decisions, 0)
+  const totalRuns = (flow?.engineRuntime ?? []).reduce((s, r) => s + r.runs, 0)
+  const windowLabel =
+    ROUTE_WINDOW_OPTIONS.find((o) => o.hours === windowHours)?.label ?? `${windowHours}h`
 
   return (
     <div className="flex h-full flex-col text-[12px] text-chrome-text">
@@ -187,7 +186,8 @@ export function RoutingWindow({ activeConnectionId, hasRvbbit }: RoutingWindowPr
           <>
             <span className="text-chrome-text/40">·</span>
             <span className="tabular-nums">
-              {fmtCount(totalDecisions)} decisions · {fmtCount(totalRuns)} runs
+              {fmtCount(totalDecisions)} decisions · {fmtCount(totalRuns)} runs ·{" "}
+              <span className="text-chrome-text/55">last {windowLabel}</span>
             </span>
           </>
         ) : null}
@@ -196,6 +196,18 @@ export function RoutingWindow({ activeConnectionId, hasRvbbit }: RoutingWindowPr
           {updatedAt > 0 ? (
             <span className="text-[10px] text-chrome-text/45">{fmtAgo(updatedAt)}</span>
           ) : null}
+          <select
+            value={windowHours}
+            onChange={(e) => setWindowHours(Number(e.target.value))}
+            title="Time window — all charts aggregate this range"
+            className="h-6 rounded border border-chrome-border bg-secondary-background px-1.5 text-[11px] text-foreground outline-none focus:ring-2 focus:ring-ring"
+          >
+            {ROUTE_WINDOW_OPTIONS.map((o) => (
+              <option key={o.hours} value={o.hours}>
+                last {o.label}
+              </option>
+            ))}
+          </select>
           <select
             value={intervalMs}
             onChange={(e) => setIntervalMs(Number(e.target.value))}
@@ -258,7 +270,12 @@ export function RoutingWindow({ activeConnectionId, hasRvbbit }: RoutingWindowPr
 
       <div className="min-h-0 flex-1 overflow-auto">
         {tab === "flow" ? (
-          <FlowTab flow={flow} profileData={profileData} loading={loading} />
+          <FlowTab
+            flow={flow}
+            profileData={profileData}
+            loading={loading}
+            windowLabel={windowLabel}
+          />
         ) : tab === "freshness" ? (
           <RoutingFreshnessTab activeConnectionId={activeConnectionId} />
         ) : tab === "profile" ? (
@@ -283,7 +300,6 @@ interface EngineStat {
   decisions: number
   cacheHits: number
   runs: number
-  elapsed: number[]
   median: number
   p95: number
   trainedShapes: number
@@ -294,10 +310,12 @@ function FlowTab({
   flow,
   profileData,
   loading,
+  windowLabel,
 }: {
   flow: FlowData | null
   profileData: ProfileData | null
   loading: boolean
+  windowLabel: string
 }) {
   const engineStats = useMemo<EngineStat[]>(() => {
     const entries = profileData?.entries ?? []
@@ -305,19 +323,15 @@ function FlowTab({
       const decRows = (flow?.decisionSummary ?? []).filter((d) => d.candidate === e.id)
       const decisions = decRows.reduce((s, d) => s + d.decisions, 0)
       const cacheHits = decRows.reduce((s, d) => s + d.cacheHits, 0)
-      const elapsed = (flow?.executions ?? [])
-        .filter((x) => x.candidate === e.id)
-        .map((x) => x.elapsedMs)
-        .sort((a, b) => a - b)
+      const rt = (flow?.engineRuntime ?? []).find((r) => r.candidate === e.id)
       const trained = entries.filter((en) => en.choice === e.id)
       return {
         id: e.id,
         decisions,
         cacheHits,
-        runs: elapsed.length,
-        elapsed,
-        median: percentile(elapsed, 0.5),
-        p95: percentile(elapsed, 0.95),
+        runs: rt?.runs ?? 0,
+        median: rt?.medianMs ?? 0,
+        p95: rt?.p95Ms ?? 0,
         trainedShapes: trained.length,
         trainedConf:
           trained.length > 0
@@ -350,13 +364,14 @@ function FlowTab({
       <Panel
         icon={FlowArrow}
         title="Routing pathways"
-        right={<span>decision source → engine</span>}
+        right={<span>decision source → engine · last {windowLabel}</span>}
       >
         <FlowDiagram links={flowLinks} height={232} />
         <p className="mt-1.5 text-[10px] leading-snug text-chrome-text/55">
           Every routed SELECT enters from a decision source on the left — a hard rule, an
-          eligibility check, or a hit in the trained profile — and is dispatched to one of six
-          execution engines on the right. Idle engines show as dim ghosts.
+          eligibility check, or a hit in the trained profile — and is dispatched to an
+          execution engine on the right. Only engines that saw traffic in this window appear
+          here; idle ones are hidden, and their cards below are dimmed.
         </p>
       </Panel>
 
@@ -366,7 +381,7 @@ function FlowTab({
         ))}
       </div>
 
-      <RecentExecutions executions={flow?.executions ?? []} />
+      <RecentExecutions executions={flow?.executions ?? []} windowLabel={windowLabel} />
 
       <TelemetryPanel status={flow?.logStatus ?? null} />
     </div>
@@ -376,8 +391,16 @@ function FlowTab({
 function EngineCard({ stat, slowestMedian }: { stat: EngineStat; slowestMedian: number }) {
   const engine = ENGINES.find((e) => e.id === stat.id)!
   const cacheRate = stat.decisions > 0 ? stat.cacheHits / stat.decisions : 0
+  // No routing this window → dim it. It returns to full strength the moment
+  // a decision or run lands on this engine again.
+  const used = stat.decisions > 0 || stat.runs > 0
   return (
-    <div className="rounded-md border border-chrome-border bg-secondary-background p-2.5">
+    <div
+      className={cn(
+        "rounded-md border border-chrome-border bg-secondary-background p-2.5 transition-opacity",
+        used ? "" : "opacity-40",
+      )}
+    >
       <div className="flex items-center gap-1.5">
         <EngineDot id={stat.id} />
         <span className="shrink-0 font-mono text-[12px] font-medium text-foreground">
@@ -433,13 +456,19 @@ function EngineCard({ stat, slowestMedian }: { stat: EngineStat; slowestMedian: 
   )
 }
 
-function RecentExecutions({ executions }: { executions: RouteExecution[] }) {
+function RecentExecutions({
+  executions,
+  windowLabel,
+}: {
+  executions: RouteExecution[]
+  windowLabel: string
+}) {
   const rows = executions.slice(0, 14)
   return (
     <Panel
       icon={Activity}
       title="Recent executions"
-      right={<span>{executions.length} logged</span>}
+      right={<span>latest {rows.length} · last {windowLabel}</span>}
     >
       {rows.length === 0 ? (
         <p className="text-[11px] text-chrome-text/55">

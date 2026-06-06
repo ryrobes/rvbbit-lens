@@ -61,7 +61,7 @@ import {
   sourceSqlForPayload,
   uniqueBlockName,
 } from "@/lib/desktop/reactive-sql"
-import { writeBlockDragPayload } from "@/lib/desktop/block-drag"
+import { setActiveBlockDragSource, writeBlockDragPayload } from "@/lib/desktop/block-drag"
 import { hasParamDragPayload, readParamDragPayload } from "@/lib/desktop/param-drag"
 import { attachDragGhost } from "@/lib/desktop/drag-ghost"
 
@@ -238,6 +238,9 @@ export function DataGridWindow({
     // Semantic projections are per-row LLM ops — never auto-materialize; the
     // Explain tab estimates cost and the user runs explicitly.
     if (isSemanticProjection) return
+    // Pipeline cascades (… then op('…')) run rowset LLM stages — don't fire
+    // them on spawn; the user reviews the SQL and runs explicitly.
+    if (hasTopLevelThen(payload.sql)) return
     const isAutoRunOrigin = payload.origin === "table" || payload.origin === "derived"
     if (!isAutoRunOrigin) return
     void runSql(payload.sql)
@@ -446,6 +449,12 @@ export function DataGridWindow({
       setActiveTab("explain")
       return
     }
+    // A newly-chained pipeline stage (… then op('…')) shouldn't fire its LLM
+    // stages on edit — surface the SQL so the user reviews and runs it.
+    if (payload.sql && hasTopLevelThen(payload.sql)) {
+      setActiveTab("sql")
+      return
+    }
     if (payload.sql) void runSql(payload.sql)
   }, [payload.sql, compiledSql, runSql, isSemanticProjection])
 
@@ -628,17 +637,20 @@ export function DataGridWindow({
   }
 
   function handleBlockDragStart(e: React.DragEvent<HTMLButtonElement>) {
+    const title = payload.title || w.title || blockName
     writeBlockDragPayload(e.dataTransfer, {
       kind: "rvbbit-lens.desktop.block",
       windowId: w.id,
       blockName,
-      title: payload.title || w.title || blockName,
+      title,
     })
     attachDragGhost(e.dataTransfer, {
       variant: "block",
       label: `{${blockName}}`,
       sublabel: "block ref",
     })
+    // Publish the active block drag so the rowset-op palette can surface.
+    setActiveBlockDragSource({ windowId: w.id, blockName, title })
   }
 
   function handleParamDragOver(e: React.DragEvent<HTMLElement>) {
@@ -820,8 +832,9 @@ export function DataGridWindow({
               type="button"
               draggable
               onDragStart={handleBlockDragStart}
+              onDragEnd={() => setActiveBlockDragSource(null)}
               onClick={onRenameBlock}
-              title={`Block name — drag onto canvas to spawn SELECT * FROM {${blockName}}, click to rename. Reference this block from any other window's SQL as {${blockName}}.`}
+              title={`Block name — drag onto a rowset tile to pipeline (filter/group/pivot/top/analyze/enrich), onto the canvas to spawn SELECT * FROM {${blockName}}, or click to rename. Reference this block from any other window's SQL as {${blockName}}.`}
               className="ml-1 inline-flex shrink-0 cursor-grab items-center gap-1 whitespace-nowrap rounded border border-main/30 bg-main/10 px-1.5 py-0.5 text-[10px] text-main hover:border-main/60 active:cursor-grabbing"
             >
               <GitBranch className="h-3 w-3" />
