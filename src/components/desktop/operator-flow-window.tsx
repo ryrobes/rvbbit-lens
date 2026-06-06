@@ -14,6 +14,7 @@ import {
 import { cn } from "@/lib/utils"
 import { Button } from "@/components/ui/button"
 import {
+  defaultNode,
   emptyOperator,
   fetchOperators,
   fetchReceiptById,
@@ -21,6 +22,8 @@ import {
   fetchSpecialists,
   runOperator,
   saveOperator,
+  type NodeKind,
+  type OpStep,
   type RvbbitOperator,
   type RvbbitSpecialist,
   type OperatorReceipt,
@@ -280,6 +283,48 @@ export function OperatorFlowWindow({
     }
   }, [activeConnectionId, opName, persisted])
 
+  // Palette drop → append a step of `kind`, pinned at the drop position.
+  const onAddNode = useCallback(
+    (kind: NodeKind, pos: NodePos) => {
+      if (!op) return
+      const steps = op.steps ?? []
+      const taken = new Set(steps.map((s) => s.name))
+      let n = steps.length + 1
+      let name = `node${n}`
+      while (taken.has(name)) name = `node${++n}`
+      const nextSteps = [...steps, defaultNode(kind, name)]
+      onChangeOp({ ...op, steps: nextSteps })
+      const id = `step-${nextSteps.length - 1}`
+      setLayout((prev) => {
+        const next = { ...prev, [id]: pos }
+        if (activeConnectionId && opName && persisted) {
+          void saveOperatorLayout(activeConnectionId, opName, next)
+        }
+        return next
+      })
+    },
+    [op, onChangeOp, activeConnectionId, opName, persisted],
+  )
+
+  // Drag-to-connect → wire one step's output into another's inputs as a
+  // {{ steps.X.output }} template (the edge then renders from that ref).
+  const onConnect = useCallback(
+    (fromIdx: number, toIdx: number) => {
+      if (!op?.steps) return
+      const source = op.steps[fromIdx]
+      const target = op.steps[toIdx]
+      if (!source || !target) return
+      const key = source.name
+      const ref = `{{ steps.${source.name}.output }}`
+      if (target.inputs?.[key] === ref) return
+      const nextSteps: OpStep[] = op.steps.map((s, i) =>
+        i === toIdx ? { ...s, inputs: { ...(s.inputs ?? {}), [key]: ref } } : s,
+      )
+      onChangeOp({ ...op, steps: nextSteps })
+    },
+    [op, onChangeOp],
+  )
+
   const receipt = useMemo(
     () => receipts.find((r) => r.receipt_id === receiptId) ?? null,
     [receipts, receiptId],
@@ -445,6 +490,8 @@ export function OperatorFlowWindow({
               editable={mode === "build"}
               positions={layout}
               onMoveNode={onMoveNode}
+              onAddNode={onAddNode}
+              onConnect={onConnect}
             />
           </div>
           {mode === "run" && receipt ? (

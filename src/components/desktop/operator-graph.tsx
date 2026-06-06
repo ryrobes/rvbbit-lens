@@ -20,6 +20,7 @@ import type {
   RvbbitOperator,
   OperatorReceipt,
   OpStep,
+  NodeKind,
   SubCall,
   Validator,
 } from "@/lib/rvbbit/operators"
@@ -56,6 +57,10 @@ interface OperatorGraphProps {
   positions?: Record<string, NodePos>
   /** Called on drag end with the node's new canvas position. */
   onMoveNode?: (id: string, pos: NodePos) => void
+  /** Palette drop → add a step of `kind` at canvas `pos`. */
+  onAddNode?: (kind: NodeKind, pos: NodePos) => void
+  /** Drag-to-connect from one pipeline step to another (by step index). */
+  onConnect?: (fromStepIndex: number, toStepIndex: number) => void
 }
 
 export function OperatorGraph({
@@ -67,6 +72,8 @@ export function OperatorGraph({
   editable = false,
   positions,
   onMoveNode,
+  onAddNode,
+  onConnect,
 }: OperatorGraphProps) {
   const graph = useMemo(() => buildOperatorGraph(op), [op])
   const trace = useMemo(
@@ -167,6 +174,64 @@ export function OperatorGraph({
     [editable, pointerToCanvas, onMoveNode, onSelectNode, selectedNodeId],
   )
 
+  // ── drag-to-connect ────────────────────────────────────────────────
+  // Pipeline steps only — connecting writes a {{ steps.X.output }} ref
+  // into the target step's inputs (the edge then renders from that ref).
+  const [connect, setConnect] = useState<{ fromId: string; x: number; y: number } | null>(null)
+  const stepIndexOf = (id: string): number | null => {
+    const n = graph.nodes.find((x) => x.id === id)
+    return n && n.ref.t === "step" ? n.ref.index : null
+  }
+  const nodeIdAt = (pt: NodePos): string | null => {
+    for (const n of graph.nodes) {
+      const p = posById.get(n.id)
+      if (!p) continue
+      if (pt.x >= p.x && pt.x <= p.x + NODE_W && pt.y >= p.y && pt.y <= p.y + NODE_H) return n.id
+    }
+    return null
+  }
+  const beginConnect = useCallback(
+    (fromId: string, e: React.PointerEvent) => {
+      if (!editable || !onConnect) return
+      e.preventDefault()
+      e.stopPropagation()
+      const p = pointerToCanvas(e.clientX, e.clientY)
+      setConnect({ fromId, x: p.x, y: p.y })
+      const onMove = (ev: PointerEvent) => {
+        const c = pointerToCanvas(ev.clientX, ev.clientY)
+        setConnect((cur) => (cur ? { ...cur, x: c.x, y: c.y } : cur))
+      }
+      const onUp = (ev: PointerEvent) => {
+        window.removeEventListener("pointermove", onMove)
+        window.removeEventListener("pointerup", onUp)
+        const c = pointerToCanvas(ev.clientX, ev.clientY)
+        const targetId = nodeIdAt(c)
+        setConnect(null)
+        if (!targetId || targetId === fromId) return
+        const from = stepIndexOf(fromId)
+        const to = stepIndexOf(targetId)
+        if (from != null && to != null && from !== to) onConnect(from, to)
+      }
+      window.addEventListener("pointermove", onMove)
+      window.addEventListener("pointerup", onUp)
+    },
+    // stepIndexOf / nodeIdAt close over graph + posById (stable per render)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [editable, onConnect, pointerToCanvas, graph],
+  )
+
+  const onCanvasDrop = useCallback(
+    (e: React.DragEvent) => {
+      if (!editable || !onAddNode) return
+      const kind = e.dataTransfer.getData("application/x-op-node-kind") as NodeKind
+      if (!kind) return
+      e.preventDefault()
+      const p = pointerToCanvas(e.clientX, e.clientY)
+      onAddNode(kind, { x: Math.max(0, Math.round(p.x - NODE_W / 2)), y: Math.max(0, Math.round(p.y - NODE_H / 2)) })
+    },
+    [editable, onAddNode, pointerToCanvas],
+  )
+
   /**
    * Per-node trace status. In build mode, every node is `idle` (we
    * paint by kind only). In run mode without a receipt selected,
@@ -185,7 +250,12 @@ export function OperatorGraph({
   }
 
   return (
-    <div className="h-full w-full overflow-auto p-2">
+    <div className="relative h-full w-full">
+      <div
+        className="h-full w-full overflow-auto p-2"
+        onDragOver={editable && onAddNode ? (e) => e.preventDefault() : undefined}
+        onDrop={editable && onAddNode ? onCanvasDrop : undefined}
+      >
       <div ref={canvasRef} className="relative" style={{ width, height }}>
         {/* regions behind everything — bbox of their contained nodes so
             they keep enclosing the nodes after a drag. */}
@@ -333,6 +403,25 @@ export function OperatorGraph({
               />
             )
           })}
+          {/* in-progress connect drag */}
+          {connect
+            ? (() => {
+                const a = posById.get(connect.fromId)
+                if (!a) return null
+                const sx = a.x + NODE_W
+                const sy = a.y + NODE_H / 2
+                const mx = (sx + connect.x) / 2
+                return (
+                  <path
+                    d={`M ${sx} ${sy} C ${mx} ${sy}, ${mx} ${connect.y}, ${connect.x} ${connect.y}`}
+                    fill="none"
+                    stroke="var(--main)"
+                    strokeWidth={2}
+                    strokeDasharray="4 3"
+                  />
+                )
+              })()
+            : null}
         </svg>
 
         {/* nodes */}
@@ -362,7 +451,73 @@ export function OperatorGraph({
             />
           )
         })}
+
+        {/* output handles — drag from a step to wire it into another */}
+        {editable && onConnect
+          ? graph.nodes
+              .filter((n) => n.ref.t === "step")
+              .map((n) => {
+                const p = posById.get(n.id)
+                if (!p) return null
+                return (
+                  <button
+                    key={`handle-${n.id}`}
+                    type="button"
+                    title="Drag to connect this step's output into another step"
+                    onPointerDown={(e) => beginConnect(n.id, e)}
+                    className="absolute rounded-full border border-main bg-secondary-background transition-colors hover:bg-main"
+                    style={{
+                      left: p.x + NODE_W - 6,
+                      top: p.y + NODE_H / 2 - 6,
+                      width: 12,
+                      height: 12,
+                      zIndex: 25,
+                      cursor: "crosshair",
+                      touchAction: "none",
+                    }}
+                  />
+                )
+              })
+          : null}
       </div>
+      </div>
+      {editable && onAddNode ? <NodePalette /> : null}
+    </div>
+  )
+}
+
+// ── Palette — drag a step kind onto the canvas to add it ─────────────
+
+const PALETTE_KINDS: { kind: NodeKind; label: string; Icon: React.ComponentType<{ className?: string }> }[] = [
+  { kind: "llm", label: "llm", Icon: Sparkles },
+  { kind: "specialist", label: "specialist", Icon: Brain },
+  { kind: "python", label: "python", Icon: FileCode2 },
+  { kind: "code", label: "code", Icon: Cpu },
+  { kind: "sql", label: "sql", Icon: Database },
+  { kind: "mcp", label: "mcp", Icon: Globe },
+]
+
+function NodePalette() {
+  return (
+    <div className="absolute left-3 top-3 z-30 flex flex-col gap-1 rounded-md border border-chrome-border bg-chrome-bg/90 p-1.5 shadow-lg backdrop-blur">
+      <div className="px-1 pb-0.5 text-[8px] uppercase tracking-wider text-chrome-text/45">
+        drag to add
+      </div>
+      {PALETTE_KINDS.map(({ kind, label, Icon }) => (
+        <div
+          key={kind}
+          draggable
+          onDragStart={(e) => {
+            e.dataTransfer.setData("application/x-op-node-kind", kind)
+            e.dataTransfer.effectAllowed = "copy"
+          }}
+          className="flex cursor-grab items-center gap-1.5 rounded border border-chrome-border/60 bg-secondary-background px-1.5 py-1 text-[10px] text-chrome-text/85 hover:border-main/50 hover:text-foreground active:cursor-grabbing"
+          style={{ color: accentForSubCallKind(kind) }}
+        >
+          <Icon className="h-3 w-3" />
+          <span className="text-chrome-text/85">{label}</span>
+        </div>
+      ))}
     </div>
   )
 }
