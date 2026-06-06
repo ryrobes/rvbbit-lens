@@ -1,6 +1,6 @@
 "use client"
 
-import { useCallback, useMemo, useRef, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import {
   AlertTriangle,
   Brain,
@@ -45,6 +45,12 @@ const PAD_Y = 64
 
 export type GraphMode = "build" | "run"
 
+/** The upstream end of a drag-to-connect: a pipeline step, or an
+ *  operator argument (input node). The downstream end is always a step. */
+export type ConnectSource =
+  | { t: "step"; index: number }
+  | { t: "input"; name: string }
+
 interface OperatorGraphProps {
   op: RvbbitOperator
   mode: GraphMode
@@ -59,8 +65,14 @@ interface OperatorGraphProps {
   onMoveNode?: (id: string, pos: NodePos) => void
   /** Palette drop → add a step of `kind` at canvas `pos`. */
   onAddNode?: (kind: NodeKind, pos: NodePos) => void
-  /** Drag-to-connect from one pipeline step to another (by step index). */
-  onConnect?: (fromStepIndex: number, toStepIndex: number) => void
+  /** Palette drop of the "input" chip → add an operator argument. */
+  onAddInput?: (pos: NodePos) => void
+  /** Whether the palette offers the "input" chip (signature is editable). */
+  allowAddInput?: boolean
+  /** Drag-to-connect into a step from a step or an input argument. */
+  onConnect?: (from: ConnectSource, toStepIndex: number) => void
+  /** Remove a pipeline step (delete key on a selected step node). */
+  onDeleteStep?: (stepIndex: number) => void
 }
 
 export function OperatorGraph({
@@ -73,7 +85,10 @@ export function OperatorGraph({
   positions,
   onMoveNode,
   onAddNode,
+  onAddInput,
+  allowAddInput = false,
   onConnect,
+  onDeleteStep,
 }: OperatorGraphProps) {
   const graph = useMemo(() => buildOperatorGraph(op), [op])
   const trace = useMemo(
@@ -178,9 +193,21 @@ export function OperatorGraph({
   // Pipeline steps only — connecting writes a {{ steps.X.output }} ref
   // into the target step's inputs (the edge then renders from that ref).
   const [connect, setConnect] = useState<{ fromId: string; x: number; y: number } | null>(null)
-  const stepIndexOf = (id: string): number | null => {
+  // Source can be a step or an input arg; target must be a step.
+  const connectSourceOf = (id: string): ConnectSource | null => {
+    const n = graph.nodes.find((x) => x.id === id)
+    if (!n) return null
+    if (n.ref.t === "step") return { t: "step", index: n.ref.index }
+    if (n.ref.t === "input") return { t: "input", name: op.arg_names[n.ref.index] ?? "" }
+    return null
+  }
+  const targetStepOf = (id: string): number | null => {
     const n = graph.nodes.find((x) => x.id === id)
     return n && n.ref.t === "step" ? n.ref.index : null
+  }
+  const connectableSource = (id: string): boolean => {
+    const n = graph.nodes.find((x) => x.id === id)
+    return !!n && (n.ref.t === "step" || n.ref.t === "input")
   }
   const nodeIdAt = (pt: NodePos): string | null => {
     for (const n of graph.nodes) {
@@ -208,9 +235,11 @@ export function OperatorGraph({
         const targetId = nodeIdAt(c)
         setConnect(null)
         if (!targetId || targetId === fromId) return
-        const from = stepIndexOf(fromId)
-        const to = stepIndexOf(targetId)
-        if (from != null && to != null && from !== to) onConnect(from, to)
+        const from = connectSourceOf(fromId)
+        const to = targetStepOf(targetId)
+        if (!from || to == null) return
+        if (from.t === "step" && from.index === to) return
+        onConnect(from, to)
       }
       window.addEventListener("pointermove", onMove)
       window.addEventListener("pointerup", onUp)
@@ -222,15 +251,42 @@ export function OperatorGraph({
 
   const onCanvasDrop = useCallback(
     (e: React.DragEvent) => {
-      if (!editable || !onAddNode) return
-      const kind = e.dataTransfer.getData("application/x-op-node-kind") as NodeKind
-      if (!kind) return
+      if (!editable) return
+      const raw = e.dataTransfer.getData("application/x-op-node-kind")
+      if (!raw) return
       e.preventDefault()
-      const p = pointerToCanvas(e.clientX, e.clientY)
-      onAddNode(kind, { x: Math.max(0, Math.round(p.x - NODE_W / 2)), y: Math.max(0, Math.round(p.y - NODE_H / 2)) })
+      const c = pointerToCanvas(e.clientX, e.clientY)
+      const pos = {
+        x: Math.max(0, Math.round(c.x - NODE_W / 2)),
+        y: Math.max(0, Math.round(c.y - NODE_H / 2)),
+      }
+      if (raw === "input") onAddInput?.(pos)
+      else onAddNode?.(raw as NodeKind, pos)
     },
-    [editable, onAddNode, pointerToCanvas],
+    [editable, onAddNode, onAddInput, pointerToCanvas],
   )
+
+  // Delete / Backspace removes the selected pipeline step.
+  const selectedStepIndex = (() => {
+    if (!selectedNodeId) return null
+    const n = graph.nodes.find((x) => x.id === selectedNodeId)
+    return n && n.ref.t === "step" ? n.ref.index : null
+  })()
+  useEffect(() => {
+    if (!editable || !onDeleteStep || selectedStepIndex == null) return
+    const onKey = (e: KeyboardEvent) => {
+      const el = e.target as HTMLElement | null
+      const typing = el && /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName)
+      if (typing) return
+      if (e.key === "Delete" || e.key === "Backspace") {
+        e.preventDefault()
+        onDeleteStep(selectedStepIndex)
+        onSelectNode(null)
+      }
+    }
+    window.addEventListener("keydown", onKey)
+    return () => window.removeEventListener("keydown", onKey)
+  }, [editable, onDeleteStep, selectedStepIndex, onSelectNode])
 
   /**
    * Per-node trace status. In build mode, every node is `idle` (we
@@ -351,7 +407,7 @@ export function OperatorGraph({
             const traversed =
               mode === "run" &&
               trace != null &&
-              (e.from === "input" || upstreamStatus === "ok" || upstreamStatus === "partial" || upstreamStatus === "failed") &&
+              (e.from.startsWith("input-") || upstreamStatus === "ok" || upstreamStatus === "partial" || upstreamStatus === "failed") &&
               (e.to === "output" ||
                 downstreamStatus === "ok" ||
                 downstreamStatus === "partial" ||
@@ -452,10 +508,10 @@ export function OperatorGraph({
           )
         })}
 
-        {/* output handles — drag from a step to wire it into another */}
+        {/* output handles — drag from a step or input arg to wire it into a step */}
         {editable && onConnect
           ? graph.nodes
-              .filter((n) => n.ref.t === "step")
+              .filter((n) => connectableSource(n.id))
               .map((n) => {
                 const p = posById.get(n.id)
                 if (!p) return null
@@ -481,7 +537,9 @@ export function OperatorGraph({
           : null}
       </div>
       </div>
-      {editable && onAddNode ? <NodePalette /> : null}
+      {editable && (onAddNode || (onAddInput && allowAddInput)) ? (
+        <NodePalette showInput={!!onAddInput && allowAddInput} />
+      ) : null}
     </div>
   )
 }
@@ -497,12 +555,26 @@ const PALETTE_KINDS: { kind: NodeKind; label: string; Icon: React.ComponentType<
   { kind: "mcp", label: "mcp", Icon: Globe },
 ]
 
-function NodePalette() {
+function NodePalette({ showInput }: { showInput: boolean }) {
   return (
     <div className="absolute left-3 top-3 z-30 flex flex-col gap-1 rounded-md border border-chrome-border bg-chrome-bg/90 p-1.5 shadow-lg backdrop-blur">
       <div className="px-1 pb-0.5 text-[8px] uppercase tracking-wider text-chrome-text/45">
         drag to add
       </div>
+      {showInput ? (
+        <div
+          draggable
+          onDragStart={(e) => {
+            e.dataTransfer.setData("application/x-op-node-kind", "input")
+            e.dataTransfer.effectAllowed = "copy"
+          }}
+          className="flex cursor-grab items-center gap-1.5 rounded border border-chrome-border/60 bg-secondary-background px-1.5 py-1 text-[10px] hover:border-main/50 hover:text-foreground active:cursor-grabbing"
+          style={{ color: "var(--main)" }}
+        >
+          <FlowArrow className="h-3 w-3" />
+          <span className="text-chrome-text/85">input</span>
+        </div>
+      ) : null}
       {PALETTE_KINDS.map(({ kind, label, Icon }) => (
         <div
           key={kind}
@@ -776,22 +848,20 @@ function describeNode(
 ): NodeView {
   switch (ref.t) {
     case "input": {
-      const args = op.arg_names
-        .map((a, i) => `${a}: ${op.arg_types[i] ?? "text"}`)
-        .join(", ")
-      const runBody =
+      const argName = op.arg_names[ref.index] ?? `arg${ref.index + 1}`
+      const argType = op.arg_types[ref.index] ?? "text"
+      const runVal =
         mode === "run" && receipt?.inputs
-          ? op.arg_names
-              .map((a) => `${a} = ${preview(String(receipt.inputs?.[a] ?? ""), 60)}`)
-              .join("\n")
+          ? preview(String(receipt.inputs?.[argName] ?? ""), 70)
           : null
       return {
         Icon: FlowArrow,
         kindLabel: "input",
-        title: `rvbbit.${op.name || "new"}`,
-        subtitle: `(${args})`,
-        body: runBody ?? undefined,
-        badges: [op.shape],
+        title: argName,
+        subtitle: argType,
+        body: runVal ?? undefined,
+        // The first input carries the operator's shape badge as a hint.
+        badges: ref.index === 0 ? [op.shape] : [],
         accent: "terminal",
       }
     }

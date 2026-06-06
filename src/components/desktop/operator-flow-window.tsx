@@ -45,7 +45,7 @@ import {
   type NodePos,
   type OperatorLayout,
 } from "@/lib/rvbbit/operator-layout"
-import { OperatorGraph, type GraphMode } from "./operator-graph"
+import { OperatorGraph, type ConnectSource, type GraphMode } from "./operator-graph"
 import { OperatorInspector } from "./operator-inspector"
 import { OperatorReceiptTimeline } from "./operator-receipt-timeline"
 import { OperatorHistoryShelf } from "./operator-history-shelf"
@@ -283,7 +283,18 @@ export function OperatorFlowWindow({
     }
   }, [activeConnectionId, opName, persisted])
 
+  const persistLayout = useCallback(
+    (next: OperatorLayout) => {
+      if (activeConnectionId && opName && persisted) {
+        void saveOperatorLayout(activeConnectionId, opName, next)
+      }
+    },
+    [activeConnectionId, opName, persisted],
+  )
+
   // Palette drop → append a step of `kind`, pinned at the drop position.
+  // Converting a single-LLM operator carries its model/prompt into the
+  // first llm step so the existing behaviour isn't silently dropped.
   const onAddNode = useCallback(
     (kind: NodeKind, pos: NodePos) => {
       if (!op) return
@@ -292,30 +303,66 @@ export function OperatorFlowWindow({
       let n = steps.length + 1
       let name = `node${n}`
       while (taken.has(name)) name = `node${++n}`
-      const nextSteps = [...steps, defaultNode(kind, name)]
+      let node = defaultNode(kind, name)
+      if (steps.length === 0 && kind === "llm") {
+        node = {
+          ...node,
+          model: op.model || node.model,
+          system: op.system_prompt || node.system,
+          user: op.user_prompt || node.user,
+        }
+      }
+      const nextSteps = [...steps, node]
       onChangeOp({ ...op, steps: nextSteps })
       const id = `step-${nextSteps.length - 1}`
       setLayout((prev) => {
         const next = { ...prev, [id]: pos }
-        if (activeConnectionId && opName && persisted) {
-          void saveOperatorLayout(activeConnectionId, opName, next)
-        }
+        persistLayout(next)
         return next
       })
     },
-    [op, onChangeOp, activeConnectionId, opName, persisted],
+    [op, onChangeOp, persistLayout],
   )
 
-  // Drag-to-connect → wire one step's output into another's inputs as a
-  // {{ steps.X.output }} template (the edge then renders from that ref).
+  // Palette "input" drop → add an operator argument. Only for unsaved
+  // operators (a created operator's signature is immutable in the DB).
+  const onAddInput = useCallback(
+    (pos: NodePos) => {
+      if (!op || persisted) return
+      const taken = new Set(op.arg_names)
+      let n = op.arg_names.length + 1
+      let name = `arg${n}`
+      while (taken.has(name)) name = `arg${++n}`
+      const idx = op.arg_names.length
+      onChangeOp({
+        ...op,
+        arg_names: [...op.arg_names, name],
+        arg_types: [...op.arg_types, "text"],
+      })
+      setLayout((prev) => ({ ...prev, [`input-${idx}`]: pos }))
+    },
+    [op, persisted, onChangeOp],
+  )
+
+  // Drag-to-connect → wire a step output or operator arg into a step's
+  // inputs as a template ref (the edge then renders from that ref).
   const onConnect = useCallback(
-    (fromIdx: number, toIdx: number) => {
+    (from: ConnectSource, toIdx: number) => {
       if (!op?.steps) return
-      const source = op.steps[fromIdx]
       const target = op.steps[toIdx]
-      if (!source || !target) return
-      const key = source.name
-      const ref = `{{ steps.${source.name}.output }}`
+      if (!target) return
+      let key: string
+      let ref: string
+      if (from.t === "step") {
+        const source = op.steps[from.index]
+        if (!source) return
+        key = source.name
+        ref = `{{ steps.${source.name}.output }}`
+      } else {
+        if (!from.name) return
+        key = from.name
+        ref = `{{ inputs.${from.name} }}`
+      }
       if (target.inputs?.[key] === ref) return
       const nextSteps: OpStep[] = op.steps.map((s, i) =>
         i === toIdx ? { ...s, inputs: { ...(s.inputs ?? {}), [key]: ref } } : s,
@@ -323,6 +370,32 @@ export function OperatorFlowWindow({
       onChangeOp({ ...op, steps: nextSteps })
     },
     [op, onChangeOp],
+  )
+
+  // Delete a step from the canvas, remapping stored positions so later
+  // steps keep their boxes (step ids are positional).
+  const onDeleteStep = useCallback(
+    (idx: number) => {
+      if (!op?.steps) return
+      const nextSteps = op.steps.filter((_, i) => i !== idx)
+      onChangeOp({ ...op, steps: nextSteps.length > 0 ? nextSteps : null })
+      setLayout((prev) => {
+        const next: OperatorLayout = {}
+        for (const [id, p] of Object.entries(prev)) {
+          const m = /^step-(\d+)$/.exec(id)
+          if (!m) {
+            next[id] = p
+            continue
+          }
+          const i = Number(m[1])
+          if (i === idx) continue
+          next[`step-${i > idx ? i - 1 : i}`] = p
+        }
+        persistLayout(next)
+        return next
+      })
+    },
+    [op, onChangeOp, persistLayout],
   )
 
   const receipt = useMemo(
@@ -491,7 +564,10 @@ export function OperatorFlowWindow({
               positions={layout}
               onMoveNode={onMoveNode}
               onAddNode={onAddNode}
+              onAddInput={onAddInput}
+              allowAddInput={!persisted}
               onConnect={onConnect}
+              onDeleteStep={onDeleteStep}
             />
           </div>
           {mode === "run" && receipt ? (

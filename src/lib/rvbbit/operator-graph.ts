@@ -25,7 +25,7 @@ export type OpNodeKind =
   | "reduce"
 
 export type NodeRef =
-  | { t: "input" }
+  | { t: "input"; index: number }
   | { t: "output" }
   | { t: "exec" }
   | { t: "step"; index: number }
@@ -131,15 +131,29 @@ export function buildOperatorGraph(op: RvbbitOperator): OpGraph {
   const regions: OpRegion[] = []
 
   let col = 0
-  nodes.push({ id: "input", kind: "input", col, row: 0, ref: { t: "input" } })
-  let prev = "input"
+  // One input node per operator argument, stacked in column 0. Each is
+  // positionable and can be wired into a step ({{ inputs.<arg> }}).
+  const inputIds: string[] = []
+  const argRows = op.arg_names.length > 0 ? centeredRows(op.arg_names.length) : [0]
+  if (op.arg_names.length > 0) {
+    op.arg_names.forEach((_, i) => {
+      const id = `input-${i}`
+      nodes.push({ id, kind: "input", col, row: argRows[i], ref: { t: "input", index: i } })
+      inputIds.push(id)
+    })
+  } else {
+    nodes.push({ id: "input-0", kind: "input", col, row: 0, ref: { t: "input", index: 0 } })
+    inputIds.push("input-0")
+  }
   col += 1
 
-  // pre-wards
+  // pre-wards (single chain in row 0); the inputs fan into the first hop.
+  let prev: string | null = null
   for (let i = 0; i < (op.wards?.pre?.length ?? 0); i++) {
     const id = `ward-pre-${i}`
     nodes.push({ id, kind: "ward", col, row: 0, ref: { t: "ward", phase: "pre", index: i } })
-    edges.push({ from: prev, to: id, kind: "flow" })
+    if (prev) edges.push({ from: prev, to: id, kind: "flow" })
+    else for (const inp of inputIds) edges.push({ from: inp, to: id, kind: "flow" })
     prev = id
     col += 1
   }
@@ -206,7 +220,10 @@ export function buildOperatorGraph(op: RvbbitOperator): OpGraph {
     laneExits = ["exec"]
   }
 
-  for (const e of execEntries) edges.push({ from: prev, to: e, kind: "flow" })
+  for (const e of execEntries) {
+    if (prev) edges.push({ from: prev, to: e, kind: "flow" })
+    else for (const inp of inputIds) edges.push({ from: inp, to: e, kind: "flow" })
+  }
   col = execCol0 + laneWidth
 
   let execExit: string
@@ -229,8 +246,8 @@ export function buildOperatorGraph(op: RvbbitOperator): OpGraph {
   }
 
   const execColEnd = col - 1
-  const rowMin = Math.min(0, ...rows)
-  const rowMax = Math.max(0, ...rows)
+  const rowMin = Math.min(0, ...rows, ...argRows)
+  const rowMax = Math.max(0, ...rows, ...argRows)
 
   if (takes) {
     regions.push({ id: "takes", kind: "takes", col0: execCol0, col1: execColEnd, row0: rowMin, row1: rowMax })
