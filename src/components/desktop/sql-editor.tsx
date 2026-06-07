@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef } from "react"
 import CodeMirror, { type Extension, type ReactCodeMirrorRef } from "@uiw/react-codemirror"
-import { sql, PostgreSQL } from "@codemirror/lang-sql"
+import { sql, PostgreSQL, type SQLNamespace } from "@codemirror/lang-sql"
 import { EditorView, keymap } from "@codemirror/view"
 import { rvbbitLensCodeMirrorTheme } from "@/lib/desktop/codemirror-theme"
 
@@ -16,6 +16,11 @@ interface SqlEditorProps {
   /** "plain" drops SQL syntax highlighting + autocomplete + line numbers — for
    *  the natural-language "Ask" mode where the content is a question, not SQL. */
   language?: "sql" | "plain"
+  /** Live schema (pg schema → table → columns) for table/column autocomplete.
+   *  Built from the connection's SchemaSnapshot; omit for keyword-only. */
+  schema?: SQLNamespace
+  /** Schema whose tables complete unqualified (the Postgres search_path head). */
+  defaultSchema?: string
 }
 
 export function SqlEditor({
@@ -26,6 +31,8 @@ export function SqlEditor({
   readOnly,
   fontSize = 13,
   language = "sql",
+  schema,
+  defaultSchema,
 }: SqlEditorProps) {
   const ref = useRef<ReactCodeMirrorRef | null>(null)
   const plain = language === "plain"
@@ -33,7 +40,9 @@ export function SqlEditor({
   const extensions: Extension[] = useMemo(() => {
     const exts: Extension[] = []
     if (plain) exts.push(EditorView.lineWrapping) // wrap long NL questions instead of scrolling
-    else exts.push(sql({ dialect: PostgreSQL, upperCaseKeywords: false }))
+    // schema-aware completion when a SQLNamespace is supplied (tables + columns
+    // with type hints); falls back to keyword-only completion otherwise.
+    else exts.push(sql({ dialect: PostgreSQL, upperCaseKeywords: false, schema, defaultSchema }))
     if (onRun) {
       exts.push(
         keymap.of([
@@ -45,7 +54,7 @@ export function SqlEditor({
       )
     }
     return exts
-  }, [onRun, plain])
+  }, [onRun, plain, schema, defaultSchema])
 
   // Auto-focus on first mount.
   useEffect(() => {

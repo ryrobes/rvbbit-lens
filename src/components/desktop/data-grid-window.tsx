@@ -43,7 +43,8 @@ import { reconcileRollupLineage } from "@/lib/desktop/rollup-sql-parse"
 import { rollupChartSpec } from "@/lib/desktop/rollup-chart"
 import { classifyColumn } from "@/lib/desktop/chart-infer"
 import { RollupShelf, type FilterKind } from "./rollup-shelf"
-import type { QueryResult } from "@/lib/db/types"
+import type { QueryResult, SchemaSnapshot } from "@/lib/db/types"
+import { buildSqlCompletionSchema } from "@/lib/desktop/sql-completion"
 import { cn } from "@/lib/utils"
 import { rowsToCsv } from "@/lib/sql/format"
 import {
@@ -75,6 +76,9 @@ interface DataGridWindowProps {
   /** Whether the active connection has the pg_rvbbit extension —
    *  enables EXPLAIN (SEMANTIC) for the semantic cost projection. */
   hasRvbbit: boolean
+  /** Active-connection schema snapshot — powers table/column autocomplete in
+   *  the SQL editor. Null until loaded / when no connection is active. */
+  schema: SchemaSnapshot | null
   allWindows: DesktopWindowState[]
   params: DesktopParamValue[]
   runSignal: number
@@ -149,6 +153,7 @@ export function DataGridWindow({
   payload,
   activeConnectionId,
   hasRvbbit,
+  schema,
   allWindows,
   params,
   runSignal,
@@ -162,6 +167,9 @@ export function DataGridWindow({
   onOpenKgForSource,
 }: DataGridWindowProps) {
   const view = payload.view ?? {}
+  // Schema-aware SQL completion (tables + columns w/ type hints), rebuilt only
+  // when the connection's schema snapshot changes.
+  const sqlCompletion = useMemo(() => buildSqlCompletionSchema(schema), [schema])
   // A semantic-projection window (spec has rvbbit scalar-op projections) is a
   // per-row LLM op — it never auto-runs; it opens on Explain so the live
   // EXPLAIN (SEMANTIC) shows the cost estimate before the user materializes it.
@@ -898,7 +906,13 @@ export function DataGridWindow({
             {queryMode === "ask" ? (
               <SqlEditor value={askDraft} onChange={setAskDraft} onRun={onRun} language="plain" />
             ) : (
-              <SqlEditor value={draftSql} onChange={setDraftSql} onRun={onRun} />
+              <SqlEditor
+                value={draftSql}
+                onChange={setDraftSql}
+                onRun={onRun}
+                schema={sqlCompletion?.namespace}
+                defaultSchema={sqlCompletion?.defaultSchema}
+              />
             )}
           </div>
           {queryMode === "ask" ? (
@@ -1075,7 +1089,13 @@ export function DataGridWindow({
           ) : null}
           {activeTab === "sql" ? (
             <div className="h-full bg-doc-bg group-data-[focused=false]/window:bg-doc-bg/70">
-              <SqlEditor value={draftSql} onChange={setDraftSql} onRun={onRun} />
+              <SqlEditor
+                value={draftSql}
+                onChange={setDraftSql}
+                onRun={onRun}
+                schema={sqlCompletion?.namespace}
+                defaultSchema={sqlCompletion?.defaultSchema}
+              />
             </div>
           ) : null}
           {activeTab === "explain" ? (

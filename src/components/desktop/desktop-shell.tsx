@@ -3412,6 +3412,7 @@ function renderWindowContent(
           payload={w.payload as DataPayload}
           activeConnectionId={ctx.activeConnectionId}
           hasRvbbit={ctx.hasRvbbit}
+          schema={ctx.schema}
           allWindows={ctx.windows}
           params={ctx.params}
           runSignal={ctx.runSignal}
