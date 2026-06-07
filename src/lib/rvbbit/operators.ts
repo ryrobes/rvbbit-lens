@@ -481,6 +481,45 @@ export async function fetchSpecialists(
   }
 }
 
+// ── LLM model catalog (for the builder's model picker) ──────────────
+//
+// rvbbit.provider_models is the canonical list of usable chat models —
+// cloud providers AND Warren-hosted local LLMs, which the warren agent
+// registers via rvbbit.register_self_hosted_model (auth_state='configured',
+// raw.kind='self_hosted'). So one catalog covers both; the target string is
+// just `provider/model`.
+
+export interface LlmModel {
+  provider: string
+  model: string
+  displayName: string | null
+  /** Registered from a Warren / local vLLM rather than a cloud provider. */
+  selfHosted: boolean
+}
+
+export async function fetchLlmModels(
+  connectionId: string,
+): Promise<{ models: LlmModel[]; error?: string }> {
+  const res = await runQuery(
+    connectionId,
+    "SELECT pm.provider, pm.model, pm.display_name, " +
+      "(coalesce(pc.raw->>'kind', '') = 'self_hosted') AS self_hosted " +
+      "FROM rvbbit.provider_models pm " +
+      "JOIN rvbbit.provider_catalog pc ON pc.provider = pm.provider " +
+      "WHERE pm.available AND pc.auth_state IN ('configured', 'public') " +
+      "ORDER BY self_hosted DESC, pm.provider, pm.model",
+  )
+  if (!res.ok) return { models: [], error: res.error }
+  return {
+    models: res.rows.map((r) => ({
+      provider: String(r.provider ?? ""),
+      model: String(r.model ?? ""),
+      displayName: r.display_name == null ? null : String(r.display_name),
+      selfHosted: r.self_hosted === true || r.self_hosted === "t",
+    })),
+  }
+}
+
 // ── Python runtime metadata (for the builder's env/handler pickers) ──
 
 export interface PythonEnv {

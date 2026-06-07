@@ -5,6 +5,7 @@ import { cn } from "@/lib/utils"
 import {
   defaultNode,
   toStepTemplate,
+  type LlmModel,
   type PythonEnv,
   type PythonHandler,
   type RvbbitOperator,
@@ -33,6 +34,7 @@ interface OperatorInspectorProps {
   mcpTools: McpToolLite[]
   pythonEnvs: PythonEnv[]
   pythonHandlers: PythonHandler[]
+  llmModels: LlmModel[]
   mcpGatewayReady: boolean
   onOpenMcpGateway?: () => void
   onChange: (next: RvbbitOperator) => void
@@ -69,6 +71,7 @@ export function OperatorInspector({
   mcpTools,
   pythonEnvs,
   pythonHandlers,
+  llmModels,
   mcpGatewayReady,
   onOpenMcpGateway,
   onChange,
@@ -90,6 +93,7 @@ export function OperatorInspector({
         mcpTools={mcpTools}
         pythonEnvs={pythonEnvs}
         pythonHandlers={pythonHandlers}
+        llmModels={llmModels}
         mcpGatewayReady={mcpGatewayReady}
         onOpenMcpGateway={onOpenMcpGateway}
         onChange={onChange}
@@ -272,6 +276,7 @@ function SelectedEditor({
   mcpTools,
   pythonEnvs,
   pythonHandlers,
+  llmModels,
   mcpGatewayReady,
   onOpenMcpGateway,
   onChange,
@@ -284,6 +289,7 @@ function SelectedEditor({
   mcpTools: McpToolLite[]
   pythonEnvs: PythonEnv[]
   pythonHandlers: PythonHandler[]
+  llmModels: LlmModel[]
   mcpGatewayReady: boolean
   onOpenMcpGateway?: () => void
   onChange: (n: RvbbitOperator) => void
@@ -350,6 +356,7 @@ function SelectedEditor({
           mcpTools={mcpTools}
           pythonEnvs={pythonEnvs}
           pythonHandlers={pythonHandlers}
+          llmModels={llmModels}
           mcpGatewayReady={mcpGatewayReady}
           onOpenMcpGateway={onOpenMcpGateway}
           onChange={(s) => setNodes(nodes.map((x, i) => (i === ni ? s : x)))}
@@ -377,6 +384,7 @@ function SelectedEditor({
           mcpTools={mcpTools}
           pythonEnvs={pythonEnvs}
           pythonHandlers={pythonHandlers}
+          llmModels={llmModels}
           mcpGatewayReady={mcpGatewayReady}
           onOpenMcpGateway={onOpenMcpGateway}
           onChange={(s) => setSteps(steps.map((x, i) => (i === si ? s : x)))}
@@ -390,16 +398,18 @@ function SelectedEditor({
   if (id === "output") {
     return <OutputEditor op={op} onChange={onChange} />
   }
-  return <OperatorMetaEditor op={op} isNew={isNew} onChange={onChange} />
+  return <OperatorMetaEditor op={op} isNew={isNew} llmModels={llmModels} onChange={onChange} />
 }
 
 function OperatorMetaEditor({
   op,
   isNew,
+  llmModels,
   onChange,
 }: {
   op: RvbbitOperator
   isNew: boolean
+  llmModels: LlmModel[]
   onChange: (n: RvbbitOperator) => void
 }) {
   return (
@@ -475,13 +485,11 @@ function OperatorMetaEditor({
           </Row>
         </>
       ) : null}
-      <Field label="model">
-        <input
-          value={op.model}
-          onChange={(e) => onChange({ ...op, model: e.target.value })}
-          className={inputCls}
-        />
-      </Field>
+      <ModelField
+        value={op.model}
+        models={llmModels}
+        onChange={(v) => onChange({ ...op, model: v })}
+      />
       {op.steps ? (
         <p className="text-[10px] text-chrome-text/55">
           This is a multi-step operator — select a step node to edit its prompt.
@@ -571,6 +579,7 @@ function StepEditor({
   mcpTools,
   pythonEnvs,
   pythonHandlers,
+  llmModels,
   mcpGatewayReady,
   onOpenMcpGateway,
   onChange,
@@ -585,6 +594,7 @@ function StepEditor({
   mcpTools: McpToolLite[]
   pythonEnvs: PythonEnv[]
   pythonHandlers: PythonHandler[]
+  llmModels: LlmModel[]
   mcpGatewayReady: boolean
   onOpenMcpGateway?: () => void
   onChange: (s: OpStep) => void
@@ -618,13 +628,11 @@ function StepEditor({
       </Row>
       {step.kind === "llm" ? (
         <>
-          <Field label="model">
-            <input
-              value={step.model ?? ""}
-              onChange={(e) => onChange({ ...step, model: e.target.value })}
-              className={inputCls}
-            />
-          </Field>
+          <ModelField
+            value={step.model ?? ""}
+            models={llmModels}
+            onChange={(v) => onChange({ ...step, model: v })}
+          />
           <Field label="system">
             <textarea
               value={step.system ?? ""}
@@ -1348,6 +1356,37 @@ function Section({
       </div>
       <div className="space-y-2">{children}</div>
     </div>
+  )
+}
+
+/** Model picker — a datalist of usable provider/model targets (cloud +
+ *  Warren-hosted local LLMs), still free-text for models not in the catalog. */
+function ModelField({
+  value,
+  models,
+  onChange,
+}: {
+  value: string
+  models: LlmModel[]
+  onChange: (v: string) => void
+}) {
+  return (
+    <Field label={models.length > 0 ? `model — ${models.length} available` : "model"}>
+      <input
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        list="op-llm-models"
+        placeholder="provider/model"
+        className={inputCls}
+      />
+      <datalist id="op-llm-models">
+        {models.map((m) => (
+          <option key={`${m.provider}/${m.model}`} value={`${m.provider}/${m.model}`}>
+            {[m.displayName, m.selfHosted ? "local" : null].filter(Boolean).join(" · ")}
+          </option>
+        ))}
+      </datalist>
+    </Field>
   )
 }
 

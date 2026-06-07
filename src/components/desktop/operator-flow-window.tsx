@@ -16,6 +16,7 @@ import { Button } from "@/components/ui/button"
 import {
   defaultNode,
   emptyOperator,
+  fetchLlmModels,
   fetchOperators,
   fetchPythonEnvs,
   fetchPythonHandlers,
@@ -26,6 +27,7 @@ import {
   saveOperator,
   signatureChanged,
   toStepTemplate,
+  type LlmModel,
   type NodeKind,
   type OpStep,
   type PythonEnv,
@@ -100,6 +102,7 @@ export function OperatorFlowWindow({
   const [mcpGateway, setMcpGateway] = useState<McpGatewayStatus | null>(null)
   const [pythonEnvs, setPythonEnvs] = useState<PythonEnv[]>([])
   const [pythonHandlers, setPythonHandlers] = useState<PythonHandler[]>([])
+  const [llmModels, setLlmModels] = useState<LlmModel[]>([])
   const [receipts, setReceipts] = useState<OperatorReceipt[]>([])
   const [receiptId, setReceiptId] = useState<string | null>(payload.receiptId ?? null)
   const [tryInputs, setTryInputs] = useState<string[]>([])
@@ -137,13 +140,14 @@ export function OperatorFlowWindow({
     let cancelled = false
     const conn = activeConnectionId
     const run = async () => {
-      const [sp, srv, tools, gateway, envs, handlers] = await Promise.all([
+      const [sp, srv, tools, gateway, envs, handlers, models] = await Promise.all([
         fetchSpecialists(conn),
         fetchServers(conn),
         fetchAllToolsLite(conn),
         fetchMcpGatewayStatus(conn),
         fetchPythonEnvs(conn),
         fetchPythonHandlers(conn),
+        fetchLlmModels(conn),
       ])
       if (cancelled) return
       setSpecialists(sp.specialists)
@@ -152,6 +156,7 @@ export function OperatorFlowWindow({
       setMcpGateway(gateway)
       setPythonEnvs(envs.envs)
       setPythonHandlers(handlers.handlers)
+      setLlmModels(models.models)
     }
     void run()
     return () => {
@@ -748,6 +753,7 @@ export function OperatorFlowWindow({
               mcpTools={mcpTools}
               pythonEnvs={pythonEnvs}
               pythonHandlers={pythonHandlers}
+              llmModels={llmModels}
               mcpGatewayReady={mcpGateway?.ready === true}
               onOpenMcpGateway={() =>
                 onOpenCapability?.(mcpGateway?.catalogId ?? MCP_GATEWAY_CATALOG_ID, "install")
