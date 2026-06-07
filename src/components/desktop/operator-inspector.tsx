@@ -1359,8 +1359,10 @@ function Section({
   )
 }
 
-/** Model picker — a datalist of usable provider/model targets (cloud +
- *  Warren-hosted local LLMs), still free-text for models not in the catalog. */
+/** Model picker — a real dropdown of usable provider/model targets (cloud +
+ *  Warren-hosted local LLMs), grouped by provider. The current value is kept
+ *  selectable even if it isn't in the catalog (so existing operators / models
+ *  pending a catalog refresh aren't lost). */
 function ModelField({
   value,
   models,
@@ -1370,22 +1372,34 @@ function ModelField({
   models: LlmModel[]
   onChange: (v: string) => void
 }) {
+  // Group by provider, preserving the query order (self-hosted first).
+  const groups = new Map<string, LlmModel[]>()
+  for (const m of models) {
+    const arr = groups.get(m.provider) ?? []
+    arr.push(m)
+    groups.set(m.provider, arr)
+  }
+  const inCatalog = models.some((m) => `${m.provider}/${m.model}` === value)
   return (
     <Field label={models.length > 0 ? `model — ${models.length} available` : "model"}>
-      <input
+      <select
         value={value}
         onChange={(e) => onChange(e.target.value)}
-        list="op-llm-models"
-        placeholder="provider/model"
         className={inputCls}
-      />
-      <datalist id="op-llm-models">
-        {models.map((m) => (
-          <option key={`${m.provider}/${m.model}`} value={`${m.provider}/${m.model}`}>
-            {[m.displayName, m.selfHosted ? "local" : null].filter(Boolean).join(" · ")}
-          </option>
+      >
+        {!inCatalog ? (
+          <option value={value}>{value ? `${value} (current)` : "— select a model —"}</option>
+        ) : null}
+        {[...groups].map(([provider, ms]) => (
+          <optgroup key={provider} label={ms[0].selfHosted ? `${provider} · local` : provider}>
+            {ms.map((m) => (
+              <option key={`${provider}/${m.model}`} value={`${provider}/${m.model}`}>
+                {m.model}
+              </option>
+            ))}
+          </optgroup>
         ))}
-      </datalist>
+      </select>
     </Field>
   )
 }
