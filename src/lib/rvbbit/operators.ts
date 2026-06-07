@@ -73,6 +73,20 @@ export interface OpStep {
   inputs?: Record<string, string>
 }
 
+/**
+ * Convert operator-context templates ({{ arg }}) to step-context
+ * ({{ inputs.arg }}) — used when materializing the single-LLM prompt as a
+ * pipeline step, since steps reference args via `inputs.`.
+ */
+export function toStepTemplate(text: string, argNames: string[]): string {
+  let out = text
+  for (const a of argNames) {
+    const esc = a.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+    out = out.replace(new RegExp(`\\{\\{\\s*${esc}\\s*\\}\\}`, "g"), `{{ inputs.${a} }}`)
+  }
+  return out
+}
+
 /** A fresh node of the given kind, for the builder's "add node". */
 export function defaultNode(kind: NodeKind, name: string): OpStep {
   switch (kind) {
@@ -145,7 +159,17 @@ export function emptyOperator(): RvbbitOperator {
     parser: "strip",
     max_tokens: 256,
     temperature: null,
-    steps: null,
+    // Start as a real one-step pipeline so the canvas opens with an actual,
+    // editable/deletable node wired to the input — not a phantom exec block.
+    steps: [
+      {
+        name: "node1",
+        kind: "llm",
+        model: "anthropic/claude-haiku-4.5",
+        system: "",
+        user: "{{ inputs.text }}",
+      },
+    ],
     retry: null,
     wards: null,
     takes: null,

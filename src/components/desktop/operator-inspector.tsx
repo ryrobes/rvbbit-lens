@@ -4,6 +4,7 @@ import { Plus, Trash2 } from "@/lib/icons"
 import { cn } from "@/lib/utils"
 import {
   defaultNode,
+  toStepTemplate,
   type RvbbitOperator,
   type RvbbitSpecialist,
   type NodeKind,
@@ -98,8 +99,8 @@ function FlowControls({
               name: "step1",
               kind: "llm",
               model: op.model,
-              system: op.system_prompt,
-              user: op.user_prompt,
+              system: toStepTemplate(op.system_prompt, op.arg_names),
+              user: toStepTemplate(op.user_prompt, op.arg_names),
             },
           ],
     })

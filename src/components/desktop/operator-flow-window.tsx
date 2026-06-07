@@ -23,6 +23,7 @@ import {
   runOperator,
   saveOperator,
   signatureChanged,
+  toStepTemplate,
   type NodeKind,
   type OpStep,
   type RvbbitOperator,
@@ -308,28 +309,42 @@ export function OperatorFlowWindow({
     (kind: NodeKind, pos: NodePos) => {
       if (!op) return
       const steps = op.steps ?? []
-      const taken = new Set(steps.map((s) => s.name))
-      let n = steps.length + 1
-      let name = `node${n}`
-      while (taken.has(name)) name = `node${++n}`
-      let node = defaultNode(kind, name)
-      if (steps.length === 0 && kind === "llm") {
-        // Converting a single-LLM operator: carry its prompt into the step.
-        node = {
-          ...node,
-          model: op.model || node.model,
-          system: op.system_prompt || node.system,
-          user: op.user_prompt || node.user,
-        }
-      } else {
-        // Fresh nodes land disconnected — clear the placeholder
-        // {{ inputs.text }} wiring so the canvas doesn't auto-spaghetti.
-        node = { ...node, ...(node.inputs ? { inputs: {} } : {}) }
+      // A fresh node lands disconnected so the canvas doesn't auto-wire.
+      const disconnected = (s: ReturnType<typeof defaultNode>) => {
+        let node = { ...s, ...(s.inputs ? { inputs: {} } : {}) }
         if (node.kind === "llm") node = { ...node, user: "" }
+        return node
       }
-      const nextSteps = [...steps, node]
+      const nameAfter = (existing: string[]) => {
+        const taken = new Set(existing)
+        let n = existing.length + 1
+        let name = `node${n}`
+        while (taken.has(name)) name = `node${++n}`
+        return name
+      }
+
+      let nextSteps
+      let droppedIndex
+      if (steps.length === 0) {
+        // Editing an existing single-LLM operator: materialize its intrinsic
+        // LLM as a real step-0 (converting {{ arg }} → {{ inputs.arg }}), then
+        // add the dropped node beside it instead of replacing it.
+        const seed = {
+          name: "node1",
+          kind: "llm" as const,
+          model: op.model,
+          system: toStepTemplate(op.system_prompt, op.arg_names),
+          user: toStepTemplate(op.user_prompt, op.arg_names),
+        }
+        const dropped = disconnected(defaultNode(kind, nameAfter(["node1"])))
+        nextSteps = [seed, dropped]
+        droppedIndex = 1
+      } else {
+        nextSteps = [...steps, disconnected(defaultNode(kind, nameAfter(steps.map((s) => s.name))))]
+        droppedIndex = nextSteps.length - 1
+      }
       onChangeOp({ ...op, steps: nextSteps })
-      const id = `step-${nextSteps.length - 1}`
+      const id = `step-${droppedIndex}`
       setLayout((prev) => {
         const next = { ...prev, [id]: pos }
         persistLayout(next)
