@@ -741,6 +741,7 @@ export function OperatorFlowWindow({
                 onOpenCapability?.(mcpGateway?.catalogId ?? MCP_GATEWAY_CATALOG_ID, "install")
               }
               onChange={onChangeOp}
+              onSelectNode={setSelectedNodeId}
             />
           ) : (
             <RunPanel

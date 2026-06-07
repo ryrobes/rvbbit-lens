@@ -31,6 +31,8 @@ interface OperatorInspectorProps {
   mcpGatewayReady: boolean
   onOpenMcpGateway?: () => void
   onChange: (next: RvbbitOperator) => void
+  /** Select a node/region (e.g. jump to a modifier's options on enable). */
+  onSelectNode?: (id: string | null) => void
 }
 
 /** Build-mode editing panel — flow-control toggles + the selected node's form. */
@@ -44,10 +46,11 @@ export function OperatorInspector({
   mcpGatewayReady,
   onOpenMcpGateway,
   onChange,
+  onSelectNode,
 }: OperatorInspectorProps) {
   return (
     <div className="flex h-full flex-col overflow-auto bg-chrome-bg/40 text-[12px] text-chrome-text">
-      <FlowControls op={op} onChange={onChange} />
+      <FlowControls op={op} onChange={onChange} onSelectNode={onSelectNode} />
       <div className="border-t border-chrome-border" />
       <SelectedEditor
         op={op}
@@ -71,24 +74,39 @@ const NODE_KINDS: NodeKind[] = ["llm", "specialist", "python", "code", "sql", "m
 function FlowControls({
   op,
   onChange,
+  onSelectNode,
 }: {
   op: RvbbitOperator
   onChange: (n: RvbbitOperator) => void
+  onSelectNode?: (id: string | null) => void
 }) {
   const firstArg = op.arg_names[0] ?? "text"
-  const toggleRetry = () =>
+  const toggleRetry = () => {
+    if (op.retry) {
+      onChange({ ...op, retry: null })
+      onSelectNode?.(null)
+      return
+    }
     onChange({
       ...op,
-      retry: op.retry
-        ? null
-        : {
-            until: { sql: "length(btrim($output)) > 0" },
-            max_attempts: 3,
-            instructions: "",
-          },
+      retry: {
+        until: { sql: "length(btrim($output)) > 0" },
+        max_attempts: 3,
+        instructions: "",
+      },
     })
-  const toggleTakes = () =>
-    onChange({ ...op, takes: op.takes ? null : { factor: 3, reduce: "vote" } })
+    // Jump straight to the retry options so they're editable on enable.
+    onSelectNode?.("retry")
+  }
+  const toggleTakes = () => {
+    if (op.takes) {
+      onChange({ ...op, takes: null })
+      onSelectNode?.(null)
+      return
+    }
+    onChange({ ...op, takes: { factor: 3, reduce: "vote" } })
+    onSelectNode?.("takes")
+  }
   const toggleSteps = () =>
     onChange({
       ...op,
@@ -116,8 +134,11 @@ function FlowControls({
       mode: "blocking",
     }
     const wards: WardsPlan = { ...(op.wards ?? {}) }
+    const index = wards[phase]?.length ?? 0
     wards[phase] = [...(wards[phase] ?? []), ward]
     onChange({ ...op, wards })
+    // Open the new ward's editor immediately.
+    onSelectNode?.(`ward-${phase}-${index}`)
   }
   const removeWard = (phase: "pre" | "post") => {
     const cur = op.wards?.[phase] ?? []
