@@ -969,8 +969,13 @@ function describeNode(
         accent: "rvbbit",
       }
     case "step":
-    case "take-step":
       return describeStepNode(op.steps?.[ref.index], op.model)
+    case "take-step": {
+      // Homogeneous takes fan the whole pipeline into N independent lanes;
+      // tag each node with its take so the repetition reads as "N full runs".
+      const view = describeStepNode(op.steps?.[ref.index], op.model)
+      return { ...view, badges: [`take ${ref.take + 1}`, ...view.badges] }
+    }
     case "take-node":
       return describeStepNode(op.takes?.nodes?.[ref.index], op.model)
     case "ward": {
