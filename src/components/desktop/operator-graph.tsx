@@ -216,7 +216,12 @@ export function OperatorGraph({
   // ── drag-to-connect ────────────────────────────────────────────────
   // Pipeline steps only — connecting writes a {{ steps.X.output }} ref
   // into the target step's inputs (the edge then renders from that ref).
-  const [connect, setConnect] = useState<{ fromId: string; x: number; y: number } | null>(null)
+  const [connect, setConnect] = useState<{
+    fromId: string
+    x: number
+    y: number
+    over: string | null
+  } | null>(null)
   // Source can be a step or an input arg; target must be a step.
   const connectSourceOf = (id: string): ConnectSource | null => {
     const n = graph.nodes.find((x) => x.id === id)
@@ -233,24 +238,45 @@ export function OperatorGraph({
     const n = graph.nodes.find((x) => x.id === id)
     return !!n && (n.ref.t === "step" || n.ref.t === "input")
   }
+  // Among all nodes under the point, pick the one whose centre is nearest —
+  // robust when freshly dropped nodes overlap (first-in-order would lose).
   const nodeIdAt = (pt: NodePos): string | null => {
+    let best: string | null = null
+    let bestD = Infinity
     for (const n of graph.nodes) {
       const p = posById.get(n.id)
       if (!p) continue
-      if (pt.x >= p.x && pt.x <= p.x + NODE_W && pt.y >= p.y && pt.y <= p.y + NODE_H) return n.id
+      if (pt.x >= p.x && pt.x <= p.x + NODE_W && pt.y >= p.y && pt.y <= p.y + NODE_H) {
+        const dx = pt.x - (p.x + NODE_W / 2)
+        const dy = pt.y - (p.y + NODE_H / 2)
+        const d = dx * dx + dy * dy
+        if (d < bestD) {
+          bestD = d
+          best = n.id
+        }
+      }
     }
-    return null
+    return best
   }
   const beginConnect = useCallback(
     (fromId: string, e: React.PointerEvent) => {
       if (!editable || !onConnect) return
       e.preventDefault()
       e.stopPropagation()
+      const src = connectSourceOf(fromId)
+      // Whether a node can receive THIS source (highlighted while hovering).
+      const isValidTarget = (id: string | null): boolean => {
+        if (!id || id === fromId || !src) return false
+        if (id === "output") return src.t === "step"
+        const to = targetStepOf(id)
+        return to != null && !(src.t === "step" && src.index === to)
+      }
       const p = pointerToCanvas(e.clientX, e.clientY)
-      setConnect({ fromId, x: p.x, y: p.y })
+      setConnect({ fromId, x: p.x, y: p.y, over: null })
       const onMove = (ev: PointerEvent) => {
         const c = pointerToCanvas(ev.clientX, ev.clientY)
-        setConnect((cur) => (cur ? { ...cur, x: c.x, y: c.y } : cur))
+        const t = nodeIdAt(c)
+        setConnect((cur) => (cur ? { ...cur, x: c.x, y: c.y, over: isValidTarget(t) ? t : null } : cur))
       }
       const onUp = (ev: PointerEvent) => {
         window.removeEventListener("pointermove", onMove)
@@ -620,6 +646,7 @@ export function OperatorGraph({
               selected={selectedNodeId === n.id}
               editable={editable}
               dragging={drag?.id === n.id}
+              dropTarget={connect?.over === n.id}
               onSelect={() => onSelectNode(selectedNodeId === n.id ? null : n.id)}
               onPointerDownNode={(e) => beginDrag(n.id, p, e)}
               style={{
@@ -644,19 +671,21 @@ export function OperatorGraph({
                   <button
                     key={`handle-${n.id}`}
                     type="button"
-                    title="Drag to connect this step's output into another step"
+                    title="Drag to connect this output into another node"
                     onPointerDown={(e) => beginConnect(n.id, e)}
-                    className="absolute rounded-full border border-main bg-secondary-background transition-colors hover:bg-main"
+                    className="group/handle absolute grid place-items-center border-0 bg-transparent"
                     style={{
-                      left: p.x + NODE_W - 6,
-                      top: p.y + NODE_H / 2 - 6,
-                      width: 12,
-                      height: 12,
+                      left: p.x + NODE_W - 14,
+                      top: p.y + NODE_H / 2 - 14,
+                      width: 28,
+                      height: 28,
                       zIndex: 25,
                       cursor: "crosshair",
                       touchAction: "none",
                     }}
-                  />
+                  >
+                    <span className="h-3.5 w-3.5 rounded-full border-2 border-main bg-secondary-background shadow transition-all group-hover/handle:scale-125 group-hover/handle:bg-main" />
+                  </button>
                 )
               })
           : null}
@@ -888,6 +917,7 @@ function NodeBox({
   selected,
   editable,
   dragging,
+  dropTarget,
   onSelect,
   onPointerDownNode,
   style,
@@ -901,6 +931,7 @@ function NodeBox({
   selected: boolean
   editable: boolean
   dragging: boolean
+  dropTarget: boolean
   onSelect: () => void
   onPointerDownNode: (e: React.PointerEvent) => void
   style: React.CSSProperties
@@ -932,6 +963,8 @@ function NodeBox({
         boxShadow: ss.shadow,
         touchAction: editable ? "none" : undefined,
         zIndex: dragging ? 20 : undefined,
+        outline: dropTarget ? "2px solid var(--main)" : undefined,
+        outlineOffset: dropTarget ? "2px" : undefined,
       }}
       className={cn(
         "group flex flex-col overflow-hidden rounded-md border-2 bg-secondary-background text-left transition",
