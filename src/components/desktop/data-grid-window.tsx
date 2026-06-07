@@ -167,9 +167,13 @@ export function DataGridWindow({
   onOpenKgForSource,
 }: DataGridWindowProps) {
   const view = payload.view ?? {}
-  // Schema-aware SQL completion (tables + columns w/ type hints), rebuilt only
-  // when the connection's schema snapshot changes.
+  // Schema-aware SQL completion (tables + columns w/ type hints, + rvbbit
+  // function snippets), rebuilt only when the connection's schema changes.
   const sqlCompletion = useMemo(() => buildSqlCompletionSchema(schema), [schema])
+  const completionSources = useMemo(
+    () => (sqlCompletion?.functionSource ? [sqlCompletion.functionSource] : undefined),
+    [sqlCompletion],
+  )
   // A semantic-projection window (spec has rvbbit scalar-op projections) is a
   // per-row LLM op — it never auto-runs; it opens on Explain so the live
   // EXPLAIN (SEMANTIC) shows the cost estimate before the user materializes it.
@@ -912,6 +916,7 @@ export function DataGridWindow({
                 onRun={onRun}
                 schema={sqlCompletion?.namespace}
                 defaultSchema={sqlCompletion?.defaultSchema}
+                completionSources={completionSources}
               />
             )}
           </div>
@@ -1095,6 +1100,7 @@ export function DataGridWindow({
                 onRun={onRun}
                 schema={sqlCompletion?.namespace}
                 defaultSchema={sqlCompletion?.defaultSchema}
+                completionSources={completionSources}
               />
             </div>
           ) : null}

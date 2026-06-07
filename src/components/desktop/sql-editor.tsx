@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useRef } from "react"
 import CodeMirror, { type Extension, type ReactCodeMirrorRef } from "@uiw/react-codemirror"
 import { sql, PostgreSQL, type SQLNamespace } from "@codemirror/lang-sql"
+import type { CompletionSource } from "@codemirror/autocomplete"
 import { EditorView, keymap } from "@codemirror/view"
 import { rvbbitLensCodeMirrorTheme } from "@/lib/desktop/codemirror-theme"
 
@@ -21,6 +22,8 @@ interface SqlEditorProps {
   schema?: SQLNamespace
   /** Schema whose tables complete unqualified (the Postgres search_path head). */
   defaultSchema?: string
+  /** Extra autocomplete sources merged with lang-sql's (e.g. rvbbit functions). */
+  completionSources?: readonly CompletionSource[]
 }
 
 export function SqlEditor({
@@ -33,16 +36,26 @@ export function SqlEditor({
   language = "sql",
   schema,
   defaultSchema,
+  completionSources,
 }: SqlEditorProps) {
   const ref = useRef<ReactCodeMirrorRef | null>(null)
   const plain = language === "plain"
 
   const extensions: Extension[] = useMemo(() => {
     const exts: Extension[] = []
-    if (plain) exts.push(EditorView.lineWrapping) // wrap long NL questions instead of scrolling
-    // schema-aware completion when a SQLNamespace is supplied (tables + columns
-    // with type hints); falls back to keyword-only completion otherwise.
-    else exts.push(sql({ dialect: PostgreSQL, upperCaseKeywords: false, schema, defaultSchema }))
+    if (plain) {
+      exts.push(EditorView.lineWrapping) // wrap long NL questions instead of scrolling
+    } else {
+      // schema-aware completion when a SQLNamespace is supplied (tables + columns
+      // with type hints); falls back to keyword-only completion otherwise.
+      const lang = sql({ dialect: PostgreSQL, upperCaseKeywords: false, schema, defaultSchema })
+      exts.push(lang)
+      // merge any extra sources (e.g. rvbbit semantic functions) into the SQL
+      // language's completion — they run alongside the schema/keyword sources.
+      for (const source of completionSources ?? []) {
+        exts.push(lang.language.data.of({ autocomplete: source }))
+      }
+    }
     if (onRun) {
       exts.push(
         keymap.of([
@@ -54,7 +67,7 @@ export function SqlEditor({
       )
     }
     return exts
-  }, [onRun, plain, schema, defaultSchema])
+  }, [onRun, plain, schema, defaultSchema, completionSources])
 
   // Auto-focus on first mount.
   useEffect(() => {

@@ -5,6 +5,8 @@ import type {
   DesktopSavedState,
   DesktopViewportState,
   DesktopWindowState,
+  SceneSlotId,
+  SlotId,
   WorkspaceCanvas,
   WorkspaceId,
 } from "./types"
@@ -18,13 +20,14 @@ import type {
  */
 interface ParsedDesktopState {
   version?: number
-  workspaces?: Partial<Record<WorkspaceId, Partial<WorkspaceCanvas>>>
+  workspaces?: Partial<Record<SlotId, Partial<WorkspaceCanvas>>>
   windows?: DesktopWindowState[]
   zSeed?: number
   params?: DesktopParamValue[]
   activeWorkspace?: string
   viewport?: DesktopViewportState
   activeConnectionId?: string | null
+  currentSceneId?: string | null
   updatedAt?: string
 }
 
@@ -38,7 +41,14 @@ const STORAGE_KEY = "rvbbit-lens.desktop.state.v1" // key name unchanged; payloa
 const VERSION = 2 as const
 export const DEFAULT_Z = 20
 
+/** The five numbered scratch desktops (the workspace switcher + Alt+1..5). */
 export const WORKSPACE_IDS: WorkspaceId[] = ["1", "2", "3", "4", "5"]
+
+/** The dedicated slot that holds a loaded Scene (a saved desktop). */
+export const SCENE_SLOT: SceneSlotId = "scene"
+
+/** Every canvas slot, including the Scene slot — for iteration / persistence. */
+export const ALL_SLOT_IDS: SlotId[] = [...WORKSPACE_IDS, SCENE_SLOT]
 
 export const DEFAULT_VIEWPORT: DesktopViewportState = { x: 0, y: 0, scale: 1 }
 
@@ -46,13 +56,14 @@ export function emptyCanvas(): WorkspaceCanvas {
   return { windows: [], zSeed: DEFAULT_Z, params: [], focusedWindowId: null }
 }
 
-export function emptyWorkspaces(): Record<WorkspaceId, WorkspaceCanvas> {
+export function emptyWorkspaces(): Record<SlotId, WorkspaceCanvas> {
   return {
     "1": emptyCanvas(),
     "2": emptyCanvas(),
     "3": emptyCanvas(),
     "4": emptyCanvas(),
     "5": emptyCanvas(),
+    scene: emptyCanvas(),
   }
 }
 
@@ -64,9 +75,10 @@ export function loadDesktopState(): DesktopSavedState | null {
     const parsed = JSON.parse(raw) as ParsedDesktopState
 
     if (parsed.version === VERSION && parsed.workspaces) {
-      // v2 — fill any missing workspace slot defensively.
+      // v2 — fill any missing slot defensively. Older v2 blobs predate the
+      // Scene slot, so emptyWorkspaces() seeds an empty one for them.
       const workspaces = emptyWorkspaces()
-      for (const id of WORKSPACE_IDS) {
+      for (const id of ALL_SLOT_IDS) {
         const c = parsed.workspaces[id]
         if (c && Array.isArray(c.windows)) {
           workspaces[id] = {
@@ -77,8 +89,8 @@ export function loadDesktopState(): DesktopSavedState | null {
           }
         }
       }
-      const active = WORKSPACE_IDS.includes(parsed.activeWorkspace as WorkspaceId)
-        ? (parsed.activeWorkspace as WorkspaceId)
+      const active = ALL_SLOT_IDS.includes(parsed.activeWorkspace as SlotId)
+        ? (parsed.activeWorkspace as SlotId)
         : "1"
       return {
         version: VERSION,
@@ -86,6 +98,7 @@ export function loadDesktopState(): DesktopSavedState | null {
         workspaces,
         viewport: parsed.viewport ?? DEFAULT_VIEWPORT,
         activeConnectionId: parsed.activeConnectionId ?? null,
+        currentSceneId: parsed.currentSceneId ?? null,
         updatedAt: parsed.updatedAt,
       }
     }
@@ -105,6 +118,7 @@ export function loadDesktopState(): DesktopSavedState | null {
         workspaces,
         viewport: parsed.viewport ?? DEFAULT_VIEWPORT,
         activeConnectionId: parsed.activeConnectionId ?? null,
+        currentSceneId: null,
         updatedAt: parsed.updatedAt,
       }
     }
@@ -116,10 +130,11 @@ export function loadDesktopState(): DesktopSavedState | null {
 }
 
 export function saveDesktopState(state: {
-  workspaces: Record<WorkspaceId, WorkspaceCanvas>
-  activeWorkspace: WorkspaceId
+  workspaces: Record<SlotId, WorkspaceCanvas>
+  activeWorkspace: SlotId
   viewport: DesktopViewportState
   activeConnectionId: string | null
+  currentSceneId: string | null
 }): void {
   if (typeof window === "undefined") return
   try {
@@ -129,6 +144,7 @@ export function saveDesktopState(state: {
       workspaces: state.workspaces,
       viewport: state.viewport,
       activeConnectionId: state.activeConnectionId,
+      currentSceneId: state.currentSceneId,
       updatedAt: new Date().toISOString(),
     }
     window.localStorage.setItem(STORAGE_KEY, JSON.stringify(body))

@@ -98,11 +98,13 @@ import {
   type NotifyEvent,
 } from "@/lib/desktop/notify-feed"
 import {
+  ALL_SLOT_IDS,
   clampViewport,
   DEFAULT_VIEWPORT,
   emptyWorkspaces,
   loadDesktopState,
   saveDesktopState,
+  SCENE_SLOT,
   WORKSPACE_IDS,
 } from "@/lib/desktop/state-store"
 import type { ConnectionRecord, SchemaSnapshot } from "@/lib/db/types"
@@ -161,18 +163,40 @@ import type {
   ViewAppBuilderPayload,
   ViewAppPayload,
   ViewAppsPayload,
+  Scene,
+  SceneConnectionFingerprint,
+  SlotId,
   WorkspaceCanvas,
   WorkspaceId,
 } from "@/lib/desktop/types"
 
 interface WorkspaceTransition {
-  from: WorkspaceId
-  to: WorkspaceId
+  from: SlotId
+  to: SlotId
   dir: "forward" | "backward"
+}
+
+/** Deep clone of a canvas — payloads are JSON-serializable by construction
+ *  (the File-store keeps non-serializable blobs out of window payloads). */
+function cloneCanvas(c: WorkspaceCanvas): WorkspaceCanvas {
+  return JSON.parse(JSON.stringify(c)) as WorkspaceCanvas
 }
 import { randomUUID } from "@/lib/uuid"
 import { putImportFile } from "@/lib/import/file-store"
 import { listViewApps } from "@/lib/desktop/view-apps"
+import {
+  buildSceneBundle,
+  contentHashOf,
+  deleteScene,
+  getScene,
+  listScenes,
+  renameScene,
+  restoreSceneBundle,
+  sceneNameExists,
+  SCENES_CHANGED_EVENT,
+  upsertScene,
+} from "@/lib/desktop/scenes"
+import { SceneList } from "./scene-tray"
 import {
   applyRollupOp,
   buildDimensionRollup,
@@ -273,11 +297,17 @@ export function DesktopShell() {
   // existing handler that calls setWindows(...) etc. keeps working
   // verbatim — only the two that nest setState (focus, openWindow)
   // were rewritten through mutateCanvas.
-  const [workspaces, setWorkspaces] = useState<Record<WorkspaceId, WorkspaceCanvas>>(
+  const [workspaces, setWorkspaces] = useState<Record<SlotId, WorkspaceCanvas>>(
     () => emptyWorkspaces(),
   )
-  const [activeWorkspace, setActiveWorkspace] = useState<WorkspaceId>("1")
+  const [activeWorkspace, setActiveWorkspace] = useState<SlotId>("1")
   const [wsTransition, setWsTransition] = useState<WorkspaceTransition | null>(null)
+  // ── Scenes (saved desktops) ───────────────────────────────────────
+  // currentSceneId binds the Scene slot to a saved Scene; `scenes` mirrors
+  // the localStorage library (refreshed on the scenes-changed / storage
+  // events). Both are global, not per-canvas.
+  const [currentSceneId, setCurrentSceneId] = useState<string | null>(null)
+  const [scenes, setScenes] = useState<Scene[]>([])
   const [runSignals, setRunSignals] = useState<Record<string, number>>({})
   const [viewport, setViewport] = useState<DesktopViewportState>(DEFAULT_VIEWPORT)
   const [ctxMenu, setCtxMenu] = useState<ContextMenuState | null>(null)
@@ -614,6 +644,7 @@ export function DesktopShell() {
       setActiveWorkspace(saved.activeWorkspace)
       setViewport(clampViewport(saved.viewport ?? DEFAULT_VIEWPORT))
       if (saved.activeConnectionId) setActiveConnectionId(saved.activeConnectionId)
+      setCurrentSceneId(saved.currentSceneId ?? null)
     }
     // Load wallpaper blob + palette from IndexedDB if present.
     void (async () => {
@@ -640,8 +671,8 @@ export function DesktopShell() {
 
   useEffect(() => {
     if (!stateLoadedRef.current) return
-    saveDesktopState({ workspaces, activeWorkspace, viewport, activeConnectionId })
-  }, [workspaces, activeWorkspace, viewport, activeConnectionId])
+    saveDesktopState({ workspaces, activeWorkspace, viewport, activeConnectionId, currentSceneId })
+  }, [workspaces, activeWorkspace, viewport, activeConnectionId, currentSceneId])
 
   // ── Wallpaper ──────────────────────────────────────────────────────
 
@@ -750,11 +781,13 @@ export function DesktopShell() {
 
   // ── Workspace switching ─────────────────────────────────────────────
   const wsTransitionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const switchWorkspace = useCallback((target: WorkspaceId) => {
+  const switchWorkspace = useCallback((target: SlotId) => {
     setActiveWorkspace((current) => {
       if (current === target) return current
+      // Direction by slot order (the Scene slot sorts after 5) so the slide
+      // animation runs the right way even when the Scene slot is involved.
       const dir: WorkspaceTransition["dir"] =
-        Number(target) > Number(current) ? "forward" : "backward"
+        ALL_SLOT_IDS.indexOf(target) > ALL_SLOT_IDS.indexOf(current) ? "forward" : "backward"
       setWsTransition({ from: current, to: target, dir })
       // Undo history is per *moment*, not per workspace — switching is a
       // clean break, so reset the stacks and let the next snapshot
@@ -782,6 +815,130 @@ export function DesktopShell() {
     return set
   }, [workspaces])
 
+  // ── Scene slot ─────────────────────────────────────────────────────
+  // The Scene slot is the only canvas with document identity. currentScene
+  // resolves it from the library; sceneDirty compares the live slot canvas
+  // hash against the saved Scene's (body has no timestamp, so it's stable).
+  const sceneSlotCanvas = workspaces[SCENE_SLOT]
+  const sceneSlotOccupied = sceneSlotCanvas.windows.length > 0
+  const currentScene = useMemo(
+    () => (currentSceneId ? (scenes.find((s) => s.id === currentSceneId) ?? null) : null),
+    [scenes, currentSceneId],
+  )
+  const sceneDirty = useMemo(
+    () => currentScene != null && contentHashOf(sceneSlotCanvas) !== currentScene.contentHash,
+    [currentScene, sceneSlotCanvas],
+  )
+
+  // Mirror the localStorage Scene library; refresh on same-tab writes and
+  // cross-tab storage events.
+  useEffect(() => {
+    const refresh = () => setScenes(listScenes())
+    refresh()
+    const onStorage = (e: StorageEvent) => {
+      if (e.key === null || e.key === "rvbbit-lens.scenes.v1") refresh()
+    }
+    window.addEventListener(SCENES_CHANGED_EVENT, refresh)
+    window.addEventListener("storage", onStorage)
+    return () => {
+      window.removeEventListener(SCENES_CHANGED_EVENT, refresh)
+      window.removeEventListener("storage", onStorage)
+    }
+  }, [])
+
+  const sceneConnectionFingerprint = useCallback((): SceneConnectionFingerprint => {
+    const c = connections.find((x) => x.id === activeConnectionId)
+    return {
+      connectionId: activeConnectionId,
+      label: c?.label,
+      host: c?.host,
+      port: c?.port,
+      database: c?.database,
+      user: c?.user,
+    }
+  }, [connections, activeConnectionId])
+
+  // Save As — freeze the ACTIVE canvas as a NEW Scene, then auto-switch into
+  // the Scene slot so "what I saved is now the open document" lands at once.
+  // (When the active canvas is a numbered slot, the cloned copy keeps the
+  // same window ids as the still-live source — benign: focus is per-canvas,
+  // only the global runSignals map can cross-fire a re-run on both.)
+  const saveDesktopAsScene = useCallback(
+    (name: string) => {
+      const body = cloneCanvas(workspaces[activeWorkspace])
+      const scene = upsertScene({
+        name,
+        body,
+        viewport,
+        connection: sceneConnectionFingerprint(),
+        bundle: buildSceneBundle(body.windows),
+      })
+      setWorkspaces((prev) => ({ ...prev, [SCENE_SLOT]: cloneCanvas(body) }))
+      setCurrentSceneId(scene.id)
+      switchWorkspace(SCENE_SLOT)
+    },
+    [workspaces, activeWorkspace, viewport, sceneConnectionFingerprint, switchWorkspace],
+  )
+
+  // Save — overwrite the open Scene with the live Scene-slot canvas.
+  const saveCurrentScene = useCallback(() => {
+    if (!currentSceneId) return
+    const existing = getScene(currentSceneId)
+    // Deleted out from under us (e.g. another tab) — don't resurrect it.
+    if (!existing) return
+    const body = cloneCanvas(workspaces[SCENE_SLOT])
+    upsertScene({
+      id: currentSceneId,
+      name: existing.name,
+      body,
+      viewport,
+      connection: sceneConnectionFingerprint(),
+      bundle: buildSceneBundle(body.windows),
+    })
+  }, [currentSceneId, workspaces, viewport, sceneConnectionFingerprint])
+
+  // Open — restore a Scene into the Scene slot and switch to it.
+  const openScene = useCallback(
+    (id: string) => {
+      const scene = getScene(id)
+      if (!scene) return
+      // Don't silently drop unsaved edits to a different open Scene.
+      if (
+        currentSceneId &&
+        currentSceneId !== id &&
+        contentHashOf(workspaces[SCENE_SLOT]) !== (getScene(currentSceneId)?.contentHash ?? "")
+      ) {
+        if (!window.confirm("The open Scene has unsaved changes that will be replaced. Continue?")) {
+          return
+        }
+      }
+      restoreSceneBundle(scene.bundle)
+      setWorkspaces((prev) => ({ ...prev, [SCENE_SLOT]: cloneCanvas(scene.body) }))
+      if (scene.viewport) setViewport(clampViewport(scene.viewport))
+      // Rebind the connection ONLY on an exact id still present in the registry
+      // — never guess from the fingerprint (a localhost collision could bind
+      // the wrong DB). Otherwise leave the active connection untouched.
+      const connId = scene.connection?.connectionId
+      if (connId && connections.some((c) => c.id === connId)) setActiveConnectionId(connId)
+      setCurrentSceneId(id)
+      switchWorkspace(SCENE_SLOT)
+    },
+    [currentSceneId, workspaces, connections, switchWorkspace],
+  )
+
+  const renameSceneById = useCallback((id: string, name: string) => {
+    renameScene(id, name)
+  }, [])
+
+  const deleteSceneById = useCallback(
+    (id: string) => {
+      deleteScene(id)
+      // Keep the slot's windows but drop document identity → becomes "unsaved".
+      if (id === currentSceneId) setCurrentSceneId(null)
+    },
+    [currentSceneId],
+  )
+
   // ── LISTEN/NOTIFY: channel set + SSE feed ───────────────────────────
   //
   // The set of channels the server listens on is the union of every
@@ -790,7 +947,7 @@ export function DesktopShell() {
   // effect keys off — when it changes, the EventSource reconnects.
   const windowChannels = useMemo(() => {
     const set = new Set<string>()
-    for (const id of WORKSPACE_IDS) {
+    for (const id of ALL_SLOT_IDS) {
       for (const w of workspaces[id].windows) {
         if (w.kind !== "data") continue
         const ch = (w.payload as DataPayload | undefined)?.notifyChannel
@@ -816,7 +973,7 @@ export function DesktopShell() {
       // workspace — the point of a subscription is to stay live.
       const ws = workspacesRef.current
       const idsToRefresh: string[] = []
-      for (const id of WORKSPACE_IDS) {
+      for (const id of ALL_SLOT_IDS) {
         for (const w of ws[id].windows) {
           if (w.kind !== "data") continue
           if ((w.payload as DataPayload | undefined)?.notifyChannel === data.channel) {
@@ -2782,11 +2939,12 @@ export function DesktopShell() {
         return
       }
 
-      // Alt+1..5 — jump to a workspace. Alt+digit rarely collides with
-      // browser chrome (unlike Ctrl/Cmd+digit which switches tabs).
-      if (e.altKey && !cmd && /^[1-5]$/.test(e.key)) {
+      // Alt+1..5 — jump to a scratch workspace; Alt+6 — the Scene slot.
+      // Alt+digit rarely collides with browser chrome (unlike Ctrl/Cmd+digit
+      // which switches tabs), which is why Scene save is menu-only, not Cmd+S.
+      if (e.altKey && !cmd && /^[1-6]$/.test(e.key)) {
         e.preventDefault()
-        switchWorkspace(e.key as WorkspaceId)
+        switchWorkspace(e.key === "6" ? SCENE_SLOT : (e.key as WorkspaceId))
       }
     }
     window.addEventListener("keydown", onKey)
@@ -3020,6 +3178,19 @@ export function DesktopShell() {
         activeWorkspace={activeWorkspace}
         workspaceOccupancy={workspaceOccupancy}
         onSwitchWorkspace={switchWorkspace}
+        sceneName={currentScene?.name ?? null}
+        sceneDirty={sceneDirty}
+        sceneCanSave={currentSceneId != null && sceneDirty}
+        sceneHasContent={workspaces[activeWorkspace].windows.length > 0}
+        sceneSlotOccupied={sceneSlotOccupied}
+        scenes={scenes}
+        currentSceneId={currentSceneId}
+        onSaveScene={saveCurrentScene}
+        onSaveSceneAs={saveDesktopAsScene}
+        onOpenScene={openScene}
+        onRenameScene={renameSceneById}
+        onDeleteScene={deleteSceneById}
+        onSceneNameExists={sceneNameExists}
       />
 
       <DesktopParamsSurface params={desktopParams} onClear={removeParam} />
@@ -3098,12 +3269,12 @@ export function DesktopShell() {
         </div>
       </div>
 
-      {/* Workspace layers — all five canvases stay mounted at once so
-          switching preserves window state and the slide animation has
-          real windows to move. Inactive layers are display:none; the
-          active one (and, mid-switch, the entering + exiting pair)
-          animate via CSS keyframes. */}
-      {WORKSPACE_IDS.map((wsId) => {
+      {/* Workspace layers — all canvases (five scratch + the Scene slot)
+          stay mounted at once so switching preserves window state and the
+          slide animation has real windows to move. Inactive layers are
+          display:none; the active one (and, mid-switch, the entering +
+          exiting pair) animate via CSS keyframes. */}
+      {ALL_SLOT_IDS.map((wsId) => {
         const canvas = workspaces[wsId]
         const isActive = wsId === activeWorkspace
         const layerClass = wsTransition
@@ -3228,6 +3399,24 @@ export function DesktopShell() {
               </DesktopWindow>
               )
             })}
+            {/* Empty Scene slot = the Scene gallery: pick one to load, or
+                save the current desktop from the Scenes menu. */}
+            {wsId === SCENE_SLOT && canvas.windows.length === 0 ? (
+              <div className="pointer-events-auto absolute left-1/2 top-1/2 w-80 -translate-x-1/2 -translate-y-1/2 rounded-lg border border-chrome-border bg-chrome-background/85 p-2 shadow-2xl backdrop-blur">
+                <div className="flex items-center gap-1.5 px-1 pb-1.5 pt-0.5 text-[11px] font-medium text-chrome-text/70">
+                  <Layers className="h-3.5 w-3.5" /> Scenes — saved desktops
+                </div>
+                <SceneList
+                  scenes={scenes}
+                  currentSceneId={currentSceneId}
+                  onOpen={openScene}
+                  onRename={renameSceneById}
+                  onDelete={deleteSceneById}
+                  nameExists={sceneNameExists}
+                  emptyHint="No saved Scenes yet. Use the Scenes menu in the top bar to save the current desktop."
+                />
+              </div>
+            ) : null}
           </div>
         )
       })}

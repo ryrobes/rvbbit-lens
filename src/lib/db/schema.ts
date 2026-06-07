@@ -1,8 +1,10 @@
 import "server-only"
 
 import { getPool } from "./pool"
-import type { ExtensionInfo, SchemaColumn, SchemaSnapshot, SchemaTable } from "./types"
+import type { ExtensionInfo, SchemaColumn, SchemaFunction, SchemaSnapshot, SchemaTable } from "./types"
 import { loadFinderStats } from "./finder-stats"
+
+type OperatorRow = { name: string; description: string | null; shape: string | null }
 
 const TABLE_QUERY = `
 SELECT
@@ -61,6 +63,48 @@ WHERE a.attnum > 0 AND NOT a.attisdropped
 ORDER BY a.attrelid, a.attnum
 `
 
+// Callable routines in user schemas. `_`-prefixed names are rvbbit internals
+// (the user only wants the public-facing semantic functions). arg_names is the
+// ordered list of INPUT args (filtering out OUT/TABLE columns via proargmodes);
+// required_count = inputs without a default (trailing defaults are optional).
+const FUNCTION_QUERY = `
+SELECT
+  n.nspname                          AS schema,
+  p.proname                          AS name,
+  pg_get_function_arguments(p.oid)   AS args,
+  pg_get_function_result(p.oid)      AS result,
+  obj_description(p.oid, 'pg_proc')  AS comment,
+  CASE p.prokind
+    WHEN 'a' THEN 'aggregate'
+    WHEN 'w' THEN 'window'
+    WHEN 'p' THEN 'procedure'
+    ELSE 'function'
+  END                                AS kind,
+  GREATEST(p.pronargs - p.pronargdefaults, 0)::int AS required_count,
+  COALESCE((
+    SELECT array_agg(u.an ORDER BY u.ord)
+    FROM unnest(
+           COALESCE(p.proargnames, ARRAY[]::text[]),
+           COALESCE(p.proargmodes, ARRAY[]::"char"[])
+         ) WITH ORDINALITY AS u(an, am, ord)
+    WHERE u.am IS NULL OR u.am IN ('i','b','v')
+  ), ARRAY[]::text[])                AS arg_names
+FROM pg_proc p
+JOIN pg_namespace n ON n.oid = p.pronamespace
+WHERE n.nspname NOT IN ('pg_catalog','information_schema')
+  AND n.nspname NOT LIKE 'pg_toast%'
+  AND n.nspname NOT LIKE 'pg_temp_%'
+  AND left(p.proname, 1) <> '_'
+  AND p.prokind IN ('f','a','w','p')
+ORDER BY n.nspname, p.proname
+`
+
+// rvbbit semantic operators carry human descriptions + a shape (scalar /
+// aggregate / dimension / rowset). We merge these onto the matching pg_proc
+// functions for richer completion info. Guarded at the call site (.catch) so
+// connections without the rvbbit extension don't error on the missing table.
+const OPERATOR_QUERY = `SELECT name, description, shape FROM rvbbit.operators`
+
 const EXTENSION_QUERY = `
 SELECT e.extname AS name,
        n.nspname AS schema,
@@ -83,7 +127,7 @@ export async function loadSchema(connectionId: string): Promise<SchemaSnapshot> 
   const { pool } = await getPool(connectionId)
   const client = await pool.connect()
   try {
-    const [tablesResult, columnsResult, dbResult, schemasResult, extResult, finderStats] = await Promise.all([
+    const [tablesResult, columnsResult, dbResult, schemasResult, extResult, functionsResult, opsResult, finderStats] = await Promise.all([
       client.query(TABLE_QUERY),
       client.query(COLUMN_QUERY),
       client.query<{ database: string }>("SELECT current_database() AS database"),
@@ -95,6 +139,8 @@ export async function loadSchema(connectionId: string): Promise<SchemaSnapshot> 
          ORDER BY nspname`,
       ),
       client.query<ExtensionInfo>(EXTENSION_QUERY),
+      client.query(FUNCTION_QUERY),
+      client.query<OperatorRow>(OPERATOR_QUERY).catch(() => ({ rows: [] as OperatorRow[] })),
       loadFinderStats(client),
     ])
 
@@ -191,6 +237,35 @@ export async function loadSchema(connectionId: string): Promise<SchemaSnapshot> 
       }
     })
 
+    // Map operator name → { description, shape } for the semantic functions.
+    const opByName = new Map<string, OperatorRow>()
+    for (const o of opsResult.rows) opByName.set(o.name, o)
+
+    const functions: SchemaFunction[] = (functionsResult.rows as Array<{
+      schema: string
+      name: string
+      args: string | null
+      result: string | null
+      comment: string | null
+      kind: SchemaFunction["kind"]
+      required_count: number | string | null
+      arg_names: string[] | null
+    }>).map((f) => {
+      const op = opByName.get(f.name)
+      return {
+        schema: f.schema,
+        name: f.name,
+        args: f.args ?? "",
+        result: f.result ?? "",
+        // operator description (richer/semantic) wins over the pg_proc comment.
+        comment: op?.description?.trim() || f.comment || null,
+        kind: f.kind,
+        argNames: f.arg_names ?? [],
+        requiredCount: Number(f.required_count) || 0,
+        shape: op?.shape ?? null,
+      }
+    })
+
     const extensions = extResult.rows
     const rvbbitExt = extensions.find((e) => e.name === "rvbbit" || e.name === "pg_rvbbit") ?? null
 
@@ -201,6 +276,7 @@ export async function loadSchema(connectionId: string): Promise<SchemaSnapshot> 
       currentDatabase: dbResult.rows[0]?.database ?? "",
       schemas: schemasResult.rows.map((r) => r.nspname),
       tables,
+      functions,
       extensions,
       hasRvbbit: !!rvbbitExt,
       rvbbitVersion: rvbbitExt?.version ?? null,

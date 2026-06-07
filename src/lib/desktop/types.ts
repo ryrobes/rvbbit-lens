@@ -761,8 +761,20 @@ export interface DesktopCanvasState {
   viewport: DesktopViewportState
 }
 
-/** One of five independent desktops. */
+/** One of five independent scratch desktops. */
 export type WorkspaceId = "1" | "2" | "3" | "4" | "5"
+
+/**
+ * A sixth, special slot dedicated to a loaded Scene (a saved desktop).
+ * It renders like the numbered canvases but carries document identity
+ * (which Scene is open, plus a dirty bit). Keeping it separate means
+ * loading a Scene never clobbers a numbered scratch desktop — the open
+ * Scene is the only canvas that is ever a "document".
+ */
+export type SceneSlotId = "scene"
+
+/** Any addressable canvas slot: a numbered scratch desktop or the Scene slot. */
+export type SlotId = WorkspaceId | SceneSlotId
 
 /**
  * A single workspace's full canvas. All five are kept mounted at once
@@ -779,10 +791,12 @@ export interface WorkspaceCanvas {
 
 export interface DesktopSavedState {
   version: 2
-  activeWorkspace: WorkspaceId
-  workspaces: Record<WorkspaceId, WorkspaceCanvas>
+  activeWorkspace: SlotId
+  workspaces: Record<SlotId, WorkspaceCanvas>
   viewport: DesktopViewportState
   activeConnectionId?: string | null
+  /** Which saved Scene is open in the Scene slot (null = none / unsaved). */
+  currentSceneId?: string | null
   updatedAt?: string
 }
 
@@ -795,6 +809,61 @@ export interface DesktopSavedStateV1 {
   params?: DesktopParamValue[]
   activeConnectionId?: string | null
   updatedAt?: string
+}
+
+// ── Scenes (saved desktops) ─────────────────────────────────────────
+//
+// A Scene freezes ONE desktop canvas (Option B: per-desktop, not the
+// whole five-workspace session) under a name, restored into the
+// dedicated Scene slot. `schemaVersion` is the FIRST field so the reader
+// can branch on it — closing the gap that the version-less view-apps
+// blob never had.
+
+export const SCENE_SCHEMA_VERSION = 1 as const
+
+/**
+ * Re-link hint for when `connectionId` is dangling on this machine.
+ * host/port/database/user only — never the password (secrets stay in the
+ * server-side connections registry).
+ */
+export interface SceneConnectionFingerprint {
+  connectionId: string | null
+  label?: string
+  host?: string
+  port?: number
+  database?: string
+  user?: string
+}
+
+/**
+ * Copies of side-store records the captured windows reference by id, so a
+ * restored view-app / artifact window resolves instead of dangling.
+ */
+export interface SceneBundle {
+  viewApps?: ViewApp[]
+  artifacts?: DesktopArtifact[]
+}
+
+export interface Scene {
+  schemaVersion: typeof SCENE_SCHEMA_VERSION
+  id: string
+  name: string
+  description?: string
+  /** The frozen desktop: windows + params + zSeed. */
+  body: WorkspaceCanvas
+  viewport?: DesktopViewportState
+  connection?: SceneConnectionFingerprint
+  bundle?: SceneBundle
+  /** Hash of `body` — drives the dirty dot on the open Scene. */
+  contentHash: string
+  windowCount: number
+  createdAt: string
+  updatedAt: string
+}
+
+export interface SceneStoreV1 {
+  schemaVersion: typeof SCENE_SCHEMA_VERSION
+  scenes: Scene[]
 }
 
 /**

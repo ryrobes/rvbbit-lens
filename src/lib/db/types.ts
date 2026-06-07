@@ -141,6 +141,26 @@ export interface SchemaTable {
   driftChangeType?: string | null
 }
 
+/** A callable routine (function / aggregate / procedure) in a user schema —
+ *  powers function-name autocomplete (esp. the rvbbit semantic functions). */
+export interface SchemaFunction {
+  schema: string
+  name: string
+  /** pretty parameter list, e.g. "intent text, operator text DEFAULT 'synth'". */
+  args: string
+  /** pretty return type, e.g. "text", "SETOF text", "TABLE(...)". */
+  result: string
+  comment: string | null
+  kind: "function" | "aggregate" | "window" | "procedure"
+  /** ordered INPUT argument names (excludes OUT / TABLE-result columns). */
+  argNames: string[]
+  /** count of leading input args without a default — the required arity. */
+  requiredCount: number
+  /** rvbbit operator shape when this fn is a registered semantic operator
+   *  (scalar | aggregate | dimension | rowset); null otherwise. */
+  shape?: string | null
+}
+
 export interface SchemaSnapshot {
   connectionId: string
   generatedAt: string
@@ -148,6 +168,8 @@ export interface SchemaSnapshot {
   currentDatabase: string
   schemas: string[]
   tables: SchemaTable[]
+  /** callable routines in user schemas (internal `_`-prefixed ones excluded). */
+  functions: SchemaFunction[]
   extensions: ExtensionInfo[]
   hasRvbbit: boolean
   rvbbitVersion: string | null

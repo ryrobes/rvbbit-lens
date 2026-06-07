@@ -1,10 +1,11 @@
 "use client"
 
 import { useEffect, useState } from "react"
-import { Activity, CaretRight, ChevronDown, Database, Plug, Plus } from "@/lib/icons"
+import { Activity, CaretRight, ChevronDown, Database, Layers, Plug, Plus } from "@/lib/icons"
 import { cn } from "@/lib/utils"
 import { RvbbitLogo } from "./rvbbit-logo"
 import { SchedulerTray } from "./scheduler-tray"
+import { SceneTray } from "./scene-tray"
 import { APP_NAME, APP_VERSION } from "@/lib/version"
 import {
   FONT_SCALE_LABELS,
@@ -14,8 +15,8 @@ import {
   type MonoFont,
   type SansFont,
 } from "@/lib/desktop/fonts"
-import type { WorkspaceId } from "@/lib/desktop/types"
-import { WORKSPACE_IDS } from "@/lib/desktop/state-store"
+import type { Scene, SlotId, WorkspaceId } from "@/lib/desktop/types"
+import { SCENE_SLOT, WORKSPACE_IDS } from "@/lib/desktop/state-store"
 
 interface ConnectionSummary {
   id: string
@@ -77,10 +78,24 @@ interface DesktopMenuBarProps {
   hasWallpaper: boolean
   hasRvbbit: boolean
   busy?: boolean
-  activeWorkspace: WorkspaceId
+  activeWorkspace: SlotId
   /** Ids of workspaces that currently hold at least one window. */
   workspaceOccupancy: Set<WorkspaceId>
-  onSwitchWorkspace: (id: WorkspaceId) => void
+  onSwitchWorkspace: (id: SlotId) => void
+  // ── Scenes (saved desktops) ──
+  sceneName: string | null
+  sceneDirty: boolean
+  sceneCanSave: boolean
+  sceneHasContent: boolean
+  sceneSlotOccupied: boolean
+  scenes: Scene[]
+  currentSceneId: string | null
+  onSaveScene: () => void
+  onSaveSceneAs: (name: string) => void
+  onOpenScene: (id: string) => void
+  onRenameScene: (id: string, name: string) => void
+  onDeleteScene: (id: string) => void
+  onSceneNameExists: (name: string, exceptId?: string) => boolean
 }
 
 // ── Entry / Submenu shape ───────────────────────────────────────────
@@ -165,6 +180,19 @@ export function DesktopMenuBar({
   activeWorkspace,
   workspaceOccupancy,
   onSwitchWorkspace,
+  sceneName,
+  sceneDirty,
+  sceneCanSave,
+  sceneHasContent,
+  sceneSlotOccupied,
+  scenes,
+  currentSceneId,
+  onSaveScene,
+  onSaveSceneAs,
+  onOpenScene,
+  onRenameScene,
+  onDeleteScene,
+  onSceneNameExists,
 }: DesktopMenuBarProps) {
   const active = connections.find((c) => c.id === activeConnectionId) ?? null
   const [aboutOpen, setAboutOpen] = useState(false)
@@ -309,6 +337,23 @@ export function DesktopMenuBar({
           activeWorkspace={activeWorkspace}
           occupancy={workspaceOccupancy}
           onSwitch={onSwitchWorkspace}
+          sceneActive={activeWorkspace === SCENE_SLOT}
+          sceneOccupied={sceneSlotOccupied}
+          sceneDirty={sceneDirty}
+        />
+        <SceneTray
+          sceneName={sceneName}
+          dirty={sceneDirty}
+          canSave={sceneCanSave}
+          hasContent={sceneHasContent}
+          scenes={scenes}
+          currentSceneId={currentSceneId}
+          onSave={onSaveScene}
+          onSaveAs={onSaveSceneAs}
+          onOpen={onOpenScene}
+          onRename={onRenameScene}
+          onDelete={onDeleteScene}
+          nameExists={onSceneNameExists}
         />
         <span className="text-chrome-text/30">·</span>
         <SchedulerTray
@@ -580,15 +625,21 @@ function WorkspaceSwitcher({
   activeWorkspace,
   occupancy,
   onSwitch,
+  sceneActive,
+  sceneOccupied,
+  sceneDirty,
 }: {
-  activeWorkspace: WorkspaceId
+  activeWorkspace: SlotId
   occupancy: Set<WorkspaceId>
-  onSwitch: (id: WorkspaceId) => void
+  onSwitch: (id: SlotId) => void
+  sceneActive: boolean
+  sceneOccupied: boolean
+  sceneDirty: boolean
 }) {
   return (
     <div
       className="flex items-center gap-0.5 rounded border border-chrome-border bg-secondary-background/60 p-0.5"
-      title="Workspaces — Alt+1…5"
+      title="Workspaces — Alt+1…5 · Scene slot Alt+6"
     >
       {WORKSPACE_IDS.map((id) => {
         const isActive = id === activeWorkspace
@@ -616,6 +667,27 @@ function WorkspaceSwitcher({
           </button>
         )
       })}
+      {/* Scene slot — the loadable "document" desktop, peer of 1–5. */}
+      <span className="mx-px h-3 w-px bg-chrome-border" />
+      <button
+        type="button"
+        onClick={() => onSwitch(SCENE_SLOT)}
+        aria-pressed={sceneActive}
+        title={`Scene slot — Alt+6${sceneOccupied ? "" : " (empty)"}`}
+        className={cn(
+          "relative flex h-5 w-5 items-center justify-center rounded transition-colors",
+          sceneActive
+            ? "bg-main text-main-foreground"
+            : sceneOccupied
+              ? "text-foreground hover:bg-foreground/[0.08]"
+              : "text-chrome-text/45 hover:bg-foreground/[0.06] hover:text-chrome-text",
+        )}
+      >
+        <Layers className="h-3 w-3" />
+        {sceneDirty && !sceneActive ? (
+          <span className="absolute bottom-0.5 left-1/2 h-[3px] w-[3px] -translate-x-1/2 rounded-full bg-main" />
+        ) : null}
+      </button>
     </div>
   )
 }
