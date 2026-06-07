@@ -327,25 +327,34 @@ export function OperatorGraph({
 
   // Drag the empty canvas to pan (nodes/handles/edges handle their own
   // pointerdown, so only background starts a pan).
-  const onPanStart = useCallback((e: React.PointerEvent) => {
-    if (e.button !== 0) return
-    if (e.target !== viewportRef.current && e.target !== canvasRef.current) return
-    e.preventDefault()
-    setPanning(true)
-    const sx = e.clientX
-    const sy = e.clientY
-    const base = viewRef.current
-    const onMove = (ev: PointerEvent) => {
-      setView((v) => ({ ...v, panX: base.panX + (ev.clientX - sx), panY: base.panY + (ev.clientY - sy) }))
-    }
-    const onUp = () => {
-      setPanning(false)
-      window.removeEventListener("pointermove", onMove)
-      window.removeEventListener("pointerup", onUp)
-    }
-    window.addEventListener("pointermove", onMove)
-    window.addEventListener("pointerup", onUp)
-  }, [])
+  const onPanStart = useCallback(
+    (e: React.PointerEvent) => {
+      if (e.button !== 0) return
+      if (e.target !== viewportRef.current && e.target !== canvasRef.current) return
+      e.preventDefault()
+      const sx = e.clientX
+      const sy = e.clientY
+      const base = viewRef.current
+      let moved = false
+      const onMove = (ev: PointerEvent) => {
+        if (!moved && Math.hypot(ev.clientX - sx, ev.clientY - sy) > 4) {
+          moved = true
+          setPanning(true)
+        }
+        setView((v) => ({ ...v, panX: base.panX + (ev.clientX - sx), panY: base.panY + (ev.clientY - sy) }))
+      }
+      const onUp = () => {
+        setPanning(false)
+        window.removeEventListener("pointermove", onMove)
+        window.removeEventListener("pointerup", onUp)
+        // A click (no drag) on the empty canvas deselects → main panel.
+        if (!moved) onSelectNode(null)
+      }
+      window.addEventListener("pointermove", onMove)
+      window.addEventListener("pointerup", onUp)
+    },
+    [onSelectNode],
+  )
 
   // Wheel to zoom around the cursor (native listener so we can preventDefault).
   useEffect(() => {
