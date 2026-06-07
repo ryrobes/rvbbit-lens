@@ -27,6 +27,7 @@ import {
   isAccelTickJob,
   isCatalogJob,
   isSemanticJob,
+  isSyncJob,
   listCronJobs,
   listCronRuns,
   scheduleSql,
@@ -65,6 +66,8 @@ const CRAWL_COMMAND = "SELECT rvbbit.catalog_crawl();"
 // The accelerator freshness heartbeat. Runs every minute; the policy-aware
 // rvbbit.accel_tick() decides which dirty, high-value tables to refresh.
 const ACCEL_TICK_COMMAND = "SELECT rvbbit.accel_tick(4);"
+// The temporal-mirror sync. CALL (it's a procedure that commits per table).
+const RUN_SYNC_COMMAND = "CALL rvbbit.run_sync();"
 
 export function SchedulerTray({ activeConnectionId, hasRvbbit, onOpenSql, onOpenDrift }: SchedulerTrayProps) {
   const [open, setOpen] = useState(false)
@@ -196,6 +199,7 @@ export function SchedulerTray({ activeConnectionId, hasRvbbit, onOpenSql, onOpen
   const status = useMemo(() => trayStatus(state, jobs), [state, jobs])
   const crawlJob = jobs.find(isCatalogJob)
   const accelTickJob = jobs.find(isAccelTickJob)
+  const syncJob = jobs.find(isSyncJob)
   // Where newly scheduled jobs RUN: the working db the user is connected to. The
   // job is registered in the home db (cron.database_name) but targets this db via
   // cron.schedule_in_database, so it need not equal the home db.
@@ -298,6 +302,19 @@ export function SchedulerTray({ activeConnectionId, hasRvbbit, onOpenSql, onOpen
                       busy={busy}
                       onSchedule={() =>
                         void mutate(scheduleSql("rvbbit_accel_tick", "* * * * *", ACCEL_TICK_COMMAND, targetDb))
+                      }
+                    />
+                  </div>
+                ) : null}
+
+                {/* temporal-mirror sync preset (every 3h) */}
+                {hasRvbbit ? (
+                  <div className="mt-1">
+                    <SyncPreset
+                      job={syncJob}
+                      busy={busy}
+                      onSchedule={() =>
+                        void mutate(scheduleSql("rvbbit_sync", "0 */3 * * *", RUN_SYNC_COMMAND, targetDb))
                       }
                     />
                   </div>
@@ -472,6 +489,38 @@ function AccelTickPreset({ job, busy, onSchedule }: { job?: CronJob; busy: boole
         className="ml-auto rounded bg-rvbbit-accent/15 px-2 py-0.5 text-[11px] font-medium text-rvbbit-accent hover:bg-rvbbit-accent/25 disabled:opacity-40"
       >
         Schedule heartbeat
+      </button>
+    </div>
+  )
+}
+
+// ── Temporal-mirror sync preset ─────────────────────────────────────
+
+function SyncPreset({ job, busy, onSchedule }: { job?: CronJob; busy: boolean; onSchedule: () => void }) {
+  if (job) {
+    return (
+      <div className="flex items-center gap-2 rounded-md border border-rvbbit-accent/30 bg-rvbbit-bg/30 px-2.5 py-1.5">
+        <RefreshCw className="h-3.5 w-3.5 shrink-0 text-rvbbit-accent" />
+        <span className="text-[11px] text-chrome-text/80">
+          Temporal Mirror sync — <span className="text-foreground">{describeCron(job.schedule)}</span>
+        </span>
+        <span className={cn("ml-auto h-1.5 w-1.5 rounded-full", job.active ? "bg-success" : "bg-chrome-text/40")} />
+      </div>
+    )
+  }
+  return (
+    <div className="flex items-center gap-2 rounded-md border border-chrome-border bg-secondary-background/40 px-2.5 py-1.5">
+      <RefreshCw className="h-3.5 w-3.5 shrink-0 text-chrome-text/60" />
+      <span className="text-[11px] text-chrome-text/70">
+        Mirror Postgres sources into time-travel tables (run_sync).
+      </span>
+      <button
+        type="button"
+        disabled={busy}
+        onClick={onSchedule}
+        className="ml-auto rounded bg-rvbbit-accent/15 px-2 py-0.5 text-[11px] font-medium text-rvbbit-accent hover:bg-rvbbit-accent/25 disabled:opacity-40"
+      >
+        Schedule every 3h
       </button>
     </div>
   )

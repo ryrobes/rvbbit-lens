@@ -222,3 +222,7 @@ export function isSemanticJob(j: CronJob): boolean {
 export function isAccelTickJob(j: CronJob): boolean {
   return /accel_tick/i.test(j.command) || j.jobname === "rvbbit_accel_tick"
 }
+/** Does this job run the temporal-mirror sync? */
+export function isSyncJob(j: CronJob): boolean {
+  return /run_sync/i.test(j.command) || j.jobname === "rvbbit_sync"
+}

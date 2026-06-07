@@ -64,6 +64,7 @@ import { NotificationToasts } from "./notification-toasts"
 import { NotificationCenterWindow } from "./notification-center-window"
 import { OperatorsWindow } from "./operators-window"
 import { CostsWindow } from "./costs-window"
+import { SyncMirrorWindow } from "./sync-mirror-window"
 import { DuckWindow } from "./duck-window"
 import { OperatorFlowWindow } from "./operator-flow-window"
 import { SpecialistsWindow } from "./specialists-window"
@@ -132,6 +133,7 @@ import type {
   FinderPayload,
   NotificationsPayload,
   CostsPayload,
+  SyncMirrorPayload,
   DuckPayload,
   OperatorFlowPayload,
   OperatorsPayload,
@@ -1575,6 +1577,18 @@ export function DesktopShell() {
       } satisfies CostsPayload,
     })
   }, [focus, openWindow, windows, updatePayload])
+
+  const openSyncMirror = useCallback(() => {
+    const existing = windows.find((w) => w.kind === "sync-mirror")
+    if (existing) return focus(existing.id)
+    openWindow({
+      id: randomUUID(),
+      kind: "sync-mirror",
+      title: "Temporal Mirror",
+      x: 128, y: 68, width: 920, height: 640,
+      payload: { kind: "sync-mirror" } satisfies SyncMirrorPayload,
+    })
+  }, [focus, openWindow, windows])
 
   const openDuck = useCallback(() => {
     const existing = windows.find((w) => w.kind === "duck")
@@ -3047,6 +3061,7 @@ export function DesktopShell() {
     { id: "cache", label: "Cache", icon: Database, color: "var(--brand-cache)", description: "Compiler & operator result caches", activate: openCache, folder: "system", rvbbit: true },
     { id: "receipts", label: "Receipts", icon: FileText, color: "var(--brand-rvbbit-cache)", sublabel: schema?.rvbbitVersion ?? undefined, description: "Per-call LLM receipts & audit", activate: openRvbbitCache, folder: "system", rvbbit: true },
     { id: "costs", label: "Costs", icon: DollarSign, color: "var(--brand-costs)", description: "LLM/sidecar spend breakdown", activate: () => openCosts(), folder: "system", rvbbit: true },
+    { id: "sync-mirror", label: "Temporal Mirror", icon: Database, color: "var(--brand-cache)", description: "Sync Postgres sources into time-travel tables", activate: openSyncMirror, folder: "system", rvbbit: true },
     // Semantic
     { id: "operators", label: "Operators", icon: FlowArrow, color: "var(--brand-operators)", description: "Semantic SQL operators", activate: openOperators, folder: "semantic", rvbbit: true },
     { id: "specialists", label: "Specialists", icon: Brain, color: "var(--brand-specialists)", description: "Fine-tuned task models", activate: openSpecialists, folder: "semantic", rvbbit: true },
@@ -3931,6 +3946,8 @@ function renderWindowContent(
           }
         />
       )
+    case "sync-mirror":
+      return <SyncMirrorWindow activeConnectionId={ctx.activeConnectionId} />
     case "duck":
       return (
         <DuckWindow
@@ -4049,6 +4066,7 @@ function iconForKind(kind: DesktopWindowState["kind"]) {
     case "warren-job-detail":
       return Rocket
     case "costs": return DollarSign
+    case "sync-mirror": return Database
     case "duck": return Boxes
     default: return Table2
   }

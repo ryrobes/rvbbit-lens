@@ -36,6 +36,7 @@ export type DesktopWindowKind =
   | "warren"
   | "warren-job-detail"
   | "costs"
+  | "sync-mirror"
   | "duck"
   | "data-search"
   | "scry-results"
@@ -103,6 +104,7 @@ export type WindowPayload =
   | WarrenPayload
   | WarrenJobDetailPayload
   | CostsPayload
+  | SyncMirrorPayload
   | DuckPayload
   | DataSearchPayload
   | ScryResultsPayload
@@ -529,6 +531,10 @@ export interface CachePayload {
   /** Which cache surface to open on: the synth-sql compiler cache or the
    * content-addressed operator result (memo) cache. */
   initialView?: "synth" | "memo"
+}
+
+export interface SyncMirrorPayload {
+  kind?: "sync-mirror"
 }
 
 export interface CostsPayload {
