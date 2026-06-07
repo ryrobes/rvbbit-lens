@@ -22,6 +22,7 @@ import {
   fetchSpecialists,
   runOperator,
   saveOperator,
+  signatureChanged,
   type NodeKind,
   type OpStep,
   type RvbbitOperator,
@@ -75,6 +76,9 @@ export function OperatorFlowWindow({
 }: OperatorFlowWindowProps) {
   const startedNew = payload.operatorName === null
   const [op, setOp] = useState<RvbbitOperator | null>(null)
+  // The last persisted snapshot — used to detect signature changes so a
+  // save can rebuild the wrapper function when args/return/shape change.
+  const [baseline, setBaseline] = useState<RvbbitOperator | null>(null)
   const [loadError, setLoadError] = useState<string | null>(null)
   const [persisted, setPersisted] = useState(!startedNew)
   const [dirty, setDirty] = useState(false)
@@ -110,8 +114,10 @@ export function OperatorFlowWindow({
       const res = await fetchOperators(activeConnectionId)
       if (cancelled) return
       const found = res.operators.find((o) => o.name === payload.operatorName)
-      if (found) setOp(found)
-      else setLoadError(res.error ?? `Operator "${payload.operatorName}" not found.`)
+      if (found) {
+        setOp(found)
+        setBaseline(found)
+      } else setLoadError(res.error ?? `Operator "${payload.operatorName}" not found.`)
     }
     void run()
     return () => {
@@ -215,16 +221,19 @@ export function OperatorFlowWindow({
     if (!activeConnectionId || !op || !op.name) return
     setSaving(true)
     setSaveError(null)
-    const res = await saveOperator(activeConnectionId, op, !persisted)
+    // New operator, or a changed signature → (re)build the wrapper.
+    const create = !persisted || !baseline || signatureChanged(baseline, op)
+    const res = await saveOperator(activeConnectionId, op, { create })
     setSaving(false)
     if (res.error) {
       setSaveError(res.error)
       return
     }
     setPersisted(true)
+    setBaseline(op)
     setDirty(false)
     window.dispatchEvent(new Event("rvbbit-lens:operators-changed"))
-  }, [activeConnectionId, op, persisted])
+  }, [activeConnectionId, op, persisted, baseline])
 
   const onTryRun = useCallback(async () => {
     if (!activeConnectionId || !op) return
@@ -324,11 +333,11 @@ export function OperatorFlowWindow({
     [op, onChangeOp, persistLayout],
   )
 
-  // Palette "input" drop → add an operator argument. Only for unsaved
-  // operators (a created operator's signature is immutable in the DB).
+  // Palette "input" drop → add an operator argument. Editing an existing
+  // operator's signature rebuilds its wrapper on the next save.
   const onAddInput = useCallback(
     (pos: NodePos) => {
-      if (!op || persisted) return
+      if (!op) return
       const taken = new Set(op.arg_names)
       let n = op.arg_names.length + 1
       let name = `arg${n}`
@@ -339,9 +348,13 @@ export function OperatorFlowWindow({
         arg_names: [...op.arg_names, name],
         arg_types: [...op.arg_types, "text"],
       })
-      setLayout((prev) => ({ ...prev, [`input-${idx}`]: pos }))
+      setLayout((prev) => {
+        const next = { ...prev, [`input-${idx}`]: pos }
+        persistLayout(next)
+        return next
+      })
     },
-    [op, persisted, onChangeOp],
+    [op, onChangeOp, persistLayout],
   )
 
   // Drag-to-connect → wire a step output or operator arg into a step's
@@ -565,7 +578,7 @@ export function OperatorFlowWindow({
               onMoveNode={onMoveNode}
               onAddNode={onAddNode}
               onAddInput={onAddInput}
-              allowAddInput={!persisted}
+              allowAddInput
               onConnect={onConnect}
               onDeleteStep={onDeleteStep}
             />

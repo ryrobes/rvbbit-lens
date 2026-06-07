@@ -492,16 +492,22 @@ function quoteIdent(name: string): string {
 }
 
 /**
- * SQL to persist an operator. New operators go through create_operator
- * (which also builds the typed wrapper); existing ones are UPDATEd in
- * place (signature is immutable in the editor). Flow control is always
- * (re)applied via the set_operator_* helpers, then the cache is purged
- * so retry/wards/takes edits take effect on already-seen inputs.
+ * SQL to persist an operator. `create` routes through create_operator
+ * (an upsert that also (re)builds the typed wrapper) — used for new
+ * operators AND whenever an existing operator's signature changes, since
+ * the wrapper function has to be regenerated. Non-signature edits take
+ * the lighter in-place UPDATE. Flow control is always (re)applied via the
+ * set_operator_* helpers, then the cache is purged so retry/wards/takes
+ * edits take effect on already-seen inputs.
+ *
+ * Note: changing arg count/types leaves the previous wrapper overload as
+ * a harmless orphan (create_operator's CREATE OR REPLACE only replaces a
+ * matching signature). New calls resolve to the new signature.
  */
-export function buildSaveSql(op: RvbbitOperator, isNew: boolean): string {
+export function buildSaveSql(op: RvbbitOperator, opts: { create: boolean }): string {
   const stmts: string[] = []
 
-  if (isNew) {
+  if (opts.create) {
     const args: string[] = [
       `op_name => ${sqlStr(op.name)}`,
       `op_arg_names => ${sqlTextArray(op.arg_names)}`,
@@ -515,6 +521,10 @@ export function buildSaveSql(op: RvbbitOperator, isNew: boolean): string {
       `op_max_tokens => ${op.max_tokens}`,
       `op_temperature => ${op.temperature == null ? "NULL" : op.temperature}`,
       `op_description => ${sqlStrOrNull(op.description)}`,
+      // Preserve infix/tests on recreate (create_operator defaults them to
+      // NULL, which would otherwise wipe them for an existing operator).
+      `op_infix_symbol => ${sqlStrOrNull(op.infix_symbol)}`,
+      `op_tests => ${sqlJsonbOrNull(op.tests)}`,
       `op_steps => ${sqlJsonbOrNull(op.steps)}`,
     ]
     stmts.push(`SELECT rvbbit.create_operator(\n  ${args.join(",\n  ")}\n)`)
@@ -549,12 +559,26 @@ export function buildDeleteSql(op: RvbbitOperator): string {
   )
 }
 
-/** Persist an operator; returns an error string on failure. */
+/** Persist an operator; returns an error string on failure. `create`
+ *  regenerates the wrapper (new operator or a changed signature). */
 export async function saveOperator(
   connectionId: string,
   op: RvbbitOperator,
-  isNew: boolean,
+  opts: { create: boolean },
 ): Promise<{ error?: string }> {
-  const res = await runQuery(connectionId, buildSaveSql(op, isNew))
+  const res = await runQuery(connectionId, buildSaveSql(op, opts))
   return res.ok ? {} : { error: res.error }
+}
+
+/** Whether two operators differ in their SQL signature (which forces a
+ *  wrapper rebuild via create_operator). */
+export function signatureChanged(a: RvbbitOperator, b: RvbbitOperator): boolean {
+  const eqArr = (x: string[], y: string[]) =>
+    x.length === y.length && x.every((v, i) => v === y[i])
+  return (
+    !eqArr(a.arg_names, b.arg_names) ||
+    !eqArr(a.arg_types, b.arg_types) ||
+    a.return_type !== b.return_type ||
+    a.shape !== b.shape
+  )
 }
