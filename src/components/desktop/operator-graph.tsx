@@ -14,6 +14,7 @@ import {
   RefreshCw,
   Shield,
   Sparkles,
+  X,
 } from "@/lib/icons"
 import { cn } from "@/lib/utils"
 import type {
@@ -71,8 +72,12 @@ interface OperatorGraphProps {
   allowAddInput?: boolean
   /** Drag-to-connect into a step from a step or an input argument. */
   onConnect?: (from: ConnectSource, toStepIndex: number) => void
-  /** Remove a pipeline step (delete key on a selected step node). */
+  /** Click an edge to remove the wiring it represents. */
+  onDisconnect?: (from: ConnectSource, toStepIndex: number) => void
+  /** Remove a pipeline step (× on a selected step, or Delete key). */
   onDeleteStep?: (stepIndex: number) => void
+  /** Remove an operator argument (× on a selected input node). */
+  onDeleteInput?: (argIndex: number) => void
 }
 
 export function OperatorGraph({
@@ -88,7 +93,9 @@ export function OperatorGraph({
   onAddInput,
   allowAddInput = false,
   onConnect,
+  onDisconnect,
   onDeleteStep,
+  onDeleteInput,
 }: OperatorGraphProps) {
   const graph = useMemo(() => buildOperatorGraph(op), [op])
   const trace = useMemo(
@@ -448,15 +455,42 @@ export function OperatorGraph({
             const ex = b.x
             const ey = b.y + NODE_H / 2
             const mx = (sx + ex) / 2
-            return (
+            const d = `M ${sx} ${sy} C ${mx} ${sy}, ${mx} ${ey}, ${ex} ${ey}`
+            const deletable =
+              editable &&
+              !!onDisconnect &&
+              connectableSource(e.from) &&
+              targetStepOf(e.to) != null
+            const path = (
               <path
-                key={i}
-                d={`M ${sx} ${sy} C ${mx} ${sy}, ${mx} ${ey}, ${ex} ${ey}`}
+                d={d}
                 fill="none"
                 stroke={stroke}
                 strokeWidth={traversed ? 2 : 1.5}
                 markerEnd={marker}
               />
+            )
+            if (!deletable) return <g key={i}>{path}</g>
+            return (
+              <g key={i} className="group/edge">
+                {path}
+                {/* fat invisible hit-area; click severs the wiring */}
+                <path
+                  d={d}
+                  fill="none"
+                  stroke="transparent"
+                  strokeWidth={14}
+                  style={{ pointerEvents: "stroke", cursor: "pointer" }}
+                  onClick={() => {
+                    const src = connectSourceOf(e.from)
+                    const to = targetStepOf(e.to)
+                    if (src && to != null) onDisconnect?.(src, to)
+                  }}
+                  className="group-hover/edge:stroke-danger/25"
+                >
+                  <title>Click to disconnect</title>
+                </path>
+              </g>
             )
           })}
           {/* in-progress connect drag */}
@@ -534,6 +568,39 @@ export function OperatorGraph({
                   />
                 )
               })
+          : null}
+
+        {/* delete affordance on the selected step / input node */}
+        {editable && selectedNodeId
+          ? (() => {
+              const n = graph.nodes.find((x) => x.id === selectedNodeId)
+              if (!n) return null
+              const isStep = n.ref.t === "step"
+              const isInput = n.ref.t === "input"
+              if (!isStep && !isInput) return null
+              if (isStep && !onDeleteStep) return null
+              if (isInput && !onDeleteInput) return null
+              const p = posById.get(n.id)
+              if (!p) return null
+              const idx = n.ref.t === "step" || n.ref.t === "input" ? n.ref.index : -1
+              return (
+                <button
+                  type="button"
+                  title={isStep ? "Delete step" : "Remove input"}
+                  onClick={() => (isStep ? onDeleteStep?.(idx) : onDeleteInput?.(idx))}
+                  className="absolute grid place-items-center rounded-full border border-danger bg-secondary-background text-danger transition-colors hover:bg-danger hover:text-chrome-bg"
+                  style={{
+                    left: p.x + NODE_W - 9,
+                    top: p.y - 9,
+                    width: 18,
+                    height: 18,
+                    zIndex: 26,
+                  }}
+                >
+                  <X className="h-3 w-3" />
+                </button>
+              )
+            })()
           : null}
       </div>
       </div>

@@ -314,12 +314,18 @@ export function OperatorFlowWindow({
       while (taken.has(name)) name = `node${++n}`
       let node = defaultNode(kind, name)
       if (steps.length === 0 && kind === "llm") {
+        // Converting a single-LLM operator: carry its prompt into the step.
         node = {
           ...node,
           model: op.model || node.model,
           system: op.system_prompt || node.system,
           user: op.user_prompt || node.user,
         }
+      } else {
+        // Fresh nodes land disconnected — clear the placeholder
+        // {{ inputs.text }} wiring so the canvas doesn't auto-spaghetti.
+        node = { ...node, ...(node.inputs ? { inputs: {} } : {}) }
+        if (node.kind === "llm") node = { ...node, user: "" }
       }
       const nextSteps = [...steps, node]
       onChangeOp({ ...op, steps: nextSteps })
@@ -383,6 +389,58 @@ export function OperatorFlowWindow({
       onChangeOp({ ...op, steps: nextSteps })
     },
     [op, onChangeOp],
+  )
+
+  // Click an edge → remove the wiring. We can only sever refs that live
+  // in the target step's inputs map (what drag-to-connect writes); a ref
+  // embedded in a prompt has to be edited in the inspector.
+  const onDisconnect = useCallback(
+    (from: ConnectSource, toIdx: number) => {
+      if (!op?.steps) return
+      const target = op.steps[toIdx]
+      if (!target?.inputs) return
+      const prefix =
+        from.t === "step"
+          ? `{{ steps.${op.steps[from.index]?.name ?? ""}`
+          : `{{ inputs.${from.name}`
+      const nextInputs = Object.fromEntries(
+        Object.entries(target.inputs).filter(([, v]) => !v.includes(prefix)),
+      )
+      if (Object.keys(nextInputs).length === Object.keys(target.inputs).length) return
+      const nextSteps: OpStep[] = op.steps.map((s, i) =>
+        i === toIdx ? { ...s, inputs: nextInputs } : s,
+      )
+      onChangeOp({ ...op, steps: nextSteps })
+    },
+    [op, onChangeOp],
+  )
+
+  // Remove an operator argument; remap input-N positions like steps.
+  const onDeleteInput = useCallback(
+    (idx: number) => {
+      if (!op) return
+      onChangeOp({
+        ...op,
+        arg_names: op.arg_names.filter((_, i) => i !== idx),
+        arg_types: op.arg_types.filter((_, i) => i !== idx),
+      })
+      setLayout((prev) => {
+        const next: OperatorLayout = {}
+        for (const [id, p] of Object.entries(prev)) {
+          const m = /^input-(\d+)$/.exec(id)
+          if (!m) {
+            next[id] = p
+            continue
+          }
+          const i = Number(m[1])
+          if (i === idx) continue
+          next[`input-${i > idx ? i - 1 : i}`] = p
+        }
+        persistLayout(next)
+        return next
+      })
+    },
+    [op, onChangeOp, persistLayout],
   )
 
   // Delete a step from the canvas, remapping stored positions so later
@@ -580,7 +638,9 @@ export function OperatorFlowWindow({
               onAddInput={onAddInput}
               allowAddInput
               onConnect={onConnect}
+              onDisconnect={onDisconnect}
               onDeleteStep={onDeleteStep}
+              onDeleteInput={onDeleteInput}
             />
           </div>
           {mode === "run" && receipt ? (

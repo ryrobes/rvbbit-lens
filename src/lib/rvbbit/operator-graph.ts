@@ -71,21 +71,35 @@ export interface OpGraph {
 export const MAX_TAKE_LANES = 5
 
 const STEP_REF_RE = /\{\{\s*steps\.([A-Za-z_][A-Za-z0-9_]*)/g
+const INPUT_REF_RE = /\{\{\s*inputs\.([A-Za-z_][A-Za-z0-9_]*)/g
 
-/** Step names referenced by a node's templated fields. */
-export function stepRefsOf(step: OpStep): string[] {
+function templatedFields(step: OpStep): string[] {
   const fields: string[] = []
   if (step.system) fields.push(step.system)
   if (step.user) fields.push(step.user)
   if (step.inputs) fields.push(...Object.values(step.inputs))
   if (step.params) fields.push(...step.params)
+  return fields
+}
+
+function refsMatching(step: OpStep, re: RegExp): string[] {
   const refs = new Set<string>()
-  for (const f of fields) {
-    STEP_REF_RE.lastIndex = 0
+  for (const f of templatedFields(step)) {
+    re.lastIndex = 0
     let m: RegExpExecArray | null
-    while ((m = STEP_REF_RE.exec(f))) refs.add(m[1])
+    while ((m = re.exec(f))) refs.add(m[1])
   }
   return [...refs]
+}
+
+/** Step names referenced by a node's templated fields ({{ steps.X }}). */
+export function stepRefsOf(step: OpStep): string[] {
+  return refsMatching(step, STEP_REF_RE)
+}
+
+/** Operator-argument names referenced by a node ({{ inputs.X }}). */
+export function inputRefsOf(step: OpStep): string[] {
+  return refsMatching(step, INPUT_REF_RE)
 }
 
 function centeredRows(n: number): number[] {
@@ -220,9 +234,25 @@ export function buildOperatorGraph(op: RvbbitOperator): OpGraph {
     laneExits = ["exec"]
   }
 
-  for (const e of execEntries) {
-    if (prev) edges.push({ from: prev, to: e, kind: "flow" })
-    else for (const inp of inputIds) edges.push({ from: inp, to: e, kind: "flow" })
+  // Input → execute wiring. A plain pipeline (no wards, no takes) draws
+  // ONLY explicit edges: input-i → step iff the step references
+  // {{ inputs.<arg> }} (and step → step from {{ steps.X }}, already added
+  // in buildChain). Other shapes keep the structural fan-in.
+  const plainPipeline = steps.length > 0 && !takes
+  const hasPreWards = (op.wards?.pre?.length ?? 0) > 0
+  if (plainPipeline && !hasPreWards) {
+    const argToInput = new Map(op.arg_names.map((nm, i) => [nm, `input-${i}`] as const))
+    steps.forEach((s, i) => {
+      for (const arg of inputRefsOf(s)) {
+        const inp = argToInput.get(arg)
+        if (inp) edges.push({ from: inp, to: `step-${i}`, kind: "flow" })
+      }
+    })
+  } else {
+    for (const e of execEntries) {
+      if (prev) edges.push({ from: prev, to: e, kind: "flow" })
+      else for (const inp of inputIds) edges.push({ from: inp, to: e, kind: "flow" })
+    }
   }
   col = execCol0 + laneWidth
 
