@@ -60,6 +60,12 @@ export function SqlEditor({
         ref={ref}
         value={value}
         height={typeof height === "number" ? `${height}px` : height}
+        // @uiw applies height="100%" only to .cm-editor/.cm-scroller, never to
+        // its own root wrapper div — so without an explicit height here that
+        // div is auto-sized and .cm-editor's 100% collapses to content height
+        // (text overflows + gets clipped, no scrollbar). Fill the parent so the
+        // scroller actually has a bounded box to scroll within.
+        className="h-full w-full"
         theme="none"
         readOnly={readOnly}
         extensions={[...extensions, ...rvbbitLensCodeMirrorTheme]}
