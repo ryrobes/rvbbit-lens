@@ -435,7 +435,8 @@ export function OperatorGraph({
       onPointerDown={onPanStart}
       onDragOver={editable && onAddNode ? (e) => e.preventDefault() : undefined}
       onDrop={editable && onAddNode ? onCanvasDrop : undefined}
-      style={{ cursor: panning ? "grabbing" : "grab" }}
+      // Dark stage so nodes read with more contrast (matches the inspector).
+      style={{ cursor: panning ? "grabbing" : "grab", background: "#0b0c0f" }}
     >
       <div
         ref={canvasRef}
