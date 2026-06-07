@@ -74,6 +74,8 @@ interface OperatorGraphProps {
   onConnect?: (from: ConnectSource, toStepIndex: number) => void
   /** Click an edge to remove the wiring it represents. */
   onDisconnect?: (from: ConnectSource, toStepIndex: number) => void
+  /** Connect a step → OUTPUT to make it the operator's result step. */
+  onSetOutput?: (stepIndex: number) => void
   /** Remove a pipeline step (× on a selected step, or Delete key). */
   onDeleteStep?: (stepIndex: number) => void
   /** Remove an operator argument (× on a selected input node). */
@@ -94,6 +96,7 @@ export function OperatorGraph({
   allowAddInput = false,
   onConnect,
   onDisconnect,
+  onSetOutput,
   onDeleteStep,
   onDeleteInput,
 }: OperatorGraphProps) {
@@ -243,17 +246,23 @@ export function OperatorGraph({
         setConnect(null)
         if (!targetId || targetId === fromId) return
         const from = connectSourceOf(fromId)
+        if (!from) return
+        // step → OUTPUT makes that step the operator's result.
+        if (targetId === "output") {
+          if (from.t === "step") onSetOutput?.(from.index)
+          return
+        }
         const to = targetStepOf(targetId)
-        if (!from || to == null) return
+        if (to == null) return
         if (from.t === "step" && from.index === to) return
         onConnect(from, to)
       }
       window.addEventListener("pointermove", onMove)
       window.addEventListener("pointerup", onUp)
     },
-    // stepIndexOf / nodeIdAt close over graph + posById (stable per render)
+    // connectSourceOf / nodeIdAt close over graph + posById (stable per render)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [editable, onConnect, pointerToCanvas, graph],
+    [editable, onConnect, onSetOutput, pointerToCanvas, graph],
   )
 
   const onCanvasDrop = useCallback(

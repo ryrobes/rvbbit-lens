@@ -406,28 +406,65 @@ export function OperatorFlowWindow({
     [op, onChangeOp],
   )
 
-  // Click an edge → remove the wiring. We can only sever refs that live
-  // in the target step's inputs map (what drag-to-connect writes); a ref
-  // embedded in a prompt has to be edited in the inspector.
+  // Click an edge → remove the wiring. Strips the {{ ... }} reference
+  // wherever it lives — inputs map, system/user prompt, or params — so any
+  // connection is severable in edit mode (correctness is checked on save).
   const onDisconnect = useCallback(
     (from: ConnectSource, toIdx: number) => {
       if (!op?.steps) return
       const target = op.steps[toIdx]
-      if (!target?.inputs) return
-      const prefix =
+      if (!target) return
+      const name =
+        from.t === "step" ? op.steps[from.index]?.name ?? "" : from.name
+      if (!name) return
+      const esc = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+      const re =
         from.t === "step"
-          ? `{{ steps.${op.steps[from.index]?.name ?? ""}`
-          : `{{ inputs.${from.name}`
-      const nextInputs = Object.fromEntries(
-        Object.entries(target.inputs).filter(([, v]) => !v.includes(prefix)),
-      )
-      if (Object.keys(nextInputs).length === Object.keys(target.inputs).length) return
-      const nextSteps: OpStep[] = op.steps.map((s, i) =>
-        i === toIdx ? { ...s, inputs: nextInputs } : s,
-      )
+          ? new RegExp(`\\{\\{\\s*steps\\.${esc}(\\.[A-Za-z0-9_]+)?\\s*\\}\\}`, "g")
+          : new RegExp(`\\{\\{\\s*inputs\\.${esc}\\s*\\}\\}`, "g")
+      const next: OpStep = { ...target }
+      if (next.system) next.system = next.system.replace(re, "")
+      if (next.user) next.user = next.user.replace(re, "")
+      if (next.params) next.params = next.params.map((p) => p.replace(re, ""))
+      if (next.inputs) {
+        const entries = Object.entries(next.inputs)
+          .map(([k, v]) => [k, v.replace(re, "")] as const)
+          .filter(([, v]) => v.trim().length > 0)
+        next.inputs = Object.fromEntries(entries)
+      }
+      const nextSteps = op.steps.map((s, i) => (i === toIdx ? next : s))
       onChangeOp({ ...op, steps: nextSteps })
     },
     [op, onChangeOp],
+  )
+
+  // Connect a step → OUTPUT to make it the operator's result. The output
+  // is the pipeline's last step, so this reorders that step to the end.
+  const onSetOutput = useCallback(
+    (idx: number) => {
+      if (!op?.steps) return
+      const len = op.steps.length
+      if (idx < 0 || idx >= len || idx === len - 1) return
+      const steps = op.steps.slice()
+      const [moved] = steps.splice(idx, 1)
+      steps.push(moved)
+      onChangeOp({ ...op, steps })
+      setLayout((prev) => {
+        const remap = (i: number) => (i === idx ? len - 1 : i > idx ? i - 1 : i)
+        const next: OperatorLayout = {}
+        for (const [id, p] of Object.entries(prev)) {
+          const m = /^step-(\d+)$/.exec(id)
+          if (!m) {
+            next[id] = p
+            continue
+          }
+          next[`step-${remap(Number(m[1]))}`] = p
+        }
+        persistLayout(next)
+        return next
+      })
+    },
+    [op, onChangeOp, persistLayout],
   )
 
   // Remove an operator argument; remap input-N positions like steps.
@@ -654,6 +691,7 @@ export function OperatorFlowWindow({
               allowAddInput
               onConnect={onConnect}
               onDisconnect={onDisconnect}
+              onSetOutput={onSetOutput}
               onDeleteStep={onDeleteStep}
               onDeleteInput={onDeleteInput}
             />
