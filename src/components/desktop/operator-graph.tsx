@@ -44,6 +44,11 @@ const ROW_SPAN = NODE_H + ROW_GAP
 const PAD_X = 34
 const PAD_Y = 64
 
+// Limited zoom range — enough to breathe in a small window without losing
+// the plot.
+const MIN_ZOOM = 0.5
+const MAX_ZOOM = 1.6
+
 export type GraphMode = "build" | "run"
 
 /** The upstream end of a drag-to-connect: a pipeline step, or an
@@ -119,6 +124,16 @@ export function OperatorGraph({
     moved: boolean
   } | null>(null)
 
+  // Pan/zoom viewport. The canvas is translated+scaled; node positions stay
+  // in untransformed canvas coords (pointerToCanvas converts back).
+  const viewportRef = useRef<HTMLDivElement>(null)
+  const [view, setView] = useState({ zoom: 1, panX: 0, panY: 0 })
+  const viewRef = useRef(view)
+  useEffect(() => {
+    viewRef.current = view
+  }, [view])
+  const [panning, setPanning] = useState(false)
+
   // Auto-layout grid position (the deterministic default).
   const gridX = (col: number) => PAD_X + col * COL_SPAN
   const gridY = (row: number) => PAD_Y + (row - graph.rowMin) * ROW_SPAN
@@ -145,14 +160,13 @@ export function OperatorGraph({
   const width = maxX
   const height = maxY
 
-  // Pointer → canvas-local coords, scale- and scroll-aware.
+  // Pointer → canvas-local coords, undoing the current pan + zoom.
   const pointerToCanvas = useCallback((clientX: number, clientY: number): NodePos => {
-    const el = canvasRef.current
+    const el = viewportRef.current
     if (!el) return { x: clientX, y: clientY }
-    const rect = el.getBoundingClientRect()
-    const sx = rect.width / el.offsetWidth || 1
-    const sy = rect.height / el.offsetHeight || 1
-    return { x: (clientX - rect.left) / sx, y: (clientY - rect.top) / sy }
+    const r = el.getBoundingClientRect()
+    const { zoom, panX, panY } = viewRef.current
+    return { x: (clientX - r.left - panX) / zoom, y: (clientY - r.top - panY) / zoom }
   }, [])
 
   const beginDrag = useCallback(
@@ -282,6 +296,64 @@ export function OperatorGraph({
     [editable, onAddNode, onAddInput, pointerToCanvas],
   )
 
+  // ── pan / zoom ─────────────────────────────────────────────────────
+  const clampZoom = (z: number) => Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, z))
+
+  // Drag the empty canvas to pan (nodes/handles/edges handle their own
+  // pointerdown, so only background starts a pan).
+  const onPanStart = useCallback((e: React.PointerEvent) => {
+    if (e.button !== 0) return
+    if (e.target !== viewportRef.current && e.target !== canvasRef.current) return
+    e.preventDefault()
+    setPanning(true)
+    const sx = e.clientX
+    const sy = e.clientY
+    const base = viewRef.current
+    const onMove = (ev: PointerEvent) => {
+      setView((v) => ({ ...v, panX: base.panX + (ev.clientX - sx), panY: base.panY + (ev.clientY - sy) }))
+    }
+    const onUp = () => {
+      setPanning(false)
+      window.removeEventListener("pointermove", onMove)
+      window.removeEventListener("pointerup", onUp)
+    }
+    window.addEventListener("pointermove", onMove)
+    window.addEventListener("pointerup", onUp)
+  }, [])
+
+  // Wheel to zoom around the cursor (native listener so we can preventDefault).
+  useEffect(() => {
+    const el = viewportRef.current
+    if (!el) return
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault()
+      const r = el.getBoundingClientRect()
+      const cx = e.clientX - r.left
+      const cy = e.clientY - r.top
+      setView((v) => {
+        const z = clampZoom(v.zoom * (e.deltaY < 0 ? 1.1 : 1 / 1.1))
+        const k = z / v.zoom
+        return { zoom: z, panX: cx - k * (cx - v.panX), panY: cy - k * (cy - v.panY) }
+      })
+    }
+    el.addEventListener("wheel", onWheel, { passive: false })
+    return () => el.removeEventListener("wheel", onWheel)
+  }, [])
+
+  // Zoom buttons pivot on the viewport centre.
+  const zoomBy = (factor: number) => {
+    const el = viewportRef.current
+    const r = el?.getBoundingClientRect()
+    const cx = (r?.width ?? 0) / 2
+    const cy = (r?.height ?? 0) / 2
+    setView((v) => {
+      const z = clampZoom(v.zoom * factor)
+      const k = z / v.zoom
+      return { zoom: z, panX: cx - k * (cx - v.panX), panY: cy - k * (cy - v.panY) }
+    })
+  }
+  const resetView = () => setView({ zoom: 1, panX: 0, panY: 0 })
+
   // Delete / Backspace removes the selected pipeline step.
   const selectedStepIndex = (() => {
     if (!selectedNodeId) return null
@@ -322,13 +394,23 @@ export function OperatorGraph({
   }
 
   return (
-    <div className="relative h-full w-full">
+    <div
+      ref={viewportRef}
+      className="relative h-full w-full overflow-hidden"
+      onPointerDown={onPanStart}
+      onDragOver={editable && onAddNode ? (e) => e.preventDefault() : undefined}
+      onDrop={editable && onAddNode ? onCanvasDrop : undefined}
+      style={{ cursor: panning ? "grabbing" : "grab" }}
+    >
       <div
-        className="h-full w-full overflow-auto p-2"
-        onDragOver={editable && onAddNode ? (e) => e.preventDefault() : undefined}
-        onDrop={editable && onAddNode ? onCanvasDrop : undefined}
+        ref={canvasRef}
+        className="absolute left-0 top-0 origin-top-left"
+        style={{
+          width,
+          height,
+          transform: `translate(${view.panX}px, ${view.panY}px) scale(${view.zoom})`,
+        }}
       >
-      <div ref={canvasRef} className="relative" style={{ width, height }}>
         {/* regions behind everything — bbox of their contained nodes so
             they keep enclosing the nodes after a drag. */}
         {graph.regions.map((r) => {
@@ -612,10 +694,52 @@ export function OperatorGraph({
             })()
           : null}
       </div>
-      </div>
       {editable && (onAddNode || (onAddInput && allowAddInput)) ? (
         <NodePalette showInput={!!onAddInput && allowAddInput} />
       ) : null}
+      <ZoomControls
+        zoom={view.zoom}
+        onIn={() => zoomBy(1.2)}
+        onOut={() => zoomBy(1 / 1.2)}
+        onReset={resetView}
+      />
+    </div>
+  )
+}
+
+function ZoomControls({
+  zoom,
+  onIn,
+  onOut,
+  onReset,
+}: {
+  zoom: number
+  onIn: () => void
+  onOut: () => void
+  onReset: () => void
+}) {
+  const btn =
+    "grid h-6 w-6 place-items-center rounded text-chrome-text/75 hover:bg-foreground/[0.08] hover:text-foreground"
+  return (
+    <div
+      className="absolute bottom-3 right-3 z-30 flex items-center gap-0.5 rounded-md border border-chrome-border bg-chrome-bg/90 p-0.5 shadow-lg backdrop-blur"
+      // Don't let clicks here start a pan.
+      onPointerDown={(e) => e.stopPropagation()}
+    >
+      <button type="button" onClick={onOut} title="Zoom out" className={btn}>
+        −
+      </button>
+      <button
+        type="button"
+        onClick={onReset}
+        title="Reset zoom & position"
+        className="min-w-[3ch] rounded px-1 text-center font-mono text-[10px] tabular-nums text-chrome-text/75 hover:bg-foreground/[0.08] hover:text-foreground"
+      >
+        {Math.round(zoom * 100)}%
+      </button>
+      <button type="button" onClick={onIn} title="Zoom in" className={btn}>
+        +
+      </button>
     </div>
   )
 }
