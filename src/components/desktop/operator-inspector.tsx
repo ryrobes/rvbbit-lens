@@ -181,30 +181,6 @@ function FlowControls({
           onRemove={() => removeWard("post")}
         />
       </div>
-      {op.steps ? (
-        <div className="mt-1.5 flex flex-wrap items-center gap-1">
-          <span className="text-[10px] text-chrome-text/55">add node:</span>
-          {NODE_KINDS.map((kind) => (
-            <button
-              key={kind}
-              type="button"
-              onClick={() =>
-                onChange({
-                  ...op,
-                  steps: [
-                    ...(op.steps ?? []),
-                    defaultNode(kind, `node${(op.steps?.length ?? 0) + 1}`),
-                  ],
-                })
-              }
-              className="inline-flex items-center gap-0.5 rounded border border-chrome-border bg-secondary-background px-1.5 py-0.5 text-[10px] hover:bg-foreground/[0.06]"
-            >
-              <Plus className="h-2.5 w-2.5" />
-              {kind}
-            </button>
-          ))}
-        </div>
-      ) : null}
     </div>
   )
 }
