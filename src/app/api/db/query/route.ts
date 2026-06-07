@@ -8,6 +8,8 @@ interface Body {
   sql?: string
   rowLimit?: number
   readOnly?: boolean
+  /** Sibling-database override (same server, different db) — e.g. pg_cron's home db. */
+  database?: string
 }
 
 export async function POST(req: Request) {
@@ -19,6 +21,7 @@ export async function POST(req: Request) {
     const result = await executeQuery(body.connectionId, body.sql, {
       rowLimit: body.rowLimit,
       readOnly: body.readOnly,
+      database: body.database,
     })
     return NextResponse.json({ ok: true, ...result })
   } catch (err) {

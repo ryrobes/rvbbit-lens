@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect, useState } from "react"
+import { useEffect, useState, type DragEvent } from "react"
 import { Activity, Flag, Layers, Sparkles, Tag, type LucideIcon } from "@/lib/icons"
 import { cn } from "@/lib/utils"
 import {
@@ -17,6 +17,7 @@ import {
   type SemanticOpTile,
 } from "@/lib/desktop/semantic-ops"
 import type { DesktopColumnDragPayload, SemanticOpMeta } from "@/lib/desktop/types"
+import { DropTargetCard, dimensionDropInfo, scalarDropInfo, type DropTargetInfo } from "./drop-target-card"
 
 const ACCENT = "var(--brand-operators)"
 
@@ -45,6 +46,7 @@ export function SemanticOpPalette({
 }) {
   const active = useActiveColumnDragSource()
   const [hot, setHot] = useState<string | null>(null)
+  const [hoverCard, setHoverCard] = useState<{ info: DropTargetInfo; tileRect: DOMRect; panelRect: DOMRect | null } | null>(null)
   // Defer the palette's appearance until *after* the drag has actually begun.
   // `onHeaderDragStart` sets the active drag source during the native
   // `dragstart`, which re-renders this subscriber in the SAME commit. Because
@@ -72,16 +74,29 @@ export function SemanticOpPalette({
   if (tiles.length === 0 && dims.length === 0) return null
   const groups = groupScalarTilesByReturnType(tiles)
 
+  // Hover detail card — same component the on-block overlay uses, so the
+  // palette (the primary drop surface) explains each op too.
+  const setHotTile = (e: DragEvent<HTMLDivElement>, t: SemanticOpTile) => {
+    const name = t.op.operator.name
+    if (hot === name) return
+    setHot(name)
+    const el = e.currentTarget
+    const panel = el.closest("[data-drop-panel]")
+    const colName = active?.columns[0]?.name ?? "column"
+    const info = t.op.operator.shape === "dimension" ? dimensionDropInfo(t, colName) : scalarDropInfo(t, colName)
+    setHoverCard({ info, tileRect: el.getBoundingClientRect(), panelRect: panel?.getBoundingClientRect() ?? null })
+  }
+
   function renderTile(t: SemanticOpTile) {
     const name = t.op.operator.name
     const isHot = hot === name
-    const Icon = returnTypeIcon(t.returnType)
+    const Icon = t.op.operator.shape === "dimension" ? Layers : returnTypeIcon(t.returnType)
     return (
       <div
         key={name}
         title={t.hint}
-        onDragEnter={(e) => { e.preventDefault(); setHot(name) }}
-        onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = "copy"; setHot(name) }}
+        onDragEnter={(e) => { e.preventDefault(); setHotTile(e, t) }}
+        onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = "copy"; setHotTile(e, t) }}
         onDragLeave={() => setHot((h) => (h === name ? null : h))}
         onDrop={(e) => {
           // stopPropagation so the drop doesn't also bubble to the desktop
@@ -89,6 +104,7 @@ export function SemanticOpPalette({
           e.preventDefault()
           e.stopPropagation()
           setHot(null)
+          setHoverCard(null)
           const payload = readColumnDragPayload(e.dataTransfer)
           if (payload) onDropOp(payload, t.op.operator, { x: e.clientX, y: e.clientY })
         }}
@@ -108,7 +124,9 @@ export function SemanticOpPalette({
           {t.label}
           {t.needsArgs ? <span className="text-chrome-text/45">…</span> : null}
         </span>
-        <span className="font-mono text-[9px] text-chrome-text/45">{returnTypeChip(t.returnType)}</span>
+        {t.op.operator.shape !== "dimension" ? (
+          <span className="font-mono text-[9px] text-chrome-text/45">{returnTypeChip(t.returnType)}</span>
+        ) : null}
       </div>
     )
   }
@@ -128,15 +146,23 @@ export function SemanticOpPalette({
 
   return (
     <div
+      data-drop-panel
       className="pointer-events-auto fixed left-1/2 top-12 z-[70] flex max-w-[min(92vw,42rem)] -translate-x-1/2 flex-col gap-1.5 rounded-lg border border-chrome-border/70 bg-chrome-bg/90 p-2 shadow-2xl backdrop-blur"
       onDragOver={(e) => {
         e.preventDefault()
         e.dataTransfer.dropEffect = "copy"
       }}
+      onDragLeave={(e) => {
+        // Cursor genuinely left the palette (not just moving between tiles).
+        if (!e.currentTarget.contains(e.relatedTarget as Node | null)) {
+          setHot(null)
+          setHoverCard(null)
+        }
+      }}
     >
       <span className="inline-flex items-center gap-1 px-0.5 text-[10px] uppercase tracking-wider" style={{ color: ACCENT }}>
         <Sparkles className="h-3 w-3" />
-        semantic · drop on a column
+        semantic · drop a column to derive or group
       </span>
       {renderGroup("labels (text)", Tag, groups.text)}
       {renderGroup("flags (y/n)", Flag, groups.bool)}
@@ -145,6 +171,9 @@ export function SemanticOpPalette({
         <div className="mt-0.5 border-t border-chrome-border/40 pt-1.5">
           {renderGroup("group by ↘", Layers, dims)}
         </div>
+      ) : null}
+      {hoverCard ? (
+        <DropTargetCard info={hoverCard.info} panelRect={hoverCard.panelRect} tileRect={hoverCard.tileRect} />
       ) : null}
     </div>
   )

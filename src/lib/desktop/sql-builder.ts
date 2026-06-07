@@ -311,9 +311,11 @@ export function buildDimensionRollup(
 ): { sql: string; title: string } {
   const col = quoteSqlIdent(column.name)
   const out = quoteSqlIdent(operator)
+  // Skip NULL/blank inputs so a per-row LLM op never burns calls on empty cells.
   const sql = [
     `SELECT t.label AS ${out}, count(*) AS n`,
-    `FROM (SELECT * FROM {${args.parentBlockName}} LIMIT ${PROJECTION_PREVIEW_LIMIT}) b,`,
+    `FROM (SELECT * FROM {${args.parentBlockName}}`,
+    `      WHERE ${col} IS NOT NULL AND ${col}::text <> '' LIMIT ${PROJECTION_PREVIEW_LIMIT}) b,`,
     `     LATERAL rvbbit.${operator}(b.${col}::text) AS t(label)`,
     `GROUP BY 1`,
     `ORDER BY n DESC;`,

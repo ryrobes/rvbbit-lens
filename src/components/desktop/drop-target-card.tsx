@@ -2,7 +2,10 @@
 
 import { useEffect, useLayoutEffect, useRef, useState } from "react"
 import { createPortal } from "react-dom"
-import type { LucideIcon } from "@/lib/icons"
+import { Layers, type LucideIcon } from "@/lib/icons"
+import { returnTypeIcon, type SemanticOpTile } from "@/lib/desktop/semantic-ops"
+
+const ACCENT = "var(--brand-operators)"
 
 /**
  * Detail card for a hovered drop tile, shown WHILE a column is being dragged.
@@ -31,6 +34,49 @@ export interface DropTargetInfo {
   extraArgs?: { name: string; type: string }[]
   /** Footer note about the drop behavior. */
   note?: string
+}
+
+/**
+ * Hover-card info for a SCALAR op tile (per-row projection). Shared by the
+ * on-block overlay and the top-center palette so both surfaces explain the op
+ * identically (description, signature, args-to-bind, cost note).
+ */
+export function scalarDropInfo(tile: SemanticOpTile, colName: string): DropTargetInfo {
+  const op = tile.op.operator
+  const extra = op.argNames.slice(1)
+  return {
+    icon: returnTypeIcon(tile.returnType),
+    title: tile.label,
+    mono: `rvbbit.${op.name}`,
+    typeChip: tile.returnType,
+    shape: op.shape,
+    accent: ACCENT,
+    description: op.description,
+    signature: `rvbbit.${op.name}(${[colName, ...extra].join(", ")})`,
+    extraArgs: extra.map((name, i) => ({ name, type: op.argTypes[i + 1] ?? "text" })),
+    note: tile.needsArgs
+      ? "On drop you'll fill these args, then it previews calls & cost on the Explain tab — nothing runs yet."
+      : "On drop it previews the LLM/sidecar calls & cost on the Explain tab — nothing runs until you hit Run.",
+  }
+}
+
+/**
+ * Hover-card info for a DIMENSION op tile (fan-out → group-by). Distinct copy:
+ * it doesn't add a per-row column, it explodes the column into label rows and
+ * counts them (a frequency table).
+ */
+export function dimensionDropInfo(tile: SemanticOpTile, colName: string): DropTargetInfo {
+  const op = tile.op.operator
+  return {
+    icon: Layers,
+    title: tile.label,
+    mono: `rvbbit.${op.name}`,
+    shape: "dimension · group-by",
+    accent: ACCENT,
+    description: op.description,
+    signature: `LATERAL rvbbit.${op.name}(${colName}) → GROUP BY label`,
+    note: "On drop it fans this column out into label rows and counts them — a frequency table. Previews calls & cost on the Explain tab first; nothing runs until you Run.",
+  }
 }
 
 const CARD_W = 268

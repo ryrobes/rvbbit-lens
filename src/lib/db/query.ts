@@ -40,6 +40,8 @@ export interface ExecuteOpts {
   rowLimit?: number
   /** If true, wrap the query in a read-only transaction. */
   readOnly?: boolean
+  /** Run against a different database on the same server (e.g. pg_cron's home db). */
+  database?: string
 }
 
 export async function executeQuery(
@@ -47,7 +49,7 @@ export async function executeQuery(
   sql: string,
   opts: ExecuteOpts = {},
 ): Promise<QueryResult> {
-  const { pool, record } = await getPool(connectionId)
+  const { pool, record } = await getPool(connectionId, opts.database)
   const limit = opts.rowLimit ?? DEFAULT_ROW_LIMIT
   const client = await pool.connect()
   const start = Date.now()

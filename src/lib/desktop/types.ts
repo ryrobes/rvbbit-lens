@@ -41,6 +41,7 @@ export type DesktopWindowKind =
   | "scry-results"
   | "drift"
   | "model-studio"
+  | "folder"
 
 export interface DesktopWindowPosition {
   x: number
@@ -106,6 +107,7 @@ export type WindowPayload =
   | ScryResultsPayload
   | DriftPayload
   | ModelStudioPayload
+  | FolderPayload
 
 export interface FinderPayload {
   kind?: "finder"
@@ -575,6 +577,16 @@ export interface ModelStudioPayload {
   kind?: "model-studio"
   /** Optional model to select on open. */
   modelName?: string
+}
+
+/**
+ * A "folder" window — a file-explorer-style grouping of desktop launchers
+ * (and, later, saved queries / arranged items). `folderId` selects which
+ * group's items to show; the shell resolves it against its launcher registry.
+ */
+export interface FolderPayload {
+  kind?: "folder"
+  folderId: string
 }
 
 export interface ConnectionsPayload {

@@ -67,24 +67,38 @@ function signatureOf(c: ConnectionRecord): string {
   })
 }
 
-export async function getPool(connectionId: string): Promise<{ pool: Pool; record: ConnectionRecord }> {
-  const record = await getConnection(connectionId)
-  if (!record) throw new Error(`Unknown connection: ${connectionId}`)
+export async function getPool(
+  connectionId: string,
+  databaseOverride?: string,
+): Promise<{ pool: Pool; record: ConnectionRecord }> {
+  const base = await getConnection(connectionId)
+  if (!base) throw new Error(`Unknown connection: ${connectionId}`)
+
+  // Optional sibling-database override (e.g. pg_cron's home db, 'postgres'): reuse
+  // this connection's host + credentials but target a different database on the same
+  // server, pooled separately. Ignored for connectionString-mode connections (the
+  // dbname is baked into the URL) — those must register a dedicated connection.
+  const record: ConnectionRecord =
+    databaseOverride && databaseOverride !== base.database && !base.connectionString
+      ? { ...base, database: databaseOverride }
+      : base
+  const cacheKey =
+    record.database !== base.database ? `${connectionId}::${record.database}` : connectionId
 
   const sig = signatureOf(record)
-  const cached = POOL_CACHE.get(connectionId)
+  const cached = POOL_CACHE.get(cacheKey)
   if (cached && cached.signature === sig) return { pool: cached.pool, record }
 
   if (cached) {
     cached.pool.end().catch(() => {})
-    POOL_CACHE.delete(connectionId)
+    POOL_CACHE.delete(cacheKey)
   }
 
   const pool = new Pool(buildPoolConfig(record))
   pool.on("error", (err) => {
-    console.warn(`[rvbbit-lens] pool ${connectionId} error:`, err.message)
+    console.warn(`[rvbbit-lens] pool ${cacheKey} error:`, err.message)
   })
-  POOL_CACHE.set(connectionId, { pool, signature: sig })
+  POOL_CACHE.set(cacheKey, { pool, signature: sig })
   return { pool, record }
 }
 

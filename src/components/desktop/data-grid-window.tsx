@@ -450,9 +450,10 @@ export function DataGridWindow({
       return
     }
     // A newly-chained pipeline stage (… then op('…')) shouldn't fire its LLM
-    // stages on edit — surface the SQL so the user reviews and runs it.
+    // stages on edit — flip to Explain for a plan-only calls/cost preview; the
+    // user reviews and runs it explicitly.
     if (payload.sql && hasTopLevelThen(payload.sql)) {
-      setActiveTab("sql")
+      setActiveTab("explain")
       return
     }
     if (payload.sql) void runSql(payload.sql)

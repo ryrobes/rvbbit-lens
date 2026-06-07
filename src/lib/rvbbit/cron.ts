@@ -52,12 +52,15 @@ interface Err {
   error: string
 }
 
-async function run(connectionId: string, sql: string): Promise<Ok | Err> {
+// `database` runs the statement against a sibling db on the same server (reusing
+// this connection's creds) — used to reach pg_cron's home db (cron.database_name)
+// while the user stays connected to their working db.
+async function run(connectionId: string, sql: string, database?: string): Promise<Ok | Err> {
   try {
     const res = await fetch("/api/db/query", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ connectionId, sql, rowLimit: 500 }),
+      body: JSON.stringify({ connectionId, sql, rowLimit: 500, database }),
     })
     return (await res.json()) as Ok | Err
   } catch (e) {
@@ -91,18 +94,27 @@ const STATE_SQL = `SELECT
 export async function detectCronState(
   connectionId: string,
 ): Promise<{ state: CronState | null; error: string | null }> {
+  // Probe the ACTIVE db: cron_db (the home), this_db (working), and the global
+  // available/preloaded flags are all valid from anywhere.
   const r = await run(connectionId, STATE_SQL)
   if (!r.ok) return { state: null, error: r.error }
   const row = r.rows[0] ?? {}
+  const cronDb = row.cron_db == null ? null : String(row.cron_db)
+  const thisDb = String(row.this_db ?? "")
+  // `created` (the extension) lives in pg_cron's HOME db. If that differs from the
+  // working db, check there — otherwise the working db would always look "not set up".
+  let created = bool(row.created)
+  if (cronDb && cronDb !== thisDb) {
+    const hr = await run(
+      connectionId,
+      "SELECT EXISTS(SELECT 1 FROM pg_extension WHERE extname='pg_cron') AS created",
+      cronDb,
+    )
+    if (hr.ok) created = bool(hr.rows[0]?.created)
+  }
   return {
     error: null,
-    state: {
-      created: bool(row.created),
-      available: bool(row.available),
-      preloaded: bool(row.preloaded),
-      cronDb: row.cron_db == null ? null : String(row.cron_db),
-      thisDb: String(row.this_db ?? ""),
-    },
+    state: { created, available: bool(row.available), preloaded: bool(row.preloaded), cronDb, thisDb },
   }
 }
 
@@ -117,8 +129,11 @@ ORDER BY j.jobname NULLS LAST, j.jobid`
 
 export async function listCronJobs(
   connectionId: string,
+  homeDb?: string | null,
 ): Promise<{ jobs: CronJob[]; error: string | null }> {
-  const r = await run(connectionId, JOBS_SQL)
+  // cron.job lives only in the home db; route there. Each job's `database` column
+  // shows the db it actually runs in (its schedule_in_database target).
+  const r = await run(connectionId, JOBS_SQL, homeDb ?? undefined)
   if (!r.ok) return { jobs: [], error: r.error }
   return {
     error: null,
@@ -139,30 +154,20 @@ export async function listCronJobs(
 export async function listCronRuns(
   connectionId: string,
   jobid: number,
-  withCost: boolean,
+  homeDb?: string | null,
 ): Promise<{ runs: CronRun[]; error: string | null }> {
-  // Cost rollup: receipts whose invocation falls inside the run's window. Only
-  // valid when rvbbit.receipts exists in this database (withCost).
-  const costSelect = withCost
-    ? `, c.cost_usd, c.n_calls, c.tokens_in, c.tokens_out`
-    : `, NULL AS cost_usd, NULL AS n_calls, NULL AS tokens_in, NULL AS tokens_out`
-  const costJoin = withCost
-    ? `LEFT JOIN LATERAL (
-         SELECT sum(cost_usd) AS cost_usd, count(*) AS n_calls,
-                sum(n_tokens_in) AS tokens_in, sum(n_tokens_out) AS tokens_out
-         FROM rvbbit.receipts rc
-         WHERE rc.invocation_at >= d.start_time
-           AND rc.invocation_at <= coalesce(d.end_time, now())
-       ) c ON true`
-    : ``
+  // cron.job_run_details lives in the home db (route there). Per-run cost was a
+  // single-query join to rvbbit.receipts when cron + rvbbit co-located; with the
+  // home db ('postgres') decoupled from the target db, receipts live elsewhere, so
+  // cost is omitted here (cross-db per-run cost attribution is a follow-up).
   const sql = `SELECT d.runid, d.status, d.start_time, d.end_time,
        extract(epoch FROM (coalesce(d.end_time, now()) - d.start_time)) AS duration_s,
-       left(d.return_message, 240) AS return_message${costSelect}
+       left(d.return_message, 240) AS return_message,
+       NULL AS cost_usd, NULL AS n_calls, NULL AS tokens_in, NULL AS tokens_out
 FROM cron.job_run_details d
-${costJoin}
 WHERE d.jobid = ${jobid}
 ORDER BY d.start_time DESC LIMIT 20`
-  const r = await run(connectionId, sql)
+  const r = await run(connectionId, sql, homeDb ?? undefined)
   if (!r.ok) return { runs: [], error: r.error }
   return {
     error: null,
@@ -181,14 +186,21 @@ ORDER BY d.start_time DESC LIMIT 20`
   }
 }
 
-/** A mutating statement; returns {ok} / error. */
-export async function exec(connectionId: string, sql: string): Promise<{ ok: boolean; error: string | null }> {
-  const r = await run(connectionId, sql)
+/** A mutating statement; returns {ok} / error. `database` routes it to a sibling db
+ *  (the pg_cron home) so cron.* CRUD runs where the cron schema lives. */
+export async function exec(
+  connectionId: string,
+  sql: string,
+  database?: string,
+): Promise<{ ok: boolean; error: string | null }> {
+  const r = await run(connectionId, sql, database)
   return r.ok ? { ok: true, error: null } : { ok: false, error: r.error }
 }
 
-export function scheduleSql(name: string, schedule: string, command: string): string {
-  return `SELECT cron.schedule(${q(name)}, ${q(schedule)}, ${q(command)})`
+/** Schedule a job in pg_cron's home db that RUNS in `targetDb` (where rvbbit lives).
+ *  Uses cron.schedule_in_database so the home db ('postgres') need not have rvbbit. */
+export function scheduleSql(name: string, schedule: string, command: string, targetDb: string): string {
+  return `SELECT cron.schedule_in_database(${q(name)}, ${q(schedule)}, ${q(command)}, ${q(targetDb)})`
 }
 export function unscheduleSql(jobid: number): string {
   return `SELECT cron.unschedule(${jobid})`

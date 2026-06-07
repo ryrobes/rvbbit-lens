@@ -43,7 +43,7 @@ import {
   returnTypeIcon,
   type SemanticOpTile,
 } from "@/lib/desktop/semantic-ops"
-import { DropTargetCard, type DropTargetInfo } from "./drop-target-card"
+import { DropTargetCard, dimensionDropInfo, scalarDropInfo, type DropTargetInfo } from "./drop-target-card"
 import { rowsetInfo, rowsetOpIcon } from "./rowset-op-palette"
 import type {
   DesktopBlockDragPayload,
@@ -271,22 +271,11 @@ export function DesktopWindow({
   }
 
   function semanticTileInfo(tile: SemanticOpTile): DropTargetInfo {
-    const op = tile.op.operator
-    const extra = op.argNames.slice(1)
-    return {
-      icon: returnTypeIcon(tile.returnType),
-      title: tile.label,
-      mono: `rvbbit.${op.name}`,
-      typeChip: tile.returnType,
-      shape: op.shape,
-      accent: "var(--brand-operators)",
-      description: op.description,
-      signature: `rvbbit.${op.name}(${[draggedColName, ...extra].join(", ")})`,
-      extraArgs: extra.map((name, i) => ({ name, type: op.argTypes[i + 1] ?? "text" })),
-      note: tile.needsArgs
-        ? "On drop you'll fill these args, then it previews calls & cost in the Explain tab — nothing runs yet."
-        : "On drop it previews the LLM/sidecar calls & cost in the Explain tab — nothing runs until you hit Run.",
-    }
+    // Per-shape copy: dimension tiles fan out → frequency table; scalar tiles
+    // add a per-row projection. (Shared with the top-center palette.)
+    return tile.op.operator.shape === "dimension"
+      ? dimensionDropInfo(tile, draggedColName)
+      : scalarDropInfo(tile, draggedColName)
   }
 
   function renderRollupTile(tile: { op: RollupOp; label: string; hint: string }, fullWidth: boolean) {
@@ -334,7 +323,8 @@ export function DesktopWindow({
     const key = `semantic:${tile.op.operator.name}`
     const hot = hoveredOpKey === key
     const accent = "var(--brand-operators)"
-    const Icon = returnTypeIcon(tile.returnType)
+    // Dimension (fan-out) tiles read as Layers; scalar tiles show their return-type glyph.
+    const Icon = tile.op.operator.shape === "dimension" ? Layers : returnTypeIcon(tile.returnType)
     return (
       <div
         key={key}
@@ -493,10 +483,11 @@ export function DesktopWindow({
   const scalarSubrails = [scalarGroups.text, scalarGroups.bool, scalarGroups.float8].filter((g) => g.length > 0)
   // The DIMENSION band is ACTIVE (real tiles) when dimension ops surface for
   // this column — so it's not counted as a placeholder then.
+  // whole-result (rowset) is handled via the block-chip drag, not a column drop,
+  // so it's intentionally NOT a column-overlay placeholder.
   const placeholderCount = [
     shapePlaceholders.aggregate,
     dimensionTiles.length > 0 ? [] : shapePlaceholders.dimension,
-    shapePlaceholders.wholeResult,
   ].filter((n) => n.length > 0).length
   // Rough per-element heights (px) for the fit estimate.
   const TILE_H = 44, HEAD_H = 18, SUBRAIL_H = 16, PIVOT_H = 30, PLACEHOLDER_H = 16
@@ -820,7 +811,6 @@ export function DesktopWindow({
               <>
                 {placeholderBand(Boxes, "aggregate", "one per group", shapePlaceholders.aggregate, "drop a column")}
                 {dimensionTiles.length > 0 ? null : placeholderBand(Layers, "dimension", "bins a group", shapePlaceholders.dimension, "drop a column")}
-                {placeholderBand(Table2, "whole-result", "drop on the block", shapePlaceholders.wholeResult, "drop the result")}
               </>
             ) : null}
           </div>

@@ -14,6 +14,7 @@ import {
   FileCsv,
   FileText,
   FlowArrow,
+  Folder,
   FolderOpen,
   GitBranch,
   Globe,
@@ -33,6 +34,7 @@ import {
 } from "@/lib/icons"
 import { PhosphorIconProvider } from "@/components/icon-provider"
 import { DesktopIcon } from "./desktop-icon"
+import { FolderWindow, type LauncherItem } from "./folder-window"
 import { DesktopMenuBar } from "./desktop-menu-bar"
 import { LineageOverlay } from "./lineage-overlay"
 import { ContextMenu, type ContextMenuState } from "./context-menu"
@@ -110,6 +112,7 @@ import type {
   DataPayload,
   DataSearchPayload,
   DriftPayload,
+  FolderPayload,
   ModelStudioPayload,
   DesktopBlockDragPayload,
   DesktopColumnDragPayload,
@@ -2166,7 +2169,9 @@ export function DesktopShell() {
           title,
           sql,
           origin: "query", // not "derived" → mount effect won't auto-run it
-          view: { activeTab: "sql", sqlRailOpen: true, sqlRailWidthPx: 360 },
+          // Open on Explain for a projected calls/cost preview (plan-only, no
+          // LLM) — parity with scalar drops; the real query never auto-runs.
+          view: { activeTab: "explain", sqlRailOpen: false, sqlRailWidthPx: 360 },
           lineage: {
             kind: "block-ref",
             parentWindowId: payload.parentWindowId,
@@ -2434,7 +2439,8 @@ export function DesktopShell() {
           title,
           sql,
           origin: "derived",
-          view: { activeTab: "sql", sqlRailOpen: true, sqlRailWidthPx: 380 },
+          // Explain-first: preview the pipeline's calls/cost before running it.
+          view: { activeTab: "explain", sqlRailOpen: false, sqlRailWidthPx: 380 },
           lineage: {
             kind: "block-ref",
             parentWindowId: payload.windowId,
@@ -2465,7 +2471,7 @@ export function DesktopShell() {
           payload: {
             ...p,
             sql,
-            view: { ...(p.view ?? {}), activeTab: "sql", sqlRailOpen: true, sqlDraft: undefined },
+            view: { ...(p.view ?? {}), activeTab: "explain", sqlRailOpen: false, sqlDraft: undefined },
           } satisfies DataPayload,
         }
       }))
@@ -2823,6 +2829,53 @@ export function DesktopShell() {
     [screenToWorld, openSqlScratchAtPos, openFinder, onPickWallpaper, lineageVisible, setLineage],
   )
 
+  // Open a folder window for a launcher group.
+  const openFolder = useCallback((folderId: string) => {
+    const folder = FOLDERS.find((f) => f.id === folderId)
+    openWindow({
+      id: randomUUID(),
+      kind: "folder",
+      title: folder?.label ?? "Folder",
+      x: clampWorld(200),
+      y: clampWorld(130),
+      width: 460,
+      height: 420,
+      payload: { kind: "folder", folderId } satisfies FolderPayload,
+    })
+  }, [openWindow])
+
+  // Flat launcher registry — the data behind BOTH the desktop icons and the
+  // folder windows. `folder` routes an item into a folder window (undefined =
+  // lives on the desktop); `rvbbit` gates it to rvbbit connections.
+  const launchers: LauncherItem[] = [
+    { id: "finder", label: "Finder", icon: FolderOpen, color: "var(--brand-finder)", activate: openFinder },
+    { id: "sql-scratch", label: "SQL Scratch", icon: FileCode2, color: "var(--brand-sql-scratch)", activate: openSqlScratch },
+    { id: "view-apps", label: "View Apps", icon: Boxes, color: "var(--brand-view-apps)", sublabel: viewAppCount ? `${viewAppCount} saved` : undefined, activate: openViewApps },
+    { id: "connections", label: "Connections", icon: Plug, color: "var(--brand-connections)", activate: openConnections },
+    // System
+    { id: "system-objects", label: "System Objects", icon: Layers, color: "var(--brand-system-objects)", description: "Tables, indexes, roles, activity", activate: () => openSystemObjects("tables"), folder: "system" },
+    { id: "extensions", label: "Extensions", icon: Settings2, color: "var(--brand-extensions)", description: "Installed Postgres extensions", activate: openExtensions, folder: "system" },
+    { id: "monitor", label: "Monitor", icon: Activity, color: "var(--brand-pg-monitor)", description: "Live server activity & stats", activate: openPgMonitor, folder: "system" },
+    { id: "cache", label: "Cache", icon: Database, color: "var(--brand-cache)", description: "Compiler & operator result caches", activate: openCache, folder: "system", rvbbit: true },
+    { id: "receipts", label: "Receipts", icon: FileText, color: "var(--brand-rvbbit-cache)", sublabel: schema?.rvbbitVersion ?? undefined, description: "Per-call LLM receipts & audit", activate: openRvbbitCache, folder: "system", rvbbit: true },
+    { id: "costs", label: "Costs", icon: DollarSign, color: "var(--brand-costs)", description: "LLM/sidecar spend breakdown", activate: () => openCosts(), folder: "system", rvbbit: true },
+    // Semantic
+    { id: "operators", label: "Operators", icon: FlowArrow, color: "var(--brand-operators)", description: "Semantic SQL operators", activate: openOperators, folder: "semantic", rvbbit: true },
+    { id: "specialists", label: "Specialists", icon: Brain, color: "var(--brand-specialists)", description: "Fine-tuned task models", activate: openSpecialists, folder: "semantic", rvbbit: true },
+    { id: "routing", label: "Routing", icon: GitBranch, color: "var(--brand-routing)", description: "Model/backend routing rules", activate: openRouting, folder: "semantic", rvbbit: true },
+    { id: "mcp", label: "MCP", icon: Globe, color: "var(--brand-mcp)", description: "MCP servers & tools", activate: openMcpServers, folder: "semantic", rvbbit: true },
+    { id: "capabilities", label: "Capabilities", icon: Package, color: "var(--brand-capability)", description: "Installable model capabilities", activate: () => openCapabilities(), folder: "semantic", rvbbit: true },
+    { id: "warren", label: "Warren", icon: Rocket, color: "var(--brand-warren)", description: "Sidecar model runtimes & jobs", activate: () => openWarren(), folder: "semantic", rvbbit: true },
+    { id: "model-studio", label: "Model Studio", icon: Brain, color: "var(--brand-specialists)", description: "Inspect & try models", activate: () => openModelStudio(), folder: "semantic", rvbbit: true },
+    { id: "duck", label: "Duck", icon: Boxes, color: "var(--brand-duck)", description: "Sidecar broker telemetry", activate: openDuck, folder: "semantic", rvbbit: true },
+    // Knowledge
+    { id: "kg", label: "Knowledge Graph", icon: TreeStructure, color: "var(--brand-kg)", description: "Browse the extracted graph", activate: () => openKgBrowser(), folder: "knowledge", rvbbit: true },
+    { id: "kg-explorer", label: "Graph Explorer", icon: TreeStructure, color: "var(--brand-kg)", description: "Walk entities & relations", activate: () => openKgExplorer(), folder: "knowledge", rvbbit: true },
+    { id: "query-lens", label: "Query Lens", icon: Eye, color: "var(--brand-query-lens)", description: "Trace a query's execution", activate: () => openQueryLens(), folder: "knowledge", rvbbit: true },
+    { id: "data-search", label: "Data Search", icon: Search, color: "var(--brand-kg)", description: "Semantic search across data", activate: () => openDataSearch(), folder: "knowledge", rvbbit: true },
+    { id: "drift", label: "Drift", icon: LineChart, color: "var(--brand-kg)", description: "Compare extraction runs", activate: () => openDrift(), folder: "knowledge", rvbbit: true },
+  ]
+
   return (
     <PhosphorIconProvider>
     <div
@@ -2996,64 +3049,22 @@ export function DesktopShell() {
         </div>
       ) : null}
 
-      {/* Desktop icon grid (fixed shortcuts) */}
-      <div className="pointer-events-none absolute inset-x-0 top-10 z-0 grid grid-cols-[repeat(auto-fill,minmax(96px,1fr))] gap-3 px-6 pt-2">
+      {/* Desktop icons — classic desktop arrangement: a left-aligned vertical
+          column that wraps into further columns growing RIGHTWARD (flex-col +
+          wrap, auto width anchored to the left edge). */}
+      <div className="pointer-events-none absolute top-12 bottom-3 left-2 z-0 flex flex-col flex-wrap content-start gap-1">
         <div className="pointer-events-auto contents">
-          <DesktopIcon label="Finder" icon={FolderOpen} onActivate={openFinder} iconColor="var(--brand-finder)" />
-          <DesktopIcon label="SQL Scratch" icon={FileCode2} onActivate={openSqlScratch} iconColor="var(--brand-sql-scratch)" />
-          <DesktopIcon label="View Apps" icon={Boxes} sublabel={viewAppCount ? `${viewAppCount} saved` : undefined} onActivate={openViewApps} iconColor="var(--brand-view-apps)" />
-          <DesktopIcon label="System Objects" icon={Layers} onActivate={() => openSystemObjects("tables")} iconColor="var(--brand-system-objects)" />
-          <DesktopIcon label="Extensions" icon={Settings2} onActivate={openExtensions} iconColor="var(--brand-extensions)" />
-          <DesktopIcon label="Connections" icon={Plug} onActivate={openConnections} iconColor="var(--brand-connections)" />
-          <DesktopIcon label="Monitor" icon={Activity} onActivate={openPgMonitor} iconColor="var(--brand-pg-monitor)" />
-          {hasRvbbit ? (
-            <DesktopIcon label="Receipts" icon={FileText} sublabel={schema?.rvbbitVersion ?? undefined} onActivate={openRvbbitCache} iconColor="var(--brand-rvbbit-cache)" />
-          ) : null}
-          {hasRvbbit ? (
-            <DesktopIcon label="Cache" icon={Database} onActivate={openCache} iconColor="var(--brand-cache)" />
-          ) : null}
-          {hasRvbbit ? (
-            <DesktopIcon label="Operators" icon={FlowArrow} onActivate={openOperators} iconColor="var(--brand-operators)" />
-          ) : null}
-          {hasRvbbit ? (
-            <DesktopIcon label="Specialists" icon={Brain} onActivate={openSpecialists} iconColor="var(--brand-specialists)" />
-          ) : null}
-          {hasRvbbit ? (
-            <DesktopIcon label="Routing" icon={GitBranch} onActivate={openRouting} iconColor="var(--brand-routing)" />
-          ) : null}
-          {hasRvbbit ? (
-            <DesktopIcon label="MCP" icon={Globe} onActivate={openMcpServers} iconColor="var(--brand-mcp)" />
-          ) : null}
-          {hasRvbbit ? (
-            <DesktopIcon label="Capabilities" icon={Package} onActivate={() => openCapabilities()} iconColor="var(--brand-capability)" />
-          ) : null}
-          {hasRvbbit ? (
-            <DesktopIcon label="Warren" icon={Rocket} onActivate={() => openWarren()} iconColor="var(--brand-warren)" />
-          ) : null}
-          {hasRvbbit ? (
-            <DesktopIcon label="Costs" icon={DollarSign} onActivate={() => openCosts()} iconColor="var(--brand-costs)" />
-          ) : null}
-          {hasRvbbit ? (
-            <DesktopIcon label="Duck" icon={Boxes} onActivate={openDuck} iconColor="var(--brand-duck)" />
-          ) : null}
-          {hasRvbbit ? (
-            <DesktopIcon label="Query Lens" icon={Eye} onActivate={() => openQueryLens()} iconColor="var(--brand-query-lens)" />
-          ) : null}
-          {hasRvbbit ? (
-            <DesktopIcon label="Data Search" icon={Search} onActivate={() => openDataSearch()} iconColor="var(--brand-kg)" />
-          ) : null}
-          {hasRvbbit ? (
-            <DesktopIcon label="Drift" icon={LineChart} onActivate={() => openDrift()} iconColor="var(--brand-kg)" />
-          ) : null}
-          {hasRvbbit ? (
-            <DesktopIcon label="Model Studio" icon={Brain} onActivate={() => openModelStudio()} iconColor="var(--brand-specialists)" />
-          ) : null}
-          {hasRvbbit ? (
-            <DesktopIcon label="Knowledge Graph" icon={TreeStructure} onActivate={() => openKgBrowser()} iconColor="var(--brand-kg)" />
-          ) : null}
-          {hasRvbbit ? (
-            <DesktopIcon label="Graph Explorer" icon={TreeStructure} onActivate={() => openKgExplorer()} iconColor="var(--brand-kg)" />
-          ) : null}
+          {/* Desktop-level launchers + folder icons, built from the
+              launcher registry. Folders only appear if they have a
+              visible item for this connection. */}
+          {launchers
+            .filter((l) => !l.folder && (!l.rvbbit || hasRvbbit))
+            .map((l) => (
+              <DesktopIcon key={l.id} label={l.label} sublabel={l.sublabel} icon={l.icon} iconColor={l.color} onActivate={l.activate} />
+            ))}
+          {FOLDERS.filter((f) => launchers.some((l) => l.folder === f.id && (!l.rvbbit || hasRvbbit))).map((f) => (
+            <DesktopIcon key={`folder:${f.id}`} label={f.label} icon={Folder} iconColor={f.color} onActivate={() => openFolder(f.id)} />
+          ))}
         </div>
       </div>
 
@@ -3121,6 +3132,7 @@ export function DesktopShell() {
                 {renderWindowContent(w, {
                   activeConnectionId,
                   hasRvbbit,
+                  launchers,
                   schema,
                   schemaLoading,
                   busy,
@@ -3256,6 +3268,8 @@ function EmptyStateOverlay({ onAddConnection }: { onAddConnection: () => void })
 interface WindowContext {
   activeConnectionId: string | null
   hasRvbbit: boolean
+  /** The launcher registry — folder windows filter it by their folderId. */
+  launchers: LauncherItem[]
   schema: SchemaSnapshot | null
   schemaLoading: boolean
   busy: boolean
@@ -3625,6 +3639,11 @@ function renderWindowContent(
           hasRvbbit={ctx.hasRvbbit}
         />
       )
+    case "folder": {
+      const folderId = (w.payload as FolderPayload).folderId
+      const items = ctx.launchers.filter((l) => l.folder === folderId && (!l.rvbbit || ctx.hasRvbbit))
+      return <FolderWindow items={items} />
+    }
     case "capabilities":
       return (
         <CapabilitiesWindow
@@ -3737,9 +3756,18 @@ function isCsvLikeFile(f: File): boolean {
   )
 }
 
+// Desktop launcher folders (file-explorer groups). Each is a folder icon on
+// the desktop that opens a folder window of its `launchers` items.
+const FOLDERS: { id: string; label: string; color: string }[] = [
+  { id: "system", label: "System", color: "var(--brand-system-objects)" },
+  { id: "semantic", label: "Semantic", color: "var(--brand-operators)" },
+  { id: "knowledge", label: "Knowledge", color: "var(--brand-kg)" },
+]
+
 function iconForKind(kind: DesktopWindowState["kind"]) {
   switch (kind) {
     case "finder": return FolderOpen
+    case "folder": return Folder
     case "data": return Table2
     case "csv-import": return FileCsv
     case "connections": return Plug

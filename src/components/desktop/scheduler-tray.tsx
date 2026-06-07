@@ -85,7 +85,9 @@ export function SchedulerTray({ activeConnectionId, hasRvbbit, onOpenSql, onOpen
     setState(s.state)
     setError(s.error)
     if (s.state?.created) {
-      const j = await listCronJobs(activeConnectionId)
+      // cron.job lives in the home db (cron.database_name, default 'postgres');
+      // route the listing there even though we stay connected to the working db.
+      const j = await listCronJobs(activeConnectionId, s.state.cronDb)
       setJobs(j.jobs)
       if (j.error) setError(j.error)
     } else {
@@ -115,7 +117,7 @@ export function SchedulerTray({ activeConnectionId, hasRvbbit, onOpenSql, onOpen
       if (cancelled) return
       setState(s.state)
       if (s.state?.created) {
-        const j = await listCronJobs(activeConnectionId)
+        const j = await listCronJobs(activeConnectionId, s.state.cronDb)
         if (!cancelled) setJobs(j.jobs)
       }
     })()
@@ -136,28 +138,33 @@ export function SchedulerTray({ activeConnectionId, hasRvbbit, onOpenSql, onOpen
     return () => document.removeEventListener("mousedown", h, true)
   }, [open])
 
+  // All cron CRUD (CREATE EXTENSION, schedule/unschedule/alter_job) targets the
+  // cron schema, which lives ONLY in the home db (cron.database_name). Route every
+  // mutation there via the sibling-db override so it works regardless of which db
+  // the user is connected to.
   const mutate = useCallback(
     async (sql: string) => {
       if (!activeConnectionId || busy) return
       setBusy(true)
-      const r = await exec(activeConnectionId, sql)
+      const r = await exec(activeConnectionId, sql, state?.cronDb ?? undefined)
       if (!r.ok) setError(r.error)
       await reload()
       setBusy(false)
     },
-    [activeConnectionId, busy, reload],
+    [activeConnectionId, busy, reload, state?.cronDb],
   )
 
-  // Run a job's command immediately (ad-hoc, via this connection). pg_cron has no
-  // "trigger now", so we just execute the SQL — note this does NOT create a
-  // cron.job_run_details entry (only scheduled runs do).
+  // Run a job's command immediately (ad-hoc). pg_cron has no "trigger now", so we
+  // just execute the SQL — note this does NOT create a cron.job_run_details entry
+  // (only scheduled runs do). Target the job's OWN database (its schedule_in_database
+  // target, where rvbbit lives), not the home db, since the command needs that schema.
   const runNow = useCallback(
     async (job: CronJob) => {
       if (!activeConnectionId || running != null) return
       setRunning(job.jobid)
       setRunResult(null)
       const started = Date.now()
-      const r = await exec(activeConnectionId, job.command)
+      const r = await exec(activeConnectionId, job.command, job.database || undefined)
       const secs = ((Date.now() - started) / 1000).toFixed(1)
       setRunResult({
         jobid: job.jobid,
@@ -178,16 +185,21 @@ export function SchedulerTray({ activeConnectionId, hasRvbbit, onOpenSql, onOpen
       setExpanded(jobid)
       setRuns([])
       if (!activeConnectionId) return
-      const r = await listCronRuns(activeConnectionId, jobid, hasRvbbit)
+      // cron.job_run_details lives in the home db; route there.
+      const r = await listCronRuns(activeConnectionId, jobid, state?.cronDb)
       setRuns(r.runs)
       if (r.error) setError(r.error)
     },
-    [activeConnectionId, expanded, hasRvbbit],
+    [activeConnectionId, expanded, state?.cronDb],
   )
 
   const status = useMemo(() => trayStatus(state, jobs), [state, jobs])
   const crawlJob = jobs.find(isCatalogJob)
   const accelTickJob = jobs.find(isAccelTickJob)
+  // Where newly scheduled jobs RUN: the working db the user is connected to. The
+  // job is registered in the home db (cron.database_name) but targets this db via
+  // cron.schedule_in_database, so it need not equal the home db.
+  const targetDb = state?.thisDb ?? ""
 
   return (
     <div ref={wrapRef} className="relative" style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}>
@@ -261,7 +273,7 @@ export function SchedulerTray({ activeConnectionId, hasRvbbit, onOpenSql, onOpen
                 setEdit={setEditing}
                 busy={busy}
                 onSave={async (name, schedule, command) => {
-                  await mutate(scheduleSql(name, schedule, command))
+                  await mutate(scheduleSql(name, schedule, command, targetDb))
                   setEditing(null)
                 }}
               />
@@ -273,7 +285,7 @@ export function SchedulerTray({ activeConnectionId, hasRvbbit, onOpenSql, onOpen
                     job={crawlJob}
                     busy={busy}
                     onSchedule={() =>
-                      void mutate(scheduleSql("rvbbit_catalog_refresh", "0 3 * * *", CRAWL_COMMAND))
+                      void mutate(scheduleSql("rvbbit_catalog_refresh", "0 3 * * *", CRAWL_COMMAND, targetDb))
                     }
                   />
                 ) : null}
@@ -285,7 +297,7 @@ export function SchedulerTray({ activeConnectionId, hasRvbbit, onOpenSql, onOpen
                       job={accelTickJob}
                       busy={busy}
                       onSchedule={() =>
-                        void mutate(scheduleSql("rvbbit_accel_tick", "* * * * *", ACCEL_TICK_COMMAND))
+                        void mutate(scheduleSql("rvbbit_accel_tick", "* * * * *", ACCEL_TICK_COMMAND, targetDb))
                       }
                     />
                   </div>
@@ -360,19 +372,24 @@ export function SchedulerTray({ activeConnectionId, hasRvbbit, onOpenSql, onOpen
 // ── Setup (pg_cron not yet created) ─────────────────────────────────
 
 function SetupView({ state, busy, onCreate }: { state: CronState; busy: boolean; onCreate: () => void }) {
-  // Can create here only if preloaded AND this db is pg_cron's home.
-  const homeMatch = !state.cronDb || state.cronDb === state.thisDb
-  const canCreate = state.available && state.preloaded && homeMatch
+  // pg_cron's schema lives only in its home db (cron.database_name, default 'postgres').
+  // We create the extension THERE — from any connection, via the sibling-db override —
+  // so multiple working databases share one cron home instead of fighting over it.
+  const homeDb = state.cronDb ?? "postgres"
+  const homeIsThis = homeDb === state.thisDb
+  const canCreate = state.available && state.preloaded
   return (
     <div className="space-y-2 p-3">
       <div className="flex items-center gap-1.5 text-chrome-text/80">
         <AlertTriangle className="h-3.5 w-3.5 text-warning" />
-        pg_cron is not set up in <span className="font-mono text-foreground">{state.thisDb}</span>.
+        pg_cron is not set up{homeIsThis ? "" : <> in <span className="font-mono text-foreground">{homeDb}</span></>}.
       </div>
       {canCreate ? (
         <>
           <p className="text-[11px] leading-snug text-chrome-text/60">
-            pg_cron is preloaded — it can be created here with no restart.
+            pg_cron is preloaded — it will be created in its home database{" "}
+            <span className="font-mono text-foreground">{homeDb}</span> (no restart). Jobs you add still
+            run against <span className="font-mono text-foreground">{state.thisDb}</span>.
           </p>
           <button
             type="button"
@@ -380,15 +397,9 @@ function SetupView({ state, busy, onCreate }: { state: CronState; busy: boolean;
             onClick={onCreate}
             className="inline-flex items-center gap-1.5 rounded bg-rvbbit-accent/15 px-2.5 py-1 text-[11px] font-medium text-rvbbit-accent hover:bg-rvbbit-accent/25 disabled:opacity-40"
           >
-            <Check className="h-3 w-3" /> Create pg_cron extension
+            <Check className="h-3 w-3" /> Create pg_cron in {homeDb}
           </button>
         </>
-      ) : state.preloaded && !homeMatch ? (
-        <p className="text-[11px] leading-snug text-chrome-text/60">
-          pg_cron&apos;s home database is{" "}
-          <span className="font-mono text-foreground">{state.cronDb}</span> — connect there to manage
-          jobs, or set <span className="font-mono">cron.database_name = &apos;{state.thisDb}&apos;</span> and restart.
-        </p>
       ) : (
         <div className="space-y-1.5">
           <p className="text-[11px] leading-snug text-chrome-text/60">
@@ -396,7 +407,7 @@ function SetupView({ state, busy, onCreate }: { state: CronState; busy: boolean;
             needs a server restart):
           </p>
           <pre className="overflow-x-auto rounded bg-background/70 px-2 py-1.5 font-mono text-[10.5px] leading-relaxed text-foreground/90">
-{`shared_preload_libraries = 'pg_cron'\ncron.database_name = '${state.thisDb}'`}
+{`shared_preload_libraries = 'pg_cron'\ncron.database_name = 'postgres'`}
           </pre>
         </div>
       )}

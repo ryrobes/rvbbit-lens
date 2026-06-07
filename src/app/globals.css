@@ -102,6 +102,7 @@
   --win-palette-h: 320;
   --win-pg-monitor-h: 150;
   --win-duck-h: 210;
+  --win-folder-h: 85;
 
   /* Desktop shortcut brand colors. Most match a window-kind hue, but
      SQL Scratch points at a warmer 88 (yellow) because the shortcut
@@ -227,6 +228,7 @@
   --win-palette-h: 320;
   --win-pg-monitor-h: 150;
   --win-duck-h: 210;
+  --win-folder-h: 85;
 
   --brand-finder: oklch(50% 0.025 220);
   --brand-sql-scratch: oklch(54% 0.025 88);
