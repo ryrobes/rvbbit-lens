@@ -481,6 +481,56 @@ export async function fetchSpecialists(
   }
 }
 
+// ── Python runtime metadata (for the builder's env/handler pickers) ──
+
+export interface PythonEnv {
+  name: string
+  status: string
+  pythonVersion: string | null
+}
+
+export interface PythonHandler {
+  name: string
+  env: string
+  entrypoint: string | null
+  description: string | null
+}
+
+export async function fetchPythonEnvs(
+  connectionId: string,
+): Promise<{ envs: PythonEnv[]; error?: string }> {
+  const res = await runQuery(
+    connectionId,
+    "SELECT name, status, python_version FROM rvbbit.python_envs ORDER BY name",
+  )
+  if (!res.ok) return { envs: [], error: res.error }
+  return {
+    envs: res.rows.map((r) => ({
+      name: String(r.name ?? ""),
+      status: String(r.status ?? ""),
+      pythonVersion: r.python_version == null ? null : String(r.python_version),
+    })),
+  }
+}
+
+export async function fetchPythonHandlers(
+  connectionId: string,
+): Promise<{ handlers: PythonHandler[]; error?: string }> {
+  const res = await runQuery(
+    connectionId,
+    "SELECT name, env_name, entrypoint, description FROM rvbbit.python_handlers ORDER BY name",
+  )
+  if (!res.ok) return { handlers: [], error: res.error }
+  return {
+    handlers: res.rows.map((r) => ({
+      name: String(r.name ?? ""),
+      env: String(r.env_name ?? ""),
+      entrypoint: r.entrypoint == null ? null : String(r.entrypoint),
+      description: r.description == null ? null : String(r.description),
+    })),
+  }
+}
+
 /** Call the operator for real (one billable run). Returns the raw output. */
 export async function runOperator(
   connectionId: string,

@@ -5,6 +5,8 @@ import { cn } from "@/lib/utils"
 import {
   defaultNode,
   toStepTemplate,
+  type PythonEnv,
+  type PythonHandler,
   type RvbbitOperator,
   type RvbbitSpecialist,
   type NodeKind,
@@ -28,6 +30,8 @@ interface OperatorInspectorProps {
   specialists: RvbbitSpecialist[]
   mcpServers: McpServerOverview[]
   mcpTools: McpToolLite[]
+  pythonEnvs: PythonEnv[]
+  pythonHandlers: PythonHandler[]
   mcpGatewayReady: boolean
   onOpenMcpGateway?: () => void
   onChange: (next: RvbbitOperator) => void
@@ -43,6 +47,8 @@ export function OperatorInspector({
   specialists,
   mcpServers,
   mcpTools,
+  pythonEnvs,
+  pythonHandlers,
   mcpGatewayReady,
   onOpenMcpGateway,
   onChange,
@@ -59,6 +65,8 @@ export function OperatorInspector({
         specialists={specialists}
         mcpServers={mcpServers}
         mcpTools={mcpTools}
+        pythonEnvs={pythonEnvs}
+        pythonHandlers={pythonHandlers}
         mcpGatewayReady={mcpGatewayReady}
         onOpenMcpGateway={onOpenMcpGateway}
         onChange={onChange}
@@ -260,6 +268,8 @@ function SelectedEditor({
   specialists,
   mcpServers,
   mcpTools,
+  pythonEnvs,
+  pythonHandlers,
   mcpGatewayReady,
   onOpenMcpGateway,
   onChange,
@@ -270,6 +280,8 @@ function SelectedEditor({
   specialists: RvbbitSpecialist[]
   mcpServers: McpServerOverview[]
   mcpTools: McpToolLite[]
+  pythonEnvs: PythonEnv[]
+  pythonHandlers: PythonHandler[]
   mcpGatewayReady: boolean
   onOpenMcpGateway?: () => void
   onChange: (n: RvbbitOperator) => void
@@ -334,6 +346,8 @@ function SelectedEditor({
           specialists={specialists}
           mcpServers={mcpServers}
           mcpTools={mcpTools}
+          pythonEnvs={pythonEnvs}
+          pythonHandlers={pythonHandlers}
           mcpGatewayReady={mcpGatewayReady}
           onOpenMcpGateway={onOpenMcpGateway}
           onChange={(s) => setNodes(nodes.map((x, i) => (i === ni ? s : x)))}
@@ -359,6 +373,8 @@ function SelectedEditor({
           specialists={specialists}
           mcpServers={mcpServers}
           mcpTools={mcpTools}
+          pythonEnvs={pythonEnvs}
+          pythonHandlers={pythonHandlers}
           mcpGatewayReady={mcpGatewayReady}
           onOpenMcpGateway={onOpenMcpGateway}
           onChange={(s) => setSteps(steps.map((x, i) => (i === si ? s : x)))}
@@ -551,6 +567,8 @@ function StepEditor({
   specialists,
   mcpServers,
   mcpTools,
+  pythonEnvs,
+  pythonHandlers,
   mcpGatewayReady,
   onOpenMcpGateway,
   onChange,
@@ -563,6 +581,8 @@ function StepEditor({
   specialists: RvbbitSpecialist[]
   mcpServers: McpServerOverview[]
   mcpTools: McpToolLite[]
+  pythonEnvs: PythonEnv[]
+  pythonHandlers: PythonHandler[]
   mcpGatewayReady: boolean
   onOpenMcpGateway?: () => void
   onChange: (s: OpStep) => void
@@ -652,21 +672,43 @@ function StepEditor({
       ) : step.kind === "python" ? (
         <>
           <Row>
-            <Field label="env — rvbbit.python_envs">
+            <Field label={`env — ${pythonEnvs.length} registered`}>
               <input
                 value={step.env ?? ""}
                 onChange={(e) => onChange({ ...step, env: e.target.value })}
                 placeholder="analytics"
+                list="op-python-envs"
                 className={inputCls}
               />
+              <datalist id="op-python-envs">
+                {pythonEnvs.map((en) => (
+                  <option key={en.name} value={en.name}>
+                    {[en.pythonVersion ? `py ${en.pythonVersion}` : null, en.status]
+                      .filter(Boolean)
+                      .join(" · ")}
+                  </option>
+                ))}
+              </datalist>
             </Field>
-            <Field label="handler — rvbbit.python_handlers">
+            <Field label="handler">
               <input
                 value={step.handler ?? ""}
                 onChange={(e) => onChange({ ...step, handler: e.target.value })}
                 placeholder="ticket_score"
+                list="op-python-handlers"
                 className={inputCls}
               />
+              <datalist id="op-python-handlers">
+                {pythonHandlers
+                  .filter((h) => !step.env || h.env === step.env)
+                  .map((h) => (
+                    <option key={h.name} value={h.name}>
+                      {[h.entrypoint ? `${h.entrypoint}()` : null, h.description]
+                        .filter(Boolean)
+                        .join(" — ")}
+                    </option>
+                  ))}
+              </datalist>
             </Field>
           </Row>
           <Field label="timeout (ms)">
