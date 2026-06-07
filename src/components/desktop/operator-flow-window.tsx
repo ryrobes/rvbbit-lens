@@ -378,8 +378,10 @@ export function OperatorFlowWindow({
     [op, onChangeOp, persistLayout],
   )
 
-  // Drag-to-connect → wire a step output or operator arg into a step's
-  // inputs as a template ref (the edge then renders from that ref).
+  // Drag-to-connect → wire any upstream step output (or operator arg) into
+  // a step as a template ref. Where the ref lands depends on how the target
+  // kind consumes data: llm reads its prompt, sql reads params, the rest
+  // read their inputs map. The edge then renders from that ref.
   const onConnect = useCallback(
     (from: ConnectSource, toIdx: number) => {
       if (!op?.steps) return
@@ -397,10 +399,20 @@ export function OperatorFlowWindow({
         key = from.name
         ref = `{{ inputs.${from.name} }}`
       }
-      if (target.inputs?.[key] === ref) return
-      const nextSteps: OpStep[] = op.steps.map((s, i) =>
-        i === toIdx ? { ...s, inputs: { ...(s.inputs ?? {}), [key]: ref } } : s,
-      )
+      const next: OpStep = { ...target }
+      if (target.kind === "llm") {
+        const cur = next.user ?? ""
+        if (cur.includes(ref)) return
+        next.user = cur ? `${cur}\n${ref}` : ref
+      } else if (target.kind === "sql") {
+        const params = next.params ?? []
+        if (params.includes(ref)) return
+        next.params = [...params, ref]
+      } else {
+        if (next.inputs?.[key] === ref) return
+        next.inputs = { ...(next.inputs ?? {}), [key]: ref }
+      }
+      const nextSteps: OpStep[] = op.steps.map((s, i) => (i === toIdx ? next : s))
       onChangeOp({ ...op, steps: nextSteps })
     },
     [op, onChangeOp],
