@@ -431,12 +431,13 @@ export function OperatorGraph({
   return (
     <div
       ref={viewportRef}
-      className="relative h-full w-full overflow-hidden"
+      // Dark stage for contrast; glass-tints (window backdrop shows) when the
+      // window isn't focused, like the rest of the window's surfaces.
+      className="relative h-full w-full overflow-hidden bg-[#0b0c0f] group-data-[focused=false]/window:bg-[#0b0c0f]/70"
       onPointerDown={onPanStart}
       onDragOver={editable && onAddNode ? (e) => e.preventDefault() : undefined}
       onDrop={editable && onAddNode ? onCanvasDrop : undefined}
-      // Dark stage so nodes read with more contrast (matches the inspector).
-      style={{ cursor: panning ? "grabbing" : "grab", background: "#0b0c0f" }}
+      style={{ cursor: panning ? "grabbing" : "grab" }}
     >
       <div
         ref={canvasRef}

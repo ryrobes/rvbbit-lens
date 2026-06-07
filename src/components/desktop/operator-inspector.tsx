@@ -44,7 +44,6 @@ interface OperatorInspectorProps {
 // dark token values locally — that keeps text/syntax readable on black even
 // under the light theme (and feeds the embedded CodeMirror its dark palette).
 const CODE_PANEL_VARS = {
-  background: "#0a0b0d",
   "--foreground": "oklch(92% 0.006 80)",
   "--chrome-text": "oklch(70% 0.006 78)",
   "--doc-bg": "oklch(15% 0.008 70)",
@@ -77,7 +76,7 @@ export function OperatorInspector({
 }: OperatorInspectorProps) {
   return (
     <div
-      className="flex h-full flex-col overflow-auto font-mono text-[12px] text-chrome-text"
+      className="flex h-full flex-col overflow-auto bg-[#0a0b0d] font-mono text-[12px] text-chrome-text group-data-[focused=false]/window:bg-[#0a0b0d]/70"
       style={CODE_PANEL_VARS}
     >
       <FlowControls op={op} onChange={onChange} onSelectNode={onSelectNode} />
