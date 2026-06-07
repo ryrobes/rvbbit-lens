@@ -22,6 +22,7 @@ import {
   type McpServerOverview,
   type McpToolLite,
 } from "@/lib/rvbbit/mcp"
+import { SqlEditor } from "./sql-editor"
 
 interface OperatorInspectorProps {
   op: RvbbitOperator
@@ -39,6 +40,26 @@ interface OperatorInspectorProps {
   onSelectNode?: (id: string | null) => void
 }
 
+// The inspector is a deliberately-black "code editor" surface, so it pins the
+// dark token values locally — that keeps text/syntax readable on black even
+// under the light theme (and feeds the embedded CodeMirror its dark palette).
+const CODE_PANEL_VARS = {
+  background: "#0a0b0d",
+  "--foreground": "oklch(92% 0.006 80)",
+  "--chrome-text": "oklch(70% 0.006 78)",
+  "--doc-bg": "oklch(15% 0.008 70)",
+  "--main": "oklch(80% 0.12 75)",
+  "--danger": "oklch(65% 0.22 25)",
+  "--syntax-foreground": "oklch(89% 0.01 260)",
+  "--syntax-keyword": "oklch(76% 0.12 308)",
+  "--syntax-function": "oklch(81% 0.11 190)",
+  "--syntax-string": "oklch(82% 0.11 44)",
+  "--syntax-number": "oklch(86% 0.11 95)",
+  "--syntax-comment": "oklch(58% 0.03 262)",
+  "--syntax-operator": "oklch(76% 0.08 239)",
+  "--syntax-identifier": "oklch(82% 0.1 149)",
+} as React.CSSProperties
+
 /** Build-mode editing panel — flow-control toggles + the selected node's form. */
 export function OperatorInspector({
   op,
@@ -55,7 +76,10 @@ export function OperatorInspector({
   onSelectNode,
 }: OperatorInspectorProps) {
   return (
-    <div className="flex h-full flex-col overflow-auto bg-chrome-bg/40 text-[12px] text-chrome-text">
+    <div
+      className="flex h-full flex-col overflow-auto font-mono text-[12px] text-chrome-text"
+      style={CODE_PANEL_VARS}
+    >
       <FlowControls op={op} onChange={onChange} onSelectNode={onSelectNode} />
       <div className="border-t border-chrome-border" />
       <SelectedEditor
@@ -158,9 +182,12 @@ function FlowControls({
   }
 
   return (
-    <div className="px-3 py-2">
-      <div className="mb-1.5 text-[10px] font-medium uppercase tracking-wide text-chrome-text/55">
-        Flow control
+    <div className="border-b border-foreground/10 px-3 py-2">
+      <div
+        className="mb-1.5 text-[10px] uppercase tracking-wider"
+        style={{ color: "var(--syntax-keyword)" }}
+      >
+        flow control
       </div>
       <div className="flex flex-wrap gap-1.5">
         <Toggle label="Multi-step" on={!!op.steps} onClick={toggleSteps} />
@@ -191,13 +218,13 @@ function Toggle({ label, on, onClick }: { label: string; on: boolean; onClick: (
       type="button"
       onClick={onClick}
       className={cn(
-        "rounded border px-2 py-0.5 text-[11px]",
+        "inline-flex items-center gap-1 rounded-[3px] border px-1.5 py-0.5 text-[11px] transition-colors",
         on
-          ? "border-rvbbit-accent/50 bg-rvbbit-bg text-rvbbit-accent"
-          : "border-chrome-border bg-secondary-background text-chrome-text/70 hover:text-foreground",
+          ? "border-main/40 bg-main/[0.08] text-main"
+          : "border-foreground/10 text-chrome-text/55 hover:text-foreground",
       )}
     >
-      {on ? "✓ " : ""}
+      <span className="opacity-90">{on ? "[x]" : "[ ]"}</span>
       {label}
     </button>
   )
@@ -215,11 +242,11 @@ function Counter({
   onRemove: () => void
 }) {
   return (
-    <span className="inline-flex items-center gap-1 rounded border border-chrome-border bg-secondary-background px-1 py-0.5 text-[10px]">
-      <button type="button" onClick={onRemove} className="px-1 hover:text-foreground" disabled={n === 0}>
+    <span className="inline-flex items-center gap-1 rounded-[3px] border border-foreground/10 px-1 py-0.5 text-[10px] text-chrome-text/70">
+      <button type="button" onClick={onRemove} className="px-1 hover:text-foreground disabled:opacity-30" disabled={n === 0}>
         −
       </button>
-      <span className="tabular-nums text-chrome-text/80">
+      <span className="tabular-nums">
         {n} {label}
       </span>
       <button type="button" onClick={onAdd} className="px-1 hover:text-foreground">
@@ -719,12 +746,14 @@ function StepEditor({
       ) : (
         <>
           <Field label="SQL — a SELECT, with $1..$N placeholders">
-            <textarea
-              value={step.sql ?? ""}
-              onChange={(e) => onChange({ ...step, sql: e.target.value })}
-              rows={3}
-              className={cn(areaCls, "font-mono")}
-            />
+            <div className="overflow-hidden rounded-[3px] border border-foreground/10 focus-within:border-main/50">
+              <SqlEditor
+                value={step.sql ?? ""}
+                onChange={(v) => onChange({ ...step, sql: v })}
+                height={120}
+                fontSize={12}
+              />
+            </div>
           </Field>
           <Field label="params (one template per line, fills $1, $2…)">
             <textarea
@@ -1251,12 +1280,15 @@ function ValidatorEditor({
 
 // ── Field primitives ────────────────────────────────────────────────
 
+// Code-editor field look: a faint recessed inset with a dim hairline border
+// (so editable spots read clearly without bright outlines); focus warms the
+// border + inset slightly instead of flashing a ring.
 const inputCls =
-  "h-7 w-full rounded border border-chrome-border bg-doc-bg px-2 text-[12px] text-foreground outline-none focus:border-main/60"
+  "h-7 w-full rounded-[3px] border border-foreground/10 bg-foreground/[0.03] px-2 font-mono text-[12px] text-foreground outline-none transition-colors placeholder:text-chrome-text/30 focus:border-main/50 focus:bg-foreground/[0.06]"
 const areaCls =
-  "w-full rounded border border-chrome-border bg-doc-bg px-2 py-1 text-[11px] leading-snug text-foreground outline-none focus:border-main/60"
+  "w-full rounded-[3px] border border-foreground/10 bg-foreground/[0.03] px-2 py-1 font-mono text-[11px] leading-snug text-foreground outline-none transition-colors placeholder:text-chrome-text/30 focus:border-main/50 focus:bg-foreground/[0.06]"
 const tabCls =
-  "rounded border border-chrome-border bg-secondary-background px-1.5 py-0.5 text-[10px] text-chrome-text/70"
+  "rounded-[3px] border border-foreground/10 bg-foreground/[0.03] px-1.5 py-0.5 text-[10px] text-chrome-text/60 hover:text-foreground"
 const tabActiveCls = "border-main/50 bg-main/15 text-main"
 
 function Section({
@@ -1275,7 +1307,10 @@ function Section({
   return (
     <div className="px-3 py-2">
       <div className="mb-1.5 flex items-center gap-1">
-        <span className="truncate text-[10px] font-medium uppercase tracking-wide text-chrome-text/55">
+        <span
+          className="truncate text-[10px] uppercase tracking-wider"
+          style={{ color: "var(--syntax-keyword)" }}
+        >
           {title}
         </span>
         <div className="flex-1" />
@@ -1320,7 +1355,9 @@ function Section({
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <label className="block">
-      <span className="mb-0.5 block text-[10px] text-chrome-text/60">{label}</span>
+      <span className="mb-0.5 block text-[10px]" style={{ color: "var(--syntax-comment)" }}>
+        {label}
+      </span>
       {children}
     </label>
   )
