@@ -1,6 +1,7 @@
 "use client"
 
 import type { InstallKnobs, Manifest } from "./capabilities"
+import { applyVllmKnobsToArgs, isVllmManifest } from "./capabilities"
 
 /**
  * Client-side model for the Warren remote-deploy layer.
@@ -273,6 +274,9 @@ export function manifestWithKnobs(manifest: Manifest, knobs: InstallKnobs): Mani
     copy.backend.timeout_ms = knobs.timeoutMs
   }
   copy.runtime = { ...(copy.runtime ?? {}), device: knobs.device }
+  if (knobs.vllm && isVllmManifest(copy)) {
+    copy.runtime.args = applyVllmKnobsToArgs(copy.runtime.args ?? [], knobs.vllm)
+  }
   return copy
 }
 

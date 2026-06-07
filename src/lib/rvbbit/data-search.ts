@@ -209,6 +209,39 @@ export async function fetchCatalogStatus(connectionId: string): Promise<CatalogS
   }
 }
 
+// ── Embedder health ──────────────────────────────────────────────────
+
+export interface EmbedderHealth {
+  /** True when rvbbit.embed returned a usable query vector. */
+  ok: boolean
+  /** Vector dimension returned by the live embedder, when ok. */
+  dim: number | null
+  error?: string
+}
+
+/**
+ * Probe the embedder that `data_search` relies on for its dense ranker.
+ *
+ * data_search embeds the query with `rvbbit.embed(query,'','query')` and
+ * SWALLOWS any failure (v_q := NULL), silently degrading to lexical-only
+ * — so a semantic query with no keyword overlap returns nothing even
+ * though the catalog is fully embedded. KG browsing needs no embedder, so
+ * it keeps working, which makes the failure look mysterious. This probe
+ * lets the UI say "semantic search is down" instead of "no matches".
+ */
+export async function probeEmbedder(connectionId: string): Promise<EmbedderHealth> {
+  const res = await runQuery(
+    connectionId,
+    `SELECT array_length(rvbbit.embed('rvbbit data-search health probe', '', 'query'), 1) AS dim`,
+  )
+  if (!res.ok) return { ok: false, dim: null, error: res.error }
+  const dim = numOrNull(res.rows[0]?.dim)
+  if (dim == null || dim <= 0) {
+    return { ok: false, dim: null, error: "embedder returned no vector" }
+  }
+  return { ok: true, dim }
+}
+
 // ── (Re)crawl the catalog ────────────────────────────────────────────
 
 export async function crawlCatalog(

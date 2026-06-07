@@ -801,12 +801,12 @@ export const SURFACE_LABEL: Record<LensSurface, string> = {
 }
 
 export const SURFACE_COLOR: Record<LensSurface, string> = {
-  receipt: "var(--rvbbit-accent)",
-  subcall: "var(--chart-2)",
-  mcp: "var(--brand-mcp)",
-  route_decision: "var(--brand-routing)",
-  route_execution: "var(--chart-4)",
-  kg_write: "var(--info)",
+  receipt: "var(--viz-surface-receipt)",
+  subcall: "var(--viz-surface-subcall)",
+  mcp: "var(--viz-surface-mcp)",
+  route_decision: "var(--viz-surface-route-decision)",
+  route_execution: "var(--viz-surface-route-execution)",
+  kg_write: "var(--viz-surface-kg-write)",
 }
 
 /**

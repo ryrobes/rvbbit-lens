@@ -66,7 +66,7 @@ export function RowsetPromptPopover({
       style={{ left, top, width: W }}
     >
       <div className="mb-1.5 flex items-center gap-1.5 text-[11px] text-foreground">
-        <Sparkles className="h-3.5 w-3.5" style={{ color: "var(--brand-operators)" }} />
+        <Sparkles className="h-3.5 w-3.5" style={{ color: "var(--viz-op-rowset)" }} />
         <span className="font-mono">then {op.name}</span>
         <span className="min-w-0 flex-1 truncate text-chrome-text/45">on {blockTitle}</span>
       </div>

@@ -283,10 +283,10 @@ const FIELD_MIME = "application/x-rvbbit-chart-field"
 
 function RoleGlyph({ role, className }: { role: ColumnRole; className?: string }) {
   const map: Record<ColumnRole, { icon: React.ComponentType<{ className?: string }>; color: string; title: string }> = {
-    numeric: { icon: Hash, color: "var(--chart-1)", title: "numeric" },
-    temporal: { icon: Calendar, color: "var(--chart-3)", title: "temporal" },
-    categorical: { icon: Tag, color: "var(--chart-4)", title: "categorical" },
-    boolean: { icon: Check, color: "var(--chart-2)", title: "boolean" },
+    numeric: { icon: Hash, color: "var(--viz-role-numeric)", title: "numeric" },
+    temporal: { icon: Calendar, color: "var(--viz-role-temporal)", title: "temporal" },
+    categorical: { icon: Tag, color: "var(--viz-role-categorical)", title: "categorical" },
+    boolean: { icon: Check, color: "var(--viz-role-boolean)", title: "boolean" },
     unknown: { icon: Tag, color: "var(--chrome-text)", title: "unknown" },
   }
   const m = map[role]

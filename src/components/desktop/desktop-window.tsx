@@ -322,7 +322,7 @@ export function DesktopWindow({
   function renderSemanticTile(tile: SemanticOpTile) {
     const key = `semantic:${tile.op.operator.name}`
     const hot = hoveredOpKey === key
-    const accent = "var(--brand-operators)"
+    const accent = "var(--viz-op-pipeline)"
     // Dimension (fan-out) tiles read as Layers; scalar tiles show their return-type glyph.
     const Icon = tile.op.operator.shape === "dimension" ? Layers : returnTypeIcon(tile.returnType)
     return (
@@ -372,7 +372,7 @@ export function DesktopWindow({
   function renderRowsetChainTile(tile: { op: SemanticOpMeta; label: string; hint: string }) {
     const key = `rowset:${tile.op.name}`
     const hot = hoveredOpKey === key
-    const accent = "var(--brand-operators)"
+    const accent = "var(--viz-op-rowset)"
     const Icon = rowsetOpIcon(tile.op.name)
     return (
       <div
@@ -418,7 +418,7 @@ export function DesktopWindow({
     const isOp = opts?.tone === "operators"
     const Icon = opts?.icon
     const ruleStyle = isOp
-      ? { backgroundColor: "color-mix(in oklch, var(--brand-operators) 50%, transparent)" }
+      ? { backgroundColor: "color-mix(in oklch, var(--viz-op-pipeline) 50%, transparent)" }
       : undefined
     return (
       <div
@@ -426,7 +426,7 @@ export function DesktopWindow({
           "col-span-full mt-0.5 flex items-center gap-2 px-1 text-[9px] uppercase tracking-wider",
           !isOp && "text-chrome-text/60",
         )}
-        style={isOp ? { color: "var(--brand-operators)" } : undefined}
+        style={isOp ? { color: "var(--viz-op-pipeline)" } : undefined}
       >
         {Icon ? <Icon className="h-3 w-3 shrink-0" /> : null}
         <span className="shrink-0">{label}</span>
@@ -443,7 +443,7 @@ export function DesktopWindow({
   function subRail(Icon: LucideIcon, label: string, count: number) {
     return (
       <div className="col-span-full flex items-center gap-1 px-1 pt-0.5 text-[9px] text-chrome-text/55">
-        <Icon className="h-2.5 w-2.5 shrink-0" style={{ color: "var(--brand-operators)" }} />
+        <Icon className="h-2.5 w-2.5 shrink-0" style={{ color: "var(--viz-op-pipeline)" }} />
         <span>{label}</span>
         <span className="text-chrome-text/35">{count}</span>
       </div>
@@ -843,13 +843,13 @@ export function DesktopWindow({
         >
           <div
             className="pointer-events-none absolute inset-0"
-            style={{ backgroundColor: "color-mix(in oklch, var(--brand-operators) 10%, transparent)" }}
+            style={{ backgroundColor: "color-mix(in oklch, var(--viz-op-rowset) 10%, transparent)" }}
           />
           <div
             data-drop-panel
             className="relative grid w-[min(94%,22rem)] grid-cols-3 gap-1 rounded-lg border border-chrome-border/60 bg-chrome-bg/85 p-2 backdrop-blur-[3px]"
           >
-            <div className="col-span-full flex items-center gap-2 px-1 text-[9px] uppercase tracking-wider" style={{ color: "var(--brand-operators)" }}>
+            <div className="col-span-full flex items-center gap-2 px-1 text-[9px] uppercase tracking-wider" style={{ color: "var(--viz-op-rowset)" }}>
               <GitBranch className="h-3 w-3" />
               chain a pipeline stage onto this block
             </div>
@@ -925,6 +925,7 @@ const KIND_HUE: Record<string, number> = {
   "warren-job-detail": 35,
   capabilities: 190,
   "capability-detail": 190,
+  "hf-deploy": 175,
   cache: 95,
   "kg-browser": 320,
   "kg-entity-detail": 320,

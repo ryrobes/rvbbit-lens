@@ -15,6 +15,7 @@ import { cn } from "@/lib/utils"
 import { Button } from "@/components/ui/button"
 import {
   applyInstallSql,
+  isVllmManifest,
   probeBackend,
   runScaffold,
   streamComposeUp,
@@ -30,7 +31,10 @@ import { fmtMs } from "./instruments"
 
 interface CapabilityInstallGraphProps {
   activeConnectionId: string | null
-  manifestPath: string
+  /** On-disk pack manifest path. Omit when deploying an inline manifest. */
+  manifestPath?: string
+  /** Inline manifest YAML for from-id deploys (no pack on disk). */
+  manifestYaml?: string
   manifest: Manifest
   knobs: InstallKnobs
   rendered: RenderedArtifacts
@@ -145,6 +149,9 @@ const COL_GAP = 36
 const PAD_X = 16
 const PAD_Y = 20
 const SMOKE_PROBE_TIMEOUT_MS = 120_000
+// vLLM loads weights + compiles CUDA graphs on first boot — minutes, not
+// seconds — so its readiness probe gets a much longer leash.
+const SMOKE_PROBE_TIMEOUT_MS_VLLM = 600_000
 const SMOKE_PROBE_INTERVAL_MS = 2_000
 
 function sleep(ms: number): Promise<void> {
@@ -155,6 +162,7 @@ function probeArtifact(
   probe: ProbeResult,
   attempts: number,
   waitedMs: number,
+  timeoutMs: number,
 ): NonNullable<SmokeArtifact["probe"]> {
   return {
     ok: probe.ok,
@@ -163,13 +171,14 @@ function probeArtifact(
     error: probe.error,
     attempts,
     waitedMs,
-    timeoutMs: SMOKE_PROBE_TIMEOUT_MS,
+    timeoutMs,
   }
 }
 
 export function CapabilityInstallGraph({
   activeConnectionId,
   manifestPath,
+  manifestYaml,
   manifest,
   knobs,
   rendered,
@@ -191,6 +200,7 @@ export function CapabilityInstallGraph({
     setStep("scaffold", { status: "running", startedAt: Date.now(), error: undefined })
     const result = await runScaffold({
       manifestPath,
+      manifestYaml,
       outDir: knobs.outputDir,
       force: true,
       overrides: {
@@ -219,7 +229,7 @@ export function CapabilityInstallGraph({
     }
     setStep("scaffold", { status: "ok", endedAt: Date.now() })
     return true
-  }, [manifestPath, knobs.outputDir, rendered, setStep])
+  }, [manifestPath, manifestYaml, knobs.outputDir, rendered, setStep])
 
   const runBuildStep = useCallback(async (): Promise<boolean> => {
     setStep("build", { status: "running", startedAt: Date.now(), error: undefined })
@@ -348,8 +358,13 @@ export function CapabilityInstallGraph({
       return true
     }
 
+    // vLLM cold-starts (weight load + CUDA graph capture) can run many
+    // minutes; give it a 10-minute leash instead of the default 2.
+    const probeTimeoutMs = isVllmManifest(manifest)
+      ? SMOKE_PROBE_TIMEOUT_MS_VLLM
+      : SMOKE_PROBE_TIMEOUT_MS
     const probeStartedAt = Date.now()
-    const probeDeadline = probeStartedAt + SMOKE_PROBE_TIMEOUT_MS
+    const probeDeadline = probeStartedAt + probeTimeoutMs
     let attempts: ProbeAttemptArtifact[] = []
     let lastProbe: ProbeResult | null = null
 
@@ -373,10 +388,10 @@ export function CapabilityInstallGraph({
         ...a,
         smoke: {
           ...smokeBase,
-          probe: probeArtifact(probe, attempt, elapsedMs),
+          probe: probeArtifact(probe, attempt, elapsedMs, probeTimeoutMs),
           probeAttempts: attempts,
           probeWaiting: !probe.ok,
-          probeTimeoutMs: SMOKE_PROBE_TIMEOUT_MS,
+          probeTimeoutMs,
         },
       }))
 
@@ -393,7 +408,7 @@ export function CapabilityInstallGraph({
 
     const waitedMs = Date.now() - probeStartedAt
     const lastError = lastProbe?.error ?? "probe failed"
-    const error = `backend_probe did not become ready within ${Math.round(SMOKE_PROBE_TIMEOUT_MS / 1000)}s: ${lastError}`
+    const error = `backend_probe did not become ready within ${Math.round(probeTimeoutMs / 1000)}s: ${lastError}`
     setArtifacts((a) => ({
       ...a,
       smoke: {
@@ -405,11 +420,11 @@ export function CapabilityInstallGraph({
           error,
           attempts: attempts.length,
           waitedMs,
-          timeoutMs: SMOKE_PROBE_TIMEOUT_MS,
+          timeoutMs: probeTimeoutMs,
         },
         probeAttempts: attempts,
         probeWaiting: false,
-        probeTimeoutMs: SMOKE_PROBE_TIMEOUT_MS,
+        probeTimeoutMs,
       },
     }))
     setStep("smoke", {
@@ -418,7 +433,7 @@ export function CapabilityInstallGraph({
       error,
     })
     return false
-  }, [activeConnectionId, rendered.smokeSql, manifest.kind, manifest.backend, setStep, onInstalledChanged])
+  }, [activeConnectionId, rendered.smokeSql, manifest, setStep, onInstalledChanged])
 
   // ── Pipeline orchestration ──
   const runFrom = useCallback(

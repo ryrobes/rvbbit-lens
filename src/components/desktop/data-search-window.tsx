@@ -7,13 +7,17 @@ import {
   crawlCatalog,
   fetchCatalogStatus,
   hitLabel,
+  probeEmbedder,
   searchData,
   shortDoc,
   type CatalogKind,
   type CatalogStatus,
   type DataSearchHit,
+  type EmbedderHealth,
 } from "@/lib/rvbbit/data-search"
 import type { DataSearchPayload } from "@/lib/desktop/types"
+import { VIZ_CHIP_FG } from "@/lib/desktop/viz-colors"
+import { cn } from "@/lib/utils"
 
 interface DataSearchWindowProps {
   payload: DataSearchPayload
@@ -30,8 +34,8 @@ interface DataSearchWindowProps {
 type KindFilter = "all" | "db_table" | "db_column"
 
 const KIND_COLOR: Record<CatalogKind, string> = {
-  db_table: "var(--brand-kg)",
-  db_column: "color-mix(in oklch, var(--brand-kg) 55%, var(--brand-query-lens))",
+  db_table: "var(--viz-kind-table)",
+  db_column: "var(--viz-kind-column)",
 }
 
 export function DataSearchWindow({
@@ -48,6 +52,7 @@ export function DataSearchWindow({
   const [searching, setSearching] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [status, setStatus] = useState<CatalogStatus | null>(null)
+  const [embed, setEmbed] = useState<EmbedderHealth | null>(null)
   const [crawling, setCrawling] = useState(false)
   const [crawlMsg, setCrawlMsg] = useState<string | null>(null)
   const seq = useRef(0)
@@ -61,8 +66,13 @@ export function DataSearchWindow({
     if (!activeConnectionId) return
     let cancelled = false
     ;(async () => {
-      const s = await fetchCatalogStatus(activeConnectionId)
-      if (!cancelled) setStatus(s)
+      const [s, e] = await Promise.all([
+        fetchCatalogStatus(activeConnectionId),
+        probeEmbedder(activeConnectionId),
+      ])
+      if (cancelled) return
+      setStatus(s)
+      setEmbed(e)
     })()
     return () => {
       cancelled = true
@@ -90,6 +100,13 @@ export function DataSearchWindow({
       setHits(hits)
       setError(error ?? null)
       setSearching(false)
+      // Empty result with a fully-embedded catalog usually means the
+      // embedder failed (data_search swallows it → lexical-only). Re-probe
+      // so the empty state can say WHY rather than "no matches".
+      if (!error && hits.length === 0) {
+        const e = await probeEmbedder(activeConnectionId)
+        if (mine === seq.current) setEmbed(e)
+      }
     }, 180)
     return () => clearTimeout(t)
   }, [q, kindFilter, activeConnectionId])
@@ -193,10 +210,29 @@ export function DataSearchWindow({
               </button>
             ))}
           </div>
-          <div className="text-[10px] text-chrome-text/50">
-            {status?.installed
-              ? `${fmtCount(status.tables)} tables · ${fmtCount(status.columns)} columns · ${fmtCount(status.embedded)}/${fmtCount(status.docs)} embedded · ${fmtAgo(status.lastRunAt ?? 0)}`
-              : "catalog not installed"}
+          <div className="flex items-center gap-2 text-[10px] text-chrome-text/50">
+            {embed ? (
+              <span
+                className={cn(
+                  "rounded-full px-1.5 py-0.5",
+                  embed.ok
+                    ? "bg-success/10 text-success"
+                    : "bg-danger/15 text-danger",
+                )}
+                title={
+                  embed.ok
+                    ? `Embedder live (${embed.dim}-dim) — semantic ranking on`
+                    : `Embedder not responding${embed.error ? `: ${embed.error}` : ""} — semantic ranking off, keyword matches only`
+                }
+              >
+                {embed.ok ? "semantic" : "semantic off"}
+              </span>
+            ) : null}
+            <span>
+              {status?.installed
+                ? `${fmtCount(status.tables)} tables · ${fmtCount(status.columns)} columns · ${fmtCount(status.embedded)}/${fmtCount(status.docs)} embedded · ${fmtAgo(status.lastRunAt ?? 0)}`
+                : "catalog not installed"}
+            </span>
           </div>
         </div>
         {crawlMsg ? <div className="mt-1.5 text-[10px] text-chrome-text/60">{crawlMsg}</div> : null}
@@ -225,9 +261,24 @@ export function DataSearchWindow({
             by semantic similarity, not keywords.
           </Centered>
         ) : hits.length === 0 && !searching ? (
-          <Centered>
-            No matches for <span className="font-mono">&ldquo;{q.trim()}&rdquo;</span>.
-          </Centered>
+          embed && !embed.ok ? (
+            <Centered>
+              <div className="space-y-1">
+                <div className="text-danger">Semantic search is unavailable.</div>
+                <div className="text-chrome-text/60">
+                  The embedder (<span className="font-mono">embed</span>) isn&rsquo;t responding
+                  {embed.error ? <> — <span className="font-mono">{embed.error}</span></> : null}, so
+                  ranking falls back to keywords only. The catalog is fully fingerprinted
+                  ({fmtCount(status?.embedded ?? 0)} embedded) — once the embedder recovers, meaning-based
+                  search returns.
+                </div>
+              </div>
+            </Centered>
+          ) : (
+            <Centered>
+              No matches for <span className="font-mono">&ldquo;{q.trim()}&rdquo;</span>.
+            </Centered>
+          )
         ) : (
           <ul className="divide-y divide-chrome-border/30">
             {hits.map((h) => (
@@ -264,7 +315,7 @@ function HitRow({
       <div className="flex items-center gap-2">
         <span
           className="shrink-0 rounded-full px-1.5 py-0.5 text-[9px] uppercase tracking-wider"
-          style={{ background: KIND_COLOR[hit.kind], color: "#0009" }}
+          style={{ background: KIND_COLOR[hit.kind], color: VIZ_CHIP_FG }}
         >
           {isTable ? "table" : "col"}
         </span>

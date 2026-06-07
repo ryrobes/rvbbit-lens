@@ -5,7 +5,7 @@ import { createPortal } from "react-dom"
 import { Layers, type LucideIcon } from "@/lib/icons"
 import { returnTypeIcon, type SemanticOpTile } from "@/lib/desktop/semantic-ops"
 
-const ACCENT = "var(--brand-operators)"
+const ACCENT = "var(--viz-op-pipeline)"
 
 /**
  * Detail card for a hovered drop tile, shown WHILE a column is being dragged.

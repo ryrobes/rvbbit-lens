@@ -478,7 +478,7 @@ function PlanNodeBox({
         borderColor: selected
           ? "var(--main)"
           : badEstimate
-            ? "var(--chart-5)"
+            ? "var(--viz-series-5)"
             : "var(--chrome-border)",
       }}
       className={cn(
@@ -534,7 +534,7 @@ function PlanNodeBox({
         className="absolute bottom-0 left-0 h-[3px]"
         style={{
           width: `${Math.max(3, Math.round(share * 100))}%`,
-          backgroundColor: share >= 0.5 ? "var(--chart-5)" : "var(--chart-3)",
+          backgroundColor: share >= 0.5 ? "var(--viz-series-5)" : "var(--viz-status-pending)",
         }}
       />
     </button>
@@ -565,7 +565,7 @@ function CallSiteBox({
       onClick={onSelect}
       style={{
         ...style,
-        borderColor: selected ? "var(--main)" : "var(--rvbbit-accent)",
+        borderColor: selected ? "var(--main)" : "var(--viz-op-llm)",
       }}
       className={cn(
         "relative flex flex-col gap-0.5 overflow-hidden rounded-md border-2 bg-rvbbit-bg px-2 py-1 pb-1.5 text-left",
@@ -593,7 +593,7 @@ function CallSiteBox({
         className="absolute bottom-0 left-0 h-[3px]"
         style={{
           width: `${Math.max(3, Math.round(share * 100))}%`,
-          backgroundColor: share >= 0.5 ? "var(--chart-5)" : "var(--rvbbit-accent)",
+          backgroundColor: share >= 0.5 ? "var(--viz-series-5)" : "var(--viz-op-llm)",
         }}
       />
     </button>

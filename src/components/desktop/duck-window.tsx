@@ -7,9 +7,7 @@ import {
   Boxes,
   CaretRight,
   Cpu,
-  Database,
   FlowArrow,
-  Layers,
   Pause,
   Play,
   RefreshCw,
@@ -74,11 +72,18 @@ function statusColor(status: string): string {
   return "var(--danger)"
 }
 const MODE_COLOR: Record<string, string> = {
-  shared_broker: "var(--rvbbit-accent)",
-  local_persistent: "var(--chart-1)",
-  local_oneshot: "var(--chart-3)",
+  shared_broker: "var(--viz-op-runtime)",
+  local_persistent: "var(--viz-engine-duck-vector)",
+  local_oneshot: "var(--viz-engine-duck-vortex)",
 }
-const DIM_COLORS = ["var(--chart-1)", "var(--chart-2)", "var(--chart-4)", "var(--chart-5)", "var(--rvbbit-accent)", "var(--main)"]
+const DIM_COLORS = [
+  "var(--viz-series-1)",
+  "var(--viz-series-2)",
+  "var(--viz-series-4)",
+  "var(--viz-series-5)",
+  "var(--viz-op-runtime)",
+  "var(--main)",
+]
 function dimColor(i: number): string {
   return DIM_COLORS[i % DIM_COLORS.length]
 }
@@ -310,7 +315,7 @@ function OverviewTab({ events, hasEvents }: { events: DuckEvent[]; hasEvents: bo
   // Derive everything from the recent event window (last ~5 min slice of buffer).
   const recent = useMemo(() => {
     if (events.length === 0) return [] as DuckEvent[]
-    const newest = events[events.length - 1]?.observedAt ?? Date.now()
+    const newest = events.reduce((max, e) => Math.max(max, e.observedAt ?? 0), 0)
     const cutoff = newest - 5 * 60_000
     const windowed = events.filter((e) => (e.observedAt ?? 0) >= cutoff)
     return windowed.length > 0 ? windowed : events.slice(-200)

@@ -135,7 +135,7 @@ export function QueryLensOverview({
             <HourlyBars
               data={hourly}
               valueFn={(p) => p.receipts}
-              barColor="var(--chart-2)"
+              barColor="var(--viz-surface-subcall)"
               errorOverlayFn={(p) => p.errors}
               unitLabel="calls"
             />
@@ -185,7 +185,7 @@ export function QueryLensOverview({
             <HourlyBars
               data={hourly}
               valueFn={(p) => p.cost}
-              barColor="var(--chart-3)"
+              barColor="var(--viz-status-pending)"
               unitLabel="USD"
               unitFn={(v) => (v > 0 ? `$${v.toFixed(4)}` : "$0")}
             />

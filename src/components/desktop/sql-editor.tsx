@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useRef } from "react"
 import CodeMirror, { type Extension, type ReactCodeMirrorRef } from "@uiw/react-codemirror"
 import { sql, PostgreSQL } from "@codemirror/lang-sql"
-import { keymap } from "@codemirror/view"
+import { EditorView, keymap } from "@codemirror/view"
 import { rvbbitLensCodeMirrorTheme } from "@/lib/desktop/codemirror-theme"
 
 interface SqlEditorProps {
@@ -13,6 +13,9 @@ interface SqlEditorProps {
   height?: string | number
   readOnly?: boolean
   fontSize?: number
+  /** "plain" drops SQL syntax highlighting + autocomplete + line numbers — for
+   *  the natural-language "Ask" mode where the content is a question, not SQL. */
+  language?: "sql" | "plain"
 }
 
 export function SqlEditor({
@@ -22,11 +25,15 @@ export function SqlEditor({
   height = "100%",
   readOnly,
   fontSize = 13,
+  language = "sql",
 }: SqlEditorProps) {
   const ref = useRef<ReactCodeMirrorRef | null>(null)
+  const plain = language === "plain"
 
   const extensions: Extension[] = useMemo(() => {
-    const exts: Extension[] = [sql({ dialect: PostgreSQL, upperCaseKeywords: false })]
+    const exts: Extension[] = []
+    if (plain) exts.push(EditorView.lineWrapping) // wrap long NL questions instead of scrolling
+    else exts.push(sql({ dialect: PostgreSQL, upperCaseKeywords: false }))
     if (onRun) {
       exts.push(
         keymap.of([
@@ -38,7 +45,7 @@ export function SqlEditor({
       )
     }
     return exts
-  }, [onRun])
+  }, [onRun, plain])
 
   // Auto-focus on first mount.
   useEffect(() => {
@@ -58,11 +65,11 @@ export function SqlEditor({
         extensions={[...extensions, ...rvbbitLensCodeMirrorTheme]}
         onChange={onChange}
         basicSetup={{
-          highlightActiveLine: true,
-          lineNumbers: true,
+          highlightActiveLine: !plain,
+          lineNumbers: !plain,
           foldGutter: false,
           dropCursor: true,
-          autocompletion: true,
+          autocompletion: !plain,
           searchKeymap: true,
         }}
       />

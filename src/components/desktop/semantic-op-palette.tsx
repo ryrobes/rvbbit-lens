@@ -19,7 +19,7 @@ import {
 import type { DesktopColumnDragPayload, SemanticOpMeta } from "@/lib/desktop/types"
 import { DropTargetCard, dimensionDropInfo, scalarDropInfo, type DropTargetInfo } from "./drop-target-card"
 
-const ACCENT = "var(--brand-operators)"
+const ACCENT = "var(--viz-op-pipeline)"
 
 /**
  * Desktop-level palette of scalar semantic-operator drop tiles. Appears

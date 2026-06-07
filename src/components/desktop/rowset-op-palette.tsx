@@ -12,7 +12,7 @@ import { availableRowsetOps } from "@/lib/desktop/semantic-ops"
 import type { DesktopBlockDragPayload, SemanticOpMeta } from "@/lib/desktop/types"
 import { DropTargetCard, type DropTargetInfo } from "./drop-target-card"
 
-const ACCENT = "var(--brand-operators)"
+const ACCENT = "var(--viz-op-rowset)"
 
 export function rowsetOpIcon(name: string): LucideIcon {
   switch (name) {

@@ -20,6 +20,7 @@
  */
 
 import { routeExplain } from "./routing"
+import { colorForVizSeriesIndex, VIZ_SERIES_COLORS } from "@/lib/desktop/viz-colors"
 
 // ── Types ───────────────────────────────────────────────────────────
 
@@ -54,16 +55,16 @@ export interface TimelineSeries {
  * use the same scale. Tables beyond the palette length wrap to the start.
  */
 export const SERIES_PALETTE: string[] = [
-  "var(--chart-1)",
-  "var(--chart-3)",
-  "var(--chart-4)",
-  "var(--info)",
-  "var(--chart-2)",
-  "var(--chart-5)",
+  VIZ_SERIES_COLORS[0],
+  VIZ_SERIES_COLORS[2],
+  VIZ_SERIES_COLORS[3],
+  VIZ_SERIES_COLORS[6],
+  VIZ_SERIES_COLORS[1],
+  VIZ_SERIES_COLORS[4],
 ]
 
 export function colorForSeriesIndex(i: number): string {
-  return SERIES_PALETTE[i % SERIES_PALETTE.length]
+  return colorForVizSeriesIndex(i)
 }
 
 export function seriesKey(table: RvbbitTableRef): string {

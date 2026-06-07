@@ -466,7 +466,7 @@ export function OperatorGraph({
           const rw = maxXr - minX + outerPad * 2
           const rh = maxYr - minY + outerPad * 2 + 16
           const isRetry = r.kind === "retry"
-          const regionColor = isRetry ? "var(--chart-3)" : "var(--rvbbit-accent)"
+          const regionColor = isRetry ? "var(--viz-op-gate)" : "var(--viz-op-llm)"
           return (
             <div
               key={r.id}
@@ -477,9 +477,7 @@ export function OperatorGraph({
                 width: rw,
                 height: rh,
                 borderColor: selectedNodeId === r.id ? "var(--main)" : regionColor,
-                background: isRetry
-                  ? "color-mix(in oklch, var(--chart-3) 7%, transparent)"
-                  : "color-mix(in oklch, var(--rvbbit-accent) 7%, transparent)",
+                background: `color-mix(in oklch, ${regionColor} 7%, transparent)`,
               }}
             >
               <button
@@ -527,7 +525,7 @@ export function OperatorGraph({
               markerHeight="6"
               orient="auto"
             >
-              <path d="M0,0 L8,4 L0,8 z" fill="var(--rvbbit-accent)" />
+              <path d="M0,0 L8,4 L0,8 z" fill="var(--viz-op-llm)" />
             </marker>
           </defs>
           {graph.edges.map((e, i) => {
@@ -554,7 +552,7 @@ export function OperatorGraph({
             const stroke = erroredHere
               ? "var(--danger)"
               : traversed
-                ? "var(--rvbbit-accent)"
+                ? "var(--viz-op-llm)"
                 : mode === "run" && trace
                   ? "color-mix(in oklch, var(--chrome-border) 50%, transparent)"
                   : "var(--chrome-border)"
@@ -572,7 +570,7 @@ export function OperatorGraph({
                   key={i}
                   d={`M ${sx} ${sy} C ${sx} ${top}, ${ex} ${top}, ${ex} ${ey}`}
                   fill="none"
-                  stroke="var(--chart-3)"
+                  stroke="var(--viz-op-gate)"
                   strokeWidth={1.5}
                   strokeDasharray="5 3"
                 />
@@ -853,16 +851,16 @@ type NodeAccent =
 
 const ACCENT_COLOR: Record<NodeAccent, string> = {
   plain: "var(--chrome-border)",
-  rvbbit: "var(--rvbbit-accent)",
-  gate: "var(--chart-3)",
-  code: "var(--chart-2)",
-  specialist: "var(--chart-1)",
+  rvbbit: "var(--viz-op-llm)",
+  gate: "var(--viz-op-gate)",
+  code: "var(--viz-op-code)",
+  specialist: "var(--viz-op-specialist)",
   // Python/executor nodes share the capability/runtime brand hue, tying
   // them visually to the runtime-sidecar capability that serves them.
-  python: "var(--brand-capability)",
-  sql: "var(--chart-4)",
-  mcp: "var(--chart-5)",
-  terminal: "var(--main)",
+  python: "var(--viz-op-runtime)",
+  sql: "var(--viz-op-sql)",
+  mcp: "var(--viz-op-mcp)",
+  terminal: "var(--viz-op-terminal)",
 }
 
 /**
@@ -1296,17 +1294,17 @@ function fmtMs(ms: number): string {
 export function accentForSubCallKind(kind: string): string {
   switch (kind) {
     case "llm":
-      return "var(--rvbbit-accent)"
+      return "var(--viz-op-llm)"
     case "specialist":
-      return "var(--chart-1)"
+      return "var(--viz-op-specialist)"
     case "python":
-      return "var(--brand-capability)"
+      return "var(--viz-op-runtime)"
     case "code":
-      return "var(--chart-2)"
+      return "var(--viz-op-code)"
     case "sql":
-      return "var(--chart-4)"
+      return "var(--viz-op-sql)"
     case "mcp":
-      return "var(--chart-5)"
+      return "var(--viz-op-mcp)"
     default:
       return "var(--chrome-border)"
   }

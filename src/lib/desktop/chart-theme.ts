@@ -69,6 +69,7 @@ export function vegaConfigFromTheme(): Record<string, unknown> {
   const t = readResolvedTokens()
   const small = Math.max(10, Math.round(t.fontPx * 0.78))
   const medium = Math.max(11, Math.round(t.fontPx * 0.86))
+  const markAccent = t.main
   return {
     background: "transparent",
     font: t.fontSans,
@@ -122,10 +123,11 @@ export function vegaConfigFromTheme(): Record<string, unknown> {
       ordinal: t.category,
       ramp: { scheme: "blues" },
     },
-    mark: { color: t.category[0] },
-    bar: { color: t.category[0], cornerRadiusTopLeft: 2, cornerRadiusTopRight: 2 },
-    line: { stroke: t.category[0], strokeWidth: 2 },
-    point: { fill: t.category[0], stroke: t.category[0], size: 64 },
+    mark: { color: markAccent },
+    area: { fill: markAccent },
+    bar: { color: markAccent, cornerRadiusTopLeft: 2, cornerRadiusTopRight: 2 },
+    line: { stroke: markAccent, strokeWidth: 2 },
+    point: { fill: markAccent, stroke: markAccent, size: 64 },
     rule: { stroke: t.chromeBorder },
     tick: { color: t.foreground },
     text: { color: t.foreground, font: t.fontSans, fontSize: small },

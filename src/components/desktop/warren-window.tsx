@@ -14,6 +14,7 @@ function useNowWhile(active: boolean): number {
 }
 import {
   AlertTriangle,
+  Boxes,
   Brain,
   CheckCircle2,
   Cpu,
@@ -38,7 +39,12 @@ import {
   type WarrenJob,
   type WarrenJobStatus,
 } from "@/lib/rvbbit/warren"
-import { fetchInstalledRuntimes, type InstalledRuntime } from "@/lib/rvbbit/capabilities"
+import {
+  fetchInstalledBackends,
+  fetchInstalledRuntimes,
+  type InstalledBackend,
+  type InstalledRuntime,
+} from "@/lib/rvbbit/capabilities"
 import { fmtAgo, fmtCount, fmtMs } from "./instruments"
 import type { WarrenPayload } from "@/lib/desktop/types"
 
@@ -51,9 +57,10 @@ interface WarrenWindowProps {
   onOpenOperator: (name: string) => void
 }
 
-type TabKey = "inventory" | "jobs" | "runtimes"
+type TabKey = "inventory" | "local" | "jobs" | "runtimes"
 const TABS: { key: TabKey; label: string }[] = [
   { key: "inventory", label: "Inventory" },
+  { key: "local", label: "Local" },
   { key: "jobs", label: "Jobs" },
   { key: "runtimes", label: "Python runtimes" },
 ]
@@ -78,10 +85,12 @@ export function WarrenWindow({
   hasRvbbit,
   onOpenJob,
   onOpenSpecialist,
+  onOpenOperator,
 }: WarrenWindowProps) {
   const [inventory, setInventory] = useState<WarrenInventoryRow[]>([])
   const [jobs, setJobs] = useState<WarrenJob[]>([])
   const [runtimes, setRuntimes] = useState<InstalledRuntime[]>([])
+  const [backends, setBackends] = useState<InstalledBackend[]>([])
   const [tab, setTab] = useState<TabKey>(payload.initialTab ?? "inventory")
   const [paused, setPaused] = useState(false)
   const [intervalMs, setIntervalMs] = useState(5000)
@@ -93,14 +102,16 @@ export function WarrenWindow({
 
   const reload = useCallback(async () => {
     if (!activeConnectionId) return
-    const [inv, jobsRes, rt] = await Promise.all([
+    const [inv, jobsRes, rt, be] = await Promise.all([
       fetchWarrenInventory(activeConnectionId),
       fetchWarrenJobs(activeConnectionId, { limit: 200 }),
       fetchInstalledRuntimes(activeConnectionId),
+      fetchInstalledBackends(activeConnectionId),
     ])
     setInventory(inv.rows)
     setJobs(jobsRes.jobs)
     setRuntimes(rt.runtimes)
+    setBackends(be.backends)
     setError(inv.error ?? jobsRes.error ?? null)
     setUpdatedAt(Date.now())
   }, [activeConnectionId])
@@ -180,6 +191,15 @@ export function WarrenWindow({
   const visibleNodeCount = showOfflineNodes
     ? nodeCounts.total
     : Math.max(0, nodeCounts.total - nodeCounts.offline)
+
+  // "Local" = installed backends with no warren deployment row — i.e.
+  // registered on this machine (local docker compose) rather than managed
+  // by the warren fleet. This is where a from-id / local capability install
+  // lands once it's no longer in the catalog view.
+  const localBackends = useMemo(
+    () => backends.filter((b) => b.deployment_id == null),
+    [backends],
+  )
 
   const jobCounts = useMemo(() => {
     let queued = 0
@@ -330,6 +350,11 @@ export function WarrenWindow({
             )}
           >
             {t.label}
+            {t.key === "local" && localBackends.length > 0 ? (
+              <span className="ml-1.5 rounded-full bg-brand-warren/15 px-1.5 py-px text-[9px] tabular-nums text-brand-warren">
+                {localBackends.length}
+              </span>
+            ) : null}
           </button>
         ))}
       </div>
@@ -346,6 +371,9 @@ export function WarrenWindow({
             onRequestDeploymentRedeploy={requestDeploymentRedeploy}
             actionDeploymentId={actionDeploymentId}
           />
+        ) : null}
+        {tab === "local" ? (
+          <LocalTab backends={localBackends} loading={loading} onOpenOperator={onOpenOperator} />
         ) : null}
         {tab === "jobs" ? <JobsTab jobs={jobs} onOpenJob={onOpenJob} /> : null}
         {tab === "runtimes" ? (
@@ -960,6 +988,98 @@ function runtimeTone(status: string): string {
  * back operator node kinds such as `python` and `mcp` — peers of model
  * backends, not models.
  */
+// ── Local tab ───────────────────────────────────────────────────────
+
+function localTone(b: InstalledBackend): { label: string; cls: string } {
+  if (b.n_errors > 0)
+    return { label: "errors", cls: "bg-warning/15 text-warning ring-warning/30" }
+  if (b.n_calls > 0)
+    return { label: "ready", cls: "bg-success/15 text-success ring-success/30" }
+  return { label: "idle", cls: "bg-foreground/10 text-chrome-text/55 ring-foreground/15" }
+}
+
+function LocalTab({
+  backends,
+  loading,
+  onOpenOperator,
+}: {
+  backends: InstalledBackend[]
+  loading: boolean
+  onOpenOperator: (name: string) => void
+}) {
+  if (!loading && backends.length === 0) {
+    return (
+      <div className="grid h-40 place-items-center px-6 text-center text-[11px] text-chrome-text/55">
+        <div>
+          <Boxes className="mx-auto mb-2 h-6 w-6 text-chrome-text/30" />
+          No locally-installed backends. Deploy one from{" "}
+          <span className="font-mono">Capabilities → Hugging Face</span> or a
+          capability pack&apos;s <span className="font-mono">Local</span> install.
+        </div>
+      </div>
+    )
+  }
+  return (
+    <div className="space-y-2 p-2.5">
+      <p className="text-[11px] text-chrome-text/55">
+        Backends running on this machine (local <span className="font-mono">docker compose</span>),
+        outside warren&apos;s managed fleet — from a local capability install or a Hugging Face
+        deploy. The catalog browser only lists published packs, so these live here.
+      </p>
+      <div className="grid grid-cols-2 gap-2">
+        {backends.map((b) => {
+          const tone = localTone(b)
+          return (
+            <button
+              key={b.name}
+              type="button"
+              onClick={() => onOpenOperator(b.name)}
+              title="Open the operator built on this backend"
+              className="flex flex-col gap-1 rounded border border-chrome-border/50 bg-foreground/[0.02] p-2 text-left transition-colors hover:border-brand-warren/40"
+            >
+              <div className="flex items-center gap-1.5">
+                <Boxes className="h-3 w-3 shrink-0 text-brand-warren" />
+                <span className="min-w-0 flex-1 truncate font-mono text-[12px] font-medium text-foreground">
+                  {b.name}
+                </span>
+                <span
+                  className={cn(
+                    "shrink-0 rounded-full px-1.5 py-px text-[9px] uppercase tracking-wider ring-1",
+                    tone.cls,
+                  )}
+                >
+                  {tone.label}
+                </span>
+              </div>
+              {b.source_model ? (
+                <div className="truncate font-mono text-[10px] text-chrome-text/55">
+                  {b.source_model}
+                </div>
+              ) : null}
+              <div className="flex items-center gap-1.5 text-[9px] text-chrome-text/50">
+                <span className="rounded bg-foreground/10 px-1 uppercase tracking-wide">
+                  {b.transport}
+                </span>
+                {b.endpoint_url ? (
+                  <span className="min-w-0 flex-1 truncate text-right font-mono text-chrome-text/40">
+                    {b.endpoint_url}
+                  </span>
+                ) : null}
+              </div>
+              <div className="flex flex-wrap items-center gap-x-2.5 gap-y-0.5 text-[9px] text-chrome-text/45">
+                <span>{fmtCount(b.n_calls)} calls</span>
+                {b.n_errors > 0 ? <span className="text-warning">{fmtCount(b.n_errors)} err</span> : null}
+                {b.p95_latency_ms != null ? <span>p95 {fmtMs(b.p95_latency_ms)}</span> : null}
+                {b.last_call_at != null ? <span>· {fmtAgo(b.last_call_at)}</span> : null}
+              </div>
+            </button>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
 function RuntimesTab({
   runtimes,
   loading,

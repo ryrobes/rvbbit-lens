@@ -311,7 +311,7 @@ function RunDetail({
             type="button"
             onClick={() => onOpenOperator("triples")}
             className="flex items-center gap-1 rounded border border-chrome-border/60 px-1.5 py-0.5 text-[10px] hover:border-chrome-border hover:bg-foreground/[0.06]"
-            style={{ color: "var(--brand-operators)" }}
+            style={{ color: "var(--viz-op-pipeline)" }}
             title="Open the rvbbit.triples operator (the extractor)"
           >
             <Wand2 className="h-3 w-3" />

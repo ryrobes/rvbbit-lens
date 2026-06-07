@@ -42,6 +42,7 @@ export type DesktopWindowKind =
   | "drift"
   | "model-studio"
   | "folder"
+  | "hf-deploy"
 
 export interface DesktopWindowPosition {
   x: number
@@ -108,6 +109,7 @@ export type WindowPayload =
   | DriftPayload
   | ModelStudioPayload
   | FolderPayload
+  | HfDeployPayload
 
 export interface FinderPayload {
   kind?: "finder"
@@ -455,6 +457,10 @@ export interface DataWindowViewState {
   sqlRailWidthPx?: number
   sqlDraft?: string
   autoRunIntervalMs?: number | null
+  /** Editor input mode: "sql" (write SQL) or "ask" (plain-English → synth_sql). */
+  queryMode?: "sql" | "ask"
+  /** The natural-language question, kept so toggling back to Ask restores it. */
+  askDraft?: string
 }
 
 export interface QueryDocumentPayload {
@@ -711,6 +717,12 @@ export interface CapabilityDetailPayload {
   catalogId: string
   /** Optional starting tab. */
   initialTab?: "overview" | "generated-sql" | "probe" | "install" | "tests"
+}
+
+export interface HfDeployPayload {
+  kind?: "hf-deploy"
+  /** Optional model id to inspect immediately on open. */
+  modelId?: string | null
 }
 
 export interface WarrenPayload {

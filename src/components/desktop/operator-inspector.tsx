@@ -1366,7 +1366,7 @@ function Section({
  *  stays valid even if it isn't in the catalog (existing operators / models
  *  pending a refresh). The popover portals to <body>, carrying the dark code
  *  tokens so it reads consistently anywhere. */
-function ModelField({
+export function ModelField({
   value,
   models,
   onChange,

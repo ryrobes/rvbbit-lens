@@ -38,6 +38,8 @@ export const runtime = "nodejs"
 
 interface ScaffoldBody {
   manifestPath?: string
+  /** Inline manifest YAML — used when there's no pack file on disk. */
+  manifestYaml?: string
   outDir?: string
   force?: boolean
   overrides?: Record<string, string>
@@ -133,21 +135,38 @@ async function runScaffoldCli(
 
 export async function POST(req: Request) {
   const body = (await req.json().catch(() => null)) as ScaffoldBody | null
-  if (!body?.manifestPath || !body?.outDir) {
+  if (!body?.outDir || (!body?.manifestPath && !body?.manifestYaml)) {
     return NextResponse.json(
-      { ok: false, error: "manifestPath and outDir required" },
+      { ok: false, error: "outDir and one of manifestPath/manifestYaml required" },
       { status: 400 },
     )
   }
   const out = resolveOutDir(body.outDir)
   if (!out.ok) return NextResponse.json({ ok: false, error: out.error }, { status: 400 })
 
-  const manifestAbs = resolveManifestPath(body.manifestPath)
-  if (!(await fileExists(manifestAbs))) {
-    return NextResponse.json(
-      { ok: false, error: `manifest not found at ${manifestAbs}` },
-      { status: 404 },
-    )
+  // Resolve the source manifest the CLI scaffolds from. For inline YAML
+  // (from-id deploys with no pack on disk) we drop it in a temp file so
+  // the CLI can render the template against it exactly like a real pack.
+  let manifestAbs: string
+  if (body.manifestPath) {
+    manifestAbs = resolveManifestPath(body.manifestPath)
+    if (!(await fileExists(manifestAbs))) {
+      return NextResponse.json(
+        { ok: false, error: `manifest not found at ${manifestAbs}` },
+        { status: 404 },
+      )
+    }
+  } else {
+    try {
+      const dir = await fs.mkdtemp(path.join(os.tmpdir(), "rvbbit-hf-"))
+      manifestAbs = path.join(dir, "capability.yaml")
+      await fs.writeFile(manifestAbs, body.manifestYaml ?? "", "utf8")
+    } catch (e) {
+      return NextResponse.json(
+        { ok: false, error: `failed to stage inline manifest: ${e instanceof Error ? e.message : String(e)}` },
+        { status: 500 },
+      )
+    }
   }
 
   const cli = locateCli()

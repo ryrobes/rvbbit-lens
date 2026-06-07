@@ -35,6 +35,7 @@ import {
   type CatalogEntry,
   type AcceptanceRunStep,
   type InstallKnobs,
+  type VllmKnobs,
   type InstalledBackend,
   type InstalledRuntime,
   type JoinedCatalogEntry,
@@ -593,6 +594,13 @@ function OverviewTab({
             to see the rendered output update live.
           </p>
 
+          {knobs.vllm ? (
+            <VllmKnobsSection
+              vllm={knobs.vllm}
+              onChange={(next) => onChangeKnobs({ ...knobs, vllm: next })}
+            />
+          ) : null}
+
           <Knob
             label="Device"
             value={knobs.device}
@@ -759,6 +767,91 @@ function NumberKnob({
       {help ? (
         <div className="mt-0.5 text-[10px] text-chrome-text/45">{help}</div>
       ) : null}
+    </div>
+  )
+}
+
+/**
+ * vLLM serving knobs — the generic batch/concurrency knobs don't map to
+ * how a vLLM server is configured, so for `vllm_openai` packs we surface
+ * the actual CLI flags (GPU memory, context length, parallelism, dtype,
+ * quantization) that drive `runtime.args`.
+ */
+function VllmKnobsSection({
+  vllm,
+  onChange,
+}: {
+  vllm: VllmKnobs
+  onChange: (next: VllmKnobs) => void
+}) {
+  const set = <K extends keyof VllmKnobs>(key: K, value: VllmKnobs[K]) =>
+    onChange({ ...vllm, [key]: value })
+  return (
+    <div className="space-y-2 rounded border border-brand-capability/25 bg-brand-capability/[0.04] p-2.5">
+      <div className="flex items-center gap-1.5">
+        <span className="text-[10px] font-semibold uppercase tracking-wider text-brand-capability">
+          vLLM serving
+        </span>
+        <span className="text-[10px] text-chrome-text/45">→ runtime.args</span>
+      </div>
+      <NumberKnob
+        label="GPU memory utilization"
+        value={vllm.gpuMemoryUtilization}
+        onChange={(v) => set("gpuMemoryUtilization", v)}
+        min={0.3}
+        max={0.98}
+        step={0.02}
+        help="--gpu-memory-utilization · fraction of VRAM vLLM may claim. Lower this first on GPU-OOM."
+      />
+      <NumberKnob
+        label="Max model length"
+        value={vllm.maxModelLen}
+        onChange={(v) => set("maxModelLen", v)}
+        min={0}
+        max={131072}
+        step={1024}
+        help={
+          vllm.maxModelLen === 0
+            ? "--max-model-len · 0 = use the model's config default"
+            : "--max-model-len · context window; smaller ⇒ less KV-cache VRAM"
+        }
+      />
+      <NumberKnob
+        label="Max concurrent sequences"
+        value={vllm.maxNumSeqs}
+        onChange={(v) => set("maxNumSeqs", v)}
+        min={0}
+        max={512}
+        step={8}
+        help={
+          vllm.maxNumSeqs === 0
+            ? "--max-num-seqs · 0 = vLLM default"
+            : "--max-num-seqs · cap on in-flight sequences"
+        }
+      />
+      <NumberKnob
+        label="Tensor parallel size"
+        value={vllm.tensorParallelSize}
+        onChange={(v) => set("tensorParallelSize", v)}
+        min={1}
+        max={8}
+        step={1}
+        help="--tensor-parallel-size · shard the model across N GPUs"
+      />
+      <Knob
+        label="dtype"
+        value={vllm.dtype}
+        onChange={(v) => set("dtype", v)}
+        options={["auto", "float16", "bfloat16", "float32"]}
+        help="--dtype · weight/activation precision"
+      />
+      <Knob
+        label="Quantization"
+        value={vllm.quantization}
+        onChange={(v) => set("quantization", v)}
+        options={["none", "awq", "gptq", "fp8", "bitsandbytes"]}
+        help="--quantization · none keeps full precision (flag omitted)"
+      />
     </div>
   )
 }

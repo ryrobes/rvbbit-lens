@@ -96,7 +96,7 @@ export function SemanticBindPopover({
       style={{ left, top, width: W }}
     >
       <div className="mb-1.5 flex items-center gap-1.5 text-[11px] text-foreground">
-        <Sparkles className="h-3.5 w-3.5" style={{ color: "var(--brand-operators)" }} />
+        <Sparkles className="h-3.5 w-3.5" style={{ color: "var(--viz-op-pipeline)" }} />
         <span className="font-mono">rvbbit.{op.name}</span>
         <span className="truncate text-chrome-text/45">({columnName}, …)</span>
       </div>

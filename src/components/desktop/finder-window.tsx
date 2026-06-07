@@ -5,11 +5,14 @@ import {
   ChevronDown,
   ChevronRight,
   Database,
+  Eye,
   FolderOpen,
+  Layers,
   Plug,
   RefreshCw,
   Search,
   Sparkles,
+  Table2,
   Loader2,
 } from "@/lib/icons"
 import { Input } from "@/components/ui/input"
@@ -20,7 +23,7 @@ import { Sparkline } from "./sparkline"
 import { useTableTimeline } from "@/lib/rvbbit/use-table-timeline"
 import type { TimelineTick } from "@/lib/rvbbit/time-travel"
 import { driftSeverityColor } from "@/lib/rvbbit/drift-flags"
-import { fmtAgo, fmtBytes, fmtRows, iconForTable } from "@/lib/rvbbit/finder-format"
+import { fmtAgo, fmtBytes, fmtRows } from "@/lib/rvbbit/finder-format"
 import { DriftChips, FinderTooltip, useFinderHoverCard } from "./finder-tooltip"
 
 interface FinderWindowProps {
@@ -163,7 +166,6 @@ function TableRow({
 }) {
   const [expanded, setExpanded] = useState(false)
   const isRvbbit = !!table.isRvbbit
-  const Icon = iconForTable(table)
   return (
     <div>
       <div className="group flex items-center gap-1 px-2 py-1 text-xs hover:bg-foreground/[0.05]">
@@ -180,7 +182,7 @@ function TableRow({
         ) : (
           <span className="w-3.5 shrink-0" />
         )}
-        <Icon className={cn("h-3 w-3 shrink-0", isRvbbit ? "text-rvbbit-accent" : "text-chrome-text/70")} />
+        <TableKindIcon table={table} className={cn("h-3 w-3 shrink-0", isRvbbit ? "text-rvbbit-accent" : "text-chrome-text/70")} />
         <button
           type="button"
           onClick={onOpen}
@@ -214,6 +216,13 @@ function TableRow({
   )
 }
 
+function TableKindIcon({ table, className }: { table: SchemaTable; className?: string }) {
+  if (table.kind === "view") return <Eye className={className} />
+  if (table.kind === "matview") return <Layers className={className} />
+  if (table.isRvbbit && table.kind === "table") return <Sparkles className={className} />
+  return <Table2 className={className} />
+}
+
 function RowBadges({ table }: { table: SchemaTable }) {
   const isRvbbit = !!table.isRvbbit
   // All provenance/detail now lives in the hover card (FinderTooltip); the badges
@@ -243,7 +252,7 @@ function RowBadges({ table }: { table: SchemaTable }) {
       {table.heat != null && table.heat > 0 ? (
         <span
           className="h-[5px] w-[5px] shrink-0 rounded-full"
-          style={{ backgroundColor: "var(--chart-5)", opacity: table.heat >= 10 ? 1 : table.heat >= 3 ? 0.7 : 0.4 }}
+          style={{ backgroundColor: "var(--viz-series-5)", opacity: table.heat >= 10 ? 1 : table.heat >= 3 ? 0.7 : 0.4 }}
         />
       ) : null}
       <span className="w-12 text-right text-[10px] tabular-nums text-chrome-text/60">{rowsLabel(table)}</span>

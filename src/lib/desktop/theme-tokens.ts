@@ -29,6 +29,7 @@ export interface ColorTokens {
   chart3: string
   chart4: string
   chart5: string
+  chart6: string
 
   // Semantic
   success: string
@@ -92,6 +93,10 @@ export interface ColorTokens {
   winExtensionsH: string
   winRvbbitCacheH: string
   winConnectionsH: string
+  winPaletteH: string
+  winPgMonitorH: string
+  winDuckH: string
+  winFolderH: string
 
   // Desktop shortcut brand colors (full oklch strings)
   brandFinder: string
@@ -101,6 +106,18 @@ export interface ColorTokens {
   brandExtensions: string
   brandConnections: string
   brandRvbbitCache: string
+  brandCache: string
+  brandPgMonitor: string
+  brandOperators: string
+  brandSpecialists: string
+  brandRouting: string
+  brandMcp: string
+  brandQueryLens: string
+  brandKg: string
+  brandCapability: string
+  brandWarren: string
+  brandCosts: string
+  brandDuck: string
 
   // Wallpaper darkening overlay
   wallpaperOverlayFrom: string

@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { Database, Eye, Search, TreeStructure, X } from "@/lib/icons"
 import { fmtAgo, fmtCount } from "./instruments"
+import { colorForVizKind, VIZ_CHIP_FG } from "@/lib/desktop/viz-colors"
 import {
   evidenceProvenanceLabel,
   fetchGraphs,
@@ -561,7 +562,7 @@ function Breadcrumbs({
             >
               <span
                 className="rounded-full px-1 py-0 text-[9px] uppercase tracking-wider"
-                style={{ background: kindColor(c.kind), color: "#0009" }}
+                style={{ background: kindColor(c.kind), color: VIZ_CHIP_FG }}
               >
                 {c.kind}
               </span>
@@ -644,7 +645,7 @@ function SeedPicker({
             >
               <span
                 className="rounded-full px-1.5 py-0.5 text-[9px] uppercase tracking-wider"
-                style={{ background: kindColor(r.kind), color: "#0009" }}
+                style={{ background: kindColor(r.kind), color: VIZ_CHIP_FG }}
               >
                 {r.kind}
               </span>
@@ -946,7 +947,7 @@ function NodeHoverCard({
       <div className="flex items-center gap-1.5">
         <span
           className="rounded-full px-1.5 py-0 text-[9px] uppercase tracking-wider"
-          style={{ background: kindColor(node.kind), color: "#0009" }}
+          style={{ background: kindColor(node.kind), color: VIZ_CHIP_FG }}
         >
           {node.kind}
         </span>
@@ -1067,7 +1068,7 @@ function EdgeEvidenceDrawer({
             >
               <span
                 className="rounded-full px-1.5 py-0 text-[9px] uppercase tracking-wider"
-                style={{ background: kindColor(from.kind), color: "#0009" }}
+                style={{ background: kindColor(from.kind), color: VIZ_CHIP_FG }}
               >
                 {from.kind}
               </span>
@@ -1099,7 +1100,7 @@ function EdgeEvidenceDrawer({
             >
               <span
                 className="rounded-full px-1.5 py-0 text-[9px] uppercase tracking-wider"
-                style={{ background: kindColor(to.kind), color: "#0009" }}
+                style={{ background: kindColor(to.kind), color: VIZ_CHIP_FG }}
               >
                 {to.kind}
               </span>
@@ -1456,13 +1457,7 @@ function midpoint(a: { x: number; y: number }, b: { x: number; y: number }) {
 
 // ── Color ───────────────────────────────────────────────────────────
 
-/** Stable color per kind — hash to hue. */
+/** Stable color per kind — hash to a theme-derived palette slot. */
 function kindColor(kind: string): string {
-  let h = 0
-  for (let i = 0; i < kind.length; i += 1) {
-    h = ((h << 5) - h + kind.charCodeAt(i)) | 0
-  }
-  const hue = ((h % 360) + 360) % 360
-  return `oklch(75% 0.14 ${hue})`
+  return colorForVizKind(kind)
 }
-

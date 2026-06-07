@@ -2,9 +2,10 @@
 
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react"
 import { createPortal } from "react-dom"
+import { Eye, Layers, Sparkles, Table2 } from "@/lib/icons"
 import type { SchemaTable } from "@/lib/db/types"
 import { FLAG_META, TONE_CLASS, driftSeverityColor } from "@/lib/rvbbit/drift-flags"
-import { fmtAgo, fmtBytes, iconForTable } from "@/lib/rvbbit/finder-format"
+import { fmtAgo, fmtBytes } from "@/lib/rvbbit/finder-format"
 
 /* ──────────────────────────── storage model ──────────────────────────── */
 
@@ -19,17 +20,17 @@ interface FootprintSeg {
 
 // The five DISJOINT tiers that sum to the real footprint. Order = stacked order.
 const SEG_DEFS: Array<{ key: string; label: string; field: keyof SchemaTable; color: string }> = [
-  { key: "heap", label: "heap", field: "heapBytes", color: "var(--info)" },
-  { key: "hot", label: "parquet · hot", field: "hotParquetBytes", color: "var(--rvbbit-accent)" },
-  { key: "cold", label: "parquet · cold", field: "coldBytes", color: "var(--chart-1)" },
-  { key: "index", label: "indexes", field: "indexBytes", color: "var(--terminal-dim)" },
-  { key: "toast", label: "toast", field: "toastBytes", color: "var(--chart-5)" },
+  { key: "heap", label: "heap", field: "heapBytes", color: "var(--viz-storage-heap)" },
+  { key: "hot", label: "parquet · hot", field: "hotParquetBytes", color: "var(--viz-storage-hot)" },
+  { key: "cold", label: "parquet · cold", field: "coldBytes", color: "var(--viz-storage-cold)" },
+  { key: "index", label: "indexes", field: "indexBytes", color: "var(--viz-storage-index)" },
+  { key: "toast", label: "toast", field: "toastBytes", color: "var(--viz-storage-toast)" },
 ]
 
 // Redundant accelerator COPIES — never summed into the footprint total.
 const COPY_DEFS: Array<{ key: string; label: string; field: keyof SchemaTable; color: string }> = [
-  { key: "vortex", label: "vortex copy", field: "vortexBytes", color: "var(--chart-4)" },
-  { key: "variants", label: "alt-layout copies", field: "variantBytes", color: "var(--chart-3)" },
+  { key: "vortex", label: "vortex copy", field: "vortexBytes", color: "var(--viz-storage-vortex)" },
+  { key: "variants", label: "alt-layout copies", field: "variantBytes", color: "var(--viz-storage-variants)" },
 ]
 
 function asBytes(v: unknown): number {
@@ -186,7 +187,6 @@ export function FinderTooltip({ table, anchor }: { table: SchemaTable; anchor: D
 
   if (typeof document === "undefined") return null
 
-  const Icon = iconForTable(table)
   const fp = buildFootprint(table)
   const isRvbbit = !!table.isRvbbit
   // Kinds with no local heap of their own — show a precise reason instead of the
@@ -216,7 +216,7 @@ export function FinderTooltip({ table, anchor }: { table: SchemaTable; anchor: D
     >
       {/* header */}
       <div className="flex items-center gap-1.5">
-        <Icon className={`h-3.5 w-3.5 shrink-0 ${isRvbbit ? "text-rvbbit-accent" : "text-chrome-text/70"}`} />
+        <TableKindIcon table={table} className={`h-3.5 w-3.5 shrink-0 ${isRvbbit ? "text-rvbbit-accent" : "text-chrome-text/70"}`} />
         <span className="min-w-0 flex-1 truncate font-mono text-xs text-foreground">
           {table.schema}.{table.name}
         </span>
@@ -241,6 +241,13 @@ export function FinderTooltip({ table, anchor }: { table: SchemaTable; anchor: D
     </div>,
     document.body,
   )
+}
+
+function TableKindIcon({ table, className }: { table: SchemaTable; className?: string }) {
+  if (table.kind === "view") return <Eye className={className} />
+  if (table.kind === "matview") return <Layers className={className} />
+  if (table.isRvbbit && table.kind === "table") return <Sparkles className={className} />
+  return <Table2 className={className} />
 }
 
 function FootprintBar({ fp }: { fp: Footprint }) {

@@ -15,14 +15,17 @@ import {
   Play,
   RotateCcw,
   Sigma,
+  Sparkles,
   Table2,
   TreeStructure,
 } from "@/lib/icons"
 import { format as formatSql } from "sql-formatter"
 import { ChartView } from "./chart-view"
+import { ModelField } from "./operator-inspector"
 import { ResultGrid } from "./result-grid"
 import { SingleCellCallout } from "./single-cell-callout"
 import { SqlEditor } from "./sql-editor"
+import { fetchLlmModels, type LlmModel } from "@/lib/rvbbit/operators"
 import { TimeTravelStrip } from "./time-travel-strip"
 import { ExplainGraph, parseExplainResult, type ExplainRoot } from "./explain-graph"
 import { Button } from "@/components/ui/button"
@@ -131,6 +134,16 @@ const FLOW_STEPS_SQL =
   "WHERE run_id = (SELECT run_id FROM rvbbit.flow_steps ORDER BY created_at DESC LIMIT 1) " +
   "ORDER BY step_idx"
 
+// The model "Ask" mode uses, persisted globally (one choice for all future
+// Asks). Empty = let rvbbit.synth_sql use the synth operator's default model.
+const ASK_MODEL_KEY = "rvbbit-lens:ask-model"
+function loadAskModel(): string {
+  try { return (typeof window !== "undefined" && window.localStorage.getItem(ASK_MODEL_KEY)) || "" } catch { return "" }
+}
+function saveAskModel(model: string): void {
+  try { window.localStorage.setItem(ASK_MODEL_KEY, model) } catch { /* ignore */ }
+}
+
 export function DataGridWindow({
   window: w,
   payload,
@@ -154,6 +167,16 @@ export function DataGridWindow({
   // EXPLAIN (SEMANTIC) shows the cost estimate before the user materializes it.
   const isSemanticProjection = ((payload.lineage ? effectiveRollup(payload.lineage) : null)?.projections?.length ?? 0) > 0
   const [draftSql, setDraftSql] = useState<string>(view.sqlDraft ?? payload.sql ?? "")
+  // Editor input mode + the plain-English question (Ask mode). In "ask" mode the
+  // editor edits `askDraft`; Run calls rvbbit.synth_sql to generate SQL, drops it
+  // into `draftSql`, flips back to "sql", and runs it. `draftSql` therefore always
+  // holds real SQL; `askDraft` always holds the question.
+  const [queryMode, setQueryMode] = useState<"sql" | "ask">(view.queryMode ?? "sql")
+  const [askDraft, setAskDraft] = useState<string>(view.askDraft ?? "")
+  // Model for Ask generation — persisted globally; "" = synth's default model.
+  const [askModel, setAskModelState] = useState<string>(() => loadAskModel())
+  const setAskModel = (m: string) => { setAskModelState(m); saveAskModel(m) }
+  const [llmModels, setLlmModels] = useState<LlmModel[]>([])
   // Tracks the last `payload.sql` we've reconciled with the local draft.
   // The sync-and-rerun effect lives further down so it can call runSql.
   const lastSyncedSqlRef = useRef<string>(payload.sql ?? "")
@@ -224,11 +247,20 @@ export function DataGridWindow({
     const handle = setTimeout(() => {
       onChangePayloadRef.current((p) => ({
         ...p,
-        view: { ...(p.view ?? {}), sqlDraft: draftSql, sqlRailOpen, activeTab },
+        view: { ...(p.view ?? {}), sqlDraft: draftSql, sqlRailOpen, activeTab, queryMode, askDraft },
       }))
     }, 250)
     return () => clearTimeout(handle)
-  }, [draftSql, sqlRailOpen, activeTab])
+  }, [draftSql, sqlRailOpen, activeTab, queryMode, askDraft])
+
+  // Lazily load the LLM model list the first time Ask mode is opened (drives the
+  // model picker under the editor). Cheap; kept in state for the window's life.
+  useEffect(() => {
+    if (queryMode !== "ask" || !activeConnectionId || llmModels.length > 0) return
+    let cancelled = false
+    fetchLlmModels(activeConnectionId).then((r) => { if (!cancelled) setLlmModels(r.models) })
+    return () => { cancelled = true }
+  }, [queryMode, activeConnectionId, llmModels.length])
 
   // First mount: auto-run for windows that already have a real SQL body
   // (table previews, drag-out aggregations, block-ref spawns). Skip the
@@ -385,7 +417,65 @@ export function DataGridWindow({
     }
   }, [activeConnectionId, activeTab, allWindows, blockName, onChangePayload, params, subscriptions, w.id])
 
-  const onRun = useCallback(() => { void runSql(draftSql || payload.sql) }, [draftSql, payload.sql, runSql])
+  // Ask mode: generate SQL from the plain-English question via rvbbit.synth_sql
+  // (grounded text-to-SQL → a validated, read-only SELECT), drop it into the
+  // editor, flip back to SQL mode, and run it. One-shot, no chat.
+  const runAsk = useCallback(async (question: string) => {
+    if (!activeConnectionId) return
+    const q = question.trim()
+    if (!q) return
+    const myNonce = ++runNonceRef.current
+    setProgress(null)
+    setRunState({ kind: "running", sql: "rvbbit.synth_sql(…)", startedAt: Date.now() })
+    try {
+      // Pass the chosen model via opts (invoke_with_cache honors opts.model and
+      // keys the cache by it); empty opts = synth's default model.
+      const opts = askModel ? JSON.stringify({ model: askModel }) : "{}"
+      const res = await fetch("/api/db/query", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          connectionId: activeConnectionId,
+          // synth_sql writes its cache on a miss → must NOT be read-only.
+          sql: `SELECT rvbbit.synth_sql('${q.replace(/'/g, "''")}', 'synth', '${opts.replace(/'/g, "''")}') AS sql`,
+          rowLimit: 1,
+          readOnly: false,
+        }),
+      })
+      const body = (await res.json()) as
+        | (QueryResult & { ok: true })
+        | { ok: false; error: string; code?: string; detail?: string; hint?: string }
+      // A newer action started while synth was in flight — drop this result.
+      if (runNonceRef.current !== myNonce) return
+      if (body.ok === false) {
+        setRunState({ kind: "error", error: body.error, code: body.code, detail: body.detail, hint: body.hint })
+        return
+      }
+      const firstCol = body.columns[0]?.name
+      const generated = ((firstCol ? body.rows[0]?.[firstCol] : null) as string | null) ?? ""
+      if (!generated.trim()) {
+        setRunState({ kind: "error", error: "Ask: no SQL was generated — try rephrasing the question." })
+        return
+      }
+      // synth_sql returns one long line — pretty-print it (whitespace/keyword
+      // case only, semantically identical) so the editor is readable. Fall back
+      // to the raw SQL if the formatter can't parse it.
+      let pretty = generated
+      try { pretty = formatSql(generated, { language: "postgresql", keywordCase: "upper" }) } catch { /* keep raw */ }
+      // Hand off to runSql (it owns the next nonce); load + flip to SQL mode.
+      setDraftSql(pretty)
+      setQueryMode("sql")
+      void runSql(pretty)
+    } catch (e) {
+      if (runNonceRef.current !== myNonce) return
+      setRunState({ kind: "error", error: e instanceof Error ? e.message : String(e) })
+    }
+  }, [activeConnectionId, askModel, runSql])
+
+  const onRun = useCallback(() => {
+    if (queryMode === "ask") void runAsk(askDraft)
+    else void runSql(draftSql || payload.sql)
+  }, [queryMode, askDraft, draftSql, payload.sql, runAsk, runSql])
 
   // Lazily load per-step rowsets for the Steps inspector when that tab opens.
   useEffect(() => {
@@ -433,6 +523,10 @@ export function DataGridWindow({
   // immediately without a manual Run.
   useEffect(() => {
     if (lastSyncedSqlRef.current === payload.sql) return
+    // In Ask mode the editor shows the question (askDraft), not draftSql, and a
+    // synth-generated SQL change shouldn't silently re-run — just advance the
+    // baseline so this doesn't re-fire when the user flips back to SQL.
+    if (queryMode === "ask") { lastSyncedSqlRef.current = payload.sql ?? ""; return }
     const prev = lastSyncedSqlRef.current
     lastSyncedSqlRef.current = payload.sql ?? ""
     setDraftSql((cur) => (cur === prev ? (payload.sql ?? "") : cur))
@@ -457,7 +551,7 @@ export function DataGridWindow({
       return
     }
     if (payload.sql) void runSql(payload.sql)
-  }, [payload.sql, compiledSql, runSql, isSemanticProjection])
+  }, [payload.sql, compiledSql, runSql, isSemanticProjection, queryMode])
 
   // ── EXPLAIN ───────────────────────────────────────────────────────
   // Plan-only EXPLAIN (FORMAT JSON) never executes the query, so it is
@@ -603,7 +697,9 @@ export function DataGridWindow({
 
   // Re-run when an upstream cascading filter changes (runSignal bumps).
   useEffect(() => {
-    if (runSignal === 0 || isSemanticProjection) return
+    // In Ask mode draftSql is empty (the editor holds the question), so this
+    // would re-run stale payload.sql — skip it.
+    if (runSignal === 0 || isSemanticProjection || queryMode === "ask") return
     void runSql(draftSql || payload.sql)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [runSignal])
@@ -672,7 +768,10 @@ export function DataGridWindow({
     if (!param) return
     onSubscribeParam(payload.key, param.field)
   }
-  const onReset = useCallback(() => { setDraftSql(payload.sql || "") }, [payload.sql])
+  const onReset = useCallback(() => {
+    if (queryMode === "ask") setAskDraft(view.askDraft ?? "")
+    else setDraftSql(payload.sql || "")
+  }, [queryMode, payload.sql, view.askDraft])
 
   const onFormat = useCallback(() => {
     try {
@@ -786,10 +885,27 @@ export function DataGridWindow({
           className="flex flex-col border-r border-chrome-border bg-doc-bg/80"
           style={{ width: view.sqlRailWidthPx ?? 380, minWidth: 280, maxWidth: 700 }}
         >
-          <Toolbar isRunning={isRunning} onRun={onRun} onFormat={onFormat} onReset={onReset} />
-          <div className="flex-1 overflow-hidden">
-            <SqlEditor value={draftSql} onChange={setDraftSql} onRun={onRun} />
+          <Toolbar
+            isRunning={isRunning}
+            onRun={onRun}
+            onFormat={onFormat}
+            onReset={onReset}
+            queryMode={queryMode}
+            onToggleMode={() => setQueryMode((m) => (m === "ask" ? "sql" : "ask"))}
+            askable={hasRvbbit}
+          />
+          <div className="min-h-0 flex-1 overflow-hidden">
+            {queryMode === "ask" ? (
+              <SqlEditor value={askDraft} onChange={setAskDraft} onRun={onRun} language="plain" />
+            ) : (
+              <SqlEditor value={draftSql} onChange={setDraftSql} onRun={onRun} />
+            )}
           </div>
+          {queryMode === "ask" ? (
+            <div className="shrink-0 border-t border-chrome-border bg-chrome-bg/30 px-2 py-1.5">
+              <ModelField value={askModel} models={llmModels} onChange={setAskModel} />
+            </div>
+          ) : null}
           <RunStatus runState={runState} progress={progress} />
         </aside>
       ) : null}
@@ -904,7 +1020,7 @@ export function DataGridWindow({
           />
         ) : null}
 
-        <div className="flex-1 overflow-hidden">
+        <div className="min-h-0 flex-1 overflow-hidden">
           {activeTab === "rows" && result ? (
             result.rows.length === 1 && result.columns.length === 1 ? (
               <SingleCellCallout
@@ -1114,25 +1230,68 @@ function Toolbar({
   onRun,
   onFormat,
   onReset,
+  queryMode,
+  onToggleMode,
+  askable,
 }: {
   isRunning: boolean
   onRun: () => void
   onFormat: () => void
   onReset: () => void
+  queryMode: "sql" | "ask"
+  onToggleMode: () => void
+  /** Whether the Ask (NL→SQL) toggle is offered — only on rvbbit connections. */
+  askable: boolean
 }) {
+  const ask = queryMode === "ask"
   return (
     <div className="flex items-center gap-1 border-b border-chrome-border bg-chrome-bg/40 px-1.5 py-1">
-      <Button size="sm" onClick={onRun} disabled={isRunning} title="Run (⌘↩)">
-        <Play className="h-3 w-3" />
-        Run
+      {/* SQL | Ask query-type toggle (rvbbit only). */}
+      {askable ? (
+        <div className="mr-0.5 inline-flex overflow-hidden rounded border border-chrome-border/70">
+          <button
+            type="button"
+            onClick={() => { if (ask) onToggleMode() }}
+            aria-pressed={!ask}
+            className={cn("px-1.5 py-0.5 text-[10px] transition-colors", !ask ? "bg-foreground/[0.12] text-foreground" : "text-chrome-text/55 hover:bg-foreground/[0.06]")}
+          >
+            SQL
+          </button>
+          <button
+            type="button"
+            onClick={() => { if (!ask) onToggleMode() }}
+            aria-pressed={ask}
+            title="Ask in plain English — generates SQL with rvbbit.synth_sql"
+            className={cn("inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] transition-colors", ask ? "bg-rvbbit-accent/20 text-rvbbit-accent" : "text-chrome-text/55 hover:bg-foreground/[0.06]")}
+          >
+            <Sparkles className="h-2.5 w-2.5" />
+            Ask
+          </button>
+        </div>
+      ) : null}
+      <Button size="sm" onClick={onRun} disabled={isRunning} title={ask ? "Generate SQL from your question (⌘↩)" : "Run (⌘↩)"}>
+        {ask ? <Sparkles className="h-3 w-3" /> : <Play className="h-3 w-3" />}
+        {ask ? "Ask" : "Run"}
       </Button>
-      <Button size="sm" variant="neutral" onClick={onFormat} title="Format">
-        Aa
-      </Button>
-      <Button size="sm" variant="ghost" onClick={onReset} title="Reset to saved">
+      {!ask ? (
+        <Button size="sm" variant="neutral" onClick={onFormat} title="Format">
+          Aa
+        </Button>
+      ) : null}
+      <Button size="sm" variant="ghost" onClick={onReset} title={ask ? "Reset question" : "Reset to saved"}>
         <RotateCcw className="h-3 w-3" />
       </Button>
-      <span className="ml-auto text-[10px] text-chrome-text/60">⌘↩ to run</span>
+      {ask ? (
+        <span
+          className="ml-auto inline-flex items-center gap-1 text-[10px] text-chrome-text/55"
+          title="Generates SQL via one grounded LLM call (rvbbit.synth_sql) over your schema; cached after the first run."
+        >
+          <Sparkles className="h-2.5 w-2.5" style={{ color: "var(--rvbbit-accent)" }} />
+          ≈1 LLM call · cached after first
+        </span>
+      ) : (
+        <span className="ml-auto text-[10px] text-chrome-text/60">⌘↩ to run</span>
+      )}
     </div>
   )
 }

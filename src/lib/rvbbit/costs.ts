@@ -63,7 +63,7 @@ export function statusColor(s: CostStatus | AuditStatus | string): string {
     case "estimated":
       return "var(--info)"
     case "pending":
-      return "var(--chart-3)"
+      return "var(--viz-status-pending)"
     case "stale_pending":
     case "uncosted":
     case "missing_cost_events":

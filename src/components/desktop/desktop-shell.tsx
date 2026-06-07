@@ -25,6 +25,7 @@ import {
   Plus,
   Rocket,
   Search,
+  Sparkles,
   Settings2,
   Table2,
   TreeStructure,
@@ -86,6 +87,7 @@ import { DriftWindow } from "./drift-window"
 import { ModelStudioWindow } from "./model-studio-window"
 import { CapabilitiesWindow } from "./capabilities-window"
 import { CapabilityDetailWindow } from "./capability-detail-window"
+import { HfDeployWindow } from "./hf-deploy-window"
 import { WarrenWindow } from "./warren-window"
 import { WarrenJobDetailWindow } from "./warren-job-detail-window"
 import {
@@ -146,6 +148,7 @@ import type {
   KgSourceContext,
   CapabilitiesPayload,
   CapabilityDetailPayload,
+  HfDeployPayload,
   WarrenPayload,
   WarrenJobDetailPayload,
   PalettePayload,
@@ -1450,6 +1453,32 @@ export function DesktopShell() {
       } satisfies CapabilitiesPayload,
     })
   }, [focus, openWindow, windows, updatePayload])
+
+  const openHfDeploy = useCallback(
+    (modelId?: string | null) => {
+      const existing = windows.find((w) => w.kind === "hf-deploy")
+      if (existing) {
+        if (modelId) {
+          updatePayload(existing.id, (p) => ({
+            ...(p as HfDeployPayload),
+            modelId,
+          }))
+        }
+        return focus(existing.id)
+      }
+      openWindow({
+        id: randomUUID(),
+        kind: "hf-deploy",
+        title: "Deploy · Hugging Face",
+        x: 160 + Math.random() * 40,
+        y: 88 + Math.random() * 40,
+        width: 1080,
+        height: 720,
+        payload: { kind: "hf-deploy", modelId: modelId ?? null } satisfies HfDeployPayload,
+      })
+    },
+    [focus, openWindow, windows, updatePayload],
+  )
 
   const openCapabilityDetail = useCallback(
     (catalogId: string, initialTab?: CapabilityDetailPayload["initialTab"]) => {
@@ -2852,6 +2881,7 @@ export function DesktopShell() {
     { id: "sql-scratch", label: "SQL Scratch", icon: FileCode2, color: "var(--brand-sql-scratch)", activate: openSqlScratch },
     { id: "view-apps", label: "View Apps", icon: Boxes, color: "var(--brand-view-apps)", sublabel: viewAppCount ? `${viewAppCount} saved` : undefined, activate: openViewApps },
     { id: "connections", label: "Connections", icon: Plug, color: "var(--brand-connections)", activate: openConnections },
+    { id: "data-search", label: "Data Search", icon: Search, color: "var(--brand-kg)", description: "Semantic search across data", activate: () => openDataSearch(), rvbbit: true },
     // System
     { id: "system-objects", label: "System Objects", icon: Layers, color: "var(--brand-system-objects)", description: "Tables, indexes, roles, activity", activate: () => openSystemObjects("tables"), folder: "system" },
     { id: "extensions", label: "Extensions", icon: Settings2, color: "var(--brand-extensions)", description: "Installed Postgres extensions", activate: openExtensions, folder: "system" },
@@ -2865,6 +2895,7 @@ export function DesktopShell() {
     { id: "routing", label: "Routing", icon: GitBranch, color: "var(--brand-routing)", description: "Model/backend routing rules", activate: openRouting, folder: "semantic", rvbbit: true },
     { id: "mcp", label: "MCP", icon: Globe, color: "var(--brand-mcp)", description: "MCP servers & tools", activate: openMcpServers, folder: "semantic", rvbbit: true },
     { id: "capabilities", label: "Capabilities", icon: Package, color: "var(--brand-capability)", description: "Installable model capabilities", activate: () => openCapabilities(), folder: "semantic", rvbbit: true },
+    { id: "hf-deploy", label: "Hugging Face", icon: Sparkles, color: "var(--brand-capability)", description: "Deploy any Hugging Face model by id", activate: () => openHfDeploy(), folder: "semantic", rvbbit: true },
     { id: "warren", label: "Warren", icon: Rocket, color: "var(--brand-warren)", description: "Sidecar model runtimes & jobs", activate: () => openWarren(), folder: "semantic", rvbbit: true },
     { id: "model-studio", label: "Model Studio", icon: Brain, color: "var(--brand-specialists)", description: "Inspect & try models", activate: () => openModelStudio(), folder: "semantic", rvbbit: true },
     { id: "duck", label: "Duck", icon: Boxes, color: "var(--brand-duck)", description: "Sidecar broker telemetry", activate: openDuck, folder: "semantic", rvbbit: true },
@@ -2872,7 +2903,6 @@ export function DesktopShell() {
     { id: "kg", label: "Knowledge Graph", icon: TreeStructure, color: "var(--brand-kg)", description: "Browse the extracted graph", activate: () => openKgBrowser(), folder: "knowledge", rvbbit: true },
     { id: "kg-explorer", label: "Graph Explorer", icon: TreeStructure, color: "var(--brand-kg)", description: "Walk entities & relations", activate: () => openKgExplorer(), folder: "knowledge", rvbbit: true },
     { id: "query-lens", label: "Query Lens", icon: Eye, color: "var(--brand-query-lens)", description: "Trace a query's execution", activate: () => openQueryLens(), folder: "knowledge", rvbbit: true },
-    { id: "data-search", label: "Data Search", icon: Search, color: "var(--brand-kg)", description: "Semantic search across data", activate: () => openDataSearch(), folder: "knowledge", rvbbit: true },
     { id: "drift", label: "Drift", icon: LineChart, color: "var(--brand-kg)", description: "Compare extraction runs", activate: () => openDrift(), folder: "knowledge", rvbbit: true },
   ]
 
@@ -3191,6 +3221,7 @@ export function DesktopShell() {
                   openDuck,
                   openCapabilities,
                   openCapabilityDetail,
+                  openHfDeploy,
                   openWarren,
                   openWarrenJob,
                 })}
@@ -3316,6 +3347,7 @@ interface WindowContext {
     catalogId: string,
     initialTab?: CapabilityDetailPayload["initialTab"],
   ) => void
+  openHfDeploy: (modelId?: string | null) => void
   openWarren: (initialTab?: WarrenPayload["initialTab"]) => void
   openWarrenJob: (jobId: string, jobName?: string | null) => void
   reloadSchema: () => void
@@ -3642,7 +3674,7 @@ function renderWindowContent(
     case "folder": {
       const folderId = (w.payload as FolderPayload).folderId
       const items = ctx.launchers.filter((l) => l.folder === folderId && (!l.rvbbit || ctx.hasRvbbit))
-      return <FolderWindow items={items} />
+      return <FolderWindow folderId={folderId} items={items} />
     }
     case "capabilities":
       return (
@@ -3652,6 +3684,16 @@ function renderWindowContent(
           initialTag={(w.payload as CapabilitiesPayload | undefined)?.tagFilter ?? null}
           onOpenCapability={(id) => ctx.openCapabilityDetail(id)}
           onOpenWarren={() => ctx.openWarren()}
+          onOpenHfDeploy={() => ctx.openHfDeploy()}
+        />
+      )
+    case "hf-deploy":
+      return (
+        <HfDeployWindow
+          payload={w.payload as HfDeployPayload}
+          activeConnectionId={ctx.activeConnectionId}
+          hasRvbbit={ctx.hasRvbbit}
+          onOpenWarrenJob={ctx.openWarrenJob}
         />
       )
     case "capability-detail":
@@ -3811,6 +3853,8 @@ function iconForKind(kind: DesktopWindowState["kind"]) {
     case "capabilities":
     case "capability-detail":
       return Package
+    case "hf-deploy":
+      return Sparkles
     case "warren":
     case "warren-job-detail":
       return Rocket

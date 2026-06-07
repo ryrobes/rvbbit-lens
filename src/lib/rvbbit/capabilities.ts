@@ -142,6 +142,10 @@ export interface ManifestRuntimeBlock {
   env?: Record<string, string>
   extra_requirements?: string[]
   volumes?: Array<{ name?: string; mount?: string }>
+  /** Container command — image runtimes pass serving flags here (vLLM). */
+  args?: string[]
+  /** Compose `ipc:` mode. vLLM wants `host` for shared-memory tensors. */
+  ipc?: string
 }
 
 export interface ManifestBackendBlock {
@@ -920,7 +924,10 @@ export async function probeBackend(
 // ── Install pipeline transport ──────────────────────────────────────
 
 export interface ScaffoldRequest {
-  manifestPath: string
+  /** On-disk manifest (catalog packs). One of manifestPath/manifestYaml required. */
+  manifestPath?: string
+  /** Inline manifest YAML (ad-hoc/from-id deploys with no pack on disk). */
+  manifestYaml?: string
   outDir: string
   force?: boolean
   overrides?: Record<string, string>
@@ -1202,6 +1209,254 @@ export async function runAcceptanceSql(
 // ── Knob editor + live render ───────────────────────────────────────
 
 /**
+ * vLLM serving levers — only meaningful for `kind: llm_provider` packs
+ * whose runtime handler is `vllm_openai`. These map 1:1 onto the
+ * vLLM OpenAI server CLI flags and are upserted into `runtime.args`
+ * (preserving manifest-fixed flags like `--model` / `--served-model-name`).
+ */
+export interface VllmKnobs {
+  /** --gpu-memory-utilization (0..1). The big GPU-OOM lever. */
+  gpuMemoryUtilization: number
+  /** --max-model-len. 0 = let vLLM use the model's config default. */
+  maxModelLen: number
+  /** --tensor-parallel-size. Shard across N GPUs. */
+  tensorParallelSize: number
+  /** --max-num-seqs. 0 = vLLM default. Caps concurrent sequences. */
+  maxNumSeqs: number
+  /** --dtype: auto | float16 | bfloat16 | float32. */
+  dtype: string
+  /** --quantization: none | awq | gptq | fp8 | bitsandbytes. */
+  quantization: string
+}
+
+/** True when this capability serves an LLM via the vLLM OpenAI image. */
+export function isVllmManifest(m: Manifest): boolean {
+  return (m.runtime?.handler ?? "").toLowerCase() === "vllm_openai"
+}
+
+export type CapabilityTypeKey =
+  | "vllm"
+  | "llm"
+  | "runtime"
+  | "embedding"
+  | "rerank"
+  | "extract"
+  | "classify"
+  | "forecast"
+  | "tabular"
+  | "specialist"
+
+export interface CapabilityTypeTone {
+  key: CapabilityTypeKey
+  label: string
+  shortLabel: string
+  cssVar: string
+}
+
+export const CAPABILITY_TYPE_TONES: Record<CapabilityTypeKey, CapabilityTypeTone> = {
+  vllm: {
+    key: "vllm",
+    label: "vLLM LLM",
+    shortLabel: "vLLM",
+    cssVar: "--cap-type-vllm",
+  },
+  llm: {
+    key: "llm",
+    label: "LLM",
+    shortLabel: "LLM",
+    cssVar: "--cap-type-llm",
+  },
+  runtime: {
+    key: "runtime",
+    label: "Runtime",
+    shortLabel: "Runtime",
+    cssVar: "--cap-type-runtime",
+  },
+  embedding: {
+    key: "embedding",
+    label: "Embedding",
+    shortLabel: "Embed",
+    cssVar: "--cap-type-embedding",
+  },
+  rerank: {
+    key: "rerank",
+    label: "Reranker",
+    shortLabel: "Rerank",
+    cssVar: "--cap-type-rerank",
+  },
+  extract: {
+    key: "extract",
+    label: "Extractor",
+    shortLabel: "Extract",
+    cssVar: "--cap-type-extract",
+  },
+  classify: {
+    key: "classify",
+    label: "Classifier",
+    shortLabel: "Classify",
+    cssVar: "--cap-type-classify",
+  },
+  forecast: {
+    key: "forecast",
+    label: "Forecast",
+    shortLabel: "Forecast",
+    cssVar: "--cap-type-forecast",
+  },
+  tabular: {
+    key: "tabular",
+    label: "Data/table",
+    shortLabel: "Data",
+    cssVar: "--cap-type-tabular",
+  },
+  specialist: {
+    key: "specialist",
+    label: "Specialist",
+    shortLabel: "Specialist",
+    cssVar: "--cap-type-specialist",
+  },
+}
+
+export function capabilityTypeTone(key: CapabilityTypeKey): CapabilityTypeTone {
+  return CAPABILITY_TYPE_TONES[key] ?? CAPABILITY_TYPE_TONES.specialist
+}
+
+export function classifyManifestCapabilityType(m: Manifest): CapabilityTypeKey {
+  return classifyCapabilityTypeFields({
+    kind: m.kind,
+    tags: m.tags ?? [],
+    runtimeHandler: m.runtime?.handler,
+    backendTransport: m.backend?.transport,
+    backendName: m.backend?.name,
+    runtimeName: m.runtime_registration?.name,
+    sourceModel: m.source?.model,
+    operators: (m.operators ?? []).map((op) => op.name),
+  })
+}
+
+export function classifyCatalogCapabilityType(c: CatalogEntry): CapabilityTypeKey {
+  if (c.manifest) return classifyManifestCapabilityType(c.manifest)
+  return classifyCapabilityTypeFields({
+    kind: c.kind,
+    tags: c.tags ?? [],
+    runtimeHandler: c.runtime_handler,
+    backendTransport: c.backend_transport,
+    backendName: c.backend_name,
+    runtimeName: c.runtime_name,
+    sourceModel: c.source_model,
+    operators: c.operators ?? [],
+  })
+}
+
+function classifyCapabilityTypeFields({
+  kind,
+  tags,
+  runtimeHandler,
+  backendTransport,
+  backendName,
+  runtimeName,
+  sourceModel,
+  operators,
+}: {
+  kind?: string | null
+  tags: string[]
+  runtimeHandler?: string | null
+  backendTransport?: string | null
+  backendName?: string | null
+  runtimeName?: string | null
+  sourceModel?: string | null
+  operators: string[]
+}): CapabilityTypeKey {
+  const lowerTags = new Set(tags.map((t) => t.toLowerCase()))
+  const handler = (runtimeHandler ?? "").toLowerCase()
+  const transport = (backendTransport ?? "").toLowerCase()
+  const nameBits = [kind, runtimeHandler, backendTransport, backendName, runtimeName, sourceModel, ...operators]
+    .filter((v): v is string => typeof v === "string" && v.length > 0)
+    .join(" ")
+    .toLowerCase()
+  const hasTag = (...needles: string[]) => needles.some((t) => lowerTags.has(t))
+  const hasText = (...needles: string[]) => needles.some((t) => nameBits.includes(t))
+  const hasAny = (...needles: string[]) => hasTag(...needles) || hasText(...needles)
+
+  if (handler === "vllm_openai" || hasAny("vllm")) return "vllm"
+  if (kind === "runtime_sidecar") return "runtime"
+  if (kind === "llm_provider" || transport === "openai_chat" || hasTag("llm")) return "llm"
+  if (handler === "embedding" || transport === "local_embed" || hasAny("embedding", "embed", "retrieval"))
+    return "embedding"
+  if (hasAny("rerank", "reranker", "cross-encoder", "cross_encoder", "semantic_score"))
+    return "rerank"
+  if (handler === "time_series_forecast" || hasAny("forecast", "forecasting", "time-series", "time_series"))
+    return "forecast"
+  if (hasAny("tabular", "table", "tabfpn", "tapas", "contract", "join", "column", "quality", "governance"))
+    return "tabular"
+  if (hasAny("extract", "extraction", "gliner", "ner", "token-classification", "token_classification", "keyphrase", "pii"))
+    return "extract"
+  if (
+    handler === "sequence_classification" ||
+    handler === "zero_shot_classification" ||
+    hasAny("classify", "classification", "classifier", "sentiment", "emotion", "nli", "zero-shot", "zero_shot", "security")
+  ) {
+    return "classify"
+  }
+  return "specialist"
+}
+
+/** vLLM flags this UI owns — stripped before re-applying knob values. */
+const VLLM_MANAGED_FLAGS = [
+  "--gpu-memory-utilization",
+  "--max-model-len",
+  "--tensor-parallel-size",
+  "--max-num-seqs",
+  "--dtype",
+  "--quantization",
+]
+
+function vllmArgValue(args: string[], flag: string): string | null {
+  const i = args.indexOf(flag)
+  return i >= 0 && i + 1 < args.length ? args[i + 1] : null
+}
+
+/** Seed the knob editor from the manifest's existing `runtime.args`. */
+export function parseVllmKnobs(args: string[]): VllmKnobs {
+  const num = (flag: string, fallback: number) => {
+    const raw = vllmArgValue(args, flag)
+    const n = raw == null ? NaN : Number(raw)
+    return Number.isFinite(n) ? n : fallback
+  }
+  return {
+    gpuMemoryUtilization: num("--gpu-memory-utilization", 0.9),
+    maxModelLen: num("--max-model-len", 0),
+    tensorParallelSize: num("--tensor-parallel-size", 1),
+    maxNumSeqs: num("--max-num-seqs", 0),
+    dtype: vllmArgValue(args, "--dtype") ?? "auto",
+    quantization: vllmArgValue(args, "--quantization") ?? "none",
+  }
+}
+
+/**
+ * Upsert the user's vLLM knobs into a base args list. Manifest-fixed
+ * flags (--model, --served-model-name, --host, --port) flow through
+ * untouched; the six managed flags are replaced with knob values.
+ */
+export function applyVllmKnobsToArgs(base: string[], v: VllmKnobs): string[] {
+  const out: string[] = []
+  for (let i = 0; i < base.length; i++) {
+    if (VLLM_MANAGED_FLAGS.includes(base[i])) {
+      i++ // skip the flag and its value
+      continue
+    }
+    out.push(base[i])
+  }
+  out.push("--dtype", v.dtype)
+  out.push("--gpu-memory-utilization", String(v.gpuMemoryUtilization))
+  out.push("--tensor-parallel-size", String(v.tensorParallelSize))
+  if (v.maxModelLen > 0) out.push("--max-model-len", String(v.maxModelLen))
+  if (v.maxNumSeqs > 0) out.push("--max-num-seqs", String(v.maxNumSeqs))
+  if (v.quantization && v.quantization !== "none")
+    out.push("--quantization", v.quantization)
+  return out
+}
+
+/**
  * The handful of knobs the install wizard exposes. Anything else is
  * inherited from the manifest. Editing a knob doesn't mutate the file —
  * it overrides values inside the render functions.
@@ -1216,6 +1471,8 @@ export interface InstallKnobs {
   dockerNetwork: string
   outputDir: string
   gpu: boolean
+  /** Present only for vLLM packs; drives `runtime.args`. */
+  vllm?: VllmKnobs
 }
 
 export function defaultKnobs(manifest: Manifest): InstallKnobs {
@@ -1231,6 +1488,9 @@ export function defaultKnobs(manifest: Manifest): InstallKnobs {
     dockerNetwork: "docker_default",
     outputDir: `.rvbbit/capabilities/${manifest.name}`,
     gpu: false,
+    vllm: isVllmManifest(manifest)
+      ? parseVllmKnobs(runtime.args ?? [])
+      : undefined,
   }
 }
 
@@ -1244,6 +1504,11 @@ function applyKnobs(manifest: Manifest, knobs: InstallKnobs): Manifest {
     copy.backend.timeout_ms = knobs.timeoutMs
   }
   copy.runtime = { ...(copy.runtime ?? {}), device: knobs.device }
+  // vLLM serving flags are upserted into runtime.args so both the
+  // compose `command:` and the rendered manifest reflect the knobs.
+  if (knobs.vllm && isVllmManifest(copy)) {
+    copy.runtime.args = applyVllmKnobsToArgs(copy.runtime.args ?? [], knobs.vllm)
+  }
   return copy
 }
 
@@ -1528,12 +1793,14 @@ function renderCompose(m: Manifest, knobs: InstallKnobs): string {
     .map((spec) => `  ${spec.name}:`)
     .join("\n")
   const sourceLines = renderRuntimeSource(runtime)
+  const commandBlock = renderCommandBlock(runtime.args)
+  const ipcLine = runtime.ipc ? `    ipc: ${JSON.stringify(runtime.ipc)}\n` : ""
   return `services:
   ${service}:
 ${sourceLines}    container_name: rvbbit-${service}
-    expose:
+${ipcLine}    expose:
       - "${containerPort}"
-    environment:
+${commandBlock}    environment:
 ${envLines}
     volumes:
 ${volumeMounts}
@@ -1553,6 +1820,18 @@ networks:
 volumes:
 ${volumeDefs}
 `
+}
+
+/**
+ * Render a compose `command:` list from runtime args. Empty string when
+ * there are none, so non-image packs (build:.) are unaffected. Without
+ * this the lens-stamped compose.yaml would clobber the CLI-rendered
+ * command and leave vLLM with no `--model`.
+ */
+function renderCommandBlock(args?: string[]): string {
+  if (!args || args.length === 0) return ""
+  const lines = args.map((a) => `      - ${JSON.stringify(String(a))}`).join("\n")
+  return `    command:\n${lines}\n`
 }
 
 function runtimeImage(runtime: ManifestRuntimeBlock): string | null {
@@ -1585,11 +1864,24 @@ function renderHostPortsCompose(m: Manifest, knobs: InstallKnobs): string {
 
 function renderGpuCompose(m: Manifest): string {
   const service = m.name.replace(/_/g, "-")
+  // Request the GPU via deploy.resources (honoured across all Docker Compose
+  // versions); the newer top-level `gpus: all` is silently ignored by older
+  // compose, leaving the container with no GPU ("0 active drivers / No CUDA
+  // runtime") — vLLM then fails device inference. Pin NVIDIA_DRIVER_CAPABILITIES
+  // so images that don't set it (e.g. vllm/vllm-openai) still get CUDA mounted.
   return `services:
   ${service}:
-    gpus: all
     environment:
       RVBBIT_CAPABILITY_DEVICE: "cuda"
+      NVIDIA_VISIBLE_DEVICES: "all"
+      NVIDIA_DRIVER_CAPABILITIES: "all"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
 `
 }
 
@@ -1607,8 +1899,10 @@ function isPlainObject(v: unknown): v is Record<string, unknown> {
 function quoteScalar(s: string): string {
   if (s === "") return '""'
   // Reserved-word and special-char guard. If the value contains
-  // anything that would confuse YAML scalar parsing, quote it.
-  if (/[:#&*!|>'"%@`\n]/.test(s) || /^[?\-]/.test(s) || /^\s|\s$/.test(s)) {
+  // anything that would confuse YAML scalar parsing, quote it. The flow
+  // indicators {}[], matter for template values like "{{ inputs.text }}",
+  // which YAML would otherwise read as a flow mapping.
+  if (/[:#&*!|>'"%@`{}[\],\n]/.test(s) || /^[?\-]/.test(s) || /^\s|\s$/.test(s)) {
     return JSON.stringify(s)
   }
   if (/^(true|false|null|yes|no|on|off|~)$/i.test(s)) return JSON.stringify(s)

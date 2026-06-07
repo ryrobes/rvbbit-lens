@@ -23,13 +23,44 @@ export interface LauncherItem {
   rvbbit?: boolean
 }
 
+type FolderView = "icon" | "list"
+
+// Per-folder Icon/List preference, persisted in localStorage (one small map
+// keyed by folderId) so the choice sticks across sessions.
+const VIEW_STORAGE_KEY = "rvbbit-lens:folder-views"
+
+function loadFolderView(folderId: string): FolderView {
+  try {
+    const raw = typeof window !== "undefined" ? window.localStorage.getItem(VIEW_STORAGE_KEY) : null
+    const map = raw ? (JSON.parse(raw) as Record<string, FolderView>) : {}
+    return map[folderId] === "list" ? "list" : "icon"
+  } catch {
+    return "icon"
+  }
+}
+
+function saveFolderView(folderId: string, view: FolderView): void {
+  try {
+    const raw = window.localStorage.getItem(VIEW_STORAGE_KEY)
+    const map = raw ? (JSON.parse(raw) as Record<string, FolderView>) : {}
+    map[folderId] = view
+    window.localStorage.setItem(VIEW_STORAGE_KEY, JSON.stringify(map))
+  } catch {
+    /* ignore quota / disabled storage */
+  }
+}
+
 /**
  * File-explorer-style folder window: shows its items in an Icon view or a List
- * view (toggle in the toolbar). Reused for grouped launchers now and saved
- * queries / arranged artifacts later.
+ * view (toggle in the toolbar, persisted per folder). Reused for grouped
+ * launchers now and saved queries / arranged artifacts later.
  */
-export function FolderWindow({ items }: { items: LauncherItem[] }) {
-  const [view, setView] = useState<"icon" | "list">("icon")
+export function FolderWindow({ folderId, items }: { folderId: string; items: LauncherItem[] }) {
+  const [view, setViewState] = useState<FolderView>(() => loadFolderView(folderId))
+  const setView = (v: FolderView) => {
+    setViewState(v)
+    saveFolderView(folderId, v)
+  }
   return (
     <div className="flex h-full flex-col bg-doc-bg group-data-[focused=false]/window:bg-doc-bg/70">
       <div className="flex h-8 shrink-0 items-center gap-2 border-b border-chrome-border bg-chrome-bg/30 px-2">

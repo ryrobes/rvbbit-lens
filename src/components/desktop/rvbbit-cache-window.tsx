@@ -441,7 +441,7 @@ function OverviewTab({
                 value: m.cost > 0 ? m.cost : m.calls,
                 valueLabel: m.cost > 0 ? `$${m.cost.toFixed(4)}` : fmtCount(m.calls),
                 sub: `${fmtCount(m.tokens)} tok`,
-                color: "var(--chart-3)",
+                color: "var(--viz-status-pending)",
                 title: `${m.model} · ${fmtCount(m.calls)} call(s) · ${fmtCount(m.tokens)} tok`,
               }))}
             />

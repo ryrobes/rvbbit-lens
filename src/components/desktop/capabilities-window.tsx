@@ -13,12 +13,15 @@ import {
   Plus,
   RefreshCw,
   Rocket,
+  Sparkles,
   Search,
   Tag,
   X,
 } from "@/lib/icons"
 import { cn } from "@/lib/utils"
 import {
+  capabilityTypeTone,
+  classifyCatalogCapabilityType,
   fetchCatalog,
   fetchInstalledBackends,
   fetchInstalledRuntimes,
@@ -47,6 +50,11 @@ import {
   fmtMs,
   InstallStateBadgeGroup,
 } from "./instruments"
+import {
+  CapabilityTypeChip,
+  CapabilityTypeWash,
+  capabilityTypeStyle,
+} from "./capability-type-visuals"
 
 interface CapabilitiesWindowProps {
   activeConnectionId: string | null
@@ -54,6 +62,7 @@ interface CapabilitiesWindowProps {
   initialTag?: string | null
   onOpenCapability: (catalogId: string) => void
   onOpenWarren?: () => void
+  onOpenHfDeploy?: () => void
 }
 
 const REFRESH_OPTIONS_MS = [
@@ -79,6 +88,7 @@ export function CapabilitiesWindow({
   initialTag,
   onOpenCapability,
   onOpenWarren,
+  onOpenHfDeploy,
 }: CapabilitiesWindowProps) {
   const [catalog, setCatalog] = useState<CatalogDoc | null>(null)
   const [installed, setInstalled] = useState<InstalledBackend[]>([])
@@ -370,6 +380,17 @@ export function CapabilitiesWindow({
                   {totalExternal} external
                 </span>
               </>
+            ) : null}
+          {onOpenHfDeploy ? (
+              <button
+                type="button"
+                onClick={onOpenHfDeploy}
+                className="inline-flex items-center gap-1 rounded-full border border-brand-capability/40 bg-brand-capability/10 px-2 py-0.5 text-[10px] text-brand-capability hover:bg-brand-capability/15"
+                title="Deploy any Hugging Face model by id — no per-model pack needed"
+              >
+                <Sparkles className="h-3 w-3" />
+                Hugging Face
+              </button>
             ) : null}
           {warrenAvail?.available && onOpenWarren ? (
               <button
@@ -796,6 +817,7 @@ function CapabilityCard({
 }) {
   const { catalog, installed, installedRuntime, flags } = entry
   const states = flagsToStates(flags)
+  const typeTone = capabilityTypeTone(classifyCatalogCapabilityType(catalog))
   // Installed *and* live — a registered backend that's healthy, in use, or a
   // ready runtime. These get the prominent treatment.
   const active =
@@ -840,12 +862,17 @@ function CapabilityCard({
             ? "border-chrome-border bg-secondary-background/50 ring-1 ring-brand-capability/15 hover:border-brand-capability/40 hover:bg-secondary-background/70"
             : "border-chrome-border bg-secondary-background/40 hover:border-brand-capability/40 hover:bg-secondary-background/70",
       )}
+      style={capabilityTypeStyle(typeTone)}
     >
+      <CapabilityTypeWash active={active} registered={flags.registered} />
       <WeightBar bytes={vramRequired} max={maxVram} />
 
       {/* title row */}
       <div className="flex items-start gap-1.5">
-        <Package className="mt-0.5 h-3.5 w-3.5 shrink-0 text-brand-capability" />
+        <Package
+          className="mt-0.5 h-3.5 w-3.5 shrink-0"
+          style={{ color: "var(--cap-type)" }}
+        />
         <div className="min-w-0 flex-1">
           <div className="truncate text-[12px] font-medium text-foreground group-hover:text-brand-capability">
             {catalog.title}
@@ -867,6 +894,7 @@ function CapabilityCard({
       {/* state badges */}
       <div className="mt-2 flex flex-wrap items-center gap-1">
         <InstallStateBadgeGroup states={states} size="xs" />
+        <CapabilityTypeChip tone={typeTone} />
         <span
           className="rounded-full border border-chrome-border/50 bg-foreground/[0.03] px-1.5 py-px font-mono text-[9px] text-chrome-text/60"
           title={`catalog source: ${catalog.catalog_source}`}

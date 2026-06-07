@@ -43,6 +43,75 @@
   --chart-5: oklch(72% 0.17 25);
   --chart-6: oklch(74% 0.19 350);
 
+  /* Visualization object palette. These are intentionally derived from
+     theme tokens rather than fixed hues, so graph nodes, timeline lanes,
+     engine ribbons, and category chips stay vibrant while following
+     dark/light and wallpaper-derived palette changes. */
+  --viz-chip-fg: var(--main-foreground);
+
+  --viz-series-1: var(--chart-1);
+  --viz-series-2: color-mix(in oklch, var(--chart-2) 84%, var(--main));
+  --viz-series-3: color-mix(in oklch, var(--chart-3) 82%, var(--rvbbit-accent));
+  --viz-series-4: color-mix(in oklch, var(--chart-4) 84%, var(--brand-query-lens));
+  --viz-series-5: color-mix(in oklch, var(--chart-5) 86%, var(--brand-warren));
+  --viz-series-6: color-mix(in oklch, var(--chart-6) 84%, var(--brand-specialists));
+  --viz-series-7: color-mix(in oklch, var(--info) 82%, var(--chart-1));
+  --viz-series-8: color-mix(in oklch, var(--success) 82%, var(--chart-2));
+  --viz-series-9: color-mix(in oklch, var(--warning) 82%, var(--chart-3));
+
+  --viz-kind-1: color-mix(in oklch, var(--chart-1) 76%, var(--brand-kg));
+  --viz-kind-2: color-mix(in oklch, var(--chart-2) 76%, var(--brand-query-lens));
+  --viz-kind-3: color-mix(in oklch, var(--chart-3) 78%, var(--brand-finder));
+  --viz-kind-4: color-mix(in oklch, var(--chart-4) 76%, var(--brand-specialists));
+  --viz-kind-5: color-mix(in oklch, var(--chart-5) 76%, var(--brand-warren));
+  --viz-kind-6: color-mix(in oklch, var(--chart-6) 76%, var(--brand-capability));
+  --viz-kind-7: color-mix(in oklch, var(--info) 78%, var(--brand-routing));
+  --viz-kind-8: color-mix(in oklch, var(--success) 76%, var(--brand-operators));
+  --viz-kind-9: color-mix(in oklch, var(--warning) 76%, var(--brand-cache));
+  --viz-kind-10: color-mix(in oklch, var(--main) 74%, var(--chart-4));
+  --viz-kind-table: color-mix(in oklch, var(--brand-kg) 68%, var(--chart-1));
+  --viz-kind-column: color-mix(in oklch, var(--brand-query-lens) 58%, var(--brand-kg));
+
+  --viz-engine-native: color-mix(in oklch, var(--brand-routing) 56%, var(--chart-5));
+  --viz-engine-duck-vector: color-mix(in oklch, var(--brand-duck) 62%, var(--chart-3));
+  --viz-engine-duck-vortex: color-mix(in oklch, var(--brand-duck) 52%, var(--chart-6));
+  --viz-engine-duck-hive: color-mix(in oklch, var(--brand-duck) 54%, var(--chart-2));
+  --viz-engine-datafusion-vector: color-mix(in oklch, var(--brand-routing) 52%, var(--chart-1));
+  --viz-engine-datafusion-hive: color-mix(in oklch, var(--brand-routing) 52%, var(--info));
+  --viz-engine-pg-rowstore: color-mix(in oklch, var(--brand-pg-monitor) 52%, var(--chart-4));
+
+  --viz-op-llm: color-mix(in oklch, var(--rvbbit-accent) 76%, var(--main));
+  --viz-op-specialist: color-mix(in oklch, var(--brand-specialists) 68%, var(--chart-1));
+  --viz-op-runtime: color-mix(in oklch, var(--brand-capability) 66%, var(--chart-6));
+  --viz-op-code: color-mix(in oklch, var(--brand-operators) 58%, var(--chart-2));
+  --viz-op-sql: color-mix(in oklch, var(--brand-query-lens) 58%, var(--chart-4));
+  --viz-op-mcp: color-mix(in oklch, var(--brand-mcp) 68%, var(--chart-5));
+  --viz-op-gate: color-mix(in oklch, var(--main) 42%, var(--chart-3));
+  --viz-op-terminal: var(--main);
+  --viz-op-pipeline: color-mix(in oklch, var(--brand-operators) 70%, var(--chart-2));
+  --viz-op-rowset: color-mix(in oklch, var(--brand-operators) 64%, var(--chart-4));
+
+  --viz-role-numeric: var(--viz-series-1);
+  --viz-role-temporal: var(--viz-series-3);
+  --viz-role-categorical: var(--viz-series-4);
+  --viz-role-boolean: var(--viz-series-2);
+
+  --viz-storage-heap: color-mix(in oklch, var(--info) 72%, var(--chart-1));
+  --viz-storage-hot: color-mix(in oklch, var(--rvbbit-accent) 74%, var(--chart-2));
+  --viz-storage-cold: var(--viz-series-1);
+  --viz-storage-index: color-mix(in oklch, var(--terminal-dim) 72%, var(--chrome-text));
+  --viz-storage-toast: var(--viz-series-5);
+  --viz-storage-vortex: var(--viz-series-4);
+  --viz-storage-variants: var(--viz-series-3);
+
+  --viz-surface-receipt: var(--viz-op-llm);
+  --viz-surface-subcall: var(--viz-op-code);
+  --viz-surface-mcp: var(--viz-op-mcp);
+  --viz-surface-route-decision: var(--viz-engine-datafusion-vector);
+  --viz-surface-route-execution: var(--viz-engine-pg-rowstore);
+  --viz-surface-kg-write: var(--viz-kind-table);
+  --viz-status-pending: var(--viz-series-3);
+
   --success: oklch(72% 0.19 145);
   --warning: oklch(80% 0.16 85);
   --danger: oklch(65% 0.22 25);
@@ -126,6 +195,20 @@
   --brand-warren: oklch(82% 0.02 35);
   --brand-costs: oklch(83% 0.02 130);
   --brand-duck: oklch(80% 0.02 210);
+
+  /* Capability model-type palette. These keep a shared lightness/chroma so
+     Warren and catalog cards get distinguishable tints without leaving the
+     current theme's muted desktop language. */
+  --cap-type-vllm: color-mix(in oklch, var(--viz-engine-datafusion-vector) 68%, var(--brand-capability));
+  --cap-type-llm: color-mix(in oklch, var(--viz-op-llm) 68%, var(--brand-routing));
+  --cap-type-runtime: color-mix(in oklch, var(--viz-op-runtime) 70%, var(--brand-warren));
+  --cap-type-embedding: color-mix(in oklch, var(--viz-kind-8) 68%, var(--brand-capability));
+  --cap-type-rerank: color-mix(in oklch, var(--viz-kind-7) 68%, var(--brand-capability));
+  --cap-type-extract: color-mix(in oklch, var(--viz-kind-4) 68%, var(--brand-specialists));
+  --cap-type-classify: color-mix(in oklch, var(--viz-kind-9) 68%, var(--brand-operators));
+  --cap-type-forecast: color-mix(in oklch, var(--viz-kind-6) 68%, var(--brand-routing));
+  --cap-type-tabular: color-mix(in oklch, var(--viz-kind-table) 68%, var(--brand-kg));
+  --cap-type-specialist: color-mix(in oklch, var(--viz-op-specialist) 68%, var(--brand-specialists));
 
   /* Wallpaper darkening overlay (when a custom wallpaper is set).
      Two stops on a 135deg gradient. */
@@ -249,6 +332,17 @@
   --brand-warren: oklch(56% 0.025 35);
   --brand-costs: oklch(56% 0.025 130);
   --brand-duck: oklch(54% 0.025 210);
+
+  --cap-type-vllm: color-mix(in oklch, var(--viz-engine-datafusion-vector) 68%, var(--brand-capability));
+  --cap-type-llm: color-mix(in oklch, var(--viz-op-llm) 68%, var(--brand-routing));
+  --cap-type-runtime: color-mix(in oklch, var(--viz-op-runtime) 70%, var(--brand-warren));
+  --cap-type-embedding: color-mix(in oklch, var(--viz-kind-8) 68%, var(--brand-capability));
+  --cap-type-rerank: color-mix(in oklch, var(--viz-kind-7) 68%, var(--brand-capability));
+  --cap-type-extract: color-mix(in oklch, var(--viz-kind-4) 68%, var(--brand-specialists));
+  --cap-type-classify: color-mix(in oklch, var(--viz-kind-9) 68%, var(--brand-operators));
+  --cap-type-forecast: color-mix(in oklch, var(--viz-kind-6) 68%, var(--brand-routing));
+  --cap-type-tabular: color-mix(in oklch, var(--viz-kind-table) 68%, var(--brand-kg));
+  --cap-type-specialist: color-mix(in oklch, var(--viz-op-specialist) 68%, var(--brand-specialists));
 
   --wallpaper-overlay-from: oklch(94% 0.01 95 / 0.62);
   --wallpaper-overlay-to: oklch(86% 0.03 90 / 0.35);

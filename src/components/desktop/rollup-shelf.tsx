@@ -183,9 +183,9 @@ function SemanticPill({
     <span
       className="inline-flex items-center gap-1 rounded-full border px-1.5 py-0.5 text-[10px]"
       style={{
-        borderColor: "color-mix(in oklch, var(--brand-operators) 45%, transparent)",
-        backgroundColor: "color-mix(in oklch, var(--brand-operators) 12%, transparent)",
-        color: "var(--brand-operators)",
+        borderColor: "color-mix(in oklch, var(--viz-op-pipeline) 45%, transparent)",
+        backgroundColor: "color-mix(in oklch, var(--viz-op-pipeline) 12%, transparent)",
+        color: "var(--viz-op-pipeline)",
       }}
       title={`rvbbit.${proj.operator}(${proj.column.name})${composed ? "" : ` — click to ${numeric ? "average" : "group & count"}`}`}
     >

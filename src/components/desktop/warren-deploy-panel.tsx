@@ -15,8 +15,13 @@ import {
 import { cn } from "@/lib/utils"
 import { Button } from "@/components/ui/button"
 import {
+  capabilityTypeTone,
+  classifyManifestCapabilityType,
+  isVllmManifest,
+  parseVllmKnobs,
   runAcceptanceSql,
   type AcceptanceRunStep,
+  type CapabilityTypeTone,
   type InstallKnobs,
   type Manifest,
   type ManifestAcceptanceBlock,
@@ -39,6 +44,10 @@ import {
   type WarrenJobStatus,
 } from "@/lib/rvbbit/warren"
 import { fmtAgo, fmtMs } from "./instruments"
+import {
+  CapabilityTypeChip,
+  capabilityTypeStyle,
+} from "./capability-type-visuals"
 
 interface WarrenDeployPanelProps {
   activeConnectionId: string | null
@@ -93,6 +102,10 @@ export function WarrenDeployPanel({
   const [acceptanceRunning, setAcceptanceRunning] = useState(false)
   const [acceptanceOk, setAcceptanceOk] = useState<boolean | null>(null)
   const hasAcceptance = (acceptance?.tests?.length ?? 0) > 0
+  const typeTone = useMemo(
+    () => capabilityTypeTone(classifyManifestCapabilityType(manifest)),
+    [manifest],
+  )
 
   // ── poll inventory + label observations ──
   const reload = useCallback(async () => {
@@ -142,6 +155,13 @@ export function WarrenDeployPanel({
     () => nodes.filter((n) => nodeMatchesSelector(n.labels, selector)),
     [nodes, selector],
   )
+  // vLLM serving knobs edited away from the manifest defaults must be
+  // carried via the manifest path even when a catalog id exists.
+  const vllmKnobsCustomized = useMemo(() => {
+    if (!knobs.vllm || !isVllmManifest(manifest)) return false
+    const base = parseVllmKnobs(manifest.runtime?.args ?? [])
+    return JSON.stringify(base) !== JSON.stringify(knobs.vllm)
+  }, [knobs.vllm, manifest])
   const vramRequired = manifest.resources?.gpu?.vram_required_bytes ?? null
   const gpuPlacement = manifest.resources?.gpu?.placement ?? "single_gpu"
   const gpuReservationWanted =
@@ -181,9 +201,16 @@ export function WarrenDeployPanel({
     // Preferred path: queue by catalog id — the server uses the published
     // manifest and stamps the job with backend/runtime/operator intent. The
     // manifest+knobs path is the ad-hoc escape hatch for catalog-less packs.
-    const result = catalogId
-      ? await deployCatalogCapability(activeConnectionId, catalogId, selector, trimmedName)
-      : await deployCapability(activeConnectionId, manifestWithKnobs(manifest, knobs), selector, trimmedName)
+    //
+    // Exception: vLLM packs with customized serving knobs. The catalog
+    // path sends only an id, so tuned runtime.args (gpu-memory-utilization,
+    // max-model-len, …) would be dropped server-side. Fall back to the
+    // manifest+knobs path so the user's overrides actually reach the agent.
+    const useKnobOverride = catalogId && vllmKnobsCustomized
+    const result =
+      catalogId && !useKnobOverride
+        ? await deployCatalogCapability(activeConnectionId, catalogId, selector, trimmedName)
+        : await deployCapability(activeConnectionId, manifestWithKnobs(manifest, knobs), selector, trimmedName)
     setDeploying(false)
     if (result.error || !result.jobId) {
       setDeployError(result.error ?? "deploy returned no job id")
@@ -194,7 +221,7 @@ export function WarrenDeployPanel({
     setAcceptanceSteps([])
     setAcceptanceOk(null)
     onOpenJob(result.jobId, trimmedName)
-  }, [activeConnectionId, catalogId, manifest, knobs, selector, jobName, onOpenJob])
+  }, [activeConnectionId, catalogId, vllmKnobsCustomized, manifest, knobs, selector, jobName, onOpenJob])
 
   const runAcceptance = useCallback(async () => {
     if (!activeConnectionId || !acceptance || acceptanceRunning) return
@@ -216,6 +243,7 @@ export function WarrenDeployPanel({
         <span className="text-[11px] uppercase tracking-wider text-chrome-text">
           Deploy via Warren
         </span>
+        <CapabilityTypeChip tone={typeTone} compact />
         <span className="text-[10px] text-chrome-text/55">
           A remote warren-agent scaffolds + builds + registers — no local docker.
         </span>
@@ -422,6 +450,13 @@ export function WarrenDeployPanel({
                 Knob overrides from the Overview tab are baked into the
                 submitted manifest.
               </p>
+              {catalogId && vllmKnobsCustomized ? (
+                <p className="text-[10px] leading-snug text-brand-capability/80">
+                  vLLM serving knobs are customized — submitting the full
+                  manifest (with your <span className="font-mono">runtime.args</span>)
+                  instead of the catalog id so the overrides reach the agent.
+                </p>
+              ) : null}
             </div>
           </div>
         </div>
@@ -453,6 +488,7 @@ export function WarrenDeployPanel({
                     selector={selector}
                     vramRequired={gpuReservationWanted ? vramRequired : null}
                     gpuPlacement={gpuPlacement}
+                    typeTone={typeTone}
                   />
                 ))}
               </div>
@@ -648,12 +684,14 @@ function NodeMatchCard({
   selector,
   vramRequired,
   gpuPlacement,
+  typeTone,
 }: {
   node: WarrenInventoryRow
   matches: boolean
   selector: Record<string, unknown>
   vramRequired: number | null
   gpuPlacement: string
+  typeTone: CapabilityTypeTone
 }) {
   const hb = nodeHeartbeatState(node.last_heartbeat)
   const vramFit = nodeFitsVram(node, vramRequired, gpuPlacement)
@@ -664,14 +702,33 @@ function NodeMatchCard({
   const missingKeys = Object.keys(selector).filter(
     (k) => !(k in node.labels) || !shallowEqual(node.labels[k], selector[k]),
   )
+  const cardStyle = {
+    ...capabilityTypeStyle(typeTone),
+    ...(matches
+      ? {
+          borderColor:
+            "color-mix(in oklch, var(--cap-type) 44%, var(--chrome-border))",
+          background:
+            "linear-gradient(135deg, color-mix(in oklch, var(--cap-type) 10%, transparent), color-mix(in oklch, var(--secondary-background) 70%, transparent)), color-mix(in oklch, var(--secondary-background) 54%, transparent)",
+        }
+      : {}),
+  }
 
   return (
     <div
       className={cn(
-        "rounded border bg-secondary-background/40 p-2",
+        "relative overflow-hidden rounded border bg-secondary-background/40 p-2 pl-3.5 transition-colors",
         matches ? "border-brand-warren/40" : "border-chrome-border/40 opacity-60",
       )}
+      style={cardStyle}
     >
+      <span
+        className="pointer-events-none absolute bottom-2 left-1 top-2 w-[3px] rounded-full"
+        style={{
+          background: "var(--cap-type)",
+          opacity: matches ? 0.7 : 0.25,
+        }}
+      />
       <div className="flex items-center gap-1.5">
         <span
           className={cn(
@@ -723,8 +780,9 @@ function NodeMatchCard({
             {vramFit === "fits" ? "fits" : vramFit === "insufficient" ? "low vram" : "no gpu"}
           </span>
         ) : null}
+        <CapabilityTypeChip tone={typeTone} className="ml-auto" compact />
         {node.version ? (
-          <span className="ml-auto font-mono text-[9px] text-chrome-text/45">
+          <span className="font-mono text-[9px] text-chrome-text/45">
             {node.version}
           </span>
         ) : null}

@@ -22,6 +22,9 @@ export function deriveTheme(palette: ImagePalette, mode: ThemeMode): DerivedThem
 function deriveDark(p: ImagePalette): ColorTokens {
   const main = p.vibrant
   const rvbbit = p.lightVibrant
+  const seriesC = vizChroma(p, "dark")
+  const brandC = brandChroma(p, "dark")
+  const brandSoftC = brandC * 0.78
   return {
     // surfaces
     background: oklch(13, 0.035, p.baseHue),
@@ -33,12 +36,13 @@ function deriveDark(p: ImagePalette): ColorTokens {
     // brand
     main,
     mainForeground: oklch(0, 0, 0),
-    // chart series — rotate around the base hue so the palette feels related
+    // chart/viz series — rotate around the base hue so the palette feels related
     chart1: main,
-    chart2: oklch(72, p.chroma * 4.5, (p.baseHue + 90) % 360),
-    chart3: oklch(80, p.chroma * 4, (p.baseHue + 180) % 360),
-    chart4: oklch(70, p.chroma * 5, (p.baseHue + 240) % 360),
-    chart5: oklch(72, p.chroma * 4.2, (p.baseHue + 320) % 360),
+    chart2: oklch(72, seriesC * 0.9, (p.baseHue + 90) % 360),
+    chart3: oklch(80, seriesC * 0.8, (p.baseHue + 180) % 360),
+    chart4: oklch(70, seriesC, (p.baseHue + 240) % 360),
+    chart5: oklch(72, seriesC * 0.85, (p.baseHue + 320) % 360),
+    chart6: oklch(74, seriesC * 0.95, (p.baseHue + 290) % 360),
     // semantic — stay constant for predictability
     success: "oklch(72% 0.19 145)",
     warning: "oklch(80% 0.16 85)",
@@ -94,14 +98,30 @@ function deriveDark(p: ImagePalette): ColorTokens {
     winExtensionsH: "285",
     winRvbbitCacheH: "175",
     winConnectionsH: "290",
+    winPaletteH: "320",
+    winPgMonitorH: "150",
+    winDuckH: "210",
+    winFolderH: "85",
     // Desktop shortcuts inherit the same hue family
-    brandFinder: oklch(82, 0.13, 220),
-    brandSqlScratch: oklch(83, 0.13, 88),
-    brandViewApps: oklch(82, 0.11, 196),
-    brandSystemObjects: oklch(82, 0.10, 235),
-    brandExtensions: oklch(82, 0.12, 285),
-    brandConnections: oklch(83, 0.13, 290),
-    brandRvbbitCache: oklch(82, 0.14, 175),
+    brandFinder: oklch(82, brandC, 220),
+    brandSqlScratch: oklch(83, brandC, 88),
+    brandViewApps: oklch(82, brandSoftC, 196),
+    brandSystemObjects: oklch(82, brandSoftC, 235),
+    brandExtensions: oklch(82, brandC, 285),
+    brandConnections: oklch(83, brandC, 290),
+    brandRvbbitCache: oklch(82, brandC, 175),
+    brandCache: oklch(83, brandC * 0.75, 95),
+    brandPgMonitor: oklch(83, brandSoftC, 150),
+    brandOperators: oklch(82, brandSoftC, 168),
+    brandSpecialists: oklch(80, brandSoftC, 300),
+    brandRouting: oklch(81, brandSoftC, 255),
+    brandMcp: oklch(82, brandSoftC, 55),
+    brandQueryLens: oklch(82, brandSoftC, 200),
+    brandKg: oklch(81, brandSoftC, 320),
+    brandCapability: oklch(82, brandSoftC, 190),
+    brandWarren: oklch(82, brandSoftC, 35),
+    brandCosts: oklch(83, brandSoftC, 130),
+    brandDuck: oklch(80, brandSoftC, 210),
     // Wallpaper overlay tinted by image baseHue so the darkening
     // doesn't fight the wallpaper's own tones
     wallpaperOverlayFrom: oklch(4, 0.02, p.baseHue, 0.78),
@@ -116,6 +136,9 @@ function deriveDark(p: ImagePalette): ColorTokens {
 function deriveLight(p: ImagePalette): ColorTokens {
   const main = p.darkVibrant
   const rvbbit = p.darkVibrant
+  const seriesC = vizChroma(p, "light")
+  const brandC = brandChroma(p, "light")
+  const brandSoftC = brandC * 0.78
   return {
     background: oklch(96, 0.008, 95),
     secondaryBackground: oklch(92, 0.012, 95),
@@ -126,10 +149,11 @@ function deriveLight(p: ImagePalette): ColorTokens {
     main,
     mainForeground: oklch(99, 0, 0),
     chart1: main,
-    chart2: oklch(58, p.chroma * 6, (p.baseHue + 90) % 360),
-    chart3: oklch(66, p.chroma * 5, (p.baseHue + 180) % 360),
-    chart4: oklch(60, p.chroma * 6.5, (p.baseHue + 240) % 360),
-    chart5: oklch(60, p.chroma * 6, (p.baseHue + 320) % 360),
+    chart2: oklch(58, seriesC * 0.92, (p.baseHue + 90) % 360),
+    chart3: oklch(66, seriesC * 0.82, (p.baseHue + 180) % 360),
+    chart4: oklch(60, seriesC, (p.baseHue + 240) % 360),
+    chart5: oklch(60, seriesC * 0.92, (p.baseHue + 320) % 360),
+    chart6: oklch(64, seriesC * 0.96, (p.baseHue + 290) % 360),
     success: "oklch(58% 0.17 145)",
     warning: "oklch(71% 0.16 85)",
     danger: "oklch(58% 0.21 25)",
@@ -173,13 +197,29 @@ function deriveLight(p: ImagePalette): ColorTokens {
     winExtensionsH: "285",
     winRvbbitCacheH: "175",
     winConnectionsH: "290",
-    brandFinder: oklch(50, 0.16, 220),
-    brandSqlScratch: oklch(58, 0.15, 88),
-    brandViewApps: oklch(54, 0.14, 196),
-    brandSystemObjects: oklch(50, 0.13, 235),
-    brandExtensions: oklch(54, 0.15, 285),
-    brandConnections: oklch(50, 0.16, 290),
-    brandRvbbitCache: oklch(54, 0.16, 175),
+    winPaletteH: "320",
+    winPgMonitorH: "150",
+    winDuckH: "210",
+    winFolderH: "85",
+    brandFinder: oklch(50, brandC, 220),
+    brandSqlScratch: oklch(58, brandC * 0.94, 88),
+    brandViewApps: oklch(54, brandSoftC, 196),
+    brandSystemObjects: oklch(50, brandSoftC, 235),
+    brandExtensions: oklch(54, brandC * 0.94, 285),
+    brandConnections: oklch(50, brandC, 290),
+    brandRvbbitCache: oklch(54, brandC, 175),
+    brandCache: oklch(58, brandC * 0.7, 95),
+    brandPgMonitor: oklch(50, brandSoftC, 150),
+    brandOperators: oklch(53, brandSoftC, 168),
+    brandSpecialists: oklch(52, brandSoftC, 300),
+    brandRouting: oklch(52, brandSoftC, 255),
+    brandMcp: oklch(54, brandSoftC, 55),
+    brandQueryLens: oklch(53, brandSoftC, 200),
+    brandKg: oklch(52, brandSoftC, 320),
+    brandCapability: oklch(54, brandSoftC, 190),
+    brandWarren: oklch(56, brandSoftC, 35),
+    brandCosts: oklch(56, brandSoftC, 130),
+    brandDuck: oklch(54, brandSoftC, 210),
     wallpaperOverlayFrom: oklch(94, 0.01, p.baseHue, 0.62),
     wallpaperOverlayTo: oklch(86, 0.03, p.baseHue, 0.35),
     ambient1: oklch(76, 0.10, p.baseHue, 0.18),
@@ -189,6 +229,18 @@ function deriveLight(p: ImagePalette): ColorTokens {
 }
 
 // ── helpers ─────────────────────────────────────────────────────────
+
+function vizChroma(p: ImagePalette, mode: ThemeMode): number {
+  return clamp(p.chroma * (mode === "dark" ? 6 : 7), mode === "dark" ? 0.12 : 0.13, mode === "dark" ? 0.20 : 0.18)
+}
+
+function brandChroma(p: ImagePalette, mode: ThemeMode): number {
+  return clamp(p.chroma * (mode === "dark" ? 5.5 : 7), mode === "dark" ? 0.06 : 0.09, mode === "dark" ? 0.15 : 0.18)
+}
+
+function clamp(n: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, n))
+}
 
 function oklch(l: number, c: number, h: number, a?: number): string {
   return a !== undefined && a !== 1

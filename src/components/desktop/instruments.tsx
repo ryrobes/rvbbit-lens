@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react"
 import type { ReactNode } from "react"
 import { cn } from "@/lib/utils"
+import { VIZ_SERIES_COLORS } from "@/lib/desktop/viz-colors"
 
 /**
  * Shared instrument-cluster primitives for the rvbbit monitor windows.
@@ -15,17 +16,7 @@ import { cn } from "@/lib/utils"
 // ── palette ─────────────────────────────────────────────────────────
 
 /** Stable per-series colors — used for specialist composition / legends. */
-export const SERIES_COLORS = [
-  "var(--chart-1)",
-  "var(--chart-2)",
-  "var(--chart-3)",
-  "var(--chart-4)",
-  "var(--chart-5)",
-  "var(--chart-6)",
-  "var(--info)",
-  "var(--success)",
-  "var(--warning)",
-]
+export const SERIES_COLORS = VIZ_SERIES_COLORS
 
 /** Teal → amber → red, keyed off a 0..1 load ratio. */
 export function loadColor(ratio: number): string {
