@@ -1,6 +1,8 @@
 "use client"
 
-import { Plus, Trash2 } from "@/lib/icons"
+import { useEffect, useLayoutEffect, useRef, useState } from "react"
+import { createPortal } from "react-dom"
+import { ChevronDown, Plus, Search, Trash2 } from "@/lib/icons"
 import { cn } from "@/lib/utils"
 import {
   defaultNode,
@@ -1359,10 +1361,11 @@ function Section({
   )
 }
 
-/** Model picker — a real dropdown of usable provider/model targets (cloud +
- *  Warren-hosted local LLMs), grouped by provider. The current value is kept
- *  selectable even if it isn't in the catalog (so existing operators / models
- *  pending a catalog refresh aren't lost). */
+/** Model picker — a searchable dropdown of usable provider/model targets
+ *  (cloud + Warren-hosted local LLMs), grouped by provider. The current value
+ *  stays valid even if it isn't in the catalog (existing operators / models
+ *  pending a refresh). The popover portals to <body>, carrying the dark code
+ *  tokens so it reads consistently anywhere. */
 function ModelField({
   value,
   models,
@@ -1372,35 +1375,170 @@ function ModelField({
   models: LlmModel[]
   onChange: (v: string) => void
 }) {
-  // Group by provider, preserving the query order (self-hosted first).
+  const [open, setOpen] = useState(false)
+  const [query, setQuery] = useState("")
+  const btnRef = useRef<HTMLButtonElement>(null)
+  const panelRef = useRef<HTMLDivElement>(null)
+  const [pos, setPos] = useState({ left: 0, top: 0, width: 0, ready: false })
+
+  const q = query.trim().toLowerCase()
+  const filtered = q
+    ? models.filter(
+        (m) =>
+          `${m.provider}/${m.model}`.toLowerCase().includes(q) ||
+          (m.displayName ?? "").toLowerCase().includes(q),
+      )
+    : models
   const groups = new Map<string, LlmModel[]>()
-  for (const m of models) {
+  for (const m of filtered) {
     const arr = groups.get(m.provider) ?? []
     arr.push(m)
     groups.set(m.provider, arr)
   }
   const inCatalog = models.some((m) => `${m.provider}/${m.model}` === value)
+
+  // close on click-away / Escape
+  useEffect(() => {
+    if (!open) return
+    const onDown = (e: MouseEvent) => {
+      const t = e.target as Node
+      if (!panelRef.current?.contains(t) && !btnRef.current?.contains(t)) setOpen(false)
+    }
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setOpen(false)
+    }
+    window.addEventListener("mousedown", onDown)
+    window.addEventListener("keydown", onKey)
+    return () => {
+      window.removeEventListener("mousedown", onDown)
+      window.removeEventListener("keydown", onKey)
+    }
+  }, [open])
+
+  // place under the trigger; flip up on overflow
+  useLayoutEffect(() => {
+    if (!open) return
+    const b = btnRef.current?.getBoundingClientRect()
+    const el = panelRef.current
+    if (!b || !el) return
+    const m = 8
+    const h = el.offsetHeight
+    let top = b.bottom + 4
+    if (top + h > window.innerHeight - m) {
+      const above = b.top - h - 4
+      top = above >= m ? above : Math.max(m, window.innerHeight - h - m)
+    }
+    setPos({ left: b.left, top, width: b.width, ready: true })
+  }, [open, query, filtered.length])
+
+  const pick = (v: string) => {
+    onChange(v)
+    setOpen(false)
+    setQuery("")
+  }
+
   return (
     <Field label={models.length > 0 ? `model — ${models.length} available` : "model"}>
-      <select
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        className={inputCls}
+      <button
+        ref={btnRef}
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        className={cn(inputCls, "flex items-center justify-between gap-2 text-left")}
       >
-        {!inCatalog ? (
-          <option value={value}>{value ? `${value} (current)` : "— select a model —"}</option>
-        ) : null}
-        {[...groups].map(([provider, ms]) => (
-          <optgroup key={provider} label={ms[0].selfHosted ? `${provider} · local` : provider}>
-            {ms.map((m) => (
-              <option key={`${provider}/${m.model}`} value={`${provider}/${m.model}`}>
-                {m.model}
-              </option>
-            ))}
-          </optgroup>
-        ))}
-      </select>
+        <span className={cn("truncate", !value && "text-chrome-text/40")}>
+          {value || "select a model…"}
+        </span>
+        <ChevronDown className="h-3 w-3 shrink-0 opacity-50" />
+      </button>
+      {open
+        ? createPortal(
+            <div
+              ref={panelRef}
+              style={{
+                ...CODE_PANEL_VARS,
+                position: "fixed",
+                left: pos.left,
+                top: pos.top,
+                width: pos.width,
+                opacity: pos.ready ? 1 : 0,
+                background: "#0e0f13",
+              }}
+              className="z-[120] overflow-hidden rounded-md border border-foreground/15 font-mono text-[12px] text-chrome-text shadow-2xl"
+            >
+              <div className="flex items-center gap-1.5 border-b border-foreground/10 px-2 py-1.5">
+                <Search className="h-3 w-3 shrink-0 text-chrome-text/45" />
+                <input
+                  autoFocus
+                  value={query}
+                  onChange={(e) => setQuery(e.target.value)}
+                  placeholder="search models…"
+                  className="w-full bg-transparent text-[12px] text-foreground outline-none placeholder:text-chrome-text/35"
+                />
+              </div>
+              <div className="max-h-72 overflow-y-auto py-1">
+                {!inCatalog && value ? (
+                  <Option label={`${value}  (current)`} active onClick={() => pick(value)} />
+                ) : null}
+                {filtered.length === 0 ? (
+                  <div className="px-3 py-2 text-[11px] text-chrome-text/45">no matches</div>
+                ) : (
+                  [...groups].map(([provider, ms]) => (
+                    <div key={provider}>
+                      <div
+                        className="px-2 pt-1.5 pb-0.5 text-[9px] uppercase tracking-wider"
+                        style={{ color: "var(--syntax-keyword)" }}
+                      >
+                        {provider}
+                        {ms[0].selfHosted ? " · local" : ""}
+                      </div>
+                      {ms.map((m) => {
+                        const v = `${m.provider}/${m.model}`
+                        return (
+                          <Option
+                            key={v}
+                            label={m.model}
+                            sub={m.displayName ?? undefined}
+                            active={v === value}
+                            onClick={() => pick(v)}
+                          />
+                        )
+                      })}
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>,
+            document.body,
+          )
+        : null}
     </Field>
+  )
+}
+
+function Option({
+  label,
+  sub,
+  active,
+  onClick,
+}: {
+  label: string
+  sub?: string
+  active?: boolean
+  onClick: () => void
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={cn(
+        "flex w-full items-center gap-2 px-2 py-1 text-left text-[11px] transition-colors hover:bg-foreground/[0.06]",
+        active ? "text-main" : "text-chrome-text/85",
+      )}
+    >
+      <span className="w-3 shrink-0 text-center">{active ? "›" : ""}</span>
+      <span className="min-w-0 flex-1 truncate">{label}</span>
+      {sub ? <span className="shrink-0 truncate text-chrome-text/40">{sub}</span> : null}
+    </button>
   )
 }
 
