@@ -361,7 +361,7 @@ export function MetricCreatorWindow({
           </Section>
 
           <Section title="SQL body">
-            <Field label="template" hint="tokens: {param} · {param!} (raw) · {metric:NAME}">
+            <Field label="template" hint="tokens: {param} · {param!} (raw) · {metric:NAME} · {metric:NAME.-1day} (rolling)">
               <div className="h-56 overflow-hidden rounded-[3px] border border-chrome-border/60">
                 <SqlEditor
                   value={form.sql}
@@ -390,7 +390,7 @@ export function MetricCreatorWindow({
           >
             <Field
               label="threshold / assertion"
-              hint="runs over the `metric` CTE → one row, an `ok` boolean. e.g. SELECT total >= {target} AS ok FROM metric"
+              hint="over the `metric` CTE → one row, an `ok` boolean. e.g. SELECT total >= {target} AS ok FROM metric · rolling: {metric:self.-1day}"
             >
               <div className="h-28 overflow-hidden rounded-[3px] border border-chrome-border/60">
                 <SqlEditor
