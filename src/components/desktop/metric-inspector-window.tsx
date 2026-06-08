@@ -33,7 +33,6 @@ import type { MetricInspectorPayload } from "@/lib/desktop/types"
 import type { QueryResultColumn } from "@/lib/db/types"
 import { ResultGrid } from "./result-grid"
 import { SqlEditor } from "./sql-editor"
-import { TimeTravelScrubber } from "./time-travel-scrubber"
 import {
   Field,
   fmtTime,
@@ -247,6 +246,19 @@ function MetricDetail({
     setRunning(false)
   }, [connectionId, name, params, defAsOf, dataAsOf, selectedVersion])
 
+  // Auto-run when the resolved SQL (def version / params) or the data-time
+  // instant changes — picking any axis immediately refreshes the result view, so
+  // the metric's data is always on screen. The Run button stays as a manual kick.
+  const onRunRef = useRef(onRun)
+  useEffect(() => {
+    onRunRef.current = onRun
+  })
+  useEffect(() => {
+    if (!resolvedSql || resolveError) return
+    const t = setTimeout(() => void onRunRef.current(), 300)
+    return () => clearTimeout(t)
+  }, [resolvedSql, resolveError, dataAsOf])
+
   // ── Data-time wiring: detect tables → fetch timelines → series ────
   const series = useDataTimeSeries(connectionId, resolvedSql)
 
@@ -329,24 +341,19 @@ function MetricDetail({
 
             {/* (B) DATA-TIME */}
             <div className="flex flex-col rounded-[3px] border border-chrome-border/60 bg-foreground/[0.02]">
-              <AxisCaption label="Data (data-time)" sub="rvbbit AS OF over the tables" />
-              <div className="flex min-h-[180px] flex-1 px-1.5 pb-1.5">
+              <AxisCaption label="Data (data-time)" sub="which snapshot of the data" />
+              <div className="max-h-44 overflow-y-auto px-1.5 pb-1.5">
                 {series === null ? (
-                  <div className="flex flex-1 items-center gap-2 px-1.5 py-3 text-[11px] text-chrome-text/45">
-                    <Loader2 className="h-3.5 w-3.5 animate-spin text-chrome-text/50" />
-                    resolving temporal tables…
-                  </div>
+                  <StatusNote state="loading" message="resolving snapshots…" />
                 ) : series.length === 0 ? (
-                  <div className="flex flex-1 flex-col gap-1 px-1.5 py-3 text-[11px] text-chrome-text/45">
+                  <div className="flex flex-col gap-1 px-1.5 py-3 text-[11px] text-chrome-text/45">
                     <span className="flex items-center gap-1.5">
                       <Clock className="h-3 w-3" /> latest only
                     </span>
                     <span className="text-chrome-text/35">no temporal tables in this metric</span>
                   </div>
                 ) : (
-                  <div className="ml-auto h-full">
-                    <TimeTravelScrubber series={series} asOf={dataAsOf} onChange={setDataAsOf} />
-                  </div>
+                  <DataTimePicker series={series} dataAsOf={dataAsOf} onSelect={setDataAsOf} />
                 )}
               </div>
             </div>
@@ -409,8 +416,8 @@ function MetricDetail({
             result.rows.length === 0 ? (
               <StatusNote state="empty" message="Metric returned no rows." />
             ) : (
-              <div className="min-h-[160px] flex-1 px-3 pb-3">
-                <div className="h-full min-h-[160px] overflow-hidden rounded-[3px] border border-chrome-border/60">
+              <div className="px-3 pb-3">
+                <div className="h-72 overflow-hidden rounded-[3px] border border-chrome-border/60">
                   <ResultGrid columns={gridColumns} rows={result.rows} className="h-full" />
                 </div>
               </div>
@@ -527,6 +534,70 @@ function fmtScrubberLabel(iso: string): string {
   const d = new Date(iso)
   if (Number.isNaN(d.getTime())) return iso
   return d.toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", hour12: false })
+}
+
+/**
+ * DATA-TIME picker: a discrete list of the underlying table snapshots (one per
+ * compaction generation), newest first, plus "Latest". Mirrors the def-time
+ * VersionPicker so both axes read the same. Selecting a snapshot pins data_as_of
+ * to that generation's exact committed_at (full precision → exact AS OF).
+ */
+function DataTimePicker({
+  series,
+  dataAsOf,
+  onSelect,
+}: {
+  series: TimelineSeries[]
+  /** null = Latest. */
+  dataAsOf: string | null
+  onSelect: (iso: string | null) => void
+}) {
+  const instants = useMemo(() => {
+    const byIso = new Map<string, { iso: string; rows: number; table: string }>()
+    for (const s of series) {
+      for (const tick of s.ticks) {
+        if (!byIso.has(tick.committedAt)) {
+          byIso.set(tick.committedAt, {
+            iso: tick.committedAt,
+            rows: tick.visibleRowsEstimate,
+            table: s.table.name,
+          })
+        }
+      }
+    }
+    return [...byIso.values()].sort((a, b) => (a.iso < b.iso ? 1 : -1))
+  }, [series])
+  const multi = series.length > 1
+
+  return (
+    <div className="space-y-0.5">
+      <button
+        type="button"
+        onClick={() => onSelect(null)}
+        className={`flex w-full items-center justify-between rounded-[3px] px-2 py-1 text-left text-[11px] ${
+          dataAsOf == null ? "bg-main/15 text-main" : "text-chrome-text/70 hover:bg-foreground/[0.05]"
+        }`}
+      >
+        <span className="font-medium">Latest</span>
+        <span className="text-[10px] opacity-60">now</span>
+      </button>
+      {instants.map((it) => (
+        <button
+          key={it.iso}
+          type="button"
+          onClick={() => onSelect(it.iso)}
+          className={`flex w-full items-center justify-between gap-2 rounded-[3px] px-2 py-1 text-left text-[11px] ${
+            dataAsOf === it.iso ? "bg-main/15 text-main" : "text-chrome-text/70 hover:bg-foreground/[0.05]"
+          }`}
+        >
+          <span className="truncate font-mono">{fmtScrubberLabel(it.iso)}</span>
+          <span className="shrink-0 text-[10px] opacity-60">
+            {it.rows.toLocaleString()} rows{multi ? ` · ${it.table}` : ""}
+          </span>
+        </button>
+      ))}
+    </div>
+  )
 }
 
 // ─────────────────────────────────────────────────────────────────────────
