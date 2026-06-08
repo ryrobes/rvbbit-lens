@@ -1,6 +1,6 @@
 "use client"
 
-import { useCallback, useEffect, useMemo, useState } from "react"
+import { Fragment, useCallback, useEffect, useMemo, useState } from "react"
 import { Check, ChevronRight, Database, Plus, RefreshCw, Trash2, X } from "@/lib/icons"
 import { cn } from "@/lib/utils"
 import {
@@ -22,6 +22,41 @@ function ago(ms: number | null): string {
   if (s < 3600) return `${Math.round(s / 60)}m ago`
   if (s < 86400) return `${Math.round(s / 3600)}h ago`
   return `${Math.round(s / 86400)}d ago`
+}
+
+function runTime(ms: number | null): string {
+  if (ms == null) return "—"
+  return new Date(ms).toLocaleString(undefined, {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  })
+}
+
+interface RunGroup {
+  runId: string
+  startedAt: number | null
+  rows: SyncRun[]
+  errors: number
+}
+
+/** Group the per-table rows (already DESC by started_at) into their runs. A run
+ *  is one run_id; the singleton lock means runs never temporally interleave. */
+function groupByRun(runs: SyncRun[]): RunGroup[] {
+  const out: RunGroup[] = []
+  for (const r of runs) {
+    const key = r.runId ?? "?"
+    const last = out[out.length - 1]
+    if (last && last.runId === key) last.rows.push(r)
+    else out.push({ runId: key, startedAt: r.startedAt, rows: [r], errors: 0 })
+  }
+  for (const g of out) {
+    const times = g.rows.map((x) => x.startedAt).filter((t): t is number => t != null)
+    g.startedAt = times.length ? Math.min(...times) : g.startedAt
+    g.errors = g.rows.filter((x) => x.action === "error").length
+  }
+  return out
 }
 
 export function SyncMirrorWindow({ activeConnectionId }: { activeConnectionId: string | null }) {
@@ -213,6 +248,7 @@ function JobDetail({
   onRefresh: () => void
 }) {
   const [confirmDel, setConfirmDel] = useState(false)
+  const groups = useMemo(() => groupByRun(runs), [runs])
   const s = job.spec
   return (
     <div className="flex min-h-0 flex-1 flex-col">
@@ -268,17 +304,31 @@ function JobDetail({
               </tr>
             </thead>
             <tbody>
-              {runs.map((r, i) => (
-                <tr key={i} className="border-b border-chrome-border/40 hover:bg-foreground/[0.03]">
-                  <td className="px-2.5 py-1 font-mono text-foreground/90">{r.sourceTable ?? "—"}</td>
-                  <td className="px-2 py-1">
-                    <span className={cn("rounded px-1.5 py-0.5 text-[10px] font-medium", actionColor(r.action))}>{r.action ?? "—"}</span>
-                  </td>
-                  <td className="px-2 py-1 text-right tabular-nums text-chrome-text/80">{r.generation ?? ""}</td>
-                  <td className="px-2 py-1 text-right tabular-nums text-chrome-text/80">{r.rowsLoaded ?? ""}</td>
-                  <td className="px-2 py-1 text-right tabular-nums text-chrome-text/55">{r.elapsedMs ?? ""}</td>
-                  <td className="max-w-[260px] truncate px-2.5 py-1 text-danger/90" title={r.error ?? ""}>{r.error ?? ""}</td>
-                </tr>
+              {groups.map((g) => (
+                <Fragment key={g.runId}>
+                  <tr className="bg-foreground/[0.05]">
+                    <td colSpan={6} className="border-y border-chrome-border/60 px-2.5 py-1 text-[10px]">
+                      <span className="font-medium text-foreground/85">{runTime(g.startedAt)}</span>
+                      <span className="text-chrome-text/45">
+                        {" · "}
+                        {g.rows.length} {g.rows.length === 1 ? "table" : "tables"}
+                        {g.errors > 0 ? ` · ${g.errors} error${g.errors === 1 ? "" : "s"}` : ""}
+                      </span>
+                    </td>
+                  </tr>
+                  {g.rows.map((r, i) => (
+                    <tr key={`${g.runId}:${i}`} className="border-b border-chrome-border/30 hover:bg-foreground/[0.03]">
+                      <td className="px-2.5 py-1 pl-4 font-mono text-foreground/90">{r.sourceTable ?? "—"}</td>
+                      <td className="px-2 py-1">
+                        <span className={cn("rounded px-1.5 py-0.5 text-[10px] font-medium", actionColor(r.action))}>{r.action ?? "—"}</span>
+                      </td>
+                      <td className="px-2 py-1 text-right tabular-nums text-chrome-text/80">{r.generation ?? ""}</td>
+                      <td className="px-2 py-1 text-right tabular-nums text-chrome-text/80">{r.rowsLoaded ?? ""}</td>
+                      <td className="px-2 py-1 text-right tabular-nums text-chrome-text/55">{r.elapsedMs ?? ""}</td>
+                      <td className="max-w-[260px] truncate px-2.5 py-1 text-danger/90" title={r.error ?? ""}>{r.error ?? ""}</td>
+                    </tr>
+                  ))}
+                </Fragment>
               ))}
             </tbody>
           </table>

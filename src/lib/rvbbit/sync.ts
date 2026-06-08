@@ -32,6 +32,7 @@ export interface SyncJob {
 }
 
 export interface SyncRun {
+  runId: string | null
   sourceTable: string | null
   destTable: string | null
   action: string | null
@@ -137,7 +138,7 @@ export async function listSyncRuns(
 ): Promise<{ runs: SyncRun[]; error: string | null }> {
   const r = await run(
     connectionId,
-    `SELECT source_table, dest_table, action, generation, rows_loaded, elapsed_ms, error,
+    `SELECT run_id::text AS run_id, source_table, dest_table, action, generation, rows_loaded, elapsed_ms, error,
             extract(epoch FROM started_at)*1000 AS started
      FROM rvbbit.sync_runs WHERE job_name = ${q(jobName)}
      ORDER BY started_at DESC LIMIT ${Math.max(1, Math.min(limit, 500))}`,
@@ -146,6 +147,7 @@ export async function listSyncRuns(
   return {
     error: null,
     runs: r.rows.map((row) => ({
+      runId: row.run_id == null ? null : String(row.run_id),
       sourceTable: row.source_table == null ? null : String(row.source_table),
       destTable: row.dest_table == null ? null : String(row.dest_table),
       action: row.action == null ? null : String(row.action),
