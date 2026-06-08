@@ -37,6 +37,7 @@ import { TimeTravelScrubber } from "./time-travel-scrubber"
 import {
   Field,
   fmtTime,
+  formatSqlSafe,
   ParamRowsEditor,
   Section,
   StatusNote,
@@ -210,6 +211,7 @@ function MetricDetail({
 
   // ── Resolved SQL (debounced) — the observable surface ─────────────
   const [resolvedSql, setResolvedSql] = useState<string | null>(null)
+  const resolvedFormatted = useMemo(() => formatSqlSafe(resolvedSql), [resolvedSql])
   const [resolveError, setResolveError] = useState<string | null>(null)
   const [resolving, setResolving] = useState(false)
 
@@ -372,7 +374,7 @@ function MetricDetail({
               <StatusNote state="error" message={resolveError} className="px-0" />
             ) : (
               <div className="h-36 overflow-hidden rounded-[3px] border border-chrome-border/60">
-                <SqlEditor value={resolvedSql ?? ""} onChange={() => {}} height="100%" readOnly fontSize={12} />
+                <SqlEditor value={resolvedFormatted} onChange={() => {}} height="100%" readOnly wrap fontSize={12} />
               </div>
             )}
           </Section>

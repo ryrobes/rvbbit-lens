@@ -6,6 +6,7 @@
 // a small status/empty note. Kept here so the three windows stay consistent.
 
 import { useMemo, useState } from "react"
+import { format as formatSql } from "sql-formatter"
 import { AlertTriangle, Loader2, Plus, Trash2 } from "@/lib/icons"
 import {
   paramsToRows,
@@ -195,6 +196,19 @@ export function ParamRowsEditor({
       </div>
     </div>
   )
+}
+
+/** Pretty-print composed metric SQL (which comes back as one long line) so the
+ *  read-only preview reads top-to-bottom instead of growing the window wide.
+ *  Falls back to the raw string if the formatter chokes on it. */
+export function formatSqlSafe(sql: string | null | undefined): string {
+  const raw = (sql ?? "").trim()
+  if (!raw) return ""
+  try {
+    return formatSql(raw, { language: "postgresql", keywordCase: "upper" })
+  } catch {
+    return raw
+  }
 }
 
 export function fmtTime(ms: number | null | undefined): string {

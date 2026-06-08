@@ -6,7 +6,7 @@
 // (Save appends a NEW VERSION); "New" clears + unlocks Name. The preview pane
 // is the debuggable surface — it shows raw preview errors verbatim.
 
-import { useCallback, useEffect, useState } from "react"
+import { useCallback, useEffect, useMemo, useState } from "react"
 import { Plus, RefreshCw, Save } from "@/lib/icons"
 import {
   defineMetric,
@@ -19,6 +19,7 @@ import { SqlEditor } from "./sql-editor"
 import {
   areaCls,
   Field,
+  formatSqlSafe,
   inputCls,
   ParamRowsEditor,
   Section,
@@ -79,6 +80,7 @@ export function MetricCreatorWindow({
   const [preview, setPreview] = useState<string | null>(null)
   const [previewError, setPreviewError] = useState<string | null>(null)
   const [previewing, setPreviewing] = useState(false)
+  const previewFormatted = useMemo(() => formatSqlSafe(preview), [preview])
 
   const [saving, setSaving] = useState(false)
   const [saveError, setSaveError] = useState<string | null>(null)
@@ -351,7 +353,7 @@ export function MetricCreatorWindow({
             }
           >
             <div className="h-40 overflow-hidden rounded-[3px] border border-chrome-border/60">
-              <SqlEditor value={preview ?? ""} onChange={() => {}} readOnly height="100%" />
+              <SqlEditor value={previewFormatted} onChange={() => {}} readOnly wrap height="100%" />
             </div>
             {previewError ? <StatusNote state="error" message={previewError} className="px-0 py-2" /> : null}
           </Section>

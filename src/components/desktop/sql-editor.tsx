@@ -17,6 +17,9 @@ interface SqlEditorProps {
   /** "plain" drops SQL syntax highlighting + autocomplete + line numbers — for
    *  the natural-language "Ask" mode where the content is a question, not SQL. */
   language?: "sql" | "plain"
+  /** Soft-wrap long lines instead of scrolling horizontally — for read-only
+   *  previews where a long line would otherwise widen the container. */
+  wrap?: boolean
   /** Live schema (pg schema → table → columns) for table/column autocomplete.
    *  Built from the connection's SchemaSnapshot; omit for keyword-only. */
   schema?: SQLNamespace
@@ -34,6 +37,7 @@ export function SqlEditor({
   readOnly,
   fontSize = 13,
   language = "sql",
+  wrap = false,
   schema,
   defaultSchema,
   completionSources,
@@ -56,6 +60,7 @@ export function SqlEditor({
         exts.push(lang.language.data.of({ autocomplete: source }))
       }
     }
+    if (wrap && !plain) exts.push(EditorView.lineWrapping)
     if (onRun) {
       exts.push(
         keymap.of([
@@ -67,7 +72,7 @@ export function SqlEditor({
       )
     }
     return exts
-  }, [onRun, plain, schema, defaultSchema, completionSources])
+  }, [onRun, plain, wrap, schema, defaultSchema, completionSources])
 
   // Auto-focus on first mount.
   useEffect(() => {
