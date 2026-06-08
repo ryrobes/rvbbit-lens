@@ -7,6 +7,7 @@ import {
   Boxes,
   Brain,
   LineChart,
+  Calculator,
   Database,
   DollarSign,
   Eye,
@@ -86,6 +87,9 @@ import type { ScryResultsPayload } from "@/lib/desktop/types"
 import type { DataSearchHit } from "@/lib/rvbbit/data-search"
 import { DriftWindow } from "./drift-window"
 import { ModelStudioWindow } from "./model-studio-window"
+import { MetricCatalogWindow } from "./metric-catalog-window"
+import { MetricCreatorWindow } from "./metric-creator-window"
+import { MetricInspectorWindow } from "./metric-inspector-window"
 import { CapabilitiesWindow } from "./capabilities-window"
 import { CapabilityDetailWindow } from "./capability-detail-window"
 import { HfDeployWindow } from "./hf-deploy-window"
@@ -170,6 +174,9 @@ import type {
   SlotId,
   WorkspaceCanvas,
   WorkspaceId,
+  MetricCatalogPayload,
+  MetricCreatorPayload,
+  MetricInspectorPayload,
 } from "@/lib/desktop/types"
 
 interface WorkspaceTransition {
@@ -1935,6 +1942,52 @@ export function DesktopShell() {
     })
   }, [focus, openWindow, windows, updatePayload])
 
+  const openMetricCatalog = useCallback(() => {
+    const existing = windows.find((w) => w.kind === "metric-catalog")
+    if (existing) return focus(existing.id)
+    openWindow({
+      id: randomUUID(),
+      kind: "metric-catalog",
+      title: "Metric Catalog",
+      x: 140, y: 76, width: 860, height: 560,
+      payload: { kind: "metric-catalog" } satisfies MetricCatalogPayload,
+    })
+  }, [focus, openWindow, windows])
+
+  const openMetricCreator = useCallback((metricName?: string) => {
+    const existing = windows.find((w) => w.kind === "metric-creator")
+    if (existing) {
+      if (metricName != null) {
+        updatePayload(existing.id, (p) => ({ ...(p as MetricCreatorPayload), metricName }))
+      }
+      return focus(existing.id)
+    }
+    openWindow({
+      id: randomUUID(),
+      kind: "metric-creator",
+      title: "Metric Creator",
+      x: 160, y: 84, width: 940, height: 660,
+      payload: { kind: "metric-creator", metricName: metricName ?? null } satisfies MetricCreatorPayload,
+    })
+  }, [focus, openWindow, windows, updatePayload])
+
+  const openMetricInspector = useCallback((metricName?: string) => {
+    const existing = windows.find((w) => w.kind === "metric-inspector")
+    if (existing) {
+      if (metricName != null) {
+        updatePayload(existing.id, (p) => ({ ...(p as MetricInspectorPayload), metricName }))
+      }
+      return focus(existing.id)
+    }
+    openWindow({
+      id: randomUUID(),
+      kind: "metric-inspector",
+      title: "Metric Inspector",
+      x: 180, y: 92, width: 1000, height: 700,
+      payload: { kind: "metric-inspector", metricName: metricName ?? null } satisfies MetricInspectorPayload,
+    })
+  }, [focus, openWindow, windows, updatePayload])
+
   const openKgExtractionRuns = useCallback(
     (graphId?: string | null, runId?: number | null) => {
       const existing = windows.find((w) => w.kind === "kg-extraction-runs")
@@ -3072,6 +3125,10 @@ export function DesktopShell() {
     { id: "warren", label: "Warren", icon: Rocket, color: "var(--brand-warren)", description: "Sidecar model runtimes & jobs", activate: () => openWarren(), folder: "semantic", rvbbit: true },
     { id: "model-studio", label: "Model Studio", icon: Brain, color: "var(--brand-specialists)", description: "Inspect & try models", activate: () => openModelStudio(), folder: "semantic", rvbbit: true },
     { id: "duck", label: "Duck", icon: Boxes, color: "var(--brand-duck)", description: "Sidecar broker telemetry", activate: openDuck, folder: "semantic", rvbbit: true },
+    // Metrics
+    { id: "metric-catalog", label: "Metric Catalog", icon: Table2, color: "oklch(78% 0.13 95)", description: "Browse all metrics", activate: () => openMetricCatalog(), folder: "metrics", rvbbit: true },
+    { id: "metric-creator", label: "Metric Creator", icon: Calculator, color: "oklch(78% 0.13 95)", description: "Author & version metrics", activate: () => openMetricCreator(), folder: "metrics", rvbbit: true },
+    { id: "metric-inspector", label: "Metric Inspector", icon: LineChart, color: "oklch(78% 0.13 95)", description: "Run metrics across def-time & data-time", activate: () => openMetricInspector(), folder: "metrics", rvbbit: true },
     // Knowledge
     { id: "kg", label: "Knowledge Graph", icon: TreeStructure, color: "var(--brand-kg)", description: "Browse the extracted graph", activate: () => openKgBrowser(), folder: "knowledge", rvbbit: true },
     { id: "kg-explorer", label: "Graph Explorer", icon: TreeStructure, color: "var(--brand-kg)", description: "Walk entities & relations", activate: () => openKgExplorer(), folder: "knowledge", rvbbit: true },
@@ -3403,6 +3460,9 @@ export function DesktopShell() {
                   openDataSearch,
                   openDrift,
                   openModelStudio,
+                  openMetricCatalog,
+                  openMetricCreator,
+                  openMetricInspector,
                   openCosts,
                   openDuck,
                   openCapabilities,
@@ -3544,6 +3604,9 @@ interface WindowContext {
   openDataSearch: (initialQuery?: string) => void
   openDrift: () => void
   openModelStudio: (modelName?: string) => void
+  openMetricCatalog: () => void
+  openMetricCreator: (metricName?: string) => void
+  openMetricInspector: (metricName?: string) => void
   openCosts: (initialFilter?: CostsPayload["initialFilter"]) => void
   openDuck: () => void
   openCapabilities: (tagFilter?: string | null) => void
@@ -3876,6 +3939,33 @@ function renderWindowContent(
           hasRvbbit={ctx.hasRvbbit}
         />
       )
+    case "metric-catalog":
+      return (
+        <MetricCatalogWindow
+          activeConnectionId={ctx.activeConnectionId}
+          hasRvbbit={ctx.hasRvbbit}
+          onOpenInspector={ctx.openMetricInspector}
+          onOpenCreator={ctx.openMetricCreator}
+        />
+      )
+    case "metric-creator":
+      return (
+        <MetricCreatorWindow
+          payload={w.payload as MetricCreatorPayload}
+          activeConnectionId={ctx.activeConnectionId}
+          hasRvbbit={ctx.hasRvbbit}
+          onOpenInspector={ctx.openMetricInspector}
+        />
+      )
+    case "metric-inspector":
+      return (
+        <MetricInspectorWindow
+          payload={w.payload as MetricInspectorPayload}
+          activeConnectionId={ctx.activeConnectionId}
+          hasRvbbit={ctx.hasRvbbit}
+          onOpenCreator={ctx.openMetricCreator}
+        />
+      )
     case "folder": {
       const folderId = (w.payload as FolderPayload).folderId
       const items = ctx.launchers.filter((l) => l.folder === folderId && (!l.rvbbit || ctx.hasRvbbit))
@@ -4011,6 +4101,7 @@ const FOLDERS: { id: string; label: string; color: string }[] = [
   { id: "system", label: "System", color: "var(--brand-system-objects)" },
   { id: "semantic", label: "Semantic", color: "var(--brand-operators)" },
   { id: "knowledge", label: "Knowledge", color: "var(--brand-kg)" },
+  { id: "metrics", label: "Metrics", color: "oklch(78% 0.13 95)" },
 ]
 
 function iconForKind(kind: DesktopWindowState["kind"]) {
@@ -4057,6 +4148,12 @@ function iconForKind(kind: DesktopWindowState["kind"]) {
       return LineChart
     case "model-studio":
       return Brain
+    case "metric-catalog":
+      return Table2
+    case "metric-creator":
+      return Calculator
+    case "metric-inspector":
+      return LineChart
     case "capabilities":
     case "capability-detail":
       return Package

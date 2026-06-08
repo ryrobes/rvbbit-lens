@@ -44,6 +44,9 @@ export type DesktopWindowKind =
   | "model-studio"
   | "folder"
   | "hf-deploy"
+  | "metric-catalog"
+  | "metric-creator"
+  | "metric-inspector"
 
 export interface DesktopWindowPosition {
   x: number
@@ -112,6 +115,9 @@ export type WindowPayload =
   | ModelStudioPayload
   | FolderPayload
   | HfDeployPayload
+  | MetricCatalogPayload
+  | MetricCreatorPayload
+  | MetricInspectorPayload
 
 export interface FinderPayload {
   kind?: "finder"
@@ -589,6 +595,23 @@ export interface ModelStudioPayload {
   kind?: "model-studio"
   /** Optional model to select on open. */
   modelName?: string
+}
+
+/** Metrics / BI apps. A metric is a named, versioned SQL template in
+ *  rvbbit.metric_defs; the Catalog browses them, the Creator authors/versions
+ *  them, the Inspector runs them across the def-time + data-time axes. */
+export interface MetricCatalogPayload {
+  kind?: "metric-catalog"
+}
+export interface MetricCreatorPayload {
+  kind?: "metric-creator"
+  /** Optional metric to load for editing on open. */
+  metricName?: string | null
+}
+export interface MetricInspectorPayload {
+  kind?: "metric-inspector"
+  /** Optional metric to select on open. */
+  metricName?: string | null
 }
 
 /**
