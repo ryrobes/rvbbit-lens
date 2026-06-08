@@ -1,6 +1,7 @@
 "use client"
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import { useWorkspaceActive } from "./workspace-active-context"
 import {
   Activity,
   AlertTriangle,
@@ -88,6 +89,7 @@ export function QueryLensWindow({
   const [error, setError] = useState<string | null>(null)
   const [paused, setPaused] = useState(false)
   const [intervalMs, setIntervalMs] = useState(5000)
+  const workspaceActive = useWorkspaceActive()
   const [updatedAt, setUpdatedAt] = useState(0)
   const loading = updatedAt === 0
   /** Rolling window for the empty-state overview dashboard. */
@@ -144,19 +146,19 @@ export function QueryLensWindow({
   // Poll recent list (the trace is historical, so it only refreshes
   // when the user picks a different query or hits reload).
   useEffect(() => {
-    if (!activeConnectionId || !hasRvbbit || paused) return
+    if (!activeConnectionId || !hasRvbbit || paused || !workspaceActive) return
     const id = setInterval(() => void loadRecent(), intervalMs)
     return () => clearInterval(id)
-  }, [activeConnectionId, hasRvbbit, paused, intervalMs, loadRecent])
+  }, [activeConnectionId, hasRvbbit, paused, intervalMs, loadRecent, workspaceActive])
 
   // Poll overview on a longer cadence — it aggregates a 24h window, so
   // a tight refresh would mostly redraw the same chart. 15s keeps the
   // dashboard feeling alive without thrashing.
   useEffect(() => {
-    if (!activeConnectionId || !hasRvbbit || paused) return
+    if (!activeConnectionId || !hasRvbbit || paused || !workspaceActive) return
     const id = setInterval(() => void loadOverview(), 15_000)
     return () => clearInterval(id)
-  }, [activeConnectionId, hasRvbbit, paused, loadOverview])
+  }, [activeConnectionId, hasRvbbit, paused, loadOverview, workspaceActive])
 
   const selectQuery = (qid: string) => {
     // Clicking the already-selected row toggles back to the overview

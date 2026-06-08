@@ -550,6 +550,26 @@ export function DesktopWindow({
     originHeight: number
   } | null>(null)
 
+  // Drag/resize are applied to LOCAL state during the gesture and committed to
+  // shell state only on pointer-up. This keeps the desktop-wide `workspaces`
+  // object — and therefore every other window across all slots — from
+  // re-rendering on every mousemove frame; only this window's chrome moves,
+  // and its content (passed as `children`) keeps its identity so it doesn't
+  // re-render either. The mirror refs let pointer-up read the final value
+  // without a stale-closure read of state.
+  const [livePos, setLivePos] = useState<{ x: number; y: number } | null>(null)
+  const [liveSize, setLiveSize] = useState<{ width: number; height: number } | null>(null)
+  const livePosRef = useRef<{ x: number; y: number } | null>(null)
+  const liveSizeRef = useRef<{ width: number; height: number } | null>(null)
+  function applyLivePos(p: { x: number; y: number } | null) {
+    livePosRef.current = p
+    setLivePos(p)
+  }
+  function applyLiveSize(s: { width: number; height: number } | null) {
+    liveSizeRef.current = s
+    setLiveSize(s)
+  }
+
   function clamp(v: number) {
     if (!Number.isFinite(v)) return 0
     return Math.min(MAX_WORLD, Math.max(MIN_WORLD, v))
@@ -571,13 +591,19 @@ export function DesktopWindow({
     const d = dragRef.current
     if (!d || d.pointerId !== e.pointerId) return
     const s = Math.max(0.2, viewportScale)
-    onMove(w.id, clamp(d.originX + (e.clientX - d.startX) / s), clamp(d.originY + (e.clientY - d.startY) / s))
+    applyLivePos({
+      x: clamp(d.originX + (e.clientX - d.startX) / s),
+      y: clamp(d.originY + (e.clientY - d.startY) / s),
+    })
   }
   function onHeaderUp(e: React.PointerEvent<HTMLDivElement>) {
     const d = dragRef.current
     if (!d || d.pointerId !== e.pointerId) return
     dragRef.current = null
     e.currentTarget.releasePointerCapture(e.pointerId)
+    const p = livePosRef.current
+    if (p) onMove(w.id, p.x, p.y) // commit once; batched with applyLivePos(null) below
+    applyLivePos(null)
   }
 
   function onResizeDown(e: React.PointerEvent<HTMLButtonElement>) {
@@ -600,13 +626,16 @@ export function DesktopWindow({
     const s = Math.max(0.2, viewportScale)
     const nw = Math.min(MAX_WIDTH, Math.max(MIN_WIDTH, r.originWidth + (e.clientX - r.startX) / s))
     const nh = Math.min(MAX_HEIGHT, Math.max(MIN_HEIGHT, r.originHeight + (e.clientY - r.startY) / s))
-    onResize(w.id, nw, nh)
+    applyLiveSize({ width: nw, height: nh })
   }
   function onResizeUp(e: React.PointerEvent<HTMLButtonElement>) {
     const r = resizeRef.current
     if (!r || r.pointerId !== e.pointerId) return
     resizeRef.current = null
     e.currentTarget.releasePointerCapture(e.pointerId)
+    const sz = liveSizeRef.current
+    if (sz) onResize(w.id, sz.width, sz.height) // commit once
+    applyLiveSize(null)
   }
 
   if (w.minimized) return null
@@ -626,10 +655,10 @@ export function DesktopWindow({
           : "bg-block-bg/55 backdrop-blur-[6px] saturate-[0.85]",
       )}
       style={{
-        left: w.x,
-        top: w.y,
-        width: w.width,
-        height: w.height,
+        left: livePos ? livePos.x : w.x,
+        top: livePos ? livePos.y : w.y,
+        width: liveSize ? liveSize.width : w.width,
+        height: liveSize ? liveSize.height : w.height,
         zIndex: w.zIndex,
         borderColor: chrome.border,
         // Unfocused windows get a shallower drop shadow and a half-strength

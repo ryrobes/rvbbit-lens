@@ -1,6 +1,7 @@
 "use client"
 
 import { useCallback, useEffect, useMemo, useState } from "react"
+import { useWorkspaceActive } from "./workspace-active-context"
 import {
   Activity,
   AlertTriangle,
@@ -108,6 +109,7 @@ export function SystemObjectsWindow({ payload, activeConnectionId }: SystemObjec
   const [error, setError] = useState<string | null>(null)
   const [paused, setPaused] = useState(false)
   const [intervalMs, setIntervalMs] = useState(10_000)
+  const workspaceActive = useWorkspaceActive()
   const [updatedAt, setUpdatedAt] = useState(0)
   const loading = updatedAt === 0
 
@@ -160,10 +162,10 @@ export function SystemObjectsWindow({ payload, activeConnectionId }: SystemObjec
   // actually shifts under the user; the rest still poll but you'll
   // mostly see the same rows.
   useEffect(() => {
-    if (!activeConnectionId || paused) return
+    if (!activeConnectionId || paused || !workspaceActive) return
     const id = setInterval(() => void run(), intervalMs)
     return () => clearInterval(id)
-  }, [activeConnectionId, paused, intervalMs, run])
+  }, [activeConnectionId, paused, intervalMs, run, workspaceActive])
 
   const summary = useMemo(
     () => deriveCategorySummary(active, result?.rows ?? []),

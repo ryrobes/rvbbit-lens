@@ -1,6 +1,7 @@
 "use client"
 
 import { useCallback, useEffect, useMemo, useState } from "react"
+import { useWorkspaceActive } from "./workspace-active-context"
 import {
   AlertTriangle,
   CheckCircle2,
@@ -98,6 +99,7 @@ export function WarrenDeployPanel({
     at: number
   } | null>(null)
   const [lastJobStatus, setLastJobStatus] = useState<WarrenJobStatus | null>(null)
+  const workspaceActive = useWorkspaceActive()
   const [acceptanceSteps, setAcceptanceSteps] = useState<AcceptanceRunStep[]>([])
   const [acceptanceRunning, setAcceptanceRunning] = useState(false)
   const [acceptanceOk, setAcceptanceOk] = useState<boolean | null>(null)
@@ -125,16 +127,16 @@ export function WarrenDeployPanel({
       await reload()
     }
     void run()
-    if (!activeConnectionId) return () => { cancelled = true }
+    if (!activeConnectionId || !workspaceActive) return () => { cancelled = true }
     const id = setInterval(() => void reload(), 5000)
     return () => {
       cancelled = true
       clearInterval(id)
     }
-  }, [activeConnectionId, reload])
+  }, [activeConnectionId, reload, workspaceActive])
 
   useEffect(() => {
-    if (!activeConnectionId || !lastEnqueued) return
+    if (!activeConnectionId || !lastEnqueued || !workspaceActive) return
     let cancelled = false
     const poll = async () => {
       const r = await fetchWarrenJob(activeConnectionId, lastEnqueued.jobId)
@@ -147,7 +149,7 @@ export function WarrenDeployPanel({
       cancelled = true
       clearInterval(id)
     }
-  }, [activeConnectionId, lastEnqueued])
+  }, [activeConnectionId, lastEnqueued, workspaceActive])
 
   // ── derive nodes + match preview ──
   const nodes = useMemo(() => uniqueNodesFromInventory(inventory), [inventory])

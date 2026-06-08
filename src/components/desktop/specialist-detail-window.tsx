@@ -1,6 +1,7 @@
 "use client"
 
 import { useCallback, useEffect, useMemo, useState } from "react"
+import { useWorkspaceActive } from "./workspace-active-context"
 import {
   Activity,
   AlertTriangle,
@@ -123,6 +124,7 @@ export function SpecialistDetailWindow({
   const [warrenDeployment, setWarrenDeployment] = useState<WarrenDeployment | null>(null)
   const [paused, setPaused] = useState(false)
   const [intervalMs, setIntervalMs] = useState(5000)
+  const workspaceActive = useWorkspaceActive()
   const [updatedAt, setUpdatedAt] = useState(0)
   /** First poll not yet returned — derived so it isn't set inside an effect. */
   const loading = updatedAt === 0
@@ -190,10 +192,10 @@ export function SpecialistDetailWindow({
   }, [activeConnectionId, hasRvbbit, loadStatic, pollCalls])
 
   useEffect(() => {
-    if (!activeConnectionId || !hasRvbbit || paused) return
+    if (!activeConnectionId || !hasRvbbit || paused || !workspaceActive) return
     const id = setInterval(() => void pollCalls(), intervalMs)
     return () => clearInterval(id)
-  }, [activeConnectionId, hasRvbbit, paused, intervalMs, pollCalls])
+  }, [activeConnectionId, hasRvbbit, paused, intervalMs, pollCalls, workspaceActive])
 
   const runTest = useCallback(async () => {
     if (!activeConnectionId) return

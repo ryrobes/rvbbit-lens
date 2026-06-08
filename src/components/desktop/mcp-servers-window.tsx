@@ -1,6 +1,7 @@
 "use client"
 
 import { useCallback, useEffect, useMemo, useState } from "react"
+import { useWorkspaceActive } from "./workspace-active-context"
 import {
   Activity,
   AlertTriangle,
@@ -69,6 +70,7 @@ export function McpServersWindow({
   const [error, setError] = useState<string | null>(null)
   const [paused, setPaused] = useState(false)
   const [intervalMs, setIntervalMs] = useState(5000)
+  const workspaceActive = useWorkspaceActive()
   const [updatedAt, setUpdatedAt] = useState(0)
   const [showAdd, setShowAdd] = useState(false)
   const loading = updatedAt === 0
@@ -103,10 +105,10 @@ export function McpServersWindow({
   }, [activeConnectionId, hasRvbbit, reload])
 
   useEffect(() => {
-    if (!activeConnectionId || !hasRvbbit || paused) return
+    if (!activeConnectionId || !hasRvbbit || paused || !workspaceActive) return
     const id = setInterval(() => void reload(), intervalMs)
     return () => clearInterval(id)
-  }, [activeConnectionId, hasRvbbit, paused, intervalMs, reload])
+  }, [activeConnectionId, hasRvbbit, paused, intervalMs, reload, workspaceActive])
 
   const { gMin, gMax, colorOf } = useMemo(() => {
     let gMin = Infinity

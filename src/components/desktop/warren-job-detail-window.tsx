@@ -1,6 +1,7 @@
 "use client"
 
 import { useCallback, useEffect, useState } from "react"
+import { useWorkspaceActive } from "./workspace-active-context"
 import {
   AlertTriangle,
   Brain,
@@ -52,6 +53,7 @@ export function WarrenJobDetailWindow({
   const [updatedAt, setUpdatedAt] = useState(0)
   const loading = updatedAt === 0
   const terminal = isTerminal(job?.status)
+  const workspaceActive = useWorkspaceActive()
 
   const poll = useCallback(async () => {
     if (!activeConnectionId) return
@@ -70,7 +72,7 @@ export function WarrenJobDetailWindow({
       await poll()
     }
     void run()
-    if (!activeConnectionId) return () => { cancelled = true }
+    if (!activeConnectionId || !workspaceActive) return () => { cancelled = true }
     const id = setInterval(() => {
       if (terminal) return
       void poll()
@@ -79,7 +81,7 @@ export function WarrenJobDetailWindow({
       cancelled = true
       clearInterval(id)
     }
-  }, [activeConnectionId, terminal, poll])
+  }, [activeConnectionId, terminal, poll, workspaceActive])
 
   if (!hasRvbbit) {
     return (

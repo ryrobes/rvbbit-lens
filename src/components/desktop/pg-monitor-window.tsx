@@ -100,12 +100,13 @@ export function PgMonitorWindow({
   // Re-render every ~500ms so "age" displays (query runtime, last
   // vacuum, etc.) tick smoothly without re-fetching.
   useEffect(() => {
+    if (!workspaceActive) return
     const id = setInterval(() => {
       ageTickRef.current += 1
       forceTick((t) => t + 1)
     }, 500)
     return () => clearInterval(id)
-  }, [])
+  }, [workspaceActive])
 
   const current = history[history.length - 1]?.snap ?? null
   const rates = useMemo(() => computeRates(history), [history])

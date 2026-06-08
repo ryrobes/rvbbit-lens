@@ -1,6 +1,7 @@
 "use client"
 
 import { useCallback, useEffect, useMemo, useState } from "react"
+import { useWorkspaceActive } from "./workspace-active-context"
 
 /** 1s-tick clock while `active` — used for live "elapsed" cells. */
 function useNowWhile(active: boolean): number {
@@ -94,6 +95,7 @@ export function WarrenWindow({
   const [tab, setTab] = useState<TabKey>(payload.initialTab ?? "inventory")
   const [paused, setPaused] = useState(false)
   const [intervalMs, setIntervalMs] = useState(5000)
+  const workspaceActive = useWorkspaceActive()
   const [showOfflineNodes, setShowOfflineNodes] = useState(false)
   const [actionDeploymentId, setActionDeploymentId] = useState<string | null>(null)
   const [updatedAt, setUpdatedAt] = useState(0)
@@ -161,13 +163,13 @@ export function WarrenWindow({
     }
     void run()
     if (!activeConnectionId || !hasRvbbit) return () => { cancelled = true }
-    if (paused) return () => { cancelled = true }
+    if (paused || !workspaceActive) return () => { cancelled = true }
     const id = setInterval(() => void reload(), intervalMs)
     return () => {
       cancelled = true
       clearInterval(id)
     }
-  }, [activeConnectionId, hasRvbbit, paused, intervalMs, reload])
+  }, [activeConnectionId, hasRvbbit, paused, intervalMs, reload, workspaceActive])
 
   // ── derived counts ──
   const nodeCounts = useMemo(() => {
@@ -908,9 +910,10 @@ function JobsTab({
 
 function JobRow({ job, onOpen }: { job: WarrenJob; onOpen: () => void }) {
   const isRunning = job.status === "running"
+  const workspaceActive = useWorkspaceActive()
   // Live tick while the job is running so the elapsed column counts up
   // without violating React's purity rule (no Date.now() in render).
-  const now = useNowWhile(isRunning)
+  const now = useNowWhile(isRunning && workspaceActive)
   const elapsed =
     job.finished_at && job.created_at
       ? job.finished_at - job.created_at

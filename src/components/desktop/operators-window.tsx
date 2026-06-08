@@ -1,6 +1,7 @@
 "use client"
 
 import { useCallback, useEffect, useMemo, useState } from "react"
+import { useWorkspaceActive } from "./workspace-active-context"
 import {
   AlertTriangle,
   CheckCircle2,
@@ -48,6 +49,7 @@ export function OperatorsWindow({
   const [error, setError] = useState<string | null>(null)
   const [paused, setPaused] = useState(false)
   const [intervalMs, setIntervalMs] = useState(10_000)
+  const workspaceActive = useWorkspaceActive()
   const [updatedAt, setUpdatedAt] = useState(0)
   const loading = updatedAt === 0
 
@@ -82,10 +84,10 @@ export function OperatorsWindow({
   }, [reload])
 
   useEffect(() => {
-    if (!activeConnectionId || !hasRvbbit || paused) return
+    if (!activeConnectionId || !hasRvbbit || paused || !workspaceActive) return
     const id = setInterval(() => void reload(), intervalMs)
     return () => clearInterval(id)
-  }, [activeConnectionId, hasRvbbit, paused, intervalMs, reload])
+  }, [activeConnectionId, hasRvbbit, paused, intervalMs, reload, workspaceActive])
 
   // ── derive ──
   const trafficByName = useMemo(() => {

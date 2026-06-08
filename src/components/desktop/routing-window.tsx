@@ -1,6 +1,7 @@
 "use client"
 
 import { useCallback, useEffect, useMemo, useState } from "react"
+import { useWorkspaceActive } from "./workspace-active-context"
 import {
   Activity,
   AlertTriangle,
@@ -78,6 +79,7 @@ export function RoutingWindow({ activeConnectionId, hasRvbbit }: RoutingWindowPr
   const [error, setError] = useState<string | null>(null)
   const [paused, setPaused] = useState(false)
   const [intervalMs, setIntervalMs] = useState(5000)
+  const workspaceActive = useWorkspaceActive()
   const [windowHours, setWindowHours] = useState<number>(ROUTE_WINDOW_OPTIONS[0].hours)
   const [updatedAt, setUpdatedAt] = useState(0)
   const loading = updatedAt === 0
@@ -130,10 +132,10 @@ export function RoutingWindow({ activeConnectionId, hasRvbbit }: RoutingWindowPr
   }, [activeConnectionId, hasRvbbit, loadProfile, pollFlow])
 
   useEffect(() => {
-    if (!activeConnectionId || !hasRvbbit || paused) return
+    if (!activeConnectionId || !hasRvbbit || paused || !workspaceActive) return
     const id = setInterval(() => void pollFlow(), intervalMs)
     return () => clearInterval(id)
-  }, [activeConnectionId, hasRvbbit, paused, intervalMs, pollFlow])
+  }, [activeConnectionId, hasRvbbit, paused, intervalMs, pollFlow, workspaceActive])
 
   if (!hasRvbbit) {
     return (

@@ -1,6 +1,7 @@
 "use client"
 
 import { useCallback, useEffect, useMemo, useState } from "react"
+import { useWorkspaceActive } from "./workspace-active-context"
 import {
   Activity,
   AlertTriangle,
@@ -115,6 +116,7 @@ export function RvbbitCacheWindow({
   const [tab, setTab] = useState<TabKey>(initialTab)
   const [paused, setPaused] = useState(false)
   const [intervalMs, setIntervalMs] = useState(10_000)
+  const workspaceActive = useWorkspaceActive()
   const [updatedAt, setUpdatedAt] = useState(0)
   const [error, setError] = useState<string | null>(null)
   const loading = updatedAt === 0
@@ -153,10 +155,10 @@ export function RvbbitCacheWindow({
   }, [reload])
 
   useEffect(() => {
-    if (!activeConnectionId || paused) return
+    if (!activeConnectionId || paused || !workspaceActive) return
     const id = setInterval(() => void reload(), intervalMs)
     return () => clearInterval(id)
-  }, [activeConnectionId, paused, intervalMs, reload])
+  }, [activeConnectionId, paused, intervalMs, reload, workspaceActive])
 
   return (
     <div className="flex h-full flex-col text-[12px] text-chrome-text">

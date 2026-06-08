@@ -1,6 +1,7 @@
 "use client"
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import { useWorkspaceActive } from "./workspace-active-context"
 import {
   AlertTriangle,
   BarChart3,
@@ -204,6 +205,7 @@ export function DataGridWindow({
   const [runState, setRunState] = useState<RunState>({ kind: "idle" })
   // Live progress for a running query (polled from a separate connection).
   const [progress, setProgress] = useState<QueryProgress | null>(null)
+  const workspaceActive = useWorkspaceActive()
   const [explainState, setExplainState] = useState<ExplainState>({ kind: "idle" })
   const [explainBusy, setExplainBusy] = useState(false)
   const [activeTab, setActiveTab] = useState<NonNullable<DataPayload["view"]>["activeTab"]>(view.activeTab ?? (isSemanticProjection ? "explain" : payload.origin === "table" ? "rows" : "sql"))
@@ -803,7 +805,7 @@ export function DataGridWindow({
   useEffect(() => {
     // progress is reset at run-start and only rendered while running, so we
     // don't clear it here (avoids a synchronous setState in the effect).
-    if (!isRunning || !activeConnectionId) return
+    if (!isRunning || !activeConnectionId || !workspaceActive) return
     let cancelled = false
     let timer: ReturnType<typeof setTimeout>
     const poll = async () => {
@@ -832,7 +834,7 @@ export function DataGridWindow({
       cancelled = true
       clearTimeout(timer)
     }
-  }, [isRunning, activeConnectionId])
+  }, [isRunning, activeConnectionId, workspaceActive])
 
   // The editable rollup spec the shelf shows — null when this isn't a
   // column-aggregate window, or when the SQL was hand-edited into a shape

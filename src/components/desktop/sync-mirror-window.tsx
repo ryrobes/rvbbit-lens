@@ -1,6 +1,7 @@
 "use client"
 
 import { Fragment, useCallback, useEffect, useMemo, useState } from "react"
+import { useWorkspaceActive } from "./workspace-active-context"
 import { Check, ChevronRight, Database, Plus, RefreshCw, Trash2, X } from "@/lib/icons"
 import { cn } from "@/lib/utils"
 import {
@@ -65,6 +66,7 @@ export function SyncMirrorWindow({ activeConnectionId }: { activeConnectionId: s
   const [editing, setEditing] = useState<{ name: string; isNew: boolean; spec: SyncSpec } | null>(null)
   const [runs, setRuns] = useState<SyncRun[]>([])
   const [running, setRunning] = useState(false)
+  const workspaceActive = useWorkspaceActive()
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -95,10 +97,10 @@ export function SyncMirrorWindow({ activeConnectionId }: { activeConnectionId: s
   // Poll while a run is in flight — sync_runs commits per table, so progress
   // shows up live even while the CALL is still pending.
   useEffect(() => {
-    if (!running) return
+    if (!running || !workspaceActive) return
     const h = setInterval(() => void refreshRuns(), 1500)
     return () => clearInterval(h)
-  }, [running, refreshRuns])
+  }, [running, refreshRuns, workspaceActive])
 
   const selectedJob = useMemo(() => jobs.find((j) => j.jobName === selected) ?? null, [jobs, selected])
 

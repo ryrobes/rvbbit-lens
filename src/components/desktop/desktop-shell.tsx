@@ -1,6 +1,6 @@
 "use client"
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react"
 import {
   Activity,
   Bell,
@@ -36,6 +36,7 @@ import {
 } from "@/lib/icons"
 import { PhosphorIconProvider } from "@/components/icon-provider"
 import { DesktopIcon } from "./desktop-icon"
+import { WorkspaceActiveContext } from "./workspace-active-context"
 import { FolderWindow, type LauncherItem } from "./folder-window"
 import { DesktopMenuBar } from "./desktop-menu-bar"
 import { LineageOverlay } from "./lineage-overlay"
@@ -349,10 +350,23 @@ export function DesktopShell() {
   const workspacesRef = useRef(workspaces)
   workspacesRef.current = workspaces
 
+  // Windows on *parked* slots that received a NOTIFY while off-screen and
+  // owe a refresh — flushed when their desktop is next activated, so an
+  // inactive desktop pays nothing for live channels but isn't stale on return.
+  const pendingRunRef = useRef<Set<string>>(new Set())
+
   // Latest active connection, for async handlers (e.g. the pivot
   // distinct-value probe) that fire outside React's render flow.
   const activeConnectionIdRef = useRef(activeConnectionId)
   activeConnectionIdRef.current = activeConnectionId
+
+  // Stable accessors for the live active canvas. Event-handler callbacks read
+  // current windows/params through these instead of closing over `windows` /
+  // `desktopParams` — closing over them makes the callback identity churn on
+  // every canvas change (open/close/move/focus), which would cascade through
+  // `baseCtx` and re-render every window (including parked ones) on each edit.
+  const liveWindows = useCallback(() => workspacesRef.current[activeWorkspaceRef.current].windows, [])
+  const liveParams = useCallback(() => workspacesRef.current[activeWorkspaceRef.current].params, [])
 
   const mutateCanvas = useCallback(
     (fn: (c: WorkspaceCanvas) => WorkspaceCanvas) => {
@@ -791,6 +805,20 @@ export function DesktopShell() {
   // ── Workspace switching ─────────────────────────────────────────────
   const wsTransitionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const switchWorkspace = useCallback((target: SlotId) => {
+    // Flush any NOTIFY-deferred refreshes owed to the slot we're entering, so
+    // a desktop that went stale while parked catches up the instant it shows.
+    if (activeWorkspaceRef.current !== target && pendingRunRef.current.size > 0) {
+      const entering = new Set(workspacesRef.current[target].windows.map((w) => w.id))
+      const toRun = [...pendingRunRef.current].filter((wid) => entering.has(wid))
+      if (toRun.length > 0) {
+        for (const wid of toRun) pendingRunRef.current.delete(wid)
+        setRunSignals((s) => {
+          const next = { ...s }
+          for (const wid of toRun) next[wid] = (next[wid] ?? 0) + 1
+          return next
+        })
+      }
+    }
     setActiveWorkspace((current) => {
       if (current === target) return current
       // Direction by slot order (the Scene slot sorts after 5) so the slide
@@ -981,12 +1009,17 @@ export function DesktopShell() {
       // Re-run every data window subscribed to this channel, in any
       // workspace — the point of a subscription is to stay live.
       const ws = workspacesRef.current
+      const activeSlot = activeWorkspaceRef.current
       const idsToRefresh: string[] = []
       for (const id of ALL_SLOT_IDS) {
         for (const w of ws[id].windows) {
           if (w.kind !== "data") continue
           if ((w.payload as DataPayload | undefined)?.notifyChannel === data.channel) {
-            idsToRefresh.push(w.id)
+            // The active slot re-runs immediately; a parked slot defers the
+            // refresh until it's next shown, so off-screen desktops never run
+            // hidden queries but still catch up on activation.
+            if (id === activeSlot) idsToRefresh.push(w.id)
+            else pendingRunRef.current.add(w.id)
           }
         }
       }
@@ -1162,7 +1195,7 @@ export function DesktopShell() {
   }, [])
 
   const subscribeParam = useCallback((targetWindowId: string, key: string, targetField?: string) => {
-    const param = desktopParams.find((p) => p.key === key)
+    const param = liveParams().find((p) => p.key === key)
     if (!param) return
     setWindows((prev) =>
       prev.map((w) => {
@@ -1191,12 +1224,12 @@ export function DesktopShell() {
       }),
     )
     setRunSignals((s) => ({ ...s, [targetWindowId]: (s[targetWindowId] ?? 0) + 1 }))
-  }, [desktopParams])
+  }, [liveParams])
 
   // ── Helpers to open specific window kinds ───────────────────────────
 
   const openFinder = useCallback(() => {
-    const existing = windows.find((w) => w.kind === "finder")
+    const existing = liveWindows().find((w) => w.kind === "finder")
     if (existing) return focus(existing.id)
     openWindow({
       id: randomUUID(),
@@ -1205,10 +1238,10 @@ export function DesktopShell() {
       x: 40, y: 40, width: 360, height: 560,
       payload: { kind: "finder" } satisfies FinderPayload,
     })
-  }, [focus, openWindow, windows])
+  }, [focus, openWindow, liveWindows])
 
   const openConnections = useCallback(() => {
-    const existing = windows.find((w) => w.kind === "connections")
+    const existing = liveWindows().find((w) => w.kind === "connections")
     if (existing) return focus(existing.id)
     openWindow({
       id: randomUUID(),
@@ -1217,7 +1250,7 @@ export function DesktopShell() {
       x: 200, y: 90, width: 560, height: 480,
       payload: { kind: "connections" },
     })
-  }, [focus, openWindow, windows])
+  }, [focus, openWindow, liveWindows])
 
   const openSqlScratch = useCallback(() => {
     if (!activeConnectionId) {
@@ -1297,7 +1330,7 @@ export function DesktopShell() {
       if (!activeConnectionId) return
       let n = 0
       for (const t of tables) {
-        const already = windows.some(
+        const already = liveWindows().some(
           (w) =>
             w.kind === "data" &&
             (w.payload as DataPayload | undefined)?.table?.schema === t.schema &&
@@ -1324,11 +1357,11 @@ export function DesktopShell() {
         n++
       }
     },
-    [activeConnectionId, openWindow, windows],
+    [activeConnectionId, openWindow, liveWindows],
   )
 
   const openViewApps = useCallback(() => {
-    const existing = windows.find((w) => w.kind === "view-apps")
+    const existing = liveWindows().find((w) => w.kind === "view-apps")
     if (existing) return focus(existing.id)
     openWindow({
       id: randomUUID(),
@@ -1337,7 +1370,7 @@ export function DesktopShell() {
       x: 240, y: 120, width: 720, height: 480,
       payload: { kind: "view-apps" } satisfies ViewAppsPayload,
     })
-  }, [focus, openWindow, windows])
+  }, [focus, openWindow, liveWindows])
 
   const openViewApp = useCallback((appId: string) => {
     openWindow({
@@ -1376,7 +1409,7 @@ export function DesktopShell() {
   }, [openWindow])
 
   const openExtensions = useCallback(() => {
-    const existing = windows.find((w) => w.kind === "extensions")
+    const existing = liveWindows().find((w) => w.kind === "extensions")
     if (existing) return focus(existing.id)
     openWindow({
       id: randomUUID(),
@@ -1385,10 +1418,10 @@ export function DesktopShell() {
       x: 180, y: 100, width: 600, height: 440,
       payload: { kind: "extensions" } satisfies ExtensionsPayload,
     })
-  }, [focus, openWindow, windows])
+  }, [focus, openWindow, liveWindows])
 
   const openRvbbitCache = useCallback(() => {
-    const existing = windows.find((w) => w.kind === "rvbbit-cache")
+    const existing = liveWindows().find((w) => w.kind === "rvbbit-cache")
     if (existing) return focus(existing.id)
     openWindow({
       id: randomUUID(),
@@ -1397,10 +1430,10 @@ export function DesktopShell() {
       x: 200, y: 110, width: 760, height: 500,
       payload: { kind: "rvbbit-cache", initialView: "receipts" } satisfies RvbbitCachePayload,
     })
-  }, [focus, openWindow, windows])
+  }, [focus, openWindow, liveWindows])
 
   const openCache = useCallback(() => {
-    const existing = windows.find((w) => w.kind === "cache")
+    const existing = liveWindows().find((w) => w.kind === "cache")
     if (existing) return focus(existing.id)
     openWindow({
       id: randomUUID(),
@@ -1409,7 +1442,7 @@ export function DesktopShell() {
       x: 230, y: 130, width: 780, height: 520,
       payload: { kind: "cache", initialView: "synth" } satisfies CachePayload,
     })
-  }, [focus, openWindow, windows])
+  }, [focus, openWindow, liveWindows])
 
   const openSqlWith = useCallback(
     (sql: string, title: string) => {
@@ -1464,7 +1497,7 @@ export function DesktopShell() {
   )
 
   const openPgMonitor = useCallback(() => {
-    const existing = windows.find((w) => w.kind === "pg-monitor")
+    const existing = liveWindows().find((w) => w.kind === "pg-monitor")
     if (existing) return focus(existing.id)
     openWindow({
       id: randomUUID(),
@@ -1473,10 +1506,10 @@ export function DesktopShell() {
       x: 120, y: 80, width: 940, height: 720,
       payload: { kind: "pg-monitor" } satisfies PgMonitorPayload,
     })
-  }, [focus, openWindow, windows])
+  }, [focus, openWindow, liveWindows])
 
   const openOperators = useCallback(() => {
-    const existing = windows.find((w) => w.kind === "operators")
+    const existing = liveWindows().find((w) => w.kind === "operators")
     if (existing) return focus(existing.id)
     openWindow({
       id: randomUUID(),
@@ -1485,12 +1518,12 @@ export function DesktopShell() {
       x: 160, y: 90, width: 460, height: 540,
       payload: { kind: "operators" } satisfies OperatorsPayload,
     })
-  }, [focus, openWindow, windows])
+  }, [focus, openWindow, liveWindows])
 
   const openOperatorFlow = useCallback(
     (operatorName: string | null, receiptId?: string | null) => {
       if (operatorName) {
-        const existing = windows.find(
+        const existing = liveWindows().find(
           (w) =>
             w.kind === "operator-flow" &&
             (w.payload as OperatorFlowPayload | undefined)?.operatorName === operatorName,
@@ -1523,11 +1556,11 @@ export function DesktopShell() {
         } satisfies OperatorFlowPayload,
       })
     },
-    [focus, openWindow, windows, updatePayload],
+    [focus, openWindow, liveWindows, updatePayload],
   )
 
   const openSpecialists = useCallback(() => {
-    const existing = windows.find((w) => w.kind === "specialists")
+    const existing = liveWindows().find((w) => w.kind === "specialists")
     if (existing) return focus(existing.id)
     openWindow({
       id: randomUUID(),
@@ -1536,10 +1569,10 @@ export function DesktopShell() {
       x: 150, y: 84, width: 768, height: 680,
       payload: { kind: "specialists" } satisfies SpecialistsPayload,
     })
-  }, [focus, openWindow, windows])
+  }, [focus, openWindow, liveWindows])
 
   const openRouting = useCallback(() => {
-    const existing = windows.find((w) => w.kind === "routing")
+    const existing = liveWindows().find((w) => w.kind === "routing")
     if (existing) return focus(existing.id)
     openWindow({
       id: randomUUID(),
@@ -1548,10 +1581,10 @@ export function DesktopShell() {
       x: 120, y: 70, width: 1100, height: 740,
       payload: { kind: "routing" } satisfies RoutingPayload,
     })
-  }, [focus, openWindow, windows])
+  }, [focus, openWindow, liveWindows])
 
   const openMcpServers = useCallback(() => {
-    const existing = windows.find((w) => w.kind === "mcp-servers")
+    const existing = liveWindows().find((w) => w.kind === "mcp-servers")
     if (existing) return focus(existing.id)
     openWindow({
       id: randomUUID(),
@@ -1560,10 +1593,10 @@ export function DesktopShell() {
       x: 150, y: 84, width: 820, height: 680,
       payload: { kind: "mcp-servers" } satisfies McpServersPayload,
     })
-  }, [focus, openWindow, windows])
+  }, [focus, openWindow, liveWindows])
 
   const openCosts = useCallback((initialFilter?: CostsPayload["initialFilter"]) => {
-    const existing = windows.find((w) => w.kind === "costs")
+    const existing = liveWindows().find((w) => w.kind === "costs")
     if (existing) {
       if (initialFilter) {
         updatePayload(existing.id, (p) => ({
@@ -1583,10 +1616,10 @@ export function DesktopShell() {
         initialFilter,
       } satisfies CostsPayload,
     })
-  }, [focus, openWindow, windows, updatePayload])
+  }, [focus, openWindow, liveWindows, updatePayload])
 
   const openSyncMirror = useCallback(() => {
-    const existing = windows.find((w) => w.kind === "sync-mirror")
+    const existing = liveWindows().find((w) => w.kind === "sync-mirror")
     if (existing) return focus(existing.id)
     openWindow({
       id: randomUUID(),
@@ -1595,10 +1628,10 @@ export function DesktopShell() {
       x: 128, y: 68, width: 920, height: 640,
       payload: { kind: "sync-mirror" } satisfies SyncMirrorPayload,
     })
-  }, [focus, openWindow, windows])
+  }, [focus, openWindow, liveWindows])
 
   const openDuck = useCallback(() => {
-    const existing = windows.find((w) => w.kind === "duck")
+    const existing = liveWindows().find((w) => w.kind === "duck")
     if (existing) return focus(existing.id)
     openWindow({
       id: randomUUID(),
@@ -1607,10 +1640,10 @@ export function DesktopShell() {
       x: 132, y: 70, width: 1000, height: 700,
       payload: { kind: "duck" } satisfies DuckPayload,
     })
-  }, [focus, openWindow, windows])
+  }, [focus, openWindow, liveWindows])
 
   const openCapabilities = useCallback((tagFilter?: string | null) => {
-    const existing = windows.find((w) => w.kind === "capabilities")
+    const existing = liveWindows().find((w) => w.kind === "capabilities")
     if (existing) {
       if (tagFilter) {
         updatePayload(existing.id, (p) => ({
@@ -1630,11 +1663,11 @@ export function DesktopShell() {
         tagFilter: tagFilter ?? null,
       } satisfies CapabilitiesPayload,
     })
-  }, [focus, openWindow, windows, updatePayload])
+  }, [focus, openWindow, liveWindows, updatePayload])
 
   const openHfDeploy = useCallback(
     (modelId?: string | null) => {
-      const existing = windows.find((w) => w.kind === "hf-deploy")
+      const existing = liveWindows().find((w) => w.kind === "hf-deploy")
       if (existing) {
         if (modelId) {
           updatePayload(existing.id, (p) => ({
@@ -1655,12 +1688,12 @@ export function DesktopShell() {
         payload: { kind: "hf-deploy", modelId: modelId ?? null } satisfies HfDeployPayload,
       })
     },
-    [focus, openWindow, windows, updatePayload],
+    [focus, openWindow, liveWindows, updatePayload],
   )
 
   const openCapabilityDetail = useCallback(
     (catalogId: string, initialTab?: CapabilityDetailPayload["initialTab"]) => {
-      const existing = windows.find(
+      const existing = liveWindows().find(
         (w) =>
           w.kind === "capability-detail" &&
           (w.payload as CapabilityDetailPayload | undefined)?.catalogId === catalogId,
@@ -1690,12 +1723,12 @@ export function DesktopShell() {
         } satisfies CapabilityDetailPayload,
       })
     },
-    [focus, openWindow, windows, updatePayload],
+    [focus, openWindow, liveWindows, updatePayload],
   )
 
   const openWarren = useCallback(
     (initialTab?: WarrenPayload["initialTab"]) => {
-      const existing = windows.find((w) => w.kind === "warren")
+      const existing = liveWindows().find((w) => w.kind === "warren")
       if (existing) {
         if (initialTab) {
           updatePayload(existing.id, (p) => ({
@@ -1713,12 +1746,12 @@ export function DesktopShell() {
         payload: { kind: "warren", initialTab } satisfies WarrenPayload,
       })
     },
-    [focus, openWindow, windows, updatePayload],
+    [focus, openWindow, liveWindows, updatePayload],
   )
 
   const openWarrenJob = useCallback(
     (jobId: string, jobName?: string | null) => {
-      const existing = windows.find(
+      const existing = liveWindows().find(
         (w) =>
           w.kind === "warren-job-detail" &&
           (w.payload as WarrenJobDetailPayload | undefined)?.jobId === jobId,
@@ -1740,11 +1773,11 @@ export function DesktopShell() {
         } satisfies WarrenJobDetailPayload,
       })
     },
-    [focus, openWindow, windows],
+    [focus, openWindow, liveWindows],
   )
 
   const openQueryLens = useCallback((queryId?: string | null) => {
-    const existing = windows.find((w) => w.kind === "query-lens")
+    const existing = liveWindows().find((w) => w.kind === "query-lens")
     if (existing) {
       if (queryId) {
         updatePayload(existing.id, (p) => ({ ...(p as QueryLensPayload), queryId }))
@@ -1758,10 +1791,10 @@ export function DesktopShell() {
       x: 120, y: 70, width: 1120, height: 720,
       payload: { kind: "query-lens", queryId: queryId ?? null } satisfies QueryLensPayload,
     })
-  }, [focus, openWindow, windows, updatePayload])
+  }, [focus, openWindow, liveWindows, updatePayload])
 
   const openKgBrowser = useCallback((graphId?: string | null) => {
-    const existing = windows.find((w) => w.kind === "kg-browser")
+    const existing = liveWindows().find((w) => w.kind === "kg-browser")
     if (existing) {
       if (graphId) {
         updatePayload(existing.id, (p) => ({ ...(p as KgBrowserPayload), graphId }))
@@ -1775,7 +1808,7 @@ export function DesktopShell() {
       x: 130, y: 80, width: 1080, height: 700,
       payload: { kind: "kg-browser", graphId: graphId ?? null } satisfies KgBrowserPayload,
     })
-  }, [focus, openWindow, windows, updatePayload])
+  }, [focus, openWindow, liveWindows, updatePayload])
 
   const openKgEntity = useCallback(
     (
@@ -1786,7 +1819,7 @@ export function DesktopShell() {
       nodeId?: number | null,
     ) => {
       // Match an existing window for the same (nodeId) or (graphId, kind, label).
-      const existing = windows.find((w) => {
+      const existing = liveWindows().find((w) => {
         if (w.kind !== "kg-entity-detail") return false
         const p = w.payload as KgEntityDetailPayload | undefined
         if (!p) return false
@@ -1830,7 +1863,7 @@ export function DesktopShell() {
         } satisfies KgEntityDetailPayload,
       })
     },
-    [focus, openWindow, windows, updatePayload],
+    [focus, openWindow, liveWindows, updatePayload],
   )
 
   const openKgExplorer = useCallback(
@@ -1839,7 +1872,7 @@ export function DesktopShell() {
       seedKind?: string | null,
       seedLabel?: string | null,
     ) => {
-      const existing = windows.find((w) => w.kind === "kg-explorer")
+      const existing = liveWindows().find((w) => w.kind === "kg-explorer")
       if (existing) {
         updatePayload(existing.id, (p) => ({
           ...(p as KgExplorerPayload),
@@ -1865,12 +1898,12 @@ export function DesktopShell() {
         } satisfies KgExplorerPayload,
       })
     },
-    [focus, openWindow, windows, updatePayload],
+    [focus, openWindow, liveWindows, updatePayload],
   )
 
   const openDataSearch = useCallback(
     (initialQuery?: string) => {
-      const existing = windows.find((w) => w.kind === "data-search")
+      const existing = liveWindows().find((w) => w.kind === "data-search")
       if (existing) {
         if (initialQuery != null) {
           updatePayload(existing.id, (p) => ({
@@ -1888,7 +1921,7 @@ export function DesktopShell() {
         payload: { kind: "data-search", initialQuery } satisfies DataSearchPayload,
       })
     },
-    [focus, openWindow, windows, updatePayload],
+    [focus, openWindow, liveWindows, updatePayload],
   )
 
   // Spawn a FRESH results window per search — no dedupe — so searches accrete
@@ -1914,7 +1947,7 @@ export function DesktopShell() {
   )
 
   const openDrift = useCallback(() => {
-    const existing = windows.find((w) => w.kind === "drift")
+    const existing = liveWindows().find((w) => w.kind === "drift")
     if (existing) return focus(existing.id)
     openWindow({
       id: randomUUID(),
@@ -1923,10 +1956,10 @@ export function DesktopShell() {
       x: 180, y: 100, width: 760, height: 660,
       payload: { kind: "drift" } satisfies DriftPayload,
     })
-  }, [focus, openWindow, windows])
+  }, [focus, openWindow, liveWindows])
 
   const openModelStudio = useCallback((modelName?: string) => {
-    const existing = windows.find((w) => w.kind === "model-studio")
+    const existing = liveWindows().find((w) => w.kind === "model-studio")
     if (existing) {
       if (modelName != null) {
         updatePayload(existing.id, (p) => ({ ...(p as ModelStudioPayload), modelName }))
@@ -1940,10 +1973,10 @@ export function DesktopShell() {
       x: 150, y: 80, width: 980, height: 680,
       payload: { kind: "model-studio", modelName } satisfies ModelStudioPayload,
     })
-  }, [focus, openWindow, windows, updatePayload])
+  }, [focus, openWindow, liveWindows, updatePayload])
 
   const openMetricCatalog = useCallback(() => {
-    const existing = windows.find((w) => w.kind === "metric-catalog")
+    const existing = liveWindows().find((w) => w.kind === "metric-catalog")
     if (existing) return focus(existing.id)
     openWindow({
       id: randomUUID(),
@@ -1952,10 +1985,10 @@ export function DesktopShell() {
       x: 140, y: 76, width: 860, height: 560,
       payload: { kind: "metric-catalog" } satisfies MetricCatalogPayload,
     })
-  }, [focus, openWindow, windows])
+  }, [focus, openWindow, liveWindows])
 
   const openMetricCreator = useCallback((metricName?: string) => {
-    const existing = windows.find((w) => w.kind === "metric-creator")
+    const existing = liveWindows().find((w) => w.kind === "metric-creator")
     if (existing) {
       if (metricName != null) {
         updatePayload(existing.id, (p) => ({ ...(p as MetricCreatorPayload), metricName }))
@@ -1969,10 +2002,10 @@ export function DesktopShell() {
       x: 160, y: 84, width: 940, height: 660,
       payload: { kind: "metric-creator", metricName: metricName ?? null } satisfies MetricCreatorPayload,
     })
-  }, [focus, openWindow, windows, updatePayload])
+  }, [focus, openWindow, liveWindows, updatePayload])
 
   const openMetricInspector = useCallback((metricName?: string) => {
-    const existing = windows.find((w) => w.kind === "metric-inspector")
+    const existing = liveWindows().find((w) => w.kind === "metric-inspector")
     if (existing) {
       if (metricName != null) {
         updatePayload(existing.id, (p) => ({ ...(p as MetricInspectorPayload), metricName }))
@@ -1986,11 +2019,11 @@ export function DesktopShell() {
       x: 180, y: 92, width: 1000, height: 700,
       payload: { kind: "metric-inspector", metricName: metricName ?? null } satisfies MetricInspectorPayload,
     })
-  }, [focus, openWindow, windows, updatePayload])
+  }, [focus, openWindow, liveWindows, updatePayload])
 
   const openKgExtractionRuns = useCallback(
     (graphId?: string | null, runId?: number | null) => {
-      const existing = windows.find((w) => w.kind === "kg-extraction-runs")
+      const existing = liveWindows().find((w) => w.kind === "kg-extraction-runs")
       if (existing) {
         if (graphId != null || runId != null) {
           updatePayload(existing.id, (p) => ({
@@ -2013,12 +2046,12 @@ export function DesktopShell() {
         } satisfies KgExtractionRunsPayload,
       })
     },
-    [focus, openWindow, windows, updatePayload],
+    [focus, openWindow, liveWindows, updatePayload],
   )
 
   const openKgMergeReview = useCallback(
     (graphId?: string | null, nodeKindFilter?: string) => {
-      const existing = windows.find((w) => w.kind === "kg-merge-review")
+      const existing = liveWindows().find((w) => w.kind === "kg-merge-review")
       if (existing) {
         updatePayload(existing.id, (p) => ({
           ...(p as KgMergeReviewPayload),
@@ -2040,7 +2073,7 @@ export function DesktopShell() {
         } satisfies KgMergeReviewPayload,
       })
     },
-    [focus, openWindow, windows, updatePayload],
+    [focus, openWindow, liveWindows, updatePayload],
   )
 
   /**
@@ -2064,7 +2097,7 @@ export function DesktopShell() {
       const title = pkCol ? `${name}#${ctx.sourcePk}` : name
 
       // Refocus an existing data window for the same source row.
-      const existing = windows.find(
+      const existing = liveWindows().find(
         (w) =>
           w.kind === "data" &&
           (w.payload as DataPayload | undefined)?.sourceContext?.sourceTable === ctx.sourceTable &&
@@ -2091,7 +2124,7 @@ export function DesktopShell() {
         } satisfies DataPayload,
       })
     },
-    [activeConnectionId, focus, openWindow, windows],
+    [activeConnectionId, focus, openWindow, liveWindows],
   )
 
   /**
@@ -2129,7 +2162,7 @@ export function DesktopShell() {
   )
 
   const openMcpServerDetail = useCallback((serverName: string) => {
-    const existing = windows.find(
+    const existing = liveWindows().find(
       (w) =>
         w.kind === "mcp-server-detail" &&
         (w.payload as McpServerDetailPayload | undefined)?.serverName === serverName,
@@ -2144,10 +2177,10 @@ export function DesktopShell() {
       width: 1020, height: 700,
       payload: { kind: "mcp-server-detail", serverName } satisfies McpServerDetailPayload,
     })
-  }, [focus, openWindow, windows])
+  }, [focus, openWindow, liveWindows])
 
   const openSpecialistDetail = useCallback((specialistName: string) => {
-    const existing = windows.find(
+    const existing = liveWindows().find(
       (w) =>
         w.kind === "specialist-detail" &&
         (w.payload as SpecialistDetailPayload | undefined)?.specialistName === specialistName,
@@ -2163,10 +2196,10 @@ export function DesktopShell() {
       height: 668,
       payload: { kind: "specialist-detail", specialistName } satisfies SpecialistDetailPayload,
     })
-  }, [focus, openWindow, windows])
+  }, [focus, openWindow, liveWindows])
 
   const openNotifications = useCallback(() => {
-    const existing = windows.find((w) => w.kind === "notifications")
+    const existing = liveWindows().find((w) => w.kind === "notifications")
     if (existing) return focus(existing.id)
     openWindow({
       id: randomUUID(),
@@ -2175,10 +2208,10 @@ export function DesktopShell() {
       x: 220, y: 120, width: 560, height: 520,
       payload: { kind: "notifications" } satisfies NotificationsPayload,
     })
-  }, [focus, openWindow, windows])
+  }, [focus, openWindow, liveWindows])
 
   const openPalette = useCallback(() => {
-    const existing = windows.find((w) => w.kind === "palette")
+    const existing = liveWindows().find((w) => w.kind === "palette")
     if (existing) return focus(existing.id)
     openWindow({
       id: randomUUID(),
@@ -2187,7 +2220,7 @@ export function DesktopShell() {
       x: 180, y: 130, width: 620, height: 480,
       payload: { kind: "palette" } satisfies PalettePayload,
     })
-  }, [focus, openWindow, windows])
+  }, [focus, openWindow, liveWindows])
 
   const onReExtractPalette = useCallback(async () => {
     if (!wallpaperUrl) return
@@ -2276,7 +2309,7 @@ export function DesktopShell() {
     (file: File, pos?: { x: number; y: number }) => {
       const id = randomUUID()
       putImportFile(id, file)
-      const n = windows.filter((w) => w.kind === "csv-import").length
+      const n = liveWindows().filter((w) => w.kind === "csv-import").length
       const defaultSchema = schema?.schemas?.includes("public")
         ? "public"
         : schema?.schemas?.[0]
@@ -2297,7 +2330,7 @@ export function DesktopShell() {
         } satisfies CsvImportPayload,
       })
     },
-    [openWindow, schema, windows],
+    [openWindow, schema, liveWindows],
   )
 
   const handleFilesDropped = useCallback(
@@ -2362,7 +2395,7 @@ export function DesktopShell() {
         parentBlockName: payload.parentBlockName,
         parentTitle: payload.parentTitle,
       })
-      const src = windows.find((w) => w.id === payload.parentWindowId)
+      const src = liveWindows().find((w) => w.id === payload.parentWindowId)
       const x = clampWorld(src ? src.x + src.width + 24 : 220)
       const y = clampWorld(src ? src.y : 140)
       openWindow({
@@ -2392,7 +2425,7 @@ export function DesktopShell() {
         } satisfies DataPayload,
       })
     },
-    [openWindow, windows],
+    [openWindow, liveWindows],
   )
 
   // Drop a DIMENSION op on a text column → spawn a frequency table: fan the
@@ -2406,7 +2439,7 @@ export function DesktopShell() {
         parentBlockName: payload.parentBlockName,
         parentTitle: payload.parentTitle,
       })
-      const src = windows.find((w) => w.id === payload.parentWindowId)
+      const src = liveWindows().find((w) => w.id === payload.parentWindowId)
       const x = clampWorld(src ? src.x + src.width + 24 : 240)
       const y = clampWorld(src ? src.y + 56 : 180)
       openWindow({
@@ -2435,7 +2468,7 @@ export function DesktopShell() {
         } satisfies DataPayload,
       })
     },
-    [openWindow, windows],
+    [openWindow, liveWindows],
   )
 
   // Pivot a dragged dimension across columns. Needs the dimension's
@@ -3101,7 +3134,7 @@ export function DesktopShell() {
   // Flat launcher registry — the data behind BOTH the desktop icons and the
   // folder windows. `folder` routes an item into a folder window (undefined =
   // lives on the desktop); `rvbbit` gates it to rvbbit connections.
-  const launchers: LauncherItem[] = [
+  const launchers: LauncherItem[] = useMemo(() => [
     { id: "finder", label: "Finder", icon: FolderOpen, color: "var(--brand-finder)", activate: openFinder },
     { id: "sql-scratch", label: "SQL Scratch", icon: FileCode2, color: "var(--brand-sql-scratch)", activate: openSqlScratch },
     { id: "view-apps", label: "View Apps", icon: Boxes, color: "var(--brand-view-apps)", sublabel: viewAppCount ? `${viewAppCount} saved` : undefined, activate: openViewApps },
@@ -3134,7 +3167,102 @@ export function DesktopShell() {
     { id: "kg-explorer", label: "Graph Explorer", icon: TreeStructure, color: "var(--brand-kg)", description: "Walk entities & relations", activate: () => openKgExplorer(), folder: "knowledge", rvbbit: true },
     { id: "query-lens", label: "Query Lens", icon: Eye, color: "var(--brand-query-lens)", description: "Trace a query's execution", activate: () => openQueryLens(), folder: "knowledge", rvbbit: true },
     { id: "drift", label: "Drift", icon: LineChart, color: "var(--brand-kg)", description: "Compare extraction runs", activate: () => openDrift(), folder: "knowledge", rvbbit: true },
-  ]
+  ], [
+    viewAppCount, schema,
+    openFinder, openSqlScratch, openViewApps, openConnections, openDataSearch,
+    openSystemObjects, openExtensions, openPgMonitor, openCache, openRvbbitCache,
+    openCosts, openSyncMirror, openOperators, openSpecialists, openRouting,
+    openMcpServers, openCapabilities, openHfDeploy, openWarren, openModelStudio,
+    openDuck, openMetricCatalog, openMetricCreator, openMetricInspector,
+    openKgBrowser, openKgExplorer, openQueryLens, openDrift,
+  ])
+
+  // Shared, per-window-invariant slice of WindowContext, memoized so the
+  // per-window <WindowFrame> memo boundary can bail. Only its referenced
+  // shell values (connection, schema, palette, notifications, …) change it;
+  // none of those fire during a drag or a focus click.
+  const baseCtx = useMemo<BaseWindowContext>(
+    () => ({
+      activeConnectionId,
+      hasRvbbit,
+      launchers,
+      schema,
+      schemaLoading,
+      busy,
+      setBusy,
+      openTableFromFinder,
+      openField,
+      openViewAppBuilder,
+      openViewApp,
+      openArtifact,
+      openQueryDocument,
+      openExtensions,
+      openRvbbitCache,
+      openCache,
+      openConnections,
+      reloadSchema: () => activeConnectionId && void loadSchema(activeConnectionId),
+      reloadConnections: loadConnections,
+      updatePayload,
+      emitParam,
+      subscribeParam,
+      editRollupSpec,
+      repivotWindow,
+      probeColumnValues,
+      palette: activePalette,
+      paletteOverrides,
+      hasWallpaper: !!wallpaperUrl,
+      onReExtractPalette,
+      onReExtractWithRvbbit,
+      onChangePaletteOverrides: setPaletteOverrides,
+      notifications,
+      watchedChannels,
+      windowChannels: windowChannels.filter((c) => !watchedChannels.includes(c)),
+      notifyStatus,
+      onAddWatched: addWatchedChannel,
+      onRemoveWatched: removeWatchedChannel,
+      onClearNotifications: clearNotifications,
+      openOperatorFlow,
+      openSpecialistDetail,
+      openMcpServerDetail,
+      openRouting,
+      openQueryLens,
+      openKgBrowser,
+      openKgEntity,
+      openSourceRow,
+      openKgForSource,
+      openKgExtractionRuns,
+      openKgMergeReview,
+      openKgExplorer,
+      openDataSearch,
+      openDrift,
+      openModelStudio,
+      openMetricCatalog,
+      openMetricCreator,
+      openMetricInspector,
+      openCosts,
+      openDuck,
+      openCapabilities,
+      openCapabilityDetail,
+      openHfDeploy,
+      openWarren,
+      openWarrenJob,
+    }),
+    [
+      activeConnectionId, hasRvbbit, launchers, schema, schemaLoading, busy, setBusy,
+      openTableFromFinder, openField, openViewAppBuilder, openViewApp, openArtifact,
+      openQueryDocument, openExtensions, openRvbbitCache, openCache, openConnections,
+      loadSchema, loadConnections, updatePayload, emitParam, subscribeParam,
+      editRollupSpec, repivotWindow, probeColumnValues, activePalette, paletteOverrides,
+      wallpaperUrl, onReExtractPalette, onReExtractWithRvbbit, setPaletteOverrides,
+      notifications, watchedChannels, windowChannels, notifyStatus, addWatchedChannel,
+      removeWatchedChannel, clearNotifications, openOperatorFlow, openSpecialistDetail,
+      openMcpServerDetail, openRouting, openQueryLens, openKgBrowser, openKgEntity,
+      openSourceRow, openKgForSource, openKgExtractionRuns, openKgMergeReview, openKgExplorer,
+      openDataSearch, openDrift, openModelStudio, openMetricCatalog, openMetricCreator,
+      openMetricInspector, openCosts, openDuck, openCapabilities, openCapabilityDetail,
+      openHfDeploy, openWarren, openWarrenJob,
+    ],
+  )
 
   return (
     <PhosphorIconProvider>
@@ -3330,11 +3458,16 @@ export function DesktopShell() {
           {/* Desktop-level launchers + folder icons, built from the
               launcher registry. Folders only appear if they have a
               visible item for this connection. */}
+          {/* `launchers`' activate handlers reach the live canvas via liveWindows()
+              (a ref read) — deferred to click time, never read during render — so
+              the react-hooks/refs flag here is a false positive. */}
+          {/* eslint-disable-next-line react-hooks/refs */}
           {launchers
             .filter((l) => !l.folder && (!l.rvbbit || hasRvbbit))
             .map((l) => (
               <DesktopIcon key={l.id} label={l.label} sublabel={l.sublabel} icon={l.icon} iconColor={l.color} onActivate={l.activate} />
             ))}
+          {/* eslint-disable-next-line react-hooks/refs */}
           {FOLDERS.filter((f) => launchers.some((l) => l.folder === f.id && (!l.rvbbit || hasRvbbit))).map((f) => (
             <DesktopIcon key={`folder:${f.id}`} label={f.label} icon={Folder} iconColor={f.color} onActivate={() => openFolder(f.id)} />
           ))}
@@ -3357,8 +3490,8 @@ export function DesktopShell() {
               : "av-ws-parked"
           : isActive ? "av-ws-active" : "av-ws-parked"
         return (
+          <WorkspaceActiveContext.Provider key={wsId} value={isActive}>
           <div
-            key={wsId}
             className={cn(
               "av-ws-layer pointer-events-none absolute inset-0 z-10 pt-8",
               layerClass,
@@ -3366,112 +3499,27 @@ export function DesktopShell() {
             aria-hidden={!isActive}
           >
             {canvas.windows.map((w) => {
-              // Column-aggregate windows are drop targets for additional
-              // columns from their *exact* parent (same parent window +
-              // same source relation). Anything else falls through to
-              // the canvas drop, which spawns a fresh block.
-              const columnDropAcceptsFrom = (() => {
-                if (w.kind !== "data") return null
-                const lin = (w.payload as DataPayload | undefined)?.lineage
-                if (!lin || lin.kind !== "column-aggregate") return null
-                // A detached (custom-SQL) window returns null → not a drop
-                // target, so dropping a column spawns a fresh block instead.
-                const spec = effectiveRollup(lin)
-                if (!spec) return null
-                return {
-                  parentWindowId: lin.parentWindowId,
-                  relationKey: lin.relationKey,
-                  measures: spec.measures,
-                }
-              })()
               return (
-              <DesktopWindow
-                key={w.id}
-                window={w}
-                icon={iconForKind(w.kind)}
-                focused={isActive && w.id === canvas.focusedWindowId}
-                onFocus={focus}
-                onClose={close}
-                onMinimize={minimize}
-                onMove={move}
-                onResize={resize}
-                viewportScale={viewport.scale}
-                columnDropAcceptsFrom={columnDropAcceptsFrom}
-                onColumnMerge={(payload, op) => mergeColumnIntoWindow(w.id, payload, op)}
-                semanticOps={semanticOps}
-                onSemanticDrop={requestSemanticDrop}
-                onRowsetChain={(payload, op, at) => requestRowsetStage(payload, op, at, true)}
-              >
-                {renderWindowContent(w, {
-                  activeConnectionId,
-                  hasRvbbit,
-                  launchers,
-                  schema,
-                  schemaLoading,
-                  busy,
-                  setBusy,
-                  openTableFromFinder,
-                  openField,
-                  openViewAppBuilder,
-                  openViewApp,
-                  openArtifact,
-                  openQueryDocument,
-                  openExtensions,
-                  openRvbbitCache,
-                  openCache,
-                  openConnections,
-                  reloadSchema: () => activeConnectionId && void loadSchema(activeConnectionId),
-                  reloadConnections: loadConnections,
-                  updatePayload,
-                  windows: canvas.windows,
-                  params: canvas.params,
-                  runSignal: runSignals[w.id] ?? 0,
-                  emitParam,
-                  subscribeParam,
-                  editRollupSpec,
-                  repivotWindow,
-                  probeColumnValues,
-                  palette: activePalette,
-                  paletteOverrides,
-                  hasWallpaper: !!wallpaperUrl,
-                  onReExtractPalette,
-                  onReExtractWithRvbbit,
-                  onChangePaletteOverrides: setPaletteOverrides,
-                  workspaceActive: isActive,
-                  notifications,
-                  watchedChannels,
-                  windowChannels: windowChannels.filter((c) => !watchedChannels.includes(c)),
-                  notifyStatus,
-                  onAddWatched: addWatchedChannel,
-                  onRemoveWatched: removeWatchedChannel,
-                  onClearNotifications: clearNotifications,
-                  openOperatorFlow,
-                  openSpecialistDetail,
-                  openMcpServerDetail,
-                  openRouting,
-                  openQueryLens,
-                  openKgBrowser,
-                  openKgEntity,
-                  openSourceRow,
-                  openKgForSource,
-                  openKgExtractionRuns,
-                  openKgMergeReview,
-                  openKgExplorer,
-                  openDataSearch,
-                  openDrift,
-                  openModelStudio,
-                  openMetricCatalog,
-                  openMetricCreator,
-                  openMetricInspector,
-                  openCosts,
-                  openDuck,
-                  openCapabilities,
-                  openCapabilityDetail,
-                  openHfDeploy,
-                  openWarren,
-                  openWarrenJob,
-                })}
-              </DesktopWindow>
+                <WindowFrame
+                  key={w.id}
+                  window={w}
+                  baseCtx={baseCtx}
+                  slotWindows={canvas.windows}
+                  slotParams={canvas.params}
+                  runSignal={runSignals[w.id] ?? 0}
+                  workspaceActive={isActive}
+                  focused={isActive && w.id === canvas.focusedWindowId}
+                  viewportScale={viewport.scale}
+                  onFocus={focus}
+                  onClose={close}
+                  onMinimize={minimize}
+                  onMove={move}
+                  onResize={resize}
+                  mergeColumnIntoWindow={mergeColumnIntoWindow}
+                  requestRowsetStage={requestRowsetStage}
+                  requestSemanticDrop={requestSemanticDrop}
+                  semanticOps={semanticOps}
+                />
               )
             })}
             {/* Empty Scene slot = the Scene gallery: pick one to load, or
@@ -3493,6 +3541,7 @@ export function DesktopShell() {
               </div>
             ) : null}
           </div>
+          </WorkspaceActiveContext.Provider>
         )
       })}
 
@@ -3655,6 +3704,103 @@ interface WindowContext {
   onRemoveWatched: (channel: string) => void
   onClearNotifications: () => void
 }
+
+/** Everything in a window's context that is shared across all windows and
+ *  doesn't vary per-window/per-slot. Memoized once at the shell so it has a
+ *  stable identity, which lets the per-window memo boundary below bail out. */
+type BaseWindowContext = Omit<WindowContext, "windows" | "params" | "runSignal" | "workspaceActive">
+
+/**
+ * Memoized per-window boundary. Re-renders only when THIS window's state, its
+ * slot's window/param arrays, its run signal, focus, or the shared `baseCtx`
+ * change. Because a mutation to the active slot leaves the other 5 slots'
+ * canvases referentially untouched (`{ ...prev, [active]: next }`), every
+ * off-screen window's props are unchanged and it bails out of re-render — so
+ * interacting with the active desktop no longer re-renders windows parked on
+ * other desktops.
+ */
+const WindowFrame = memo(function WindowFrame({
+  window: w,
+  baseCtx,
+  slotWindows,
+  slotParams,
+  runSignal,
+  workspaceActive,
+  focused,
+  viewportScale,
+  onFocus,
+  onClose,
+  onMinimize,
+  onMove,
+  onResize,
+  mergeColumnIntoWindow,
+  requestRowsetStage,
+  requestSemanticDrop,
+  semanticOps,
+}: {
+  window: DesktopWindowState
+  baseCtx: BaseWindowContext
+  slotWindows: DesktopWindowState[]
+  slotParams: DesktopParamValue[]
+  runSignal: number
+  workspaceActive: boolean
+  focused: boolean
+  viewportScale: number
+  onFocus: (id: string) => void
+  onClose: (id: string) => void
+  onMinimize: (id: string) => void
+  onMove: (id: string, x: number, y: number) => void
+  onResize: (id: string, width: number, height: number) => void
+  mergeColumnIntoWindow: (targetWindowId: string, payload: DesktopColumnDragPayload, op: RollupOp) => void
+  requestRowsetStage: (payload: DesktopBlockDragPayload, op: SemanticOpMeta, at: { x: number; y: number }, inPlace?: boolean) => void
+  requestSemanticDrop: (payload: DesktopColumnDragPayload, op: SemanticOpMeta, at: { x: number; y: number }, targetWindowId?: string) => void
+  semanticOps: SemanticOpMeta[]
+}) {
+  const ctx = useMemo<WindowContext>(
+    () => ({ ...baseCtx, windows: slotWindows, params: slotParams, runSignal, workspaceActive }),
+    [baseCtx, slotWindows, slotParams, runSignal, workspaceActive],
+  )
+  // Column-aggregate windows are drop targets for additional columns from
+  // their *exact* parent (same parent window + same source relation).
+  // Anything else falls through to the canvas drop, which spawns a fresh block.
+  const columnDropAcceptsFrom = useMemo(() => {
+    if (w.kind !== "data") return null
+    const lin = (w.payload as DataPayload | undefined)?.lineage
+    if (!lin || lin.kind !== "column-aggregate") return null
+    const spec = effectiveRollup(lin)
+    if (!spec) return null
+    return { parentWindowId: lin.parentWindowId, relationKey: lin.relationKey, measures: spec.measures }
+  }, [w])
+  const onColumnMerge = useCallback(
+    (payload: DesktopColumnDragPayload, op: RollupOp) => mergeColumnIntoWindow(w.id, payload, op),
+    [mergeColumnIntoWindow, w.id],
+  )
+  const onRowsetChain = useCallback(
+    (payload: DesktopBlockDragPayload, op: SemanticOpMeta, at: { x: number; y: number }) =>
+      requestRowsetStage(payload, op, at, true),
+    [requestRowsetStage],
+  )
+  return (
+    <DesktopWindow
+      window={w}
+      icon={iconForKind(w.kind)}
+      focused={focused}
+      onFocus={onFocus}
+      onClose={onClose}
+      onMinimize={onMinimize}
+      onMove={onMove}
+      onResize={onResize}
+      viewportScale={viewportScale}
+      columnDropAcceptsFrom={columnDropAcceptsFrom}
+      onColumnMerge={onColumnMerge}
+      semanticOps={semanticOps}
+      onSemanticDrop={requestSemanticDrop}
+      onRowsetChain={onRowsetChain}
+    >
+      {renderWindowContent(w, ctx)}
+    </DesktopWindow>
+  )
+})
 
 function renderWindowContent(
   w: DesktopWindowState,
