@@ -1128,6 +1128,7 @@ export function DataGridWindow({
       </section>
       <TimeTravelStrip
         sql={draftSql}
+        detectSql={compiledSql}
         onChange={setDraftSql}
         onRun={onRun}
         connectionId={activeConnectionId}

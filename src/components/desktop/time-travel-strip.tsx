@@ -26,6 +26,10 @@ import {
 
 interface Props {
   sql: string
+  /** The COMPILED sql ({block} refs resolved). Detection + the displayed as-of
+   *  run off this so a wrapped/downstream window still sees its temporal tables
+   *  and inherited as-of. Falls back to `sql` (the raw draft) when absent. */
+  detectSql?: string
   onChange: (next: string) => void
   onRun?: () => void
   connectionId: string | null
@@ -34,12 +38,20 @@ interface Props {
 
 export function TimeTravelStrip({
   sql,
+  detectSql,
   onChange,
   onRun,
   connectionId,
   hasRvbbit,
 }: Props) {
-  const { asOf, body } = useMemo(() => parseAsOfComment(sql), [sql])
+  // Detection runs off the COMPILED sql (`body` below). The readout prefers the
+  // draft's OWN as-of so scrubbing moves the handle immediately, and falls back
+  // to the compiled/inherited one (a downstream window shows what it runs at).
+  // Editing (onAsOfChange below) stays on the raw draft `sql`.
+  const source = detectSql ?? sql
+  const { body, asOf: inheritedAsOf } = useMemo(() => parseAsOfComment(source), [source])
+  const ownAsOf = useMemo(() => parseAsOfComment(sql).asOf, [sql])
+  const asOf = ownAsOf ?? inheritedAsOf
 
   const [tables, setTables] = useState<RvbbitTableRef[] | null>(null)
   const lastDetectedBodyRef = useRef<string | null>(null)
@@ -56,7 +68,7 @@ export function TimeTravelStrip({
         setTables([])
         return
       }
-      const res = await detectRvbbitTables(connectionId, body || sql)
+      const res = await detectRvbbitTables(connectionId, body || source)
       if (cancelled) return
       lastDetectedBodyRef.current = body
       setTables(res)
@@ -64,7 +76,7 @@ export function TimeTravelStrip({
     return () => {
       cancelled = true
     }
-  }, [connectionId, hasRvbbit, body, sql, tables])
+  }, [connectionId, hasRvbbit, body, source, tables])
 
   // Per-table timeline cache, keyed by `schema.name` so flipping between
   // snapshots is instant for any table we've already loaded.
