@@ -12,12 +12,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { Play, Pencil, RefreshCw, Sigma, Loader2, ChevronDown, ChevronRight, Clock } from "@/lib/icons"
 import {
+  checkMetric,
   fetchMetricVersions,
   listMetrics,
   resolveMetricSql,
   runMetric,
   type MetricRunResult,
   type MetricSummary,
+  type MetricVerdict,
   type MetricVersion,
 } from "@/lib/rvbbit/metrics"
 import {
@@ -40,6 +42,7 @@ import {
   ParamRowsEditor,
   Section,
   StatusNote,
+  VerdictBadge,
   VersionPicker,
 } from "./metric-shared"
 
@@ -81,6 +84,15 @@ export function MetricInspectorWindow({
       cancelled = true
     }
   }, [activeConnectionId, hasRvbbit, listReloadKey])
+
+  // Re-opening the inspector for a different metric (Catalog/Creator) updates the
+  // payload on the already-mounted window; sync selection during render (the
+  // React "adjust state on prop change" pattern — track the prev prop in state).
+  const [lastOpenName, setLastOpenName] = useState(payload.metricName)
+  if (payload.metricName && payload.metricName !== lastOpenName) {
+    setLastOpenName(payload.metricName)
+    setSelectedName(payload.metricName)
+  }
 
   if (!activeConnectionId || !hasRvbbit) {
     return <StatusNote state="empty" message="Connect to an rvbbit-enabled database." />
@@ -235,11 +247,17 @@ function MetricDetail({
   const [running, setRunning] = useState(false)
   // Capture the as-of pair the displayed result was actually run at.
   const [ranAtLabel, setRanAtLabel] = useState<string | null>(null)
+  // KPI verdict at the same as-of pair (null = not a KPI).
+  const [verdict, setVerdict] = useState<MetricVerdict | null>(null)
 
   const onRun = useCallback(async () => {
     setRunning(true)
-    const res = await runMetric(connectionId, name, params, defAsOf, dataAsOf)
+    const [res, chk] = await Promise.all([
+      runMetric(connectionId, name, params, defAsOf, dataAsOf),
+      checkMetric(connectionId, name, params, defAsOf, dataAsOf),
+    ])
     setResult(res)
+    setVerdict(chk.verdict)
     const defLabel = selectedVersion == null ? "latest" : `v${selectedVersion}`
     const dataLabel = dataAsOf ? fmtScrubberLabel(dataAsOf) : "latest"
     setRanAtLabel(`def: ${defLabel} · data: ${dataLabel}`)
@@ -400,6 +418,7 @@ function MetricDetail({
               </button>
               {result && result.error == null ? (
                 <span className="flex items-center gap-2 text-[11px] text-chrome-text/55">
+                  <VerdictBadge verdict={verdict} size="md" />
                   <span className="tabular-nums text-foreground">{result.rows.length} rows</span>
                   {ranAtLabel ? <span className="font-mono text-chrome-text/45">{ranAtLabel}</span> : null}
                 </span>

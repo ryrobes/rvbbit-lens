@@ -199,6 +199,7 @@ export function MetricCatalogWindow({
                 <Th onClick={() => toggleSort("version")} className="text-right">
                   Ver{arrow("version")}
                 </Th>
+                <th className="px-2 py-1 text-left font-normal">Type</th>
                 <th className="px-2 py-1 text-left font-normal">Grain</th>
                 <Th onClick={() => toggleSort("owner")} className="text-left">
                   Owner{arrow("owner")}
@@ -221,6 +222,15 @@ export function MetricCatalogWindow({
                   <td className="px-3 py-1 font-mono text-foreground">{m.name}</td>
                   <td className="px-2 py-1 text-right tabular-nums text-chrome-text/70">
                     v{m.version}
+                  </td>
+                  <td className="px-2 py-1">
+                    {m.checkSql ? (
+                      <span className="rounded-full border border-emerald-500/40 bg-emerald-500/10 px-1.5 py-px text-[10px] font-medium uppercase tracking-wide text-emerald-500">
+                        KPI
+                      </span>
+                    ) : (
+                      <span className="text-[10px] text-chrome-text/30">metric</span>
+                    )}
                   </td>
                   <td className="px-2 py-1 text-chrome-text/70">
                     {m.grain ?? <span className="text-chrome-text/30">—</span>}

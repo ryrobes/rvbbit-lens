@@ -21,6 +21,8 @@ export interface MetricSummary {
   labels: Record<string, unknown>
   createdAt: number | null // epoch ms
   sql: string
+  /** When non-null the metric is a KPI (has a threshold/assertion check). */
+  checkSql: string | null
 }
 
 export interface MetricVersion {
@@ -35,6 +37,7 @@ export interface MetricVersion {
   grain: string | null
   description: string | null
   owner: string | null
+  checkSql: string | null
 }
 
 export interface DefineMetricInput {
@@ -45,6 +48,20 @@ export interface DefineMetricInput {
   description?: string | null
   owner?: string | null
   labels?: Record<string, unknown>
+  /** Optional KPI check SQL — runs against the `metric` CTE, yields `ok`. */
+  check?: string | null
+}
+
+/** A KPI verdict (rvbbit.check_metric / preview_check_sql jsonb). Carries at
+ *  least `ok` + `status`; the rest (value/target/...) is whatever the check
+ *  yielded. `ok === null` means unknown (e.g. NULL over missing data) — never
+ *  "pass". */
+export interface MetricVerdict {
+  ok: boolean | null
+  status: string
+  value?: unknown
+  target?: unknown
+  [k: string]: unknown
 }
 
 /** One expanded result row of rvbbit.metric() plus the ordered column union. */
@@ -125,7 +142,7 @@ export async function listMetrics(
 ): Promise<{ metrics: MetricSummary[]; error: string | null }> {
   const r = await run(
     connectionId,
-    `SELECT name, version, grain, description, owner, params, labels, sql,
+    `SELECT name, version, grain, description, owner, params, labels, sql, check_sql,
             extract(epoch FROM created_at) * 1000 AS created_ms
      FROM rvbbit.metric_catalog ORDER BY name`,
   )
@@ -142,6 +159,7 @@ export async function listMetrics(
       labels: asObject(row.labels),
       createdAt: num(row.created_ms),
       sql: String(row.sql ?? ""),
+      checkSql: str(row.check_sql),
     })),
   }
 }
@@ -152,7 +170,7 @@ export async function fetchMetricVersions(
 ): Promise<{ versions: MetricVersion[]; error: string | null }> {
   const r = await run(
     connectionId,
-    `SELECT version, sql, params, grain, description, owner,
+    `SELECT version, sql, params, grain, description, owner, check_sql,
             extract(epoch FROM created_at) * 1000 AS created_ms,
             created_at::text AS created_iso
      FROM rvbbit.metric_versions(${q(name)})`,
@@ -169,6 +187,7 @@ export async function fetchMetricVersions(
       grain: str(row.grain),
       description: str(row.description),
       owner: str(row.owner),
+      checkSql: str(row.check_sql),
     })),
   }
 }
@@ -263,11 +282,59 @@ export async function defineMetric(
       ${input.grain ? q(input.grain) : "NULL"},
       ${input.description ? q(input.description) : "NULL"},
       ${input.owner ? q(input.owner) : "NULL"},
-      ${jb(input.labels ?? {})}
+      ${jb(input.labels ?? {})},
+      ${input.check && input.check.trim() ? q(input.check) : "NULL"}
     ) AS version`
   const r = await run(connectionId, sql)
   if (!r.ok) return { version: null, error: r.error }
   return { version: num(r.rows[0]?.version), error: null }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// KPI checks (verdicts)
+// ─────────────────────────────────────────────────────────────────────────
+
+function asVerdict(v: unknown): MetricVerdict | null {
+  const obj = v == null ? null : typeof v === "string" ? (() => { try { return JSON.parse(v) } catch { return null } })() : v
+  if (obj == null || typeof obj !== "object") return null
+  const o = obj as Record<string, unknown>
+  return {
+    ...o,
+    ok: o.ok == null ? null : o.ok === true || o.ok === "true" || o.ok === "t",
+    status: o.status == null ? (o.ok ? "pass" : "fail") : String(o.status),
+  }
+}
+
+/** Evaluate a SAVED metric's KPI check. Returns null when it is not a KPI. */
+export async function checkMetric(
+  connectionId: string,
+  name: string,
+  params: Record<string, unknown>,
+  defAsOf?: string | null,
+  dataAsOf?: string | null,
+): Promise<{ verdict: MetricVerdict | null; error: string | null }> {
+  const r = await run(
+    connectionId,
+    `SELECT rvbbit.check_metric(${q(name)}, ${jb(params)}, ${defArg(defAsOf)}, ${dataArg(dataAsOf)}) AS verdict`,
+  )
+  if (!r.ok) return { verdict: null, error: r.error }
+  return { verdict: asVerdict(r.rows[0]?.verdict), error: null }
+}
+
+/** Preview a DRAFT check (Creator) against draft metric + check bodies. */
+export async function previewCheckSql(
+  connectionId: string,
+  metricSql: string,
+  checkSql: string,
+  params: Record<string, unknown>,
+  defAsOf?: string | null,
+): Promise<{ verdict: MetricVerdict | null; error: string | null }> {
+  const r = await run(
+    connectionId,
+    `SELECT rvbbit.preview_check_sql(${q(metricSql)}, ${q(checkSql)}, ${jb(params)}, ${defArg(defAsOf)}) AS verdict`,
+  )
+  if (!r.ok) return { verdict: null, error: r.error }
+  return { verdict: asVerdict(r.rows[0]?.verdict), error: null }
 }
 
 /** Remove every version of a metric (Creator delete). */

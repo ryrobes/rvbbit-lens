@@ -11,6 +11,7 @@ import { AlertTriangle, Loader2, Plus, Trash2 } from "@/lib/icons"
 import {
   paramsToRows,
   rowsToParams,
+  type MetricVerdict,
   type MetricVersion,
   type ParamRow,
 } from "@/lib/rvbbit/metrics"
@@ -227,6 +228,34 @@ export function formatMetricBody(sql: string | null | undefined): string {
   } catch {
     return raw
   }
+}
+
+/** A KPI verdict pill: green pass / red fail / amber unknown. Reads `status`
+ *  (so a 3-state check shows its own label) but colors from `ok`. */
+export function VerdictBadge({
+  verdict,
+  size = "sm",
+}: {
+  verdict: MetricVerdict | null | undefined
+  size?: "sm" | "md"
+}) {
+  if (!verdict) return null
+  const tone =
+    verdict.ok === true
+      ? "border-emerald-500/40 bg-emerald-500/15 text-emerald-500"
+      : verdict.ok === false
+        ? "border-danger/40 bg-danger/15 text-danger"
+        : "border-amber-500/40 bg-amber-500/15 text-amber-500"
+  const sz = size === "md" ? "px-2 py-0.5 text-[11px]" : "px-1.5 py-px text-[10px]"
+  return (
+    <span
+      className={`inline-flex items-center gap-1 rounded-full border font-medium uppercase tracking-wide ${tone} ${sz}`}
+      title={verdict.value != null ? `value ${String(verdict.value)} · target ${String(verdict.target ?? "—")}` : undefined}
+    >
+      <span className="h-1.5 w-1.5 rounded-full bg-current" />
+      {verdict.status || (verdict.ok ? "pass" : "fail")}
+    </span>
+  )
 }
 
 export function fmtTime(ms: number | null | undefined): string {

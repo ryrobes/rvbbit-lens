@@ -11,8 +11,10 @@ import { Plus, RefreshCw, Save } from "@/lib/icons"
 import {
   defineMetric,
   listMetrics,
+  previewCheckSql,
   previewMetricSql,
   type MetricSummary,
+  type MetricVerdict,
 } from "@/lib/rvbbit/metrics"
 import type { MetricCreatorPayload } from "@/lib/desktop/types"
 import { SqlEditor } from "./sql-editor"
@@ -25,6 +27,7 @@ import {
   ParamRowsEditor,
   Section,
   StatusNote,
+  VerdictBadge,
 } from "./metric-shared"
 
 interface MetricCreatorWindowProps {
@@ -41,6 +44,7 @@ interface FormState {
   grain: string
   description: string
   owner: string
+  check: string
 }
 
 const BLANK: FormState = {
@@ -50,6 +54,7 @@ const BLANK: FormState = {
   grain: "",
   description: "",
   owner: "",
+  check: "",
 }
 
 function fromSummary(m: MetricSummary): FormState {
@@ -61,6 +66,7 @@ function fromSummary(m: MetricSummary): FormState {
     grain: m.grain ?? "",
     description: m.description ?? "",
     owner: m.owner ?? "",
+    check: m.checkSql ? formatMetricBody(m.checkSql) : "",
   }
 }
 
@@ -83,6 +89,10 @@ export function MetricCreatorWindow({
   const [previewError, setPreviewError] = useState<string | null>(null)
   const [previewing, setPreviewing] = useState(false)
   const previewFormatted = useMemo(() => formatSqlSafe(preview), [preview])
+
+  // Draft KPI verdict (only when a check is present).
+  const [verdict, setVerdict] = useState<MetricVerdict | null>(null)
+  const [verdictError, setVerdictError] = useState<string | null>(null)
 
   const [saving, setSaving] = useState(false)
   const [saveError, setSaveError] = useState<string | null>(null)
@@ -166,6 +176,27 @@ export function MetricCreatorWindow({
     return () => clearTimeout(handle)
   }, [activeConnectionId, hasRvbbit, form.sql, form.params])
 
+  // Draft KPI verdict — debounced, only when both metric + check are present.
+  useEffect(() => {
+    if (!activeConnectionId || !hasRvbbit) return
+    const handle = setTimeout(async () => {
+      if (form.sql.trim() === "" || form.check.trim() === "") {
+        setVerdict(null)
+        setVerdictError(null)
+        return
+      }
+      const { verdict: v, error } = await previewCheckSql(
+        activeConnectionId,
+        form.sql,
+        form.check,
+        form.params,
+      )
+      setVerdict(v)
+      setVerdictError(error)
+    }, 400)
+    return () => clearTimeout(handle)
+  }, [activeConnectionId, hasRvbbit, form.sql, form.check, form.params])
+
   const canSave = !saving && form.name.trim() !== "" && form.sql.trim() !== ""
 
   const save = useCallback(async () => {
@@ -181,6 +212,7 @@ export function MetricCreatorWindow({
       grain: form.grain.trim() || null,
       description: form.description.trim() || null,
       owner: form.owner.trim() || null,
+      check: form.check.trim() || null,
     })
     if (error) {
       setSaveError(error)
@@ -346,6 +378,31 @@ export function MetricCreatorWindow({
               params={form.params}
               onChange={(next) => setForm((f) => ({ ...f, params: next }))}
             />
+          </Section>
+
+          <Section
+            title="Check (KPI)"
+            right={
+              form.check.trim() ? <VerdictBadge verdict={verdict} /> : (
+                <span className="text-[10px] text-chrome-text/35">optional</span>
+              )
+            }
+          >
+            <Field
+              label="threshold / assertion"
+              hint="runs over the `metric` CTE → one row, an `ok` boolean. e.g. SELECT total >= {target} AS ok FROM metric"
+            >
+              <div className="h-28 overflow-hidden rounded-[3px] border border-chrome-border/60">
+                <SqlEditor
+                  value={form.check}
+                  onChange={(v) => setForm((f) => ({ ...f, check: v }))}
+                  onRun={() => void save()}
+                  height="100%"
+                  fontSize={12}
+                />
+              </div>
+            </Field>
+            {verdictError ? <StatusNote state="error" message={verdictError} className="px-0 py-1" /> : null}
           </Section>
 
           <Section
