@@ -7,6 +7,7 @@ import type {
   JsonbProjectionColumn,
 } from "./types"
 import { buildJsonbProjection, isSynthQuery } from "@/lib/sql/then-rewrite"
+import { parseAsOfComment, withAsOf } from "@/lib/rvbbit/time-travel"
 
 /**
  * The reactive SQL engine — every data window declares a block name and an
@@ -183,6 +184,9 @@ export function buildDesktopRuntimeGraph(
     const missingRefs: string[] = []
     const missingParams: string[] = []
     const paramRefs: string[] = []
+    // Path 1 time-travel inheritance: as_of values lifted from referenced
+    // upstreams (their leading comment is lost once they become a subquery).
+    const inheritedAsOfs: string[] = []
 
     // {X} → inline aliased subquery `(compiled-upstream-sql) AS x`. The
     // upstream window's compiled output already has its own param subs
@@ -202,8 +206,16 @@ export function buildDesktopRuntimeGraph(
       refs.push({ windowId: upstream.windowId, blockName: upstream.blockName, title: upstream.title })
       // Synth/flow blocks expose a single jsonb column; inline their *projection*
       // (real, typed columns) so this block can reference fields like season/n.
+      // Collect the upstream's as_of from its compiledSql (which always carries
+      // the leading comment), then strip any leading as_of from the body we
+      // actually inline (a subquery can't carry a leading comment). The lifted
+      // as_of is re-applied to THIS block's leading comment below.
+      const upAsOf = parseAsOfComment(upstreamCompiled.compiledSql).asOf
+      if (upAsOf) inheritedAsOfs.push(upAsOf)
       const upstreamSql = upstreamCompiled.projectionSql ?? upstreamCompiled.compiledSql
-      const inner = stripTrailingLimitOffset(stripTrailingSqlTerminator(upstreamSql))
+      const inner = stripTrailingLimitOffset(
+        stripTrailingSqlTerminator(parseAsOfComment(upstreamSql).body),
+      )
       return `(\n${indentSql(inner)}\n) AS ${quoteSqlIdent(slugifyBlockName(upstream.blockName))}`
     })
 
@@ -241,6 +253,15 @@ export function buildDesktopRuntimeGraph(
     rewritten = sub.sql
     missingParams.push(...sub.missingParams)
 
+    // Path 1: this block's OWN leading as_of wins; otherwise inherit a referenced
+    // upstream's. Re-apply the effective as_of as THIS block's leading comment so
+    // the extension (which honors only a leading comment) sees it even though the
+    // upstream is now a subquery. One as_of per block — mixed upstream as_ofs take
+    // the first (true per-table as_of would need a real SQL clause).
+    const ownAsOf = parseAsOfComment(rewritten).asOf
+    const effectiveAsOf = ownAsOf ?? inheritedAsOfs.find(Boolean) ?? null
+    const cleanBody = parseAsOfComment(rewritten).body
+
     const dedupedRefs = dedupeRefs(refs)
     // A synth block (single jsonb column) carries a typed projection so that
     // *references* to it inline real columns. Its own compiledSql stays raw — the
@@ -248,15 +269,15 @@ export function buildDesktopRuntimeGraph(
     // re-check guards against a stale jsonbProjection lingering after the source was
     // edited to a non-synth query (projecting a non-synth shape would mis-alias).
     const projectionSql =
-      isJsonbBlock && block.jsonbProjection && isSynthQuery(rewritten)
-        ? buildJsonbProjection(stripTrailingSqlTerminator(rewritten), block.jsonbProjection)
+      isJsonbBlock && block.jsonbProjection && isSynthQuery(cleanBody)
+        ? buildJsonbProjection(stripTrailingSqlTerminator(cleanBody), block.jsonbProjection)
         : undefined
     const next: DesktopCompiledBlock = {
       windowId: block.windowId,
       title: block.title,
       blockName: block.blockName,
       sourceSql: block.sourceSql,
-      compiledSql: rewritten,
+      compiledSql: withAsOf(cleanBody, effectiveAsOf),
       projectionSql,
       refs: dedupedRefs,
       paramRefs: [...new Set(paramRefs)],
