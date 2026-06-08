@@ -19,6 +19,7 @@ import { SqlEditor } from "./sql-editor"
 import {
   areaCls,
   Field,
+  formatMetricBody,
   formatSqlSafe,
   inputCls,
   ParamRowsEditor,
@@ -54,7 +55,8 @@ const BLANK: FormState = {
 function fromSummary(m: MetricSummary): FormState {
   return {
     name: m.name,
-    sql: m.sql,
+    // Format the loaded template body (tokens preserved) so it opens readable.
+    sql: formatMetricBody(m.sql),
     params: m.params ?? {},
     grain: m.grain ?? "",
     description: m.description ?? "",

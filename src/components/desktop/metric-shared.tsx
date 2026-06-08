@@ -211,6 +211,24 @@ export function formatSqlSafe(sql: string | null | undefined): string {
   }
 }
 
+/** Pretty-print a metric TEMPLATE body — which still contains {param}, {param!}
+ *  and {metric:NAME} tokens. The default parser throws on those, so treat the
+ *  tokens as opaque placeholders (paramTypes.custom) to keep them intact. Used
+ *  when LOADING a saved metric into the editor, not on every keystroke. */
+export function formatMetricBody(sql: string | null | undefined): string {
+  const raw = (sql ?? "").trim()
+  if (!raw) return ""
+  try {
+    return formatSql(raw, {
+      language: "postgresql",
+      keywordCase: "upper",
+      paramTypes: { custom: [{ regex: "\\{[A-Za-z0-9_:!]+\\}" }] },
+    })
+  } catch {
+    return raw
+  }
+}
+
 export function fmtTime(ms: number | null | undefined): string {
   if (ms == null || !Number.isFinite(ms)) return "—"
   const d = new Date(ms)
