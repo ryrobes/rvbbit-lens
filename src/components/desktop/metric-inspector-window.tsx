@@ -10,13 +10,17 @@
 // rvbbit.metric() into a ResultGrid annotated with the as-of pair it ran at.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
-import { Play, Pencil, RefreshCw, Sigma, Loader2, ChevronDown, ChevronRight, Clock } from "@/lib/icons"
+import { Play, Pencil, RefreshCw, Save, Sigma, Loader2, ChevronDown, ChevronRight, Clock } from "@/lib/icons"
 import {
   checkMetric,
+  fetchMetricHistory,
   fetchMetricVersions,
   listMetrics,
+  materializeMetric,
+  observationHeadline,
   resolveMetricSql,
   runMetric,
+  type MetricObservation,
   type MetricRunResult,
   type MetricSummary,
   type MetricVerdict,
@@ -53,7 +57,8 @@ interface Props {
   onOpenCreator: (name?: string) => void
 }
 
-type Tab = "run" | "history"
+type Tab = "run" | "trend" | "versions"
+const TAB_LABEL: Record<Tab, string> = { run: "Run", trend: "Trend", versions: "Versions" }
 
 export function MetricInspectorWindow({
   payload,
@@ -319,7 +324,7 @@ function MetricDetail({
 
       {/* Tabs */}
       <div className="flex items-center gap-0 border-b border-chrome-border/50 px-3">
-        {(["run", "history"] as Tab[]).map((t) => (
+        {(["run", "trend", "versions"] as Tab[]).map((t) => (
           <button
             key={t}
             type="button"
@@ -330,7 +335,7 @@ function MetricDetail({
                 : "border-transparent text-chrome-text/55 hover:text-foreground"
             }`}
           >
-            {t === "run" ? "Run" : "History"}
+            {TAB_LABEL[t]}
           </button>
         ))}
       </div>
@@ -447,6 +452,14 @@ function MetricDetail({
             </div>
           )}
         </div>
+      ) : tab === "trend" ? (
+        <MetricTrend
+          connectionId={connectionId}
+          name={name}
+          params={params}
+          defAsOf={defAsOf}
+          dataAsOf={dataAsOf}
+        />
       ) : (
         <VersionHistory
           versions={versions}
@@ -454,6 +467,144 @@ function MetricDetail({
           selectedVersion={selectedVersion}
           onSelect={setSelectedVersion}
         />
+      )}
+    </div>
+  )
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Trend tab — the durable materialized series (value + verdict over time)
+// ─────────────────────────────────────────────────────────────────────────
+
+function MetricTrend({
+  connectionId,
+  name,
+  params,
+  defAsOf,
+  dataAsOf,
+}: {
+  connectionId: string
+  name: string
+  params: Record<string, unknown>
+  defAsOf: string | null
+  dataAsOf: string | null
+}) {
+  const [obs, setObs] = useState<MetricObservation[] | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [reloadKey, setReloadKey] = useState(0)
+  const [materializing, setMaterializing] = useState(false)
+
+  useEffect(() => {
+    let cancelled = false
+    void (async () => {
+      const res = await fetchMetricHistory(connectionId, name)
+      if (cancelled) return
+      setObs(res.observations)
+      setError(res.error)
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [connectionId, name, reloadKey])
+
+  const onMaterialize = useCallback(async () => {
+    setMaterializing(true)
+    await materializeMetric(connectionId, name, params, defAsOf, dataAsOf)
+    setMaterializing(false)
+    setReloadKey((k) => k + 1)
+  }, [connectionId, name, params, defAsOf, dataAsOf])
+
+  // oldest → newest for the bar strip; normalize headline values to a height.
+  const series = useMemo(() => {
+    const arr = (obs ?? []).slice().reverse()
+    const vals = arr.map(observationHeadline).filter((v): v is number => v != null)
+    const min = vals.length ? Math.min(...vals) : 0
+    const max = vals.length ? Math.max(...vals) : 1
+    const span = max - min || 1
+    return arr.map((o) => {
+      const v = observationHeadline(o)
+      return { o, v, frac: v == null ? 0 : 0.12 + 0.88 * ((v - min) / span) }
+    })
+  }, [obs])
+
+  return (
+    <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+      <div className="flex items-center gap-2 border-b border-chrome-border/50 px-3 py-2">
+        <span className="text-[11px] uppercase tracking-wider text-chrome-text/60">Materialized series</span>
+        {obs ? <span className="text-[11px] text-chrome-text/45">{obs.length} obs</span> : null}
+        <div className="flex-1" />
+        <button
+          type="button"
+          onClick={() => void onMaterialize()}
+          disabled={materializing}
+          title="Append an observation at the current def-time + data-time"
+          className="flex items-center gap-1.5 rounded-[3px] border border-main/40 bg-main/15 px-2 py-1 text-[11px] text-main hover:bg-main/25 disabled:opacity-40"
+        >
+          {materializing ? <Loader2 className="h-3 w-3 animate-spin" /> : <Save className="h-3 w-3" />}
+          Materialize now
+        </button>
+      </div>
+
+      {obs == null ? (
+        <StatusNote state="loading" />
+      ) : error ? (
+        <StatusNote state="error" message={error} />
+      ) : obs.length === 0 ? (
+        <StatusNote
+          state="empty"
+          message="No observations yet — Materialize now, or wait for the next compaction of the underlying data."
+        />
+      ) : (
+        <div className="flex min-h-0 flex-1 flex-col">
+          <div className="flex items-end gap-0.5 px-3 py-3" style={{ height: 96 }}>
+            {series.map(({ o, v, frac }) => (
+              <div
+                key={o.observationId}
+                title={`${o.dataAsOfIso ? fmtScrubberLabel(o.dataAsOfIso) : "—"} · ${v ?? "—"} · ${o.status ?? "—"} · ${o.trigger}`}
+                className={`min-w-[3px] flex-1 rounded-sm ${
+                  o.verdict?.ok === true
+                    ? "bg-emerald-500/70"
+                    : o.verdict?.ok === false
+                      ? "bg-danger/70"
+                      : "bg-foreground/25"
+                }`}
+                style={{ height: `${Math.max(2, frac * 100)}%` }}
+              />
+            ))}
+          </div>
+          <div className="min-h-0 flex-1 overflow-y-auto border-t border-chrome-border/40">
+            <table className="w-full border-collapse text-[11px]">
+              <thead className="sticky top-0 z-10 bg-chrome-bg text-[10px] uppercase tracking-wider text-chrome-text/55">
+                <tr className="border-b border-chrome-border/50">
+                  <th className="px-3 py-1 text-left font-normal">Data instant</th>
+                  <th className="px-2 py-1 text-right font-normal">Gen</th>
+                  <th className="px-2 py-1 text-right font-normal">Value</th>
+                  <th className="px-2 py-1 text-left font-normal">Verdict</th>
+                  <th className="px-2 py-1 text-left font-normal">Trigger</th>
+                </tr>
+              </thead>
+              <tbody>
+                {obs.map((o) => (
+                  <tr key={o.observationId} className="border-b border-chrome-border/20">
+                    <td className="px-3 py-1 font-mono text-chrome-text/70">
+                      {o.dataAsOfIso ? fmtScrubberLabel(o.dataAsOfIso) : "—"}
+                    </td>
+                    <td className="px-2 py-1 text-right tabular-nums text-chrome-text/50">
+                      {o.dataGeneration ?? "—"}
+                    </td>
+                    <td className="px-2 py-1 text-right tabular-nums text-foreground">
+                      {observationHeadline(o) ?? "—"}
+                    </td>
+                    <td className="px-2 py-1">
+                      {o.verdict ? <VerdictBadge verdict={o.verdict} /> : <span className="text-chrome-text/30">—</span>}
+                    </td>
+                    <td className="px-2 py-1 text-chrome-text/50">{o.trigger}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
       )}
     </div>
   )

@@ -337,6 +337,97 @@ export async function previewCheckSql(
   return { verdict: asVerdict(r.rows[0]?.verdict), error: null }
 }
 
+// ─────────────────────────────────────────────────────────────────────────
+// Materialization (the durable observation log)
+// ─────────────────────────────────────────────────────────────────────────
+
+export interface MetricObservation {
+  observationId: number
+  metricVersion: number | null
+  dataGeneration: number | null
+  dataAsOf: number | null // epoch ms
+  dataAsOfIso: string | null
+  observedAt: number | null // epoch ms
+  value: unknown // jsonb (array of row objects)
+  verdict: MetricVerdict | null
+  status: string | null
+  trigger: string
+}
+
+/** The durable materialized series for a metric (newest data first). */
+export async function fetchMetricHistory(
+  connectionId: string,
+  name: string,
+  limit = 200,
+): Promise<{ observations: MetricObservation[]; error: string | null }> {
+  const r = await run(
+    connectionId,
+    `SELECT observation_id, metric_version, data_generation, value, verdict, status, trigger,
+            extract(epoch FROM data_as_of) * 1000 AS data_ms,
+            data_as_of::text AS data_iso,
+            extract(epoch FROM observed_at) * 1000 AS obs_ms
+     FROM rvbbit.metric_history(${q(name)}, ${Math.max(1, Math.min(limit, 2000))})`,
+  )
+  if (!r.ok) return { observations: [], error: r.error }
+  return {
+    error: null,
+    observations: r.rows.map((row) => ({
+      observationId: Number(row.observation_id),
+      metricVersion: num(row.metric_version),
+      dataGeneration: num(row.data_generation),
+      dataAsOf: num(row.data_ms),
+      dataAsOfIso: str(row.data_iso),
+      observedAt: num(row.obs_ms),
+      value: typeof row.value === "string" ? safeJson(row.value) : row.value,
+      verdict: asVerdict(row.verdict),
+      status: str(row.status),
+      trigger: String(row.trigger ?? "manual"),
+    })),
+  }
+}
+
+/** Append a manual observation at the current axes. Returns the observation id. */
+export async function materializeMetric(
+  connectionId: string,
+  name: string,
+  params: Record<string, unknown>,
+  defAsOf?: string | null,
+  dataAsOf?: string | null,
+): Promise<{ id: number | null; error: string | null }> {
+  const r = await run(
+    connectionId,
+    `SELECT rvbbit.materialize_metric(${q(name)}, ${jb(params)}, ${defArg(defAsOf)}, ${dataArg(dataAsOf)}, NULL, 'manual') AS id`,
+  )
+  if (!r.ok) return { id: null, error: r.error }
+  return { id: num(r.rows[0]?.id), error: null }
+}
+
+function safeJson(s: string): unknown {
+  try {
+    return JSON.parse(s)
+  } catch {
+    return null
+  }
+}
+
+/** Pull a single headline number out of an observation (verdict.value first,
+ *  else the first numeric field of the first result row) — for the trend line. */
+export function observationHeadline(obs: MetricObservation): number | null {
+  const v = obs.verdict?.value
+  if (typeof v === "number") return v
+  if (typeof v === "string" && v.trim() !== "" && Number.isFinite(Number(v))) return Number(v)
+  const rows = Array.isArray(obs.value) ? (obs.value as Array<Record<string, unknown>>) : []
+  const first = rows[0]
+  if (first) {
+    for (const k of Object.keys(first)) {
+      const n = first[k]
+      if (typeof n === "number") return n
+      if (typeof n === "string" && n.trim() !== "" && Number.isFinite(Number(n))) return Number(n)
+    }
+  }
+  return null
+}
+
 /** Remove every version of a metric (Creator delete). */
 export async function deleteMetric(
   connectionId: string,
