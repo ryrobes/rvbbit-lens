@@ -91,6 +91,7 @@ import { ModelStudioWindow } from "./model-studio-window"
 import { MetricCatalogWindow } from "./metric-catalog-window"
 import { MetricCreatorWindow } from "./metric-creator-window"
 import { MetricInspectorWindow } from "./metric-inspector-window"
+import { MetricBoardWindow } from "./metric-board-window"
 import { CapabilitiesWindow } from "./capabilities-window"
 import { CapabilityDetailWindow } from "./capability-detail-window"
 import { HfDeployWindow } from "./hf-deploy-window"
@@ -178,6 +179,7 @@ import type {
   MetricCatalogPayload,
   MetricCreatorPayload,
   MetricInspectorPayload,
+  MetricBoardPayload,
 } from "@/lib/desktop/types"
 
 interface WorkspaceTransition {
@@ -2021,6 +2023,18 @@ export function DesktopShell() {
     })
   }, [focus, openWindow, liveWindows, updatePayload])
 
+  const openMetricBoard = useCallback(() => {
+    const existing = liveWindows().find((w) => w.kind === "metric-board")
+    if (existing) return focus(existing.id)
+    openWindow({
+      id: randomUUID(),
+      kind: "metric-board",
+      title: "KPI Board",
+      x: 160, y: 84, width: 1040, height: 660,
+      payload: { kind: "metric-board" } satisfies MetricBoardPayload,
+    })
+  }, [focus, openWindow, liveWindows])
+
   const openKgExtractionRuns = useCallback(
     (graphId?: string | null, runId?: number | null) => {
       const existing = liveWindows().find((w) => w.kind === "kg-extraction-runs")
@@ -2279,6 +2293,28 @@ export function DesktopShell() {
       width: 720,
       height: 480,
       payload,
+    })
+  }, [openWindow])
+
+  // Open arbitrary SQL as a live, auto-running data window (editor + ResultGrid).
+  // `origin: "derived"` makes the grid run on open — used by the KPI board drill
+  // to materialize the exact reproducible query behind a historical cell.
+  const openSqlData = useCallback((sql: string, title: string) => {
+    openWindow({
+      id: randomUUID(),
+      kind: "data",
+      title,
+      x: 200 + Math.random() * 60,
+      y: 120 + Math.random() * 60,
+      width: 760,
+      height: 520,
+      payload: {
+        kind: "data",
+        title,
+        sql,
+        origin: "derived",
+        view: { activeTab: "rows", sqlRailOpen: true, sqlRailWidthPx: 360 },
+      } satisfies DataPayload,
     })
   }, [openWindow])
 
@@ -3162,6 +3198,7 @@ export function DesktopShell() {
     { id: "metric-catalog", label: "Metric Catalog", icon: Table2, color: "oklch(78% 0.13 95)", description: "Browse all metrics", activate: () => openMetricCatalog(), folder: "metrics", rvbbit: true },
     { id: "metric-creator", label: "Metric Creator", icon: Calculator, color: "oklch(78% 0.13 95)", description: "Author & version metrics", activate: () => openMetricCreator(), folder: "metrics", rvbbit: true },
     { id: "metric-inspector", label: "Metric Inspector", icon: LineChart, color: "oklch(78% 0.13 95)", description: "Run metrics across def-time & data-time", activate: () => openMetricInspector(), folder: "metrics", rvbbit: true },
+    { id: "metric-board", label: "KPI Board", icon: Table2, color: "oklch(78% 0.13 95)", description: "Matrix of metric values & KPI verdicts over time", activate: () => openMetricBoard(), folder: "metrics", rvbbit: true },
     // Knowledge
     { id: "kg", label: "Knowledge Graph", icon: TreeStructure, color: "var(--brand-kg)", description: "Browse the extracted graph", activate: () => openKgBrowser(), folder: "knowledge", rvbbit: true },
     { id: "kg-explorer", label: "Graph Explorer", icon: TreeStructure, color: "var(--brand-kg)", description: "Walk entities & relations", activate: () => openKgExplorer(), folder: "knowledge", rvbbit: true },
@@ -3173,7 +3210,7 @@ export function DesktopShell() {
     openSystemObjects, openExtensions, openPgMonitor, openCache, openRvbbitCache,
     openCosts, openSyncMirror, openOperators, openSpecialists, openRouting,
     openMcpServers, openCapabilities, openHfDeploy, openWarren, openModelStudio,
-    openDuck, openMetricCatalog, openMetricCreator, openMetricInspector,
+    openDuck, openMetricCatalog, openMetricCreator, openMetricInspector, openMetricBoard,
     openKgBrowser, openKgExplorer, openQueryLens, openDrift,
   ])
 
@@ -3196,6 +3233,7 @@ export function DesktopShell() {
       openViewApp,
       openArtifact,
       openQueryDocument,
+      openSqlData,
       openExtensions,
       openRvbbitCache,
       openCache,
@@ -3250,7 +3288,7 @@ export function DesktopShell() {
     [
       activeConnectionId, hasRvbbit, launchers, schema, schemaLoading, busy, setBusy,
       openTableFromFinder, openField, openViewAppBuilder, openViewApp, openArtifact,
-      openQueryDocument, openExtensions, openRvbbitCache, openCache, openConnections,
+      openQueryDocument, openSqlData, openExtensions, openRvbbitCache, openCache, openConnections,
       loadSchema, loadConnections, updatePayload, emitParam, subscribeParam,
       editRollupSpec, repivotWindow, probeColumnValues, activePalette, paletteOverrides,
       wallpaperUrl, onReExtractPalette, onReExtractWithRvbbit, setPaletteOverrides,
@@ -3624,6 +3662,7 @@ interface WindowContext {
   openViewApp: (appId: string) => void
   openArtifact: (artifactId: string) => void
   openQueryDocument: (payload: QueryDocumentPayload) => void
+  openSqlData: (sql: string, title: string) => void
   openExtensions: () => void
   openRvbbitCache: () => void
   openCache: () => void
@@ -4112,6 +4151,19 @@ function renderWindowContent(
           onOpenCreator={ctx.openMetricCreator}
         />
       )
+    case "metric-board":
+      return (
+        <MetricBoardWindow
+          payload={w.payload as MetricBoardPayload}
+          activeConnectionId={ctx.activeConnectionId}
+          hasRvbbit={ctx.hasRvbbit}
+          windowId={w.id}
+          onOpenInspector={ctx.openMetricInspector}
+          onOpenSqlData={ctx.openSqlData}
+          onEmitParam={ctx.emitParam}
+          onChangePayload={(mut) => ctx.updatePayload(w.id, (p) => mut(p as MetricBoardPayload))}
+        />
+      )
     case "folder": {
       const folderId = (w.payload as FolderPayload).folderId
       const items = ctx.launchers.filter((l) => l.folder === folderId && (!l.rvbbit || ctx.hasRvbbit))
@@ -4300,6 +4352,8 @@ function iconForKind(kind: DesktopWindowState["kind"]) {
       return Calculator
     case "metric-inspector":
       return LineChart
+    case "metric-board":
+      return Table2
     case "capabilities":
     case "capability-detail":
       return Package

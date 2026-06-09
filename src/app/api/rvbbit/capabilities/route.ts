@@ -5,31 +5,36 @@ import yaml from "js-yaml"
 
 export const runtime = "nodejs"
 
+const DEFAULT_CAPABILITY_ROOT = "/usr/share/rvbbit/capabilities"
+
 /**
- * Read-only bridge to the on-disk capabilities directory in the
- * rvbbit repo. Resolves the repo root from $RVBBIT_REPO_PATH and
- * (in dev) falls back to a co-checked-out sibling path. Phase 1
- * supports two reads: the catalog index and individual manifests.
+ * Read-only bridge to packaged capability files. Release images ship these
+ * under $RVBBIT_CAPABILITY_ROOT; dev checkouts can point at the rvbbit-sql
+ * repo with $RVBBIT_REPO_PATH.
  *
  * GET ?action=catalog
  *   → { ok: true, doc: <catalog.json shape> }
  *
- * GET ?action=manifest&path=capabilities/manifests/extract/...yaml
+ * GET ?action=manifest&path=capabilities/packs/extract/.../capability.yaml
  *   → { ok: true, manifest: <parsed YAML> }
  *
- * Manifest paths are constrained to live under <root>/capabilities/manifests
- * so this route can't be coerced into reading arbitrary files.
+ * Manifest paths are constrained to the configured capabilities tree so this
+ * route can't be coerced into reading arbitrary files.
  */
 
-function repoRoot(): string {
-  if (process.env.RVBBIT_REPO_PATH) return process.env.RVBBIT_REPO_PATH
-  const sibling = process.env.RVBBIT_REPO_NAME ?? "rvbbit-sql"
-  return path.resolve(/*turbopackIgnore: true*/ process.cwd(), "..", sibling)
+function capabilityRoot(): string {
+  if (process.env.RVBBIT_CAPABILITY_ROOT) {
+    return path.resolve(process.env.RVBBIT_CAPABILITY_ROOT)
+  }
+  if (process.env.RVBBIT_REPO_PATH) {
+    return path.resolve(process.env.RVBBIT_REPO_PATH, "capabilities")
+  }
+  return DEFAULT_CAPABILITY_ROOT
 }
 
 async function readCatalog(): Promise<{ ok: true; doc: unknown } | { ok: false; status: number; error: string }> {
-  const root = repoRoot()
-  const file = path.join(root, "capabilities", "catalog.json")
+  const root = capabilityRoot()
+  const file = path.join(root, "catalog.json")
   try {
     const text = await fs.readFile(file, "utf8")
     const doc = JSON.parse(text) as unknown
@@ -41,8 +46,8 @@ async function readCatalog(): Promise<{ ok: true; doc: unknown } | { ok: false; 
         ok: false,
         status: 404,
         error:
-          `catalog.json not found at ${file}. Set RVBBIT_REPO_PATH to your rvbbit repo, ` +
-          `or rebuild via \`capabilities/tools/rvbbit-capability catalog build --output capabilities/catalog.json\`.`,
+          `catalog.json not found at ${file}. Set RVBBIT_CAPABILITY_ROOT, ` +
+          `set RVBBIT_REPO_PATH to your rvbbit-sql checkout, or rebuild/package the capability catalog.`,
       }
     }
     return { ok: false, status: 500, error: e instanceof Error ? e.message : String(e) }
@@ -52,8 +57,7 @@ async function readCatalog(): Promise<{ ok: true; doc: unknown } | { ok: false; 
 async function readManifest(
   relPath: string,
 ): Promise<{ ok: true; manifest: unknown } | { ok: false; status: number; error: string }> {
-  const root = repoRoot()
-  const capabilitiesRoot = path.resolve(path.join(root, "capabilities"))
+  const capabilitiesRoot = capabilityRoot()
 
   // Accept the current pack shape (`capabilities/packs/.../capability.yaml`)
   // plus the older `capabilities/manifests/...` fallback. Either way, the

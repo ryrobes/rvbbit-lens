@@ -47,6 +47,7 @@ export type DesktopWindowKind =
   | "metric-catalog"
   | "metric-creator"
   | "metric-inspector"
+  | "metric-board"
 
 export interface DesktopWindowPosition {
   x: number
@@ -118,6 +119,7 @@ export type WindowPayload =
   | MetricCatalogPayload
   | MetricCreatorPayload
   | MetricInspectorPayload
+  | MetricBoardPayload
 
 export interface FinderPayload {
   kind?: "finder"
@@ -612,6 +614,17 @@ export interface MetricInspectorPayload {
   kind?: "metric-inspector"
   /** Optional metric to select on open. */
   metricName?: string | null
+}
+export interface MetricBoardPayload {
+  kind?: "metric-board"
+  /** Persisted time-range selection (index into the board's RANGES). */
+  rangeIdx?: number
+  /** "value" (stored/def-scrub) or "restate" (reported-vs-recomputed). */
+  mode?: "value" | "restate"
+  /** Definition-time scrub (YYYY-MM-DD); empty = current definition. */
+  defDate?: string
+  /** Show every materialization as its own column (no date_trunc rollup). */
+  showAll?: boolean
 }
 
 /**

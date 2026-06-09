@@ -949,6 +949,7 @@ const KIND_HUE: Record<string, number> = {
   "metric-catalog": 95,
   "metric-creator": 95,
   "metric-inspector": 95,
+  "metric-board": 95,
   "mcp-servers": 55,
   "mcp-server-detail": 55,
   "query-lens": 200,

@@ -410,13 +410,13 @@ function safeJson(s: string): unknown {
   }
 }
 
-/** Pull a single headline number out of an observation (verdict.value first,
- *  else the first numeric field of the first result row) — for the trend line. */
-export function observationHeadline(obs: MetricObservation): number | null {
-  const v = obs.verdict?.value
+/** Pull a single headline number out of a (value, verdict) pair: verdict.value
+ *  first, else the first numeric field of the first result row. */
+function headlineOf(value: unknown, verdict: MetricVerdict | null): number | null {
+  const v = verdict?.value
   if (typeof v === "number") return v
   if (typeof v === "string" && v.trim() !== "" && Number.isFinite(Number(v))) return Number(v)
-  const rows = Array.isArray(obs.value) ? (obs.value as Array<Record<string, unknown>>) : []
+  const rows = Array.isArray(value) ? (value as Array<Record<string, unknown>>) : []
   const first = rows[0]
   if (first) {
     for (const k of Object.keys(first)) {
@@ -426,6 +426,128 @@ export function observationHeadline(obs: MetricObservation): number | null {
     }
   }
   return null
+}
+
+/** The headline number of a materialized observation (for the trend line). */
+export function observationHeadline(obs: MetricObservation): number | null {
+  return headlineOf(obs.value, obs.verdict)
+}
+
+/** The headline number of a board cell. */
+export function boardCellHeadline(cell: MetricBoardCell): number | null {
+  return headlineOf(cell.value, cell.verdict)
+}
+
+/** One cell of the KPI board: the latest observation that landed in a
+ *  (metric, data-time bucket). Mirrors rvbbit.metric_board(). */
+export interface MetricBoardCell {
+  metric: string
+  /** Bucket start, epoch ms (the column key). */
+  bucketMs: number
+  /** Exact data-time of the observation behind this cell, epoch ms. */
+  dataAsOf: number | null
+  /** The definition-time this observation was recorded under, epoch ms. */
+  defAsOf: number | null
+  /** The params this observation was recorded with (for exact reproduction). */
+  params: Record<string, unknown>
+  dataGeneration: number | null
+  metricVersion: number | null
+  value: unknown
+  verdict: MetricVerdict | null
+  status: string | null
+  trigger: string
+}
+
+// "raw" = no date_trunc rollup: every distinct materialization (per metric ×
+// exact data-instant) becomes its own column.
+export type BoardBucket = "hour" | "day" | "week" | "month" | "raw"
+
+/** Fetch the (metric × data-time) board grid from the observation log. */
+export async function fetchMetricBoard(
+  connectionId: string,
+  opts: { days?: number; bucket?: BoardBucket; metrics?: string[] } = {},
+): Promise<{ cells: MetricBoardCell[]; error: string | null }> {
+  const days = Math.max(1, Math.min(opts.days ?? 90, 3650))
+  const bucket = opts.bucket ?? "day"
+  const metricsArg =
+    opts.metrics && opts.metrics.length
+      ? `ARRAY[${opts.metrics.map((m) => q(m)).join(",")}]::text[]`
+      : "NULL::text[]"
+  // Raw mode reads the observation log directly, keying each column by the
+  // exact data-instant (no date_trunc). DISTINCT ON the instant still folds
+  // a re-materialization of the SAME data-time to its latest value (Restate
+  // mode surfaces those changes) — so columns are distinct materializations,
+  // not duplicate same-instant rows. Mirrors rvbbit.metric_board's projection.
+  const sql =
+    bucket === "raw"
+      ? `SELECT DISTINCT ON (o.metric_name, COALESCE(o.data_as_of, o.observed_at))
+                o.metric_name                                              AS metric,
+                extract(epoch FROM COALESCE(o.data_as_of, o.observed_at)) * 1000 AS bucket_ms,
+                extract(epoch FROM COALESCE(o.data_as_of, o.observed_at)) * 1000 AS data_ms,
+                extract(epoch FROM o.def_as_of) * 1000                    AS def_ms,
+                o.params, o.data_generation, o.metric_version,
+                o.value, o.verdict, o.status, o.trigger
+           FROM rvbbit.metric_observations o
+          WHERE COALESCE(o.data_as_of, o.observed_at) >= now() - make_interval(days => ${days})
+            AND (${metricsArg} IS NULL OR o.metric_name = ANY(${metricsArg}))
+          ORDER BY o.metric_name,
+                   COALESCE(o.data_as_of, o.observed_at),
+                   o.observed_at DESC`
+      : `SELECT c->>'metric'                                           AS metric,
+                extract(epoch FROM (c->>'bucket')::timestamptz) * 1000 AS bucket_ms,
+                extract(epoch FROM (c->>'data_as_of')::timestamptz) * 1000 AS data_ms,
+                extract(epoch FROM (c->>'def_as_of')::timestamptz) * 1000 AS def_ms,
+                (c->'params')                                          AS params,
+                (c->'data_generation')                                 AS data_generation,
+                (c->'metric_version')                                  AS metric_version,
+                (c->'value')                                           AS value,
+                (c->'verdict')                                         AS verdict,
+                (c->>'status')                                         AS status,
+                (c->>'trigger')                                        AS trigger
+         FROM rvbbit.metric_board(${metricsArg}, now() - interval '${days} days', now(), ${q(bucket)}) c`
+  const r = await run(connectionId, sql)
+  if (!r.ok) return { cells: [], error: r.error }
+  return {
+    error: null,
+    cells: r.rows.map((row) => {
+      const p = typeof row.params === "string" ? safeJson(row.params) : row.params
+      return {
+        metric: String(row.metric),
+        bucketMs: num(row.bucket_ms) ?? 0,
+        dataAsOf: num(row.data_ms),
+        defAsOf: num(row.def_ms),
+        params: (p && typeof p === "object" ? (p as Record<string, unknown>) : {}),
+        dataGeneration: num(row.data_generation),
+        metricVersion: num(row.metric_version),
+        value: typeof row.value === "string" ? safeJson(row.value) : row.value,
+        verdict: asVerdict(row.verdict),
+        status: str(row.status),
+        trigger: String(row.trigger ?? "manual"),
+      }
+    }),
+  }
+}
+
+/** Live-recompute a single cell's headline + verdict at a given (def-time,
+ *  data-time) — the basis for the board's Restatement and def-time-scrub modes.
+ *  Restatement compares this against the stored observation; def-scrub replaces
+ *  it. Two round-trips (metric + check); callers should batch/throttle. */
+export async function recomputeCell(
+  connectionId: string,
+  name: string,
+  params: Record<string, unknown>,
+  defAsOfIso: string | null,
+  dataAsOfIso: string | null,
+): Promise<{ headline: number | null; verdict: MetricVerdict | null; error: string | null }> {
+  const [res, chk] = await Promise.all([
+    runMetric(connectionId, name, params, defAsOfIso, dataAsOfIso),
+    checkMetric(connectionId, name, params, defAsOfIso, dataAsOfIso),
+  ])
+  return {
+    headline: headlineOf(res.rows, chk.verdict),
+    verdict: chk.verdict,
+    error: res.error ?? chk.error,
+  }
 }
 
 /** Remove every version of a metric (Creator delete). */

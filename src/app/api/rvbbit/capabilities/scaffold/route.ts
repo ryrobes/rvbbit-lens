@@ -6,6 +6,8 @@ import path from "path"
 
 export const runtime = "nodejs"
 
+const DEFAULT_CAPABILITY_ROOT = "/usr/share/rvbbit/capabilities"
+
 /**
  * Run the `rvbbit-capability scaffold` CLI against a manifest, then
  * write the client's knob-rendered overrides on top of the generated
@@ -22,7 +24,7 @@ export const runtime = "nodejs"
  * Body:
  *   {
  *     manifestPath: string,   // catalog manifest_path
- *     outDir: string,         // absolute or $HOME-relative
+ *     outDir: string,         // absolute or local-work-root-relative
  *     force?: boolean,
  *     overrides?: {           // optional per-file overwrites
  *       "register.sql"?: string,
@@ -62,27 +64,36 @@ const ALLOWED_OVERRIDES = new Set([
 ])
 
 function repoRoot(): string {
-  return (
-    process.env.RVBBIT_REPO_PATH ??
-    path.join(/*turbopackIgnore: true*/ os.homedir(), "repos2026", "rvbbit-sql")
+  return process.env.RVBBIT_REPO_PATH ?? ""
+}
+
+function capabilityRoot(): string {
+  if (process.env.RVBBIT_CAPABILITY_ROOT) return process.env.RVBBIT_CAPABILITY_ROOT
+  const root = repoRoot()
+  return root ? path.join(root, "capabilities") : DEFAULT_CAPABILITY_ROOT
+}
+
+function localWorkRoot(): string {
+  return path.resolve(
+    process.env.RVBBIT_LOCAL_WORK_ROOT?.trim() ||
+      process.env.RVBBIT_LENS_HOME?.trim() ||
+      os.homedir(),
   )
 }
 
-/** Constrain outDir to under $HOME (single-user trust model). */
+/** Constrain outDir to the writable local work root. */
 function resolveOutDir(raw: string): { ok: true; path: string } | { ok: false; error: string } {
   if (!raw || raw.trim().length === 0) {
     return { ok: false, error: "outDir is required" }
   }
-  const home = os.homedir()
-  const resolved = path.isAbsolute(raw) ? path.resolve(raw) : path.resolve(home, raw)
-  // Refuse traversal outside $HOME — a footgun rather than a security
-  // boundary, given this is a local single-user app. Catches typos like
-  // "/etc/rvbbit" that would otherwise silently land outside the user's
-  // tree.
-  if (!resolved.startsWith(home + path.sep) && resolved !== home) {
+  const root = localWorkRoot()
+  const resolved = path.isAbsolute(raw) ? path.resolve(raw) : path.resolve(root, raw)
+  // Refuse traversal outside the local work root. In packaged Lens this is the
+  // /data volume; in direct dev runs it falls back to the user home.
+  if (!resolved.startsWith(root + path.sep) && resolved !== root) {
     return {
       ok: false,
-      error: `outDir must live under $HOME (${home}); got ${resolved}`,
+      error: `outDir must live under local work root (${root}); got ${resolved}`,
     }
   }
   return { ok: true, path: resolved }
@@ -91,14 +102,18 @@ function resolveOutDir(raw: string): { ok: true; path: string } | { ok: false; e
 function locateCli(): string {
   const explicit = process.env.RVBBIT_CAPABILITY_CLI
   if (explicit) return explicit
-  return path.join(repoRoot(), "capabilities", "tools", "rvbbit-capability")
+  const root = repoRoot()
+  if (root) return path.join(root, "capabilities", "tools", "rvbbit-capability")
+  const caps = capabilityRoot()
+  if (caps) return path.join(caps, "tools", "rvbbit-capability")
+  return "rvbbit-capability"
 }
 
 function resolveManifestPath(raw: string): string {
   if (path.isAbsolute(raw)) return raw
-  // catalog entries store paths as "capabilities/manifests/..." relative to
-  // the repo root. Resolve against RVBBIT_REPO_PATH for absolute disk reads.
-  return path.resolve(repoRoot(), raw)
+  const caps = capabilityRoot()
+  const stripped = raw.replace(/^capabilities\//, "").replace(/^\/+/, "")
+  return path.resolve(caps, stripped)
 }
 
 async function fileExists(p: string): Promise<boolean> {
@@ -148,7 +163,18 @@ export async function POST(req: Request) {
   // (from-id deploys with no pack on disk) we drop it in a temp file so
   // the CLI can render the template against it exactly like a real pack.
   let manifestAbs: string
-  if (body.manifestPath) {
+  if (body.manifestYaml && body.manifestYaml.trim().length > 0) {
+    try {
+      const dir = await fs.mkdtemp(path.join(os.tmpdir(), "rvbbit-hf-"))
+      manifestAbs = path.join(dir, "capability.yaml")
+      await fs.writeFile(manifestAbs, body.manifestYaml, "utf8")
+    } catch (e) {
+      return NextResponse.json(
+        { ok: false, error: `failed to stage inline manifest: ${e instanceof Error ? e.message : String(e)}` },
+        { status: 500 },
+      )
+    }
+  } else if (body.manifestPath) {
     manifestAbs = resolveManifestPath(body.manifestPath)
     if (!(await fileExists(manifestAbs))) {
       return NextResponse.json(
@@ -157,16 +183,10 @@ export async function POST(req: Request) {
       )
     }
   } else {
-    try {
-      const dir = await fs.mkdtemp(path.join(os.tmpdir(), "rvbbit-hf-"))
-      manifestAbs = path.join(dir, "capability.yaml")
-      await fs.writeFile(manifestAbs, body.manifestYaml ?? "", "utf8")
-    } catch (e) {
-      return NextResponse.json(
-        { ok: false, error: `failed to stage inline manifest: ${e instanceof Error ? e.message : String(e)}` },
-        { status: 500 },
-      )
-    }
+    return NextResponse.json(
+      { ok: false, error: "manifestPath or manifestYaml required" },
+      { status: 400 },
+    )
   }
 
   const cli = locateCli()
@@ -175,8 +195,8 @@ export async function POST(req: Request) {
       {
         ok: false,
         error:
-          `rvbbit-capability CLI not found at ${cli}. Set RVBBIT_REPO_PATH ` +
-          `or RVBBIT_CAPABILITY_CLI to point at it.`,
+          `rvbbit-capability CLI not found at ${cli}. Set RVBBIT_CAPABILITY_CLI, ` +
+          `RVBBIT_REPO_PATH, or package the CLI under RVBBIT_CAPABILITY_ROOT/tools.`,
       },
       { status: 500 },
     )

@@ -19,7 +19,7 @@ export const runtime = "nodejs"
  * pattern) and an AbortController to cancel — when the request is
  * aborted we kill the docker compose child.
  *
- * outDir is validated to live under $HOME (single-user trust model);
+ * outDir is validated to live under the writable local work root;
  * compose.yaml must exist in that directory.
  */
 
@@ -29,16 +29,46 @@ interface ComposeBody {
   publishHostPort?: boolean
 }
 
+function envFlag(name: string): boolean {
+  const value = process.env[name]?.trim().toLowerCase()
+  return value === "1" || value === "true" || value === "yes" || value === "on"
+}
+
+function dockerInvocation(args: string[]): { command: string; args: string[]; display: string } {
+  const dockerBin = process.env.RVBBIT_DOCKER_BIN?.trim() || "docker"
+  if (envFlag("RVBBIT_DOCKER_SUDO")) {
+    const sudoArgs = ["-n", dockerBin, ...args]
+    return {
+      command: "sudo",
+      args: sudoArgs,
+      display: `sudo ${sudoArgs.join(" ")}`,
+    }
+  }
+  return {
+    command: dockerBin,
+    args,
+    display: `${dockerBin} ${args.join(" ")}`,
+  }
+}
+
+function localWorkRoot(): string {
+  return path.resolve(
+    process.env.RVBBIT_LOCAL_WORK_ROOT?.trim() ||
+      process.env.RVBBIT_LENS_HOME?.trim() ||
+      os.homedir(),
+  )
+}
+
 function resolveOutDir(raw: string): { ok: true; path: string } | { ok: false; error: string } {
   if (!raw || raw.trim().length === 0) {
     return { ok: false, error: "outDir is required" }
   }
-  const home = os.homedir()
-  const resolved = path.isAbsolute(raw) ? path.resolve(raw) : path.resolve(home, raw)
-  if (!resolved.startsWith(home + path.sep) && resolved !== home) {
+  const root = localWorkRoot()
+  const resolved = path.isAbsolute(raw) ? path.resolve(raw) : path.resolve(root, raw)
+  if (!resolved.startsWith(root + path.sep) && resolved !== root) {
     return {
       ok: false,
-      error: `outDir must live under $HOME (${home}); got ${resolved}`,
+      error: `outDir must live under local work root (${root}); got ${resolved}`,
     }
   }
   return { ok: true, path: resolved }
@@ -105,7 +135,8 @@ export async function POST(req: Request) {
   const encoder = new TextEncoder()
   const stream = new ReadableStream<Uint8Array>({
     start(controller) {
-      const child = spawn("docker", args, {
+      const docker = dockerInvocation(args)
+      const child = spawn(docker.command, docker.args, {
         cwd: out.path,
         stdio: ["ignore", "pipe", "pipe"],
       })
@@ -153,7 +184,7 @@ export async function POST(req: Request) {
           sseFrame({
             type: "line",
             stream: "stdout",
-            text: `+ docker ${args.join(" ")}`,
+            text: `+ ${docker.display}`,
           }),
         ),
       )
