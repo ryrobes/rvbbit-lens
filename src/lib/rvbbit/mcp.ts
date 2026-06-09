@@ -709,3 +709,176 @@ export function buildArgsFromForm(
   }
   return { args, errors }
 }
+
+// ── MCP capabilities (catalog install) ──────────────────────────────
+//
+// An MCP server published to rvbbit.capability_catalog (kind='mcp') is, to the
+// user, the same as a Warren model capability: a thing you install that adds
+// operators + functions. The baked manifest carries the surface (so the card
+// shows "adds N operators + M tables") and the declared secrets (no values).
+
+export interface McpSecretDecl {
+  name: string
+  envVar: string
+  required: boolean
+  label: string
+  help: string
+  link: string
+}
+
+export interface McpCapability {
+  id: string
+  name: string
+  title: string
+  description: string | null
+  tags: string[]
+  /** Baked operator names the install will create. */
+  operators: string[]
+  nTools: number
+  nResources: number
+  secrets: McpSecretDecl[]
+  manifest: Record<string, unknown>
+}
+
+function parseTextArray(v: unknown): string[] {
+  if (Array.isArray(v)) return v.map(String)
+  if (typeof v === "string" && v.startsWith("{") && v.endsWith("}")) {
+    const inner = v.slice(1, -1).trim()
+    return inner === "" ? [] : inner.split(",").map((s) => s.replace(/^"|"$/g, ""))
+  }
+  return []
+}
+
+function parseSecrets(v: unknown): McpSecretDecl[] {
+  const arr = Array.isArray(v) ? v : typeof v === "string" ? (JSON.parse(v || "[]") as unknown[]) : []
+  return arr.map((s) => {
+    const o = (s ?? {}) as Record<string, unknown>
+    return {
+      name: String(o.name ?? ""),
+      envVar: String(o.env_var ?? o.name ?? ""),
+      required: o.required !== false,
+      label: String(o.label ?? o.name ?? ""),
+      help: String(o.help ?? ""),
+      link: String(o.link ?? ""),
+    }
+  })
+}
+
+/** All published MCP capabilities (kind='mcp'). */
+export async function listMcpCapabilities(
+  connectionId: string,
+): Promise<{ caps: McpCapability[]; error?: string }> {
+  const r = await runQuery(
+    connectionId,
+    `SELECT id, name, title, description, tags, operators,
+            (manifest->'surface'->>'n_tools')      AS n_tools,
+            (manifest->'surface'->>'n_resources')  AS n_resources,
+            (manifest->'secrets')                  AS secrets,
+            manifest
+     FROM rvbbit.capability_catalog WHERE kind = 'mcp' AND active ORDER BY name`,
+  )
+  if (!r.ok) return { caps: [], error: r.error }
+  return {
+    caps: r.rows.map((row) => ({
+      id: String(row.id),
+      name: String(row.name),
+      title: String(row.title ?? row.name),
+      description: strOrNull(row.description),
+      tags: parseTextArray(row.tags),
+      operators: parseTextArray(row.operators),
+      nTools: num(row.n_tools),
+      nResources: num(row.n_resources),
+      secrets: parseSecrets(row.secrets),
+      manifest: (typeof row.manifest === "string" ? JSON.parse(row.manifest) : row.manifest) as Record<string, unknown>,
+    })),
+  }
+}
+
+/** Push one install-time secret to the gateway (never to Postgres). */
+export async function pushMcpSecret(
+  server: string,
+  name: string,
+  value: string,
+): Promise<{ ok: boolean; error?: string }> {
+  try {
+    const res = await fetch("/api/mcp/secret", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ server, name, value }),
+    })
+    const j = (await res.json()) as { ok: boolean; error?: string }
+    return j.ok ? { ok: true } : { ok: false, error: j.error }
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) }
+  }
+}
+
+export interface McpInstallResult {
+  ok: boolean
+  error?: string
+  server?: string
+  operatorsCreated?: number
+  tools?: string[]
+  drift?: { added: string[]; removed: string[]; changed: boolean }
+}
+
+/** Install a published MCP capability: register the server, push secrets to the
+ *  gateway, then refresh + reconcile + generate operators. */
+export async function installMcpCapability(
+  connectionId: string,
+  catalogId: string,
+  serverName: string,
+  secrets: Record<string, string>,
+): Promise<McpInstallResult> {
+  // 1. Register the server (own statement → commits before the gateway refresh).
+  const reg = await runQuery(
+    connectionId,
+    `SELECT rvbbit.install_mcp_register(${sqlStr(catalogId)}, ${sqlStr(serverName)}) AS server`,
+  )
+  if (!reg.ok) return { ok: false, error: reg.error }
+  const server = String(reg.rows[0]?.server ?? serverName)
+
+  // 2. Push secrets to the gateway (values never touch PG).
+  for (const [name, value] of Object.entries(secrets)) {
+    if (!value || !value.trim()) continue
+    const res = await pushMcpSecret(server, name, value)
+    if (!res.ok) return { ok: false, error: `secret ${name}: ${res.error}`, server }
+  }
+
+  // 3. Finalize: live refresh + drift-reconcile + operator generation.
+  const fin = await runQuery(
+    connectionId,
+    `SELECT rvbbit.install_mcp_finalize(${sqlStr(catalogId)}, ${sqlStr(server)}) AS result`,
+  )
+  if (!fin.ok) return { ok: false, error: fin.error, server }
+  const result = (typeof fin.rows[0]?.result === "string"
+    ? JSON.parse(String(fin.rows[0]?.result))
+    : fin.rows[0]?.result) as Record<string, unknown> | null
+  const drift = (result?.drift ?? {}) as Record<string, unknown>
+  return {
+    ok: true,
+    server,
+    operatorsCreated: num(result?.operators_created),
+    tools: parseTextArray(result?.tools),
+    drift: {
+      added: parseTextArray(drift.added),
+      removed: parseTextArray(drift.removed),
+      changed: drift.changed === true,
+    },
+  }
+}
+
+/** Scan a registered server + publish it to the catalog (kind='mcp'). */
+export async function publishMcpCapability(
+  connectionId: string,
+  server: string,
+  title?: string,
+  tags?: string[],
+): Promise<{ ok: boolean; id?: string; error?: string }> {
+  const r = await runQuery(
+    connectionId,
+    `SELECT rvbbit.publish_mcp_capability(${sqlStr(server)}, ${title ? sqlStr(title) : "NULL"}, ${sqlTextArrayOrNull(tags)}) ->> 'id' AS id`,
+  )
+  if (!r.ok) return { ok: false, error: r.error }
+  return { ok: true, id: strOrNull(r.rows[0]?.id) ?? undefined }
+}

@@ -58,6 +58,8 @@ import { CodePreview, type CodeLang } from "./code-preview"
 import { CapabilityInstallGraph } from "./capability-install-graph"
 import { WarrenDeployPanel } from "./warren-deploy-panel"
 import { fetchWarrenAvailability, type WarrenAvailability } from "@/lib/rvbbit/warren"
+import { McpInstallPanel } from "./mcp-install-panel"
+import { listMcpCapabilities, type McpCapability } from "@/lib/rvbbit/mcp"
 
 interface CapabilityDetailWindowProps {
   payload: CapabilityDetailPayload
@@ -76,6 +78,13 @@ const TABS: { key: TabKey; label: string }[] = [
   { key: "install", label: "Install" },
   { key: "tests", label: "Tests" },
 ]
+// MCP capabilities have no model artifacts (no generated SQL / probe / accept
+// tests) — they introduce *tools* via the gateway. So they get a focused
+// two-tab surface: what it adds, and the keys+install form.
+const MCP_TABS: { key: TabKey; label: string }[] = [
+  { key: "overview", label: "Overview" },
+  { key: "install", label: "Install" },
+]
 
 export function CapabilityDetailWindow({
   payload,
@@ -90,6 +99,7 @@ export function CapabilityDetailWindow({
   const [installed, setInstalled] = useState<InstalledBackend | null>(null)
   const [installedRuntime, setInstalledRuntime] = useState<InstalledRuntime | null>(null)
   const [knobs, setKnobs] = useState<InstallKnobs | null>(null)
+  const [mcpCap, setMcpCap] = useState<McpCapability | null>(null)
   const [tab, setTab] = useState<TabKey>(payload.initialTab ?? "overview")
   const [loadError, setLoadError] = useState<string | null>(null)
   const [updatedAt, setUpdatedAt] = useState(0)
@@ -139,6 +149,24 @@ export function CapabilityDetailWindow({
       cancelled = true
     }
   }, [payload.catalogId, activeConnectionId])
+
+  // ── MCP capabilities: load the install-time shape (keys + surface) ──
+  // Reuses the exact catalog query the MCP servers window uses, so the
+  // declared-secret list and tool/resource counts match one-for-one.
+  const isMcp = catalog?.kind === "mcp"
+  useEffect(() => {
+    if (!activeConnectionId || !isMcp || !catalog) return
+    let cancelled = false
+    const run = async () => {
+      const r = await listMcpCapabilities(activeConnectionId)
+      if (cancelled) return
+      setMcpCap(r.caps.find((c) => c.id === catalog.id) ?? null)
+    }
+    void run()
+    return () => {
+      cancelled = true
+    }
+  }, [activeConnectionId, isMcp, catalog])
 
   // ── poll installed-backend row to keep the join fresh ──
   const pollInstalled = useCallback(async () => {
@@ -192,7 +220,9 @@ export function CapabilityDetailWindow({
 
   // ── live render (the Bret Victor lever) ──
   const rendered: RenderedArtifacts | null = useMemo(() => {
-    if (!manifest || !knobs) return null
+    // MCP manifests have no model artifacts to render (and renderManifest
+    // assumes the model shape) — the MCP branch never reads `rendered`.
+    if (!manifest || !knobs || manifest.kind === "mcp") return null
     return renderManifest(manifest, knobs)
   }, [manifest, knobs])
 
@@ -306,7 +336,7 @@ export function CapabilityDetailWindow({
 
       {/* tab bar */}
       <div className="flex items-center gap-px border-b border-chrome-border bg-chrome-bg/20 px-2">
-        {TABS.map((t) => (
+        {(isMcp ? MCP_TABS : TABS).map((t) => (
           <button
             key={t.key}
             type="button"
@@ -325,6 +355,26 @@ export function CapabilityDetailWindow({
 
       {/* body */}
       <div className="min-h-0 flex-1 overflow-hidden">
+        {isMcp ? (
+          tab === "install" ? (
+            <div className="h-full overflow-auto p-3">
+              {mcpCap ? (
+                <McpInstallPanel
+                  connId={activeConnectionId}
+                  cap={mcpCap}
+                  onInstalled={() => void pollInstalled()}
+                />
+              ) : (
+                <div className="grid h-full place-items-center text-[11px] text-chrome-text/60">
+                  loading capability…
+                </div>
+              )}
+            </div>
+          ) : (
+            <McpOverviewTab catalog={catalog!} manifest={manifest!} cap={mcpCap} />
+          )
+        ) : (
+          <>
         {tab === "overview" ? (
           <OverviewTab
             catalog={catalog!}
@@ -366,7 +416,169 @@ export function CapabilityDetailWindow({
             catalog={catalog!}
           />
         ) : null}
+          </>
+        )}
       </div>
+    </div>
+  )
+}
+
+// ── MCP overview tab ─────────────────────────────────────────────────
+// An MCP capability introduces *tools* (→ operators) and *resources*
+// (→ tables-as-functions) over the gateway. This pane shows what it adds and
+// what it needs, mirroring how a Warren specialist's overview reads — but
+// sourced from the MCP manifest's tool/resource surface, not a model card.
+
+interface McpManifestView {
+  description?: string
+  tools?: Array<{ name?: string; description?: string }>
+  resources?: Array<{ name?: string; uri?: string; description?: string }>
+  connection?: { command?: string; args?: string[]; transport?: string }
+  surface?: { n_tools?: number; n_resources?: number }
+}
+
+function McpFact({ label, value }: { label: string; value: number | string }) {
+  return (
+    <div className="rounded border border-chrome-border bg-chrome-bg/40 px-2.5 py-1.5">
+      <div className="font-mono text-[15px] leading-none text-foreground">{value}</div>
+      <div className="mt-1 text-[9px] uppercase tracking-wider text-chrome-text/55">{label}</div>
+    </div>
+  )
+}
+
+function McpOverviewTab({
+  catalog,
+  manifest,
+  cap,
+}: {
+  catalog: CatalogEntry
+  manifest: Manifest
+  cap: McpCapability | null
+}) {
+  const m = manifest as unknown as McpManifestView
+  const tools = m.tools ?? []
+  const resources = m.resources ?? []
+  const conn = m.connection ?? {}
+  const description = catalog.description ?? m.description ?? null
+  const cmdline = [conn.command, ...(conn.args ?? [])].filter(Boolean).join(" ")
+  const secrets = cap?.secrets ?? []
+
+  return (
+    <div className="h-full space-y-3 overflow-auto p-3">
+      {description ? (
+        <p className="text-[12px] leading-relaxed text-chrome-text/85">{description}</p>
+      ) : null}
+
+      <div className="grid grid-cols-4 gap-1.5">
+        <McpFact label="tools" value={tools.length || cap?.nTools || 0} />
+        <McpFact label="tables" value={resources.length || cap?.nResources || 0} />
+        <McpFact label="operators" value={catalog.operators.length} />
+        <McpFact label="keys" value={secrets.length} />
+      </div>
+
+      {conn.transport || cmdline ? (
+        <div className="rounded border border-chrome-border bg-chrome-bg/30 px-2.5 py-1.5">
+          <div className="mb-0.5 text-[9px] uppercase tracking-wider text-chrome-text/50">connection</div>
+          <div className="flex flex-wrap items-center gap-1.5 font-mono text-[10px] text-chrome-text/75">
+            {conn.transport ? (
+              <span className="rounded bg-foreground/[0.06] px-1 py-px uppercase">{conn.transport}</span>
+            ) : null}
+            {cmdline ? <span className="truncate">{cmdline}</span> : null}
+          </div>
+        </div>
+      ) : null}
+
+      {tools.length > 0 ? (
+        <div>
+          <div className="mb-1 flex items-center gap-1.5 text-[10px] uppercase tracking-wider text-chrome-text/50">
+            <FlowArrow className="h-3 w-3" /> tools → operators
+          </div>
+          <div className="space-y-1">
+            {tools.map((t, i) => (
+              <div
+                key={t.name ?? i}
+                className="rounded border border-chrome-border bg-chrome-bg/30 px-2 py-1"
+              >
+                <div className="font-mono text-[11px] text-foreground">{t.name}</div>
+                {t.description ? (
+                  <div className="mt-0.5 line-clamp-2 text-[10px] text-chrome-text/60">{t.description}</div>
+                ) : null}
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : null}
+
+      {resources.length > 0 ? (
+        <div>
+          <div className="mb-1 flex items-center gap-1.5 text-[10px] uppercase tracking-wider text-chrome-text/50">
+            <Layers className="h-3 w-3" /> resources → tables
+          </div>
+          <div className="space-y-1">
+            {resources.map((r, i) => (
+              <div
+                key={r.name ?? r.uri ?? i}
+                className="rounded border border-chrome-border bg-chrome-bg/30 px-2 py-1"
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <span className="font-mono text-[11px] text-foreground">{r.name ?? r.uri}</span>
+                  {r.uri && r.name ? (
+                    <span className="truncate font-mono text-[9px] text-chrome-text/45">{r.uri}</span>
+                  ) : null}
+                </div>
+                {r.description ? (
+                  <div className="mt-0.5 line-clamp-2 text-[10px] text-chrome-text/60">{r.description}</div>
+                ) : null}
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : null}
+
+      {secrets.length > 0 ? (
+        <div>
+          <div className="mb-1 flex items-center gap-1.5 text-[10px] uppercase tracking-wider text-chrome-text/50">
+            <Plug className="h-3 w-3" /> required keys
+          </div>
+          <div className="space-y-1">
+            {secrets.map((s) => (
+              <div
+                key={s.name}
+                className="flex items-center justify-between rounded border border-chrome-border bg-chrome-bg/30 px-2 py-1 text-[10px]"
+              >
+                <span className="font-mono text-chrome-text/80">
+                  {s.label}
+                  {s.required ? <span className="text-danger"> *</span> : null}
+                </span>
+                {s.link ? (
+                  <a href={s.link} target="_blank" rel="noreferrer" className="text-rvbbit-accent hover:underline">
+                    get a key →
+                  </a>
+                ) : (
+                  <span className="text-chrome-text/45">{s.help || "secret"}</span>
+                )}
+              </div>
+            ))}
+          </div>
+          <div className="mt-1 text-[9px] leading-snug text-chrome-text/45">
+            Provide these in the <span className="text-chrome-text/70">Install</span> tab — they go to the
+            gateway&apos;s encrypted store, never Postgres.
+          </div>
+        </div>
+      ) : null}
+
+      {catalog.tags.length > 0 ? (
+        <div className="flex flex-wrap gap-1">
+          {catalog.tags.map((tag) => (
+            <span
+              key={tag}
+              className="rounded-full border border-chrome-border bg-foreground/[0.04] px-1.5 py-px text-[9px] text-chrome-text/60"
+            >
+              {tag}
+            </span>
+          ))}
+        </div>
+      ) : null}
     </div>
   )
 }
@@ -679,7 +891,7 @@ function OverviewTab({
               className="h-3.5 w-3.5 accent-brand-capability"
             />
             <span className="text-[11px] text-foreground">
-              Use GPU overlay (compose.gpu.yaml)
+              Force GPU overlay (auto can enable it)
             </span>
           </label>
         </div>

@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react"
 import { useWorkspaceActive } from "./workspace-active-context"
+import { McpInstallPanel } from "./mcp-install-panel"
 import {
   Activity,
   AlertTriangle,
@@ -31,10 +32,13 @@ import {
   fetchGhostServers,
   fetchInvocations,
   fetchServers,
+  listMcpCapabilities,
+  publishMcpCapability,
   MCP_GATEWAY_CATALOG_ID,
   registerServer,
   serverStatus,
   type GhostServerRow,
+  type McpCapability,
   type McpGatewayStatus,
   type McpInvocation,
   type McpServerOverview,
@@ -42,6 +46,9 @@ import {
   type ServerStatus,
   type Transport,
 } from "@/lib/rvbbit/mcp"
+
+const mcpInputCls =
+  "mt-0.5 w-full rounded border border-chrome-border bg-chrome-bg px-1.5 py-1 text-[11px] text-foreground outline-none focus:border-rvbbit-accent/50"
 
 interface McpServersWindowProps {
   activeConnectionId: string | null
@@ -73,6 +80,7 @@ export function McpServersWindow({
   const workspaceActive = useWorkspaceActive()
   const [updatedAt, setUpdatedAt] = useState(0)
   const [showAdd, setShowAdd] = useState(false)
+  const [showCatalog, setShowCatalog] = useState(false)
   const loading = updatedAt === 0
 
   const reload = useCallback(async () => {
@@ -236,6 +244,22 @@ export function McpServersWindow({
             <Plus className="h-3 w-3" />
             Server
           </button>
+          <button
+            type="button"
+            onClick={() => setShowCatalog((s) => !s)}
+            disabled={!gatewayReady}
+            title="Browse + install MCP capabilities from the catalog"
+            className={cn(
+              "inline-flex h-6 items-center gap-1 rounded border px-1.5 text-[11px]",
+              showCatalog
+                ? "border-rvbbit-accent/50 bg-rvbbit-accent/15 text-rvbbit-accent"
+                : "border-chrome-border text-chrome-text/80 hover:border-rvbbit-accent/40 hover:text-foreground",
+              !gatewayReady && "cursor-not-allowed opacity-45 hover:border-chrome-border hover:text-chrome-text/80",
+            )}
+          >
+            <Box className="h-3 w-3" />
+            Catalog
+          </button>
         </div>
       </div>
 
@@ -264,6 +288,14 @@ export function McpServersWindow({
               await reload()
             }}
             onCancel={() => setShowAdd(false)}
+          />
+        ) : null}
+
+        {showCatalog ? (
+          <McpCatalogBrowser
+            connId={activeConnectionId}
+            servers={servers.map((s) => s.name)}
+            onChanged={reload}
           />
         ) : null}
 
@@ -832,3 +864,150 @@ const inputCls =
   "h-7 w-full rounded border border-chrome-border bg-doc-bg px-2 font-mono text-[11px] text-foreground outline-none focus:border-main/60"
 const areaCls =
   "w-full rounded border border-chrome-border bg-doc-bg px-2 py-1 font-mono text-[11px] leading-snug text-foreground outline-none focus:border-main/60"
+
+// ── MCP capability catalog: browse + install + publish ──────────────
+function McpCatalogBrowser({
+  connId,
+  servers,
+  onChanged,
+}: {
+  connId: string | null
+  servers: string[]
+  onChanged: () => void | Promise<void>
+}) {
+  const [caps, setCaps] = useState<McpCapability[]>([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+  const [sel, setSel] = useState<McpCapability | null>(null)
+  const [pubServer, setPubServer] = useState("")
+  const [publishing, setPublishing] = useState(false)
+  const [pubMsg, setPubMsg] = useState<string | null>(null)
+
+  const load = useCallback(async () => {
+    if (!connId) return
+    const r = await listMcpCapabilities(connId)
+    setCaps(r.caps)
+    setError(r.error ?? null)
+    setLoading(false)
+  }, [connId])
+  useEffect(() => {
+    let cancelled = false
+    const run = async () => {
+      if (cancelled) return
+      await load()
+    }
+    void run()
+    return () => {
+      cancelled = true
+    }
+  }, [load])
+
+  const pick = (c: McpCapability) => setSel(c)
+  const doPublish = async () => {
+    if (!connId || !pubServer) return
+    setPublishing(true)
+    setPubMsg(null)
+    const r = await publishMcpCapability(connId, pubServer)
+    setPublishing(false)
+    if (r.ok) {
+      setPubMsg(`Published “${r.id}”.`)
+      await load()
+    } else {
+      setPubMsg(r.error ?? "publish failed")
+    }
+  }
+
+  return (
+    <div className="rounded border border-rvbbit-accent/30 bg-chrome-bg/40 p-2.5">
+      <div className="mb-2 flex items-center justify-between">
+        <span className="inline-flex items-center gap-1.5 text-[11px] font-medium text-foreground">
+          <Box className="h-3.5 w-3.5 text-rvbbit-accent" /> MCP Capability Catalog
+        </span>
+        <button
+          type="button"
+          onClick={() => void load()}
+          className="grid h-5 w-5 place-items-center rounded text-chrome-text/70 hover:bg-foreground/[0.08] hover:text-foreground"
+          title="Reload catalog"
+        >
+          <RefreshCw className="h-3 w-3" />
+        </button>
+      </div>
+
+      {error ? <div className="mb-1.5 text-[10px] text-danger">{error}</div> : null}
+
+      {!sel ? (
+        <>
+          {loading ? (
+            <div className="text-[11px] text-chrome-text/60">loading…</div>
+          ) : caps.length === 0 ? (
+            <div className="text-[11px] text-chrome-text/60">
+              No MCP capabilities published yet. Register a server, run it once, then publish it below.
+            </div>
+          ) : (
+            <div className="space-y-1.5">
+              {caps.map((c) => (
+                <button
+                  key={c.id}
+                  type="button"
+                  onClick={() => pick(c)}
+                  className="block w-full rounded border border-chrome-border px-2 py-1.5 text-left hover:border-rvbbit-accent/40 hover:bg-foreground/[0.04]"
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-[12px] font-medium text-foreground">{c.title}</span>
+                    <span className="shrink-0 text-[10px] text-chrome-text/60">
+                      adds {c.operators.length} operators · {c.nResources} tables
+                    </span>
+                  </div>
+                  {c.description ? (
+                    <div className="truncate text-[10px] text-chrome-text/55">{c.description}</div>
+                  ) : null}
+                  {c.secrets.length > 0 ? (
+                    <div className="mt-0.5 text-[10px] text-amber-300/70">
+                      needs {c.secrets.length} key{c.secrets.length === 1 ? "" : "s"}
+                    </div>
+                  ) : null}
+                </button>
+              ))}
+            </div>
+          )}
+
+          <div className="mt-2.5 border-t border-chrome-border/60 pt-2">
+            <div className="mb-1 text-[10px] uppercase tracking-wider text-chrome-text/50">
+              Publish a registered server
+            </div>
+            <div className="flex items-center gap-1.5">
+              <select
+                value={pubServer}
+                onChange={(e) => setPubServer(e.target.value)}
+                className={cn(mcpInputCls, "flex-1")}
+              >
+                <option value="">choose a server…</option>
+                {servers.map((s) => (
+                  <option key={s} value={s}>
+                    {s}
+                  </option>
+                ))}
+              </select>
+              <button
+                type="button"
+                onClick={() => void doPublish()}
+                disabled={!pubServer || publishing}
+                className="rounded border border-chrome-border px-2 py-1 text-[11px] text-chrome-text/80 hover:border-rvbbit-accent/40 hover:text-foreground disabled:opacity-45"
+              >
+                {publishing ? "Publishing…" : "Publish"}
+              </button>
+            </div>
+            {pubMsg ? <div className="mt-1 text-[10px] text-chrome-text/70">{pubMsg}</div> : null}
+          </div>
+        </>
+      ) : (
+        <McpInstallPanel
+          connId={connId}
+          cap={sel}
+          onInstalled={onChanged}
+          onBack={() => setSel(null)}
+        />
+      )}
+    </div>
+  )
+}

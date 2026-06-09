@@ -734,13 +734,15 @@ export async function deployCatalogCapability(
   catalogId: string,
   targetSelector: Record<string, unknown>,
   jobName?: string | null,
+  installMode: "build" | "image" = "build",
 ): Promise<{ jobId: string | null; error?: string }> {
   const selectorSql = sqlLit(JSON.stringify(targetSelector)) + "::jsonb"
   const jobNameSql = jobName == null || jobName === "" ? "NULL" : sqlLit(jobName)
   const sql = `SELECT rvbbit.deploy_catalog_capability(
       catalog_id => ${sqlLit(catalogId)},
       target_selector => ${selectorSql},
-      job_name => ${jobNameSql}
+      job_name => ${jobNameSql},
+      install_mode => ${sqlLit(installMode)}
     ) AS job_id`
   const res = await runQuery(connectionId, sql)
   if (!res.ok) return { jobId: null, error: res.error }

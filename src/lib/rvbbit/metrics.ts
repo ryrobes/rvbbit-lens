@@ -412,18 +412,30 @@ function safeJson(s: string): unknown {
 
 /** Pull a single headline number out of a (value, verdict) pair: verdict.value
  *  first, else the first numeric field of the first result row. */
+/** Generic row-count column names — used only as a last resort for the headline,
+ *  so e.g. `{n, region, revenue}` surfaces `revenue`, not the `n` counter. */
+const COUNTER_KEYS = new Set(["n", "count", "cnt", "rows", "num", "row_count", "total_count"])
+
+function asNumber(x: unknown): number | null {
+  if (typeof x === "number") return x
+  if (typeof x === "string" && x.trim() !== "" && Number.isFinite(Number(x))) return Number(x)
+  return null
+}
+
 function headlineOf(value: unknown, verdict: MetricVerdict | null): number | null {
-  const v = verdict?.value
-  if (typeof v === "number") return v
-  if (typeof v === "string" && v.trim() !== "" && Number.isFinite(Number(v))) return Number(v)
+  const v = asNumber(verdict?.value)
+  if (v != null) return v
   const rows = Array.isArray(value) ? (value as Array<Record<string, unknown>>) : []
   const first = rows[0]
   if (first) {
+    let counterFallback: number | null = null
     for (const k of Object.keys(first)) {
-      const n = first[k]
-      if (typeof n === "number") return n
-      if (typeof n === "string" && n.trim() !== "" && Number.isFinite(Number(n))) return Number(n)
+      const n = asNumber(first[k])
+      if (n == null) continue
+      if (!COUNTER_KEYS.has(k.toLowerCase())) return n // prefer a real measure
+      if (counterFallback == null) counterFallback = n
     }
+    if (counterFallback != null) return counterFallback
   }
   return null
 }

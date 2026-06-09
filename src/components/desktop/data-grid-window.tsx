@@ -46,6 +46,7 @@ import { classifyColumn } from "@/lib/desktop/chart-infer"
 import { RollupShelf, type FilterKind } from "./rollup-shelf"
 import type { QueryResult, SchemaSnapshot } from "@/lib/db/types"
 import { buildSqlCompletionSchema } from "@/lib/desktop/sql-completion"
+import type { BlockReferenceMap } from "@/lib/desktop/sql-block-refs"
 import { cn } from "@/lib/utils"
 import { rowsToCsv } from "@/lib/sql/format"
 import {
@@ -222,6 +223,31 @@ export function DataGridWindow({
     if (payload.reactive?.blockName) return payload.reactive.blockName
     return uniqueBlockName(payload.title || w.title || w.id, allWindows, w.id)
   }, [allWindows, payload.reactive?.blockName, payload.title, w.id, w.title])
+
+  // Map of every block's `{name}` → its title + SQL, powering the editor's
+  // cross-block reference highlighting + hover cards. Memoized on reference
+  // *content* so moving/resizing windows doesn't reconfigure the editor —
+  // refSignature deliberately omits window position.
+  const refSignature = allWindows
+    .filter((win) => win.kind === "data")
+    .map((win) => {
+      const p = win.payload as DataPayload | undefined
+      const name = p?.reactive?.blockName || slugifyBlockName(p?.title || win.title || win.id)
+      return `${name}${p?.title ?? ""}${p ? sourceSqlForPayload(p) : ""}`
+    })
+    .join("")
+  const blockReferences = useMemo<BlockReferenceMap>(() => {
+    const map: BlockReferenceMap = new Map()
+    for (const win of allWindows) {
+      if (win.kind !== "data") continue
+      const p = win.payload as DataPayload | undefined
+      if (!p) continue
+      const name = p.reactive?.blockName || slugifyBlockName(p.title || win.title || win.id)
+      if (name) map.set(name.toLowerCase(), { title: p.title || win.title || name, sql: sourceSqlForPayload(p) })
+    }
+    return map
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [refSignature])
 
   // First time this window opens, persist its unique block name into
   // the payload so subsequent renders see the same name and other
@@ -919,6 +945,7 @@ export function DataGridWindow({
                 schema={sqlCompletion?.namespace}
                 defaultSchema={sqlCompletion?.defaultSchema}
                 completionSources={completionSources}
+                blockReferences={blockReferences}
               />
             )}
           </div>
@@ -1103,6 +1130,7 @@ export function DataGridWindow({
                 schema={sqlCompletion?.namespace}
                 defaultSchema={sqlCompletion?.defaultSchema}
                 completionSources={completionSources}
+                blockReferences={blockReferences}
               />
             </div>
           ) : null}

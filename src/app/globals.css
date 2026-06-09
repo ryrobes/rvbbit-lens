@@ -208,6 +208,7 @@
   --cap-type-classify: color-mix(in oklch, var(--viz-kind-9) 68%, var(--brand-operators));
   --cap-type-forecast: color-mix(in oklch, var(--viz-kind-6) 68%, var(--brand-routing));
   --cap-type-tabular: color-mix(in oklch, var(--viz-kind-table) 68%, var(--brand-kg));
+  --cap-type-mcp: color-mix(in oklch, var(--viz-op-runtime) 60%, var(--brand-kg));
   --cap-type-specialist: color-mix(in oklch, var(--viz-op-specialist) 68%, var(--brand-specialists));
 
   /* Wallpaper darkening overlay (when a custom wallpaper is set).
@@ -342,6 +343,7 @@
   --cap-type-classify: color-mix(in oklch, var(--viz-kind-9) 68%, var(--brand-operators));
   --cap-type-forecast: color-mix(in oklch, var(--viz-kind-6) 68%, var(--brand-routing));
   --cap-type-tabular: color-mix(in oklch, var(--viz-kind-table) 68%, var(--brand-kg));
+  --cap-type-mcp: color-mix(in oklch, var(--viz-op-runtime) 60%, var(--brand-kg));
   --cap-type-specialist: color-mix(in oklch, var(--viz-op-specialist) 68%, var(--brand-specialists));
 
   --wallpaper-overlay-from: oklch(94% 0.01 95 / 0.62);

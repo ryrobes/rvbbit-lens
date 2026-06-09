@@ -14,6 +14,7 @@ import {
   listMetrics,
   resolveMetricSql,
   recomputeCell,
+  checkMetric,
   boardCellHeadline,
   type MetricBoardCell,
   type MetricSummary,
@@ -137,7 +138,13 @@ export function MetricBoardWindow({
   const [mode, setMode] = useState<"value" | "restate">(payload.mode ?? "value")
   const [defDate, setDefDate] = useState<string>(payload.defDate ?? "")
   const [recompute, setRecompute] = useState<Map<string, Recomputed>>(new Map())
+  const [whatIf, setWhatIf] = useState<{ metric: string; target: number } | null>(null)
+  const [whatIfVerdicts, setWhatIfVerdicts] = useState<Map<string, boolean | null>>(new Map())
   const defActive = mode === "value" && defDate !== ""
+  const clearWhatIf = useCallback(() => {
+    setWhatIf(null)
+    setWhatIfVerdicts(new Map())
+  }, [])
 
   const selectRange = useCallback(
     (i: number) => {
@@ -259,6 +266,34 @@ export function MetricBoardWindow({
     }
   }, [mode, defActive, defDate, cells, activeConnectionId])
 
+  // Threshold what-if: recolor a KPI's whole row by re-running its check with an
+  // overridden {target} (debounced). The metric value is unchanged — only the
+  // verdict moves — answering "how many past periods breach at target X?".
+  useEffect(() => {
+    if (!whatIf || !activeConnectionId) return
+    const { metric, target } = whatIf
+    let cancelled = false
+    const timer = setTimeout(() => {
+      void (async () => {
+        const out = new Map<string, boolean | null>()
+        for (const c of cells) {
+          if (cancelled) return
+          if (c.metric !== metric) continue
+          const dataIso = c.dataAsOf ? new Date(c.dataAsOf).toISOString() : null
+          const defIso = c.defAsOf ? new Date(c.defAsOf).toISOString() : null
+          const { verdict } = await checkMetric(activeConnectionId, metric, { ...(c.params ?? {}), target }, defIso, dataIso)
+          if (cancelled) return
+          out.set(`${c.metric} ${c.bucketMs}`, verdict?.ok ?? null)
+          setWhatIfVerdicts(new Map(out))
+        }
+      })()
+    }, 250)
+    return () => {
+      cancelled = true
+      clearTimeout(timer)
+    }
+  }, [whatIf, cells, activeConnectionId])
+
   const { columns, byKey } = useMemo(() => {
     const colSet = new Set<number>()
     const byKey = new Map<string, MetricBoardCell>()
@@ -284,6 +319,15 @@ export function MetricBoardWindow({
     if (!c) return { text: <span className="text-chrome-text/20">·</span>, cls: "text-chrome-text/20", title: undefined as string | undefined }
     const key = `${c.metric} ${c.bucketMs}`
     const baseTitle = `${c.metric} @ ${fmtCol(c.bucketMs, bucket)}${c.dataGeneration != null ? ` · gen ${c.dataGeneration}` : ""}`
+    if (whatIf && c.metric === whatIf.metric) {
+      const ok = whatIfVerdicts.get(key)
+      const h = boardCellHeadline(c)
+      return {
+        text: h != null ? compactNum(h) : <span className="text-chrome-text/20">·</span>,
+        cls: cn(tint(ok), "ring-1 ring-inset ring-amber-400/50"),
+        title: `${baseTitle} · what-if target ${whatIf.target}: ${ok === false ? "BREACH" : ok === true ? "ok" : "…"}`,
+      }
+    }
     if (mode === "restate") {
       const r = recompute.get(key)
       if (!r) return { text: "…", cls: "text-chrome-text/30", title: "computing…" }
@@ -312,6 +356,18 @@ export function MetricBoardWindow({
       title: `${baseTitle}${c.verdict?.target != null ? ` · target ${c.verdict.target}` : ""}`,
     }
   }
+
+  // Popover-scoped derivations for the selected cell (explain + what-if).
+  const selMeta = sel ? metrics.find((m) => m.name === sel.cell.metric) ?? null : null
+  const selIsKpi = !!selMeta?.checkSql
+  const selRowCells = sel ? cells.filter((c) => c.metric === sel.cell.metric) : []
+  const selTarget = sel?.cell.verdict?.target != null ? Number(sel.cell.verdict.target) : 0
+  const whatIfOnSel = !!(whatIf && sel && whatIf.metric === sel.cell.metric)
+  const whatIfTarget = whatIfOnSel ? whatIf!.target : selTarget
+  const sliderMax = Math.max(selTarget * 2, ...selRowCells.map((c) => boardCellHeadline(c) ?? 0), 1)
+  const breaches = whatIfOnSel
+    ? selRowCells.filter((c) => whatIfVerdicts.get(`${c.metric} ${c.bucketMs}`) === false).length
+    : 0
 
   if (!hasRvbbit) {
     return (
@@ -414,6 +470,14 @@ export function MetricBoardWindow({
             </button>
           ) : null}
         </label>
+        {whatIf ? (
+          <span className="flex items-center gap-1 rounded border border-amber-400/50 bg-amber-400/10 px-1.5 py-0.5 text-[11px] text-amber-100">
+            what-if: {whatIf.metric} @ {compactNum(whatIf.target)}
+            <button onClick={clearWhatIf} className="text-amber-200/70 hover:text-amber-100" title="clear what-if">
+              <X className="h-3 w-3" />
+            </button>
+          </span>
+        ) : null}
         <button
           onClick={() => void load()}
           className="ml-auto flex items-center gap-1 rounded border border-chrome-border px-2 py-1 text-[11px] text-chrome-text/80 hover:bg-chrome-bg/60"
@@ -542,6 +606,56 @@ export function MetricBoardWindow({
               <Row k="def version" v={sel.cell.metricVersion != null ? `v${sel.cell.metricVersion}` : "—"} />
               <Row k="trigger" v={sel.cell.trigger} />
             </div>
+            {/* explain-the-red + threshold what-if (KPI cells only) */}
+            {selIsKpi ? (
+              <div className="border-t border-chrome-border px-2.5 py-2 text-[11px]">
+                <div className="mb-1 text-chrome-text/50">check</div>
+                <code className="block whitespace-pre-wrap break-words rounded bg-black/25 px-1.5 py-1 text-[10px] leading-snug text-chrome-text/80">
+                  {selMeta?.checkSql}
+                </code>
+                {sel.cell.verdict ? (
+                  <div className="mt-1.5 flex flex-wrap items-center gap-1.5 text-[10px] text-chrome-text/70">
+                    <span className="tabular-nums">value {sel.cell.verdict.value != null ? String(sel.cell.verdict.value) : "—"}</span>
+                    <span className="text-chrome-text/30">·</span>
+                    <span className="tabular-nums">target {sel.cell.verdict.target != null ? String(sel.cell.verdict.target) : "—"}</span>
+                    <span className="text-chrome-text/30">→</span>
+                    <span className={sel.cell.verdict.ok === false ? "font-medium text-red-300" : "font-medium text-emerald-300"}>
+                      {sel.cell.verdict.ok === false ? "FAIL" : "PASS"}
+                    </span>
+                  </div>
+                ) : null}
+                <div className="mt-2.5">
+                  <div className="mb-1 flex items-center justify-between">
+                    <span className="text-chrome-text/50">what-if target</span>
+                    <input
+                      type="number"
+                      value={whatIfTarget}
+                      onChange={(e) => setWhatIf({ metric: sel.cell.metric, target: Number(e.target.value) })}
+                      className={cn(inputCls, "h-6 w-24 text-right")}
+                    />
+                  </div>
+                  <input
+                    type="range"
+                    min={0}
+                    max={sliderMax}
+                    step={sliderMax / 100 || 1}
+                    value={whatIfTarget}
+                    onChange={(e) => setWhatIf({ metric: sel.cell.metric, target: Number(e.target.value) })}
+                    className="w-full accent-amber-400"
+                  />
+                  {whatIfOnSel ? (
+                    <div className="mt-1 flex items-center justify-between text-[10px]">
+                      <span className="text-amber-200/80">
+                        {breaches}/{selRowCells.length} period{selRowCells.length === 1 ? "" : "s"} breach at {compactNum(whatIfTarget)}
+                      </span>
+                      <button onClick={clearWhatIf} className="text-chrome-text/50 hover:text-chrome-text">
+                        reset
+                      </button>
+                    </div>
+                  ) : null}
+                </div>
+              </div>
+            ) : null}
             <div className="flex flex-col border-t border-chrome-border text-[11px]">
               <button
                 onClick={() => void drill(sel.cell)}

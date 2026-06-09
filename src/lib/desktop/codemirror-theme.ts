@@ -27,6 +27,63 @@ const editorTheme = EditorView.theme(
       caretColor: "var(--main)",
       padding: "8px 0",
     },
+    // Cross-block `{name}` references: an accent pill when the block resolves,
+    // a wavy warning underline when it's dangling. (.cm-block-ref-missing is
+    // declared after .cm-block-ref so it overrides the shared props.)
+    ".cm-block-ref": {
+      backgroundColor: "color-mix(in oklch, var(--main) 16%, transparent)",
+      color: "var(--main)",
+      borderRadius: "4px",
+      padding: "0 3px",
+      boxShadow: "inset 0 0 0 1px color-mix(in oklch, var(--main) 32%, transparent)",
+    },
+    ".cm-block-ref-missing": {
+      backgroundColor: "transparent",
+      color: "var(--warning)",
+      boxShadow: "none",
+      textDecoration: "underline wavy",
+      textDecorationColor: "color-mix(in oklch, var(--warning) 70%, transparent)",
+      textUnderlineOffset: "2px",
+    },
+    ".cm-block-ref-tooltip": {
+      padding: "7px 9px",
+      maxWidth: "440px",
+    },
+    ".cm-block-ref-tooltip-head": {
+      display: "flex",
+      gap: "8px",
+      alignItems: "baseline",
+      justifyContent: "space-between",
+      fontWeight: "600",
+      fontSize: "11px",
+      color: "var(--main)",
+      marginBottom: "5px",
+    },
+    ".cm-block-ref-tooltip-name": {
+      fontFamily: "var(--font-family-mono)",
+      fontSize: "10px",
+      fontWeight: "400",
+      color: "color-mix(in oklch, var(--chrome-text) 70%, transparent)",
+    },
+    ".cm-block-ref-tooltip-missing": {
+      color: "var(--warning)",
+    },
+    ".cm-block-ref-tooltip-note": {
+      fontSize: "10px",
+      lineHeight: "1.4",
+      color: "color-mix(in oklch, var(--chrome-text) 70%, transparent)",
+    },
+    ".cm-block-ref-tooltip-sql": {
+      margin: "0",
+      whiteSpace: "pre-wrap",
+      wordBreak: "break-word",
+      fontFamily: "var(--font-family-mono)",
+      fontSize: "11px",
+      lineHeight: "1.45",
+      color: "var(--foreground)",
+      maxHeight: "220px",
+      overflow: "auto",
+    },
     ".cm-cursor, .cm-dropCursor": {
       borderLeftColor: "var(--main)",
       borderLeftWidth: "2px",

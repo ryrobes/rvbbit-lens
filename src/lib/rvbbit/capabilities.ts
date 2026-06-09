@@ -128,6 +128,7 @@ export interface ManifestSourceBlock {
 }
 
 export interface ManifestRuntimeBlock {
+  mode?: string
   image?: string
   image_digest?: string
   pull_policy?: string
@@ -198,6 +199,11 @@ export interface Manifest {
   tags?: string[]
   source?: ManifestSourceBlock
   runtime?: ManifestRuntimeBlock
+  prebuilt_runtime?: {
+    image?: string
+    pull_policy?: string
+    source?: string
+  }
   /** Present on model packs (`kind: hf_backend`); absent on runtime sidecars. */
   backend?: ManifestBackendBlock
   /** Present on runtime sidecars (`kind: runtime_sidecar`). */
@@ -996,7 +1002,13 @@ export type ComposeFrame =
  * server-side.
  */
 export async function streamComposeUp(
-  args: { outDir: string; gpu?: boolean; publishHostPort?: boolean },
+  args: {
+    outDir: string
+    device?: string
+    gpu?: boolean
+    gpuIntent?: boolean
+    publishHostPort?: boolean
+  },
   onFrame: (frame: ComposeFrame) => void,
   signal?: AbortSignal,
 ): Promise<{ exitCode: number; error?: string }> {
@@ -1244,6 +1256,7 @@ export type CapabilityTypeKey =
   | "classify"
   | "forecast"
   | "tabular"
+  | "mcp"
   | "specialist"
 
 export interface CapabilityTypeTone {
@@ -1307,6 +1320,12 @@ export const CAPABILITY_TYPE_TONES: Record<CapabilityTypeKey, CapabilityTypeTone
     label: "Data/table",
     shortLabel: "Data",
     cssVar: "--cap-type-tabular",
+  },
+  mcp: {
+    key: "mcp",
+    label: "MCP server",
+    shortLabel: "MCP",
+    cssVar: "--cap-type-mcp",
   },
   specialist: {
     key: "specialist",
@@ -1377,6 +1396,7 @@ function classifyCapabilityTypeFields({
   const hasText = (...needles: string[]) => needles.some((t) => nameBits.includes(t))
   const hasAny = (...needles: string[]) => hasTag(...needles) || hasText(...needles)
 
+  if (kind === "mcp" || hasTag("mcp")) return "mcp"
   if (handler === "vllm_openai" || hasAny("vllm")) return "vllm"
   if (kind === "runtime_sidecar") return "runtime"
   if (kind === "llm_provider" || transport === "openai_chat" || hasTag("llm")) return "llm"

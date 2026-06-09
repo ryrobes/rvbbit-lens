@@ -4,8 +4,9 @@ import { useEffect, useMemo, useRef } from "react"
 import CodeMirror, { type Extension, type ReactCodeMirrorRef } from "@uiw/react-codemirror"
 import { sql, PostgreSQL, type SQLNamespace } from "@codemirror/lang-sql"
 import type { CompletionSource } from "@codemirror/autocomplete"
-import { EditorView, keymap } from "@codemirror/view"
+import { EditorView, keymap, tooltips } from "@codemirror/view"
 import { rvbbitLensCodeMirrorTheme } from "@/lib/desktop/codemirror-theme"
+import { blockReferenceExtensions, type BlockReferenceMap } from "@/lib/desktop/sql-block-refs"
 
 interface SqlEditorProps {
   value: string
@@ -27,6 +28,9 @@ interface SqlEditorProps {
   defaultSchema?: string
   /** Extra autocomplete sources merged with lang-sql's (e.g. rvbbit functions). */
   completionSources?: readonly CompletionSource[]
+  /** Cross-block `{name}` references → info, for highlighting + hover tooltips
+   *  showing the referenced block's SQL. Omit to disable reference decoration. */
+  blockReferences?: BlockReferenceMap
 }
 
 export function SqlEditor({
@@ -41,6 +45,7 @@ export function SqlEditor({
   schema,
   defaultSchema,
   completionSources,
+  blockReferences,
 }: SqlEditorProps) {
   const ref = useRef<ReactCodeMirrorRef | null>(null)
   const plain = language === "plain"
@@ -59,6 +64,15 @@ export function SqlEditor({
       for (const source of completionSources ?? []) {
         exts.push(lang.language.data.of({ autocomplete: source }))
       }
+      // highlight cross-block {name} references + hover-to-see their SQL.
+      if (blockReferences) exts.push(blockReferenceExtensions(blockReferences))
+      // Render tooltips (hover cards + the completion popup) into <body> so the
+      // editor's overflow-hidden chrome (rail, window body) can't clip them. CM
+      // copies the editor's theme classes onto the external container, so the
+      // themed styling is preserved.
+      if (typeof document !== "undefined") {
+        exts.push(tooltips({ position: "fixed", parent: document.body }))
+      }
     }
     if (wrap && !plain) exts.push(EditorView.lineWrapping)
     if (onRun) {
@@ -72,7 +86,7 @@ export function SqlEditor({
       )
     }
     return exts
-  }, [onRun, plain, wrap, schema, defaultSchema, completionSources])
+  }, [onRun, plain, wrap, schema, defaultSchema, completionSources, blockReferences])
 
   // Auto-focus on first mount.
   useEffect(() => {

@@ -22,7 +22,7 @@ import {
   parseVllmKnobs,
   runAcceptanceSql,
   type AcceptanceRunStep,
-  type CapabilityTypeTone,
+type CapabilityTypeTone,
   type InstallKnobs,
   type Manifest,
   type ManifestAcceptanceBlock,
@@ -49,6 +49,8 @@ import {
   CapabilityTypeChip,
   capabilityTypeStyle,
 } from "./capability-type-visuals"
+
+type InstallMode = "build" | "image"
 
 interface WarrenDeployPanelProps {
   activeConnectionId: string | null
@@ -91,6 +93,7 @@ export function WarrenDeployPanel({
   const [observations, setObservations] = useState<WarrenLabelObservation[]>([])
   const [selector, setSelector] = useState<Record<string, unknown>>({})
   const [jobName, setJobName] = useState("")
+  const [installMode, setInstallMode] = useState<InstallMode>("build")
   const [deploying, setDeploying] = useState(false)
   const [deployError, setDeployError] = useState<string | null>(null)
   /** Most recent successful enqueue — kept visible after the auto-open. */
@@ -108,6 +111,12 @@ export function WarrenDeployPanel({
     () => capabilityTypeTone(classifyManifestCapabilityType(manifest)),
     [manifest],
   )
+  const prebuiltImage = useMemo(() => prebuiltRuntimeImage(manifest), [manifest])
+  const hasPrebuiltImage = prebuiltImage != null
+  const effectiveInstallMode: InstallMode = hasPrebuiltImage ? installMode : "build"
+  useEffect(() => {
+    if (!hasPrebuiltImage && installMode !== "build") setInstallMode("build")
+  }, [hasPrebuiltImage, installMode])
 
   // ── poll inventory + label observations ──
   const reload = useCallback(async () => {
@@ -209,10 +218,21 @@ export function WarrenDeployPanel({
     // max-model-len, …) would be dropped server-side. Fall back to the
     // manifest+knobs path so the user's overrides actually reach the agent.
     const useKnobOverride = catalogId && vllmKnobsCustomized
+    const deployManifest = manifestWithKnobs(manifest, knobs)
+    const adHocManifest =
+      effectiveInstallMode === "image"
+        ? manifestWithPrebuiltRuntime(deployManifest)
+        : deployManifest
     const result =
       catalogId && !useKnobOverride
-        ? await deployCatalogCapability(activeConnectionId, catalogId, selector, trimmedName)
-        : await deployCapability(activeConnectionId, manifestWithKnobs(manifest, knobs), selector, trimmedName)
+        ? await deployCatalogCapability(
+            activeConnectionId,
+            catalogId,
+            selector,
+            trimmedName,
+            effectiveInstallMode,
+          )
+        : await deployCapability(activeConnectionId, adHocManifest, selector, trimmedName)
     setDeploying(false)
     if (result.error || !result.jobId) {
       setDeployError(result.error ?? "deploy returned no job id")
@@ -223,7 +243,17 @@ export function WarrenDeployPanel({
     setAcceptanceSteps([])
     setAcceptanceOk(null)
     onOpenJob(result.jobId, trimmedName)
-  }, [activeConnectionId, catalogId, vllmKnobsCustomized, manifest, knobs, selector, jobName, onOpenJob])
+  }, [
+    activeConnectionId,
+    catalogId,
+    vllmKnobsCustomized,
+    effectiveInstallMode,
+    manifest,
+    knobs,
+    selector,
+    jobName,
+    onOpenJob,
+  ])
 
   const runAcceptance = useCallback(async () => {
     if (!activeConnectionId || !acceptance || acceptanceRunning) return
@@ -335,6 +365,33 @@ export function WarrenDeployPanel({
                 className="h-7 w-full rounded border border-chrome-border bg-secondary-background px-2 font-mono text-[11px] text-foreground outline-none focus:ring-2 focus:ring-ring"
               />
             </div>
+
+            {hasPrebuiltImage ? (
+              <div>
+                <div className="mb-1 flex items-center gap-1.5 text-[9px] uppercase tracking-wider text-chrome-text/55">
+                  <Cpu className="h-3 w-3" />
+                  artifact mode
+                </div>
+                <div className="grid grid-cols-2 overflow-hidden rounded border border-chrome-border bg-secondary-background">
+                  {(["build", "image"] as InstallMode[]).map((mode) => (
+                    <button
+                      key={mode}
+                      type="button"
+                      onClick={() => setInstallMode(mode)}
+                      className={cn(
+                        "h-7 px-2 text-[10px] uppercase tracking-wider",
+                        effectiveInstallMode === mode
+                          ? "bg-brand-warren/15 text-brand-warren"
+                          : "text-chrome-text/60 hover:bg-foreground/[0.05] hover:text-foreground",
+                      )}
+                      title={mode === "image" ? prebuiltImage : undefined}
+                    >
+                      {mode === "build" ? "Build" : "Prebuilt"}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            ) : null}
 
             <div className="space-y-1.5 border-t border-chrome-border/40 pt-3">
               <Button
@@ -632,6 +689,31 @@ function shallowEqual(a: unknown, b: unknown): boolean {
   if (typeof a !== typeof b) return false
   if (typeof a === "object") return JSON.stringify(a) === JSON.stringify(b)
   return false
+}
+
+function prebuiltRuntimeImage(manifest: Manifest): string | null {
+  const prebuilt = manifest.prebuilt_runtime
+  const image = typeof prebuilt?.image === "string" ? prebuilt.image.trim() : ""
+  return image.length > 0 ? image : null
+}
+
+function manifestWithPrebuiltRuntime(manifest: Manifest): Manifest {
+  const image = prebuiltRuntimeImage(manifest)
+  if (!image) return manifest
+  const pullPolicy =
+    typeof manifest.prebuilt_runtime?.pull_policy === "string" &&
+    manifest.prebuilt_runtime.pull_policy.trim().length > 0
+      ? manifest.prebuilt_runtime.pull_policy.trim()
+      : "missing"
+  return {
+    ...manifest,
+    runtime: {
+      ...(manifest.runtime ?? {}),
+      mode: "image",
+      image,
+      pull_policy: pullPolicy,
+    },
+  }
 }
 
 function LabelKeyRow({

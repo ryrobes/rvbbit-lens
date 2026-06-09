@@ -42,6 +42,11 @@ interface CapabilityInstallGraphProps {
   onInstalledChanged?: () => void
 }
 
+function manifestGpuIntent(manifest: Manifest): boolean {
+  const gpu = manifest.resources?.gpu
+  return gpu?.required === true || Boolean(String(gpu?.placement ?? "").trim())
+}
+
 // ── Step state model ────────────────────────────────────────────────
 
 type StepKey = "scaffold" | "build" | "register" | "operator" | "smoke"
@@ -190,6 +195,9 @@ export function CapabilityInstallGraph({
   const [running, setRunning] = useState(false)
   const [pipelineError, setPipelineError] = useState<string | null>(null)
   const composeAbortRef = useRef<AbortController | null>(null)
+  const gpuIntent = useMemo(() => manifestGpuIntent(manifest), [manifest])
+  const devicePref = (knobs.device || "auto").trim().toLowerCase()
+  const autoGpuEligible = !knobs.gpu && (devicePref === "cuda" || (devicePref === "auto" && gpuIntent))
 
   // ── per-step runners ──
   const setStep = useCallback((key: StepKey, patch: Partial<StepState>) => {
@@ -238,7 +246,13 @@ export function CapabilityInstallGraph({
     composeAbortRef.current = abort
 
     const result = await streamComposeUp(
-      { outDir: knobs.outputDir, gpu: knobs.gpu, publishHostPort: knobs.publishHostPort },
+      {
+        outDir: knobs.outputDir,
+        device: knobs.device,
+        gpu: knobs.gpu,
+        gpuIntent,
+        publishHostPort: knobs.publishHostPort,
+      },
       (frame: ComposeFrame) => {
         if (frame.type === "line") {
           setArtifacts((a) => {
@@ -273,7 +287,7 @@ export function CapabilityInstallGraph({
     }
     setStep("build", { status: "ok", endedAt: Date.now() })
     return true
-  }, [knobs.outputDir, knobs.gpu, knobs.publishHostPort, setStep])
+  }, [gpuIntent, knobs.device, knobs.outputDir, knobs.gpu, knobs.publishHostPort, setStep])
 
   const runSqlStep = useCallback(
     async (
@@ -511,6 +525,10 @@ export function CapabilityInstallGraph({
         {knobs.gpu ? (
           <span className="rounded-full bg-warning/15 px-1.5 py-0.5 text-[9px] uppercase tracking-wider text-warning">
             gpu overlay
+          </span>
+        ) : autoGpuEligible ? (
+          <span className="rounded-full bg-warning/15 px-1.5 py-0.5 text-[9px] uppercase tracking-wider text-warning">
+            gpu auto
           </span>
         ) : null}
         {knobs.publishHostPort ? (
