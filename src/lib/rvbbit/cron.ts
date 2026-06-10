@@ -205,6 +205,23 @@ export function scheduleSql(name: string, schedule: string, command: string, tar
 export function unscheduleSql(jobid: number): string {
   return `SELECT cron.unschedule(${jobid})`
 }
+
+/** Install the four alert pg_cron jobs (3 sweep tiers + the action worker) in one
+ *  statement, consistent with the home-db→target-db model the tray uses. The job
+ *  names match isAlertJob() so they're recognised once created. */
+export function alertsInstallSql(targetDb: string): string {
+  const sched = (name: string, schedule: string, cmd: string) =>
+    `cron.schedule_in_database(${q(name)}, ${q(schedule)}, ${q(cmd)}, ${q(targetDb)})`
+  return (
+    "SELECT " +
+    [
+      sched("rvbbit_alert_sweep_fast", "* * * * *", "SELECT rvbbit.alert_sweep('fast')"),
+      sched("rvbbit_alert_sweep_normal", "*/15 * * * *", "SELECT rvbbit.alert_sweep('normal')"),
+      sched("rvbbit_alert_sweep_slow", "0 * * * *", "SELECT rvbbit.alert_sweep('slow')"),
+      sched("rvbbit_alert_worker", "* * * * *", "SELECT rvbbit.alert_worker_tick(50)"),
+    ].join(",\n       ")
+  )
+}
 export function setActiveSql(jobid: number, active: boolean): string {
   return `SELECT cron.alter_job(job_id := ${jobid}, active := ${active})`
 }
@@ -225,4 +242,8 @@ export function isAccelTickJob(j: CronJob): boolean {
 /** Does this job run the temporal-mirror sync? */
 export function isSyncJob(j: CronJob): boolean {
   return /run_sync/i.test(j.command) || j.jobname === "rvbbit_sync"
+}
+/** Does this job run an alert sweep or the alert action worker? */
+export function isAlertJob(j: CronJob): boolean {
+  return /rvbbit\.(alert_sweep|alert_worker_tick)\b/i.test(j.command) || /^rvbbit_alert_/.test(j.jobname ?? "")
 }

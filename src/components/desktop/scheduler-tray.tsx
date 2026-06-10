@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import {
   AlertTriangle,
+  Bell,
   Check,
   ChevronDown,
   ChevronRight,
@@ -21,10 +22,12 @@ import { cn } from "@/lib/utils"
 import { fmtAgo } from "./instruments"
 import { SqlEditor } from "./sql-editor"
 import {
+  alertsInstallSql,
   CREATE_EXTENSION_SQL,
   detectCronState,
   exec,
   isAccelTickJob,
+  isAlertJob,
   isCatalogJob,
   isSemanticJob,
   isSyncJob,
@@ -200,6 +203,7 @@ export function SchedulerTray({ activeConnectionId, hasRvbbit, onOpenSql, onOpen
   const crawlJob = jobs.find(isCatalogJob)
   const accelTickJob = jobs.find(isAccelTickJob)
   const syncJob = jobs.find(isSyncJob)
+  const alertJobs = jobs.filter(isAlertJob)
   // Where newly scheduled jobs RUN: the working db the user is connected to. The
   // job is registered in the home db (cron.database_name) but targets this db via
   // cron.schedule_in_database, so it need not equal the home db.
@@ -317,6 +321,13 @@ export function SchedulerTray({ activeConnectionId, hasRvbbit, onOpenSql, onOpen
                         void mutate(scheduleSql("rvbbit_sync", "0 */3 * * *", RUN_SYNC_COMMAND, targetDb))
                       }
                     />
+                  </div>
+                ) : null}
+
+                {/* alerts: sweep tiers + action worker */}
+                {hasRvbbit ? (
+                  <div className="mt-1">
+                    <AlertsPreset jobs={alertJobs} busy={busy} onSchedule={() => void mutate(alertsInstallSql(targetDb))} />
                   </div>
                 ) : null}
 
@@ -521,6 +532,41 @@ function SyncPreset({ job, busy, onSchedule }: { job?: CronJob; busy: boolean; o
         className="ml-auto rounded bg-rvbbit-accent/15 px-2 py-0.5 text-[11px] font-medium text-rvbbit-accent hover:bg-rvbbit-accent/25 disabled:opacity-40"
       >
         Schedule every 3h
+      </button>
+    </div>
+  )
+}
+
+function AlertsPreset({ jobs, busy, onSchedule }: { jobs: CronJob[]; busy: boolean; onSchedule: () => void }) {
+  if (jobs.length > 0) {
+    const active = jobs.filter((j) => j.active).length
+    const sweeps = jobs.filter((j) => /alert_sweep/i.test(j.command) || /sweep/.test(j.jobname ?? "")).length
+    return (
+      <div className="flex items-center gap-2 rounded-md border border-rvbbit-accent/30 bg-rvbbit-bg/30 px-2.5 py-1.5">
+        <Bell className="h-3.5 w-3.5 shrink-0 text-rvbbit-accent" />
+        <span className="text-[11px] text-chrome-text/80">
+          Alerts — <span className="text-foreground">{sweeps} sweep tier{sweeps === 1 ? "" : "s"} + worker</span>
+        </span>
+        <span className="ml-auto text-[10px] text-chrome-text/50">
+          {active}/{jobs.length} active
+        </span>
+        <span className={cn("h-1.5 w-1.5 rounded-full", active > 0 ? "bg-success" : "bg-chrome-text/40")} />
+      </div>
+    )
+  }
+  return (
+    <div className="flex items-center gap-2 rounded-md border border-chrome-border bg-secondary-background/40 px-2.5 py-1.5">
+      <Bell className="h-3.5 w-3.5 shrink-0 text-chrome-text/60" />
+      <span className="text-[11px] text-chrome-text/70">
+        Sweep alert conditions + drain actions (fast/normal/slow + worker).
+      </span>
+      <button
+        type="button"
+        disabled={busy}
+        onClick={onSchedule}
+        className="ml-auto rounded bg-rvbbit-accent/15 px-2 py-0.5 text-[11px] font-medium text-rvbbit-accent hover:bg-rvbbit-accent/25 disabled:opacity-40"
+      >
+        Schedule alerts
       </button>
     </div>
   )

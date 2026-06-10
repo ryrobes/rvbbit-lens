@@ -6,6 +6,8 @@ import { cn } from "@/lib/utils"
 import { useWorkspaceActive } from "./workspace-active-context"
 import { SqlEditor } from "./sql-editor"
 import { fetchAllToolsLite, schemaType, type McpToolLite } from "@/lib/rvbbit/mcp"
+import { listMetrics, type MetricSummary } from "@/lib/rvbbit/metrics"
+import { fetchOperators, type RvbbitOperator } from "@/lib/rvbbit/operators"
 import {
   commitThreshold,
   createAlert,
@@ -16,6 +18,7 @@ import {
   fetchAlertSweepRuns,
   muteRule,
   previewCondition,
+  previewMetricObservation,
   runSweep,
   runWorker,
   setAlertsEnabled,
@@ -26,6 +29,7 @@ import {
   type AlertEvent,
   type AlertRule,
   type AlertSweepRun,
+  type MetricObsPreview,
   type PreviewRow,
 } from "@/lib/rvbbit/alerts"
 import type { AlertsPayload } from "@/lib/desktop/types"
@@ -531,9 +535,9 @@ function RuleEditor({
   const cs = initial?.conditionSpec ?? {}
   const fp = initial?.firePolicy ?? {}
   const as = initial?.actionSpec ?? {}
-  const opInit = ((): "noop" | "sql" | "mcp_call" | "flow" => {
+  const opInit = ((): "noop" | "sql" | "operator" | "mcp_call" | "flow" => {
     const o = String(as.operator ?? "noop")
-    return o === "sql" || o === "mcp_call" || o === "flow" ? o : "noop"
+    return o === "sql" || o === "mcp_call" || o === "flow" || o === "operator" ? o : "noop"
   })()
   const cadInit = (["fast", "normal", "slow"] as const).includes(initial?.cadenceTier as "fast")
     ? (initial!.cadenceTier as "fast" | "normal" | "slow")
@@ -547,7 +551,7 @@ function RuleEditor({
   const [compare, setCompare] = useState<"gte" | "lte">(cs.compare === "lte" ? "lte" : "gte")
   const [consecutiveN, setConsecutiveN] = useState(fp.consecutive_n != null ? String(fp.consecutive_n) : "1")
   const [cooldownSecs, setCooldownSecs] = useState(fp.cooldown_secs != null ? String(fp.cooldown_secs) : "0")
-  const [operator, setOperator] = useState<"noop" | "sql" | "mcp_call" | "flow">(opInit)
+  const [operator, setOperator] = useState<"noop" | "sql" | "operator" | "mcp_call" | "flow">(opInit)
   const [actionSql, setActionSql] = useState(typeof as.sql === "string" ? as.sql : "INSERT INTO incidents(rule, entity, ts)\n  VALUES ($1->>'rule', $1->>'entity', now())")
   const [server, setServer] = useState(typeof as.server === "string" ? as.server : "linear")
   const [tool, setTool] = useState(typeof as.tool === "string" ? as.tool : "create_issue")
@@ -562,6 +566,14 @@ function RuleEditor({
   const [confirmDel, setConfirmDel] = useState(false)
   const [deleting, setDeleting] = useState(false)
   const [mcpTools, setMcpTools] = useState<McpToolLite[]>([])
+  // condition: 'sql' (free-form) or 'metric' (ride a KPI's verdict)
+  const [condMode, setCondMode] = useState<"sql" | "metric">(cs.kind === "metric" ? "metric" : "sql")
+  const [metricName, setMetricName] = useState(typeof cs.metric === "string" ? cs.metric : "")
+  const [metrics, setMetrics] = useState<MetricSummary[]>([])
+  const [metricObs, setMetricObs] = useState<MetricObsPreview | null>(null)
+  // operator action: pick a catalogued operator + fill its typed args
+  const [operatorName, setOperatorName] = useState(typeof as.operator_name === "string" ? as.operator_name : "")
+  const [operators, setOperators] = useState<RvbbitOperator[]>([])
 
   // load the MCP tool catalog once the user picks the mcp_call action, so we can
   // offer server/tool completion + show the selected tool's docstring + args.
@@ -573,6 +585,49 @@ function RuleEditor({
     void (async () => {
       const r = await fetchAllToolsLite(connectionId)
       if (!cancelled) setMcpTools(r.rows)
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [operator, connectionId])
+
+  // metric catalog when the condition is metric-referenced (re-fetch per connection)
+  useEffect(() => {
+    if (condMode !== "metric") return
+    let cancelled = false
+    void (async () => {
+      const r = await listMetrics(connectionId)
+      if (!cancelled) setMetrics(r.metrics)
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [condMode, connectionId])
+
+  // the picked metric's latest observation = what the alert would read right now
+  useEffect(() => {
+    if (condMode !== "metric") return
+    let cancelled = false
+    void (async () => {
+      if (!metricName.trim()) {
+        if (!cancelled) setMetricObs(null)
+        return
+      }
+      const r = await previewMetricObservation(connectionId, metricName)
+      if (!cancelled) setMetricObs(r.obs)
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [condMode, metricName, connectionId])
+
+  // operator catalog when the action is operator-typed (re-fetch per connection)
+  useEffect(() => {
+    if (operator !== "operator") return
+    let cancelled = false
+    void (async () => {
+      const r = await fetchOperators(connectionId)
+      if (!cancelled) setOperators(r.operators)
     })()
     return () => {
       cancelled = true
@@ -609,7 +664,7 @@ function RuleEditor({
   const nBreach = preview.filter(breaches).length
 
   const argsValid = useMemo(() => {
-    if (operator !== "mcp_call") return true
+    if (operator !== "mcp_call" && operator !== "operator") return true
     try {
       JSON.parse(argsJson)
       return true
@@ -617,6 +672,20 @@ function RuleEditor({
       return false
     }
   }, [operator, argsJson])
+
+  const selectedMetric = useMemo(() => metrics.find((m) => m.name === metricName) ?? null, [metrics, metricName])
+  const selectedOperator = useMemo(() => operators.find((o) => o.name === operatorName) ?? null, [operators, operatorName])
+  // (name, type) per positional arg of the picked operator
+  const operatorArgs = useMemo(() => {
+    if (!selectedOperator) return [] as { name: string; type: string }[]
+    return selectedOperator.arg_names.map((n, i) => ({ name: n, type: selectedOperator.arg_types[i] ?? "text" }))
+  }, [selectedOperator])
+  const fillOperatorTemplate = () => {
+    if (!selectedOperator) return
+    const skel: Record<string, unknown> = {}
+    for (const n of selectedOperator.arg_names) skel[n] = ""
+    setArgsJson(JSON.stringify(skel, null, 2))
+  }
 
   const mcpServers = useMemo(() => [...new Set(mcpTools.map((t) => t.server))].sort(), [mcpTools])
   const toolsForServer = useMemo(() => mcpTools.filter((t) => t.server === server), [mcpTools, server])
@@ -651,14 +720,26 @@ function RuleEditor({
   }
 
   const buildDraft = (): AlertDraft => {
-    const condition: Record<string, unknown> = { kind: "sql", query: query.trim() }
-    if (scored) {
-      condition.threshold = Number(threshold)
-      condition.compare = compare
+    let condition: Record<string, unknown>
+    if (condMode === "metric") {
+      condition = { kind: "metric", metric: metricName.trim() }
+    } else {
+      condition = { kind: "sql", query: query.trim() }
+      if (scored) {
+        condition.threshold = Number(threshold)
+        condition.compare = compare
+      }
     }
     const action: Record<string, unknown> = { operator }
     if (operator === "sql") action.sql = actionSql
-    else if (operator === "mcp_call") {
+    else if (operator === "operator") {
+      action.operator_name = operatorName.trim()
+      try {
+        action.args = JSON.parse(argsJson)
+      } catch {
+        action.args = {}
+      }
+    } else if (operator === "mcp_call") {
       action.server = server
       action.tool = tool
       try {
@@ -682,7 +763,9 @@ function RuleEditor({
     }
   }
 
-  const canSave = name.trim().length > 0 && query.trim().length > 0 && argsValid && !saving
+  const conditionReady = condMode === "metric" ? metricName.trim().length > 0 : query.trim().length > 0
+  const operatorReady = operator !== "operator" || operatorName.trim().length > 0
+  const canSave = name.trim().length > 0 && conditionReady && operatorReady && argsValid && !saving
   const save = async () => {
     setSaving(true)
     const err = await createAlert(connectionId, buildDraft())
@@ -762,26 +845,82 @@ function RuleEditor({
         <div className="mb-1 flex items-center gap-2 text-[11px]">
           <span className="font-medium text-foreground">Condition</span>
           <div className="flex items-center overflow-hidden rounded border border-chrome-border text-[10px]">
-            {(["scored", "status"] as const).map((m) => (
-              <button
-                key={m}
-                type="button"
-                onClick={() => setScored(m === "scored")}
-                className={cn("px-1.5 py-0.5", (m === "scored") === scored ? "bg-rvbbit-accent/20 text-foreground" : "text-chrome-text/60")}
-              >
+            {(["sql", "metric"] as const).map((m) => (
+              <button key={m} type="button" onClick={() => setCondMode(m)} className={cn("px-1.5 py-0.5 font-mono", condMode === m ? "bg-rvbbit-accent/20 text-foreground" : "text-chrome-text/60")}>
                 {m}
               </button>
             ))}
           </div>
+          {condMode === "sql" ? (
+            <div className="flex items-center overflow-hidden rounded border border-chrome-border text-[10px]">
+              {(["scored", "status"] as const).map((m) => (
+                <button
+                  key={m}
+                  type="button"
+                  onClick={() => setScored(m === "scored")}
+                  className={cn("px-1.5 py-0.5", (m === "scored") === scored ? "bg-rvbbit-accent/20 text-foreground" : "text-chrome-text/60")}
+                >
+                  {m}
+                </button>
+              ))}
+            </div>
+          ) : null}
           <span className="ml-auto text-[10px] text-chrome-text/50">
-            returns <span className="font-mono">entity_key</span> + <span className="font-mono">{scored ? "score" : "status"}</span>
+            {condMode === "sql" ? (
+              <>
+                returns <span className="font-mono">entity_key</span> + <span className="font-mono">{scored ? "score" : "status"}</span>
+              </>
+            ) : (
+              "fires when the metric's KPI check fails"
+            )}
           </span>
         </div>
-        <div className="h-36 overflow-hidden rounded border border-chrome-border/60">
-          <SqlEditor value={query} onChange={setQuery} height="100%" />
-        </div>
-        {scored ? (
-          <div className="mt-1.5 flex items-center gap-2">
+        {condMode === "metric" ? (
+          <div className="flex flex-col gap-2">
+            <Field label="metric (KPI)">
+              <select value={metricName} onChange={(e) => setMetricName(e.target.value)} className={cn(inputCls, "font-mono")}>
+                <option value="">— pick a metric —</option>
+                {metrics.map((m) => (
+                  <option key={m.name} value={m.name}>
+                    {m.name}
+                    {m.checkSql ? "" : "  (no check)"}
+                  </option>
+                ))}
+              </select>
+            </Field>
+            {selectedMetric ? (
+              <div className="rounded border border-chrome-border/60 bg-block-bg/40 p-2 text-[10px]">
+                {selectedMetric.description ? <div className="mb-1 text-chrome-text/70">{selectedMetric.description}</div> : null}
+                {!selectedMetric.checkSql ? (
+                  <div className="mb-1 text-amber-300/80">⚠ this metric has no KPI check — add a check_sql so the alert has a pass/fail verdict to ride.</div>
+                ) : null}
+                {metricObs ? (
+                  <div className="flex items-center gap-2">
+                    <span className="text-chrome-text/55">latest verdict</span>
+                    <span
+                      className="rounded px-1.5 py-0.5 font-medium uppercase"
+                      style={{
+                        background: "color-mix(in oklch, " + statusColor(metricObs.status === "fail" ? "fail" : "pass") + " 18%, transparent)",
+                        color: metricObs.status === "fail" ? "var(--color-amber-100,#fef3c7)" : "var(--color-emerald-100,#d1fae5)",
+                      }}
+                    >
+                      {metricObs.status ?? "—"}
+                    </span>
+                    <span className="ml-auto text-chrome-text/45">as of {metricObs.dataAsOf ? metricObs.dataAsOf.slice(0, 19) : "—"}</span>
+                  </div>
+                ) : (
+                  <div className="text-chrome-text/40">no materialized observation yet — materialize the metric so the alert has something to read.</div>
+                )}
+              </div>
+            ) : null}
+          </div>
+        ) : (
+          <>
+            <div className="h-36 overflow-hidden rounded border border-chrome-border/60">
+              <SqlEditor value={query} onChange={setQuery} height="100%" />
+            </div>
+            {scored ? (
+              <div className="mt-1.5 flex items-center gap-2">
             <Field label="compare">
               <div className="flex items-center overflow-hidden rounded border border-chrome-border text-[10px]">
                 {(["gte", "lte"] as const).map((c) => (
@@ -830,6 +969,8 @@ function RuleEditor({
             {preview.length === 0 && !previewErr ? <span className="text-[10px] text-chrome-text/40">no rows — adjust the query</span> : null}
           </div>
         </div>
+          </>
+        )}
       </div>
 
       {/* fire policy */}
@@ -850,7 +991,7 @@ function RuleEditor({
         <div className="mb-1 flex items-center gap-2 text-[11px]">
           <span className="font-medium text-foreground">Action</span>
           <div className="flex items-center overflow-hidden rounded border border-chrome-border text-[10px]">
-            {(["noop", "sql", "mcp_call", "flow"] as const).map((op) => (
+            {(["noop", "sql", "operator", "mcp_call", "flow"] as const).map((op) => (
               <button key={op} type="button" onClick={() => setOperator(op)} className={cn("px-1.5 py-0.5 font-mono", operator === op ? "bg-rvbbit-accent/20 text-foreground" : "text-chrome-text/60")}>
                 {op}
               </button>
@@ -863,6 +1004,55 @@ function RuleEditor({
               <SqlEditor value={actionSql} onChange={setActionSql} height="100%" />
             </div>
           </Field>
+        ) : null}
+        {operator === "operator" ? (
+          <div className="flex flex-col gap-1.5">
+            <Field label="operator">
+              <input value={operatorName} onChange={(e) => setOperatorName(e.target.value)} list="alerts-operators" className={cn(inputCls, "font-mono")} />
+              <datalist id="alerts-operators">
+                {operators.map((o) => (
+                  <option key={o.name} value={o.name} />
+                ))}
+              </datalist>
+            </Field>
+            {selectedOperator ? (
+              <div className="rounded border border-chrome-border/60 bg-block-bg/40 p-2 text-[10px]">
+                <div className="mb-1 flex items-center gap-2">
+                  <span className="font-mono text-rvbbit-accent">{selectedOperator.name}</span>
+                  <span className="text-chrome-text/45">
+                    {selectedOperator.shape} → {selectedOperator.return_type}
+                  </span>
+                  {operatorArgs.length > 0 ? (
+                    <button
+                      type="button"
+                      onClick={fillOperatorTemplate}
+                      title="Fill the args with this operator's parameter names"
+                      className="ml-auto rounded border border-chrome-border px-1.5 py-0.5 text-[9px] text-chrome-text/70 hover:bg-foreground/[0.06]"
+                    >
+                      use template
+                    </button>
+                  ) : null}
+                </div>
+                {selectedOperator.description ? <div className="mb-1.5 leading-snug text-chrome-text/70">{selectedOperator.description}</div> : null}
+                <div className="flex flex-col gap-0.5">
+                  {operatorArgs.map((a) => (
+                    <div key={a.name} className="flex items-baseline gap-1.5">
+                      <span className="font-mono text-foreground">{a.name}</span>
+                      <span className="text-chrome-text/45">{a.type}</span>
+                    </div>
+                  ))}
+                  {operatorArgs.length === 0 ? <span className="text-chrome-text/40">no arguments</span> : null}
+                </div>
+              </div>
+            ) : operatorName.trim() ? (
+              <div className="text-[10px] text-chrome-text/40">
+                no operator named <span className="font-mono">{operatorName}</span> in the catalog.
+              </div>
+            ) : null}
+            <Field label={`args — {rule} {entity} {transition} fill from context${argsValid ? "" : "  ⚠ invalid JSON"}`}>
+              <textarea value={argsJson} onChange={(e) => setArgsJson(e.target.value)} rows={3} spellCheck={false} className={cn(inputCls, "resize-y font-mono leading-snug", !argsValid && "border-red-500/50")} />
+            </Field>
+          </div>
         ) : null}
         {operator === "mcp_call" ? (
           <div className="flex flex-col gap-1.5">
@@ -1279,9 +1469,11 @@ export function AlertsWindow({ payload, activeConnectionId, hasRvbbit, onChangeP
                 {/* condition → policy → action pipeline */}
                 <div className="mt-2 flex flex-wrap items-center gap-1.5 text-[10px]">
                   <span className="rounded border border-chrome-border bg-block-bg/60 px-1.5 py-0.5 font-mono text-chrome-text/80">
-                    {isScored
-                      ? `score ${rule.conditionSpec.compare === "lte" ? "≤" : "≥"} ${numFmt(Number(rule.conditionSpec.threshold))}`
-                      : "status = fail"}
+                    {rule.conditionSpec.kind === "metric"
+                      ? `metric: ${rule.conditionSpec.metric}`
+                      : isScored
+                        ? `score ${rule.conditionSpec.compare === "lte" ? "≤" : "≥"} ${numFmt(Number(rule.conditionSpec.threshold))}`
+                        : "status = fail"}
                   </span>
                   <span className="text-chrome-text/40">→</span>
                   <span className="rounded border border-chrome-border bg-block-bg/60 px-1.5 py-0.5 text-chrome-text/80">
@@ -1299,6 +1491,7 @@ export function AlertsWindow({ payload, activeConnectionId, hasRvbbit, onChangeP
                   >
                     {String(rule.actionSpec.operator ?? "?")}
                     {rule.actionSpec.operator === "mcp_call" ? `(${rule.actionSpec.server}.${rule.actionSpec.tool})` : ""}
+                    {rule.actionSpec.operator === "operator" ? `(${rule.actionSpec.operator_name})` : ""}
                   </span>
                 </div>
                 {typeof rule.conditionSpec.query === "string" ? (

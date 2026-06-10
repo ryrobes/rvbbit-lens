@@ -278,6 +278,38 @@ export async function deleteRule(connectionId: string, rule: string): Promise<st
   return r.ok ? null : r.error
 }
 
+export interface MetricObsPreview {
+  status: string | null
+  dataAsOf: string | null
+  value: unknown
+  verdict: unknown
+}
+
+/** Latest materialized observation for a metric — what a metric-ref condition reads. */
+export async function previewMetricObservation(
+  connectionId: string,
+  metric: string,
+): Promise<{ obs: MetricObsPreview | null; error: string | null }> {
+  const r = await run(
+    connectionId,
+    `SELECT status, data_as_of::text AS data_as_of, value, verdict
+     FROM rvbbit.metric_observations WHERE metric_name = ${q(metric)}
+     ORDER BY data_as_of DESC NULLS LAST, observed_at DESC LIMIT 1`,
+  )
+  if (!r.ok) return { obs: null, error: r.error }
+  const row = r.rows[0]
+  if (!row) return { obs: null, error: null }
+  return {
+    obs: {
+      status: str(row.status),
+      dataAsOf: str(row.data_as_of),
+      value: row.value,
+      verdict: row.verdict,
+    },
+    error: null,
+  }
+}
+
 /** A row from a live condition-query preview (which entities + score/status). */
 export interface PreviewRow {
   entityKey: string
