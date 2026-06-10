@@ -1396,7 +1396,9 @@ function classifyCapabilityTypeFields({
   const hasText = (...needles: string[]) => needles.some((t) => nameBits.includes(t))
   const hasAny = (...needles: string[]) => hasTag(...needles) || hasText(...needles)
 
-  if (kind === "mcp" || hasTag("mcp")) return "mcp"
+  // Strictly the kind='mcp' rows — NOT anything merely tagged 'mcp' (e.g. the
+  // MCP gateway *runtime* carries an 'mcp' tag but is a runtime_sidecar).
+  if (kind === "mcp") return "mcp"
   if (handler === "vllm_openai" || hasAny("vllm")) return "vllm"
   if (kind === "runtime_sidecar") return "runtime"
   if (kind === "llm_provider" || transport === "openai_chat" || hasTag("llm")) return "llm"

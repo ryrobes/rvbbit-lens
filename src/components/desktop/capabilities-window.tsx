@@ -8,6 +8,7 @@ import {
   Cpu,
   Globe,
   Package,
+  Plug,
   Pause,
   Play,
   Plus,
@@ -818,6 +819,11 @@ function CapabilityCard({
   const { catalog, installed, installedRuntime, flags } = entry
   const states = flagsToStates(flags)
   const typeTone = capabilityTypeTone(classifyCatalogCapabilityType(catalog))
+  // MCP capabilities are a different *kind* of thing from model packs (tools
+  // over a gateway, not weights) — give them their own icon, an accent rail,
+  // and an MCP-shaped facts row so they read as distinct at a glance, not just
+  // via the type chip.
+  const isMcp = catalog.kind === "mcp"
   // Installed *and* live — a registered backend that's healthy, in use, or a
   // ready runtime. These get the prominent treatment.
   const active =
@@ -865,14 +871,27 @@ function CapabilityCard({
       style={capabilityTypeStyle(typeTone)}
     >
       <CapabilityTypeWash active={active} registered={flags.registered} />
+      {isMcp ? (
+        <span
+          aria-hidden
+          className="pointer-events-none absolute inset-y-0 left-0 w-[3px] bg-[var(--cap-type)]/70"
+        />
+      ) : null}
       <WeightBar bytes={vramRequired} max={maxVram} />
 
       {/* title row */}
       <div className="flex items-start gap-1.5">
-        <Package
-          className="mt-0.5 h-3.5 w-3.5 shrink-0"
-          style={{ color: "var(--cap-type)" }}
-        />
+        {isMcp ? (
+          <Plug
+            className="mt-0.5 h-3.5 w-3.5 shrink-0"
+            style={{ color: "var(--cap-type)" }}
+          />
+        ) : (
+          <Package
+            className="mt-0.5 h-3.5 w-3.5 shrink-0"
+            style={{ color: "var(--cap-type)" }}
+          />
+        )}
         <div className="min-w-0 flex-1">
           <div className="truncate text-[12px] font-medium text-foreground group-hover:text-brand-capability">
             {catalog.title}
@@ -927,23 +946,39 @@ function CapabilityCard({
         ) : null}
       </div>
 
-      {/* facts row */}
-      <div className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[10px] text-chrome-text/55">
-        <span
-          className="truncate font-mono text-chrome-text/65"
-          title={catalog.source_model ?? ""}
-        >
-          {catalog.source_model ?? "—"}
-        </span>
-        {catalog.license ? (
-          <>
-            <span>·</span>
-            <span className="font-mono">{catalog.license}</span>
-          </>
-        ) : null}
-        <span>·</span>
-        <span>{catalog.runtime_handler}</span>
-      </div>
+      {/* facts row — MCP cards describe a tool surface, not a model artifact */}
+      {isMcp ? (
+        <div className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[10px] text-chrome-text/55">
+          <span className="font-mono text-[var(--cap-type)]">MCP server</span>
+          <span>·</span>
+          <span>
+            {catalog.operators.length} operator{catalog.operators.length === 1 ? "" : "s"}
+          </span>
+          {catalog.tags.includes("mcp") && catalog.runtime_handler ? (
+            <>
+              <span>·</span>
+              <span className="font-mono">{catalog.runtime_handler}</span>
+            </>
+          ) : null}
+        </div>
+      ) : (
+        <div className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[10px] text-chrome-text/55">
+          <span
+            className="truncate font-mono text-chrome-text/65"
+            title={catalog.source_model ?? ""}
+          >
+            {catalog.source_model ?? "—"}
+          </span>
+          {catalog.license ? (
+            <>
+              <span>·</span>
+              <span className="font-mono">{catalog.license}</span>
+            </>
+          ) : null}
+          <span>·</span>
+          <span>{catalog.runtime_handler}</span>
+        </div>
+      )}
 
       {/* tags */}
       {catalog.tags && catalog.tags.length > 0 ? (
