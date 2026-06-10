@@ -56,8 +56,14 @@ seam to swap SQLite for Postgres without touching the client.
 1. **Spine (DONE)** — SQLite store + migrations + CRUD API + debounced
    write-shadow + first-run seed. No user-visible change; durability under the
    hood, keyed by a per-browser home id.
-2. **Sharing** — soft identity (name → home), the Scene Library, share URLs, and
-   the `readOnly` / `?present=1` flag.
+2. **Sharing** — soft identity, the Scene Library, share URLs, the `readOnly` /
+   `?present=1` flag.
+   - **2.1 identity + hydration (DONE)** — `home-identity.ts` + a menu-bar
+     `HomeIndicator`. A home is a slug (no auth, capability-URL style). Switching
+     is **lossless** (your current home stays shadowed): *claim* an empty home
+     (switch + seed from local, no reload) or *adopt* an existing one (pull
+     state+scenes → reload, with a confirm). `?home=<slug>` deep-links auto-adopt.
+   - 2.2 (next) — the Scene Library (load/fork/share/visibility) + the present flag.
 3. **Globalize connections** — move connections into `lens_connection`
    (server-authoritative, shared creds in the server secret store).
 

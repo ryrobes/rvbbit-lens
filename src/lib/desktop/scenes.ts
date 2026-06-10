@@ -230,3 +230,19 @@ export function deleteScene(id: string): boolean {
   writeStore(next)
   return true
 }
+
+/**
+ * Overwrite the local scene store from server-pulled scenes (a home switch).
+ * Raw write + change event so the trays refresh; does NOT re-shadow (the data
+ * just came from the server). The caller reloads after.
+ */
+export function hydrateScenes(scenes: Scene[]): void {
+  if (typeof window === "undefined") return
+  try {
+    const store: SceneStoreV1 = { schemaVersion: SCENE_SCHEMA_VERSION, scenes }
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(store))
+    window.dispatchEvent(new Event(SCENES_CHANGED_EVENT))
+  } catch {
+    // best-effort
+  }
+}

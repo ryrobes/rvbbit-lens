@@ -156,6 +156,21 @@ export function saveDesktopState(state: {
   }
 }
 
+/**
+ * Overwrite the persisted desktop blob from a server-pulled value (a home
+ * switch). Raw write — does NOT re-shadow, since the data just came from the
+ * server. The caller reloads so loadDesktopState() re-reads it.
+ */
+export function hydrateDesktopState(blob: unknown): void {
+  if (typeof window === "undefined") return
+  try {
+    if (blob == null) window.localStorage.removeItem(STORAGE_KEY)
+    else window.localStorage.setItem(STORAGE_KEY, JSON.stringify(blob))
+  } catch {
+    // best-effort
+  }
+}
+
 export function clampViewport(viewport: DesktopViewportState): DesktopViewportState {
   return {
     x: Number.isFinite(viewport.x) ? viewport.x : 0,
