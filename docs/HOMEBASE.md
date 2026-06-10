@@ -36,8 +36,8 @@ turns a personal scratchpad into a shareable presentation surface.
   independent copy in your home. No live co-edit (a 10× scope jump we don't
   need).
 - **Presentation mode = a flag.** A `readOnly` behavior flag (UI toggle or
-  `?present=1`) gates writes; the "less chrome" *rendering* is a deferred visual
-  pass over the same flag.
+  `?present=1`) gates writes; the "less chrome" *rendering* (v1: chrome-off
+  windows + fit-to-screen framing + card treatment) layers over the same flag.
 
 The one cost we accept: global connections ⇒ a **shared DB identity** per
 connection. That's correct for an internal org, and it's the clean trigger for
@@ -71,8 +71,21 @@ seam to swap SQLite for Postgres without touching the client.
    - **2.2b present flag (DONE)** — `present-mode.ts` (a per-tab sessionStorage
      flag) + a menu-bar `PresentToggle`; `?present=1` enters it on load.
      `saveDesktopState` no-ops in present mode, so a presented desktop is a stable
-     read-only surface (React state still updates; only persistence stops). The
-     "less chrome" rendering pass is still deferred.
+     read-only surface (React state still updates; only persistence stops).
+   - **2.2c present rendering v1 (DONE)** — the "less chrome" pass. A reactive
+     `usePresentMode()` (`useSyncExternalStore` over the flag) threads through the
+     window frame and the shell. When present: windows drop editor chrome (the
+     title bar slims to a non-interactive label strip — no drag, no
+     minimize/maximize/close, resize grip removed — and the focus-ring shadow
+     collapses to one calm card shadow on every window), and the active canvas is
+     **fit to screen** — a translate+scale on an inner layer wrapper centres the
+     windows' bounding box (capped at 1×, floored at 0.45×), recomputed on
+     enter/resize/workspace-switch. The framing is local state, never written to
+     the persisted `viewport`, so it can't leak into saved desktops or scenes;
+     edit mode renders byte-identical to before (the wrapper is a no-transform
+     pass-through). Deferred to **v2**: scene-level *authored* alternative
+     geometry (a breakpoint-keyed present layout, Tableau-style) for when
+     fit-to-screen isn't enough.
 3. **Close the loop / home discovery (DONE)** — connections turned out to be
    **already server-global**: `lib/db/registry.ts` keeps them in a single
    server-side `connections.json` (`~/.config/rvbbit-lens/`, 0600, managed via
