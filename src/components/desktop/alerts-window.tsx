@@ -4,6 +4,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { Activity, Bell, Play, RefreshCw, X, Zap } from "@/lib/icons"
 import { cn } from "@/lib/utils"
 import { useWorkspaceActive } from "./workspace-active-context"
+import { SqlEditor } from "./sql-editor"
+import { fetchAllToolsLite, schemaType, type McpToolLite } from "@/lib/rvbbit/mcp"
 import {
   commitThreshold,
   createAlert,
@@ -33,6 +35,20 @@ interface AlertsWindowProps {
   activeConnectionId: string | null
   hasRvbbit: boolean
   onChangePayload: (mut: (p: AlertsPayload) => AlertsPayload) => void
+  // open a live, auto-running SQL data window (used by the per-rule "history ↗")
+  onOpenSqlData?: (sql: string, title: string) => void
+}
+
+// The firing + action audit trail for one rule, as an editable/runnable query.
+function alertHistorySql(ruleName: string): string {
+  const safe = ruleName.replace(/'/g, "''")
+  return `-- firing + action history for ${ruleName}
+SELECT ts, entity_key, transition, status, error,
+       action_output, action_receipt_id
+FROM rvbbit.alert_events
+WHERE rule_name = '${safe}'
+ORDER BY ts DESC
+LIMIT 200;`
 }
 
 // ── small helpers ─────────────────────────────────────────────────────────────
@@ -545,6 +561,23 @@ function RuleEditor({
   const [saving, setSaving] = useState(false)
   const [confirmDel, setConfirmDel] = useState(false)
   const [deleting, setDeleting] = useState(false)
+  const [mcpTools, setMcpTools] = useState<McpToolLite[]>([])
+
+  // load the MCP tool catalog once the user picks the mcp_call action, so we can
+  // offer server/tool completion + show the selected tool's docstring + args.
+  // Re-fetches when the active connection changes (the catalog is per-connection);
+  // the `cancelled` flag drops stale responses.
+  useEffect(() => {
+    if (operator !== "mcp_call") return
+    let cancelled = false
+    void (async () => {
+      const r = await fetchAllToolsLite(connectionId)
+      if (!cancelled) setMcpTools(r.rows)
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [operator, connectionId])
 
   // debounced live preview of the condition query (all setState in the async
   // callback so nothing runs synchronously in the effect body)
@@ -584,6 +617,38 @@ function RuleEditor({
       return false
     }
   }, [operator, argsJson])
+
+  const mcpServers = useMemo(() => [...new Set(mcpTools.map((t) => t.server))].sort(), [mcpTools])
+  const toolsForServer = useMemo(() => mcpTools.filter((t) => t.server === server), [mcpTools, server])
+  const selectedTool = useMemo(
+    () => mcpTools.find((t) => t.server === server && t.name === tool) ?? null,
+    [mcpTools, server, tool],
+  )
+  // (name, type, required, description) for each documented argument of the picked tool
+  const argSpecs = useMemo(() => {
+    const props = selectedTool?.inputSchema?.properties
+    if (!props) return [] as { name: string; type: string; required: boolean; description: string | null }[]
+    const req = new Set(selectedTool?.inputSchema?.required ?? [])
+    return Object.entries(props).map(([n, p]) => ({
+      name: n,
+      type: schemaType(p),
+      required: req.has(n),
+      description: p.description ?? null,
+    }))
+  }, [selectedTool])
+
+  // seed the args template with a skeleton of the tool's required keys
+  const fillArgsTemplate = () => {
+    const props = selectedTool?.inputSchema?.properties
+    if (!props) return
+    const keys = selectedTool?.inputSchema?.required ?? Object.keys(props)
+    const skel: Record<string, unknown> = {}
+    for (const k of keys) {
+      const t = schemaType(props[k])
+      skel[k] = t === "number" || t === "integer" ? 0 : t === "boolean" ? false : ""
+    }
+    setArgsJson(JSON.stringify(skel, null, 2))
+  }
 
   const buildDraft = (): AlertDraft => {
     const condition: Record<string, unknown> = { kind: "sql", query: query.trim() }
@@ -712,7 +777,9 @@ function RuleEditor({
             returns <span className="font-mono">entity_key</span> + <span className="font-mono">{scored ? "score" : "status"}</span>
           </span>
         </div>
-        <textarea value={query} onChange={(e) => setQuery(e.target.value)} rows={3} spellCheck={false} className={cn(inputCls, "resize-y font-mono leading-snug")} />
+        <div className="h-36 overflow-hidden rounded border border-chrome-border/60">
+          <SqlEditor value={query} onChange={setQuery} height="100%" />
+        </div>
         {scored ? (
           <div className="mt-1.5 flex items-center gap-2">
             <Field label="compare">
@@ -792,15 +859,73 @@ function RuleEditor({
         </div>
         {operator === "sql" ? (
           <Field label="sql (the alert context is bound to $1, a jsonb of rule/entity/transition)">
-            <textarea value={actionSql} onChange={(e) => setActionSql(e.target.value)} rows={2} spellCheck={false} className={cn(inputCls, "resize-y font-mono leading-snug")} />
+            <div className="h-24 overflow-hidden rounded border border-chrome-border/60">
+              <SqlEditor value={actionSql} onChange={setActionSql} height="100%" />
+            </div>
           </Field>
         ) : null}
         {operator === "mcp_call" ? (
           <div className="flex flex-col gap-1.5">
             <div className="grid grid-cols-2 gap-2">
-              <Field label="server"><input value={server} onChange={(e) => setServer(e.target.value)} className={cn(inputCls, "font-mono")} /></Field>
-              <Field label="tool"><input value={tool} onChange={(e) => setTool(e.target.value)} className={cn(inputCls, "font-mono")} /></Field>
+              <Field label="server">
+                <input value={server} onChange={(e) => setServer(e.target.value)} list="alerts-mcp-servers" className={cn(inputCls, "font-mono")} />
+                <datalist id="alerts-mcp-servers">
+                  {mcpServers.map((s) => (
+                    <option key={s} value={s} />
+                  ))}
+                </datalist>
+              </Field>
+              <Field label="tool">
+                <input value={tool} onChange={(e) => setTool(e.target.value)} list="alerts-mcp-tools" className={cn(inputCls, "font-mono")} />
+                <datalist id="alerts-mcp-tools">
+                  {toolsForServer.map((t) => (
+                    <option key={t.name} value={t.name} />
+                  ))}
+                </datalist>
+              </Field>
             </div>
+            {/* docstring for the picked tool — informational, so you know what to provide */}
+            {selectedTool ? (
+              <div className="rounded border border-chrome-border/60 bg-block-bg/40 p-2 text-[10px]">
+                <div className="mb-1 flex items-center gap-2">
+                  <span className="font-mono text-rvbbit-accent">
+                    {selectedTool.server}.{selectedTool.name}
+                  </span>
+                  {argSpecs.length > 0 ? (
+                    <button
+                      type="button"
+                      onClick={fillArgsTemplate}
+                      title="Fill the args template with this tool's required keys"
+                      className="ml-auto rounded border border-chrome-border px-1.5 py-0.5 text-[9px] text-chrome-text/70 hover:bg-foreground/[0.06]"
+                    >
+                      use template
+                    </button>
+                  ) : null}
+                </div>
+                {selectedTool.description ? <div className="mb-1.5 leading-snug text-chrome-text/70">{selectedTool.description}</div> : null}
+                <div className="flex flex-col gap-0.5">
+                  {argSpecs.map((a) => (
+                    <div key={a.name} className="flex items-baseline gap-1.5">
+                      <span className="font-mono text-foreground">{a.name}</span>
+                      <span className="text-chrome-text/45">{a.type}</span>
+                      {a.required ? (
+                        <span className="rounded bg-amber-400/15 px-1 text-[8px] uppercase tracking-wide text-amber-200">req</span>
+                      ) : null}
+                      {a.description ? (
+                        <span className="min-w-0 flex-1 truncate text-chrome-text/55" title={a.description}>
+                          — {a.description}
+                        </span>
+                      ) : null}
+                    </div>
+                  ))}
+                  {argSpecs.length === 0 ? <span className="text-chrome-text/40">no documented arguments</span> : null}
+                </div>
+              </div>
+            ) : tool.trim() ? (
+              <div className="text-[10px] text-chrome-text/40">
+                no catalog entry for <span className="font-mono">{server}.{tool}</span> — check the name or run a catalog refresh.
+              </div>
+            ) : null}
             <Field label={`args template — {rule} {entity} {transition} fill from context${argsValid ? "" : "  ⚠ invalid JSON"}`}>
               <textarea value={argsJson} onChange={(e) => setArgsJson(e.target.value)} rows={3} spellCheck={false} className={cn(inputCls, "resize-y font-mono leading-snug", !argsValid && "border-red-500/50")} />
             </Field>
@@ -829,7 +954,7 @@ function RuleEditor({
 
 // ── main cockpit ──────────────────────────────────────────────────────────────
 
-export function AlertsWindow({ payload, activeConnectionId, hasRvbbit, onChangePayload }: AlertsWindowProps) {
+export function AlertsWindow({ payload, activeConnectionId, hasRvbbit, onChangePayload, onOpenSqlData }: AlertsWindowProps) {
   const wsActive = useWorkspaceActive()
   const [rules, setRules] = useState<AlertRule[]>([])
   const [enabled, setEnabled] = useState(true)
@@ -1106,6 +1231,16 @@ export function AlertsWindow({ payload, activeConnectionId, hasRvbbit, onChangeP
                   </span>
                   <span className="text-[9px] text-chrome-text/50">{rule.cardinality}</span>
                   <div className="ml-auto flex items-center gap-1">
+                    {onOpenSqlData ? (
+                      <button
+                        type="button"
+                        onClick={() => onOpenSqlData(alertHistorySql(rule.name), `Alert history · ${rule.name}`)}
+                        title="Open the full firing + action history as an editable, runnable SQL query"
+                        className="rounded border border-chrome-border px-1.5 py-0.5 text-[10px] text-chrome-text/70 hover:bg-foreground/[0.06]"
+                      >
+                        history ↗
+                      </button>
+                    ) : null}
                     <button
                       type="button"
                       onClick={() => {

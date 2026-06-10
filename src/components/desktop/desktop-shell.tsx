@@ -4337,6 +4337,7 @@ function renderWindowContent(
           activeConnectionId={ctx.activeConnectionId}
           hasRvbbit={ctx.hasRvbbit}
           onChangePayload={(mut) => ctx.updatePayload(w.id, (p) => mut(p as AlertsPayload))}
+          onOpenSqlData={ctx.openSqlData}
         />
       )
     case "folder": {
