@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useRef } from "react"
 import CodeMirror, { type Extension, type ReactCodeMirrorRef } from "@uiw/react-codemirror"
 import { sql, PostgreSQL, type SQLNamespace } from "@codemirror/lang-sql"
+import { json as jsonLang } from "@codemirror/lang-json"
 import type { CompletionSource } from "@codemirror/autocomplete"
 import { EditorView, keymap, tooltips } from "@codemirror/view"
 import { rvbbitLensCodeMirrorTheme } from "@/lib/desktop/codemirror-theme"
@@ -26,8 +27,9 @@ interface SqlEditorProps {
   readOnly?: boolean
   fontSize?: number
   /** "plain" drops SQL syntax highlighting + autocomplete + line numbers — for
-   *  the natural-language "Ask" mode where the content is a question, not SQL. */
-  language?: "sql" | "plain"
+   *  the natural-language "Ask" mode where the content is a question, not SQL.
+   *  "json" swaps the SQL grammar for JSON highlighting (e.g. action arg bodies). */
+  language?: "sql" | "json" | "plain"
   /** Soft-wrap long lines instead of scrolling horizontally — for read-only
    *  previews where a long line would otherwise widen the container. */
   wrap?: boolean
@@ -59,6 +61,7 @@ export function SqlEditor({
 }: SqlEditorProps) {
   const ref = useRef<ReactCodeMirrorRef | null>(null)
   const plain = language === "plain"
+  const isJson = language === "json"
 
   const extensions: Extension[] = useMemo(() => {
     const exts: Extension[] = []
@@ -78,6 +81,8 @@ export function SqlEditor({
     )
     if (plain) {
       exts.push(EditorView.lineWrapping) // wrap long NL questions instead of scrolling
+    } else if (isJson) {
+      exts.push(jsonLang()) // JSON grammar → the theme's highlightStyle colors it
     } else {
       // schema-aware completion when a SQLNamespace is supplied (tables + columns
       // with type hints); falls back to keyword-only completion otherwise.
@@ -110,7 +115,7 @@ export function SqlEditor({
       )
     }
     return exts
-  }, [onRun, plain, wrap, schema, defaultSchema, completionSources, blockReferences])
+  }, [onRun, plain, isJson, wrap, schema, defaultSchema, completionSources, blockReferences])
 
   // Auto-focus on first mount.
   useEffect(() => {
@@ -140,7 +145,7 @@ export function SqlEditor({
           lineNumbers: !plain,
           foldGutter: false,
           dropCursor: true,
-          autocompletion: !plain,
+          autocompletion: !plain && !isJson,
           searchKeymap: true,
         }}
       />

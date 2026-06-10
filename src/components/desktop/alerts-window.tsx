@@ -71,11 +71,11 @@ function fmtAgo(ms: number | null): string {
 function statusColor(status: string | null): string {
   switch (status) {
     case "fail":
-      return "var(--color-amber-400, #fbbf24)"
+      return "var(--danger)"
     case "pass":
-      return "var(--color-emerald-400, #34d399)"
+      return "var(--success)"
     default:
-      return "var(--color-zinc-500, #71717a)"
+      return "var(--chrome-text)"
   }
 }
 
@@ -189,7 +189,7 @@ function ThresholdExplorer({
           y={10}
           width={Math.max(0, compare === "lte" ? tx - PADX : W - PADX - tx)}
           height={AXIS_Y - 10}
-          fill="color-mix(in oklch, var(--color-red-500, #ef4444) 12%, transparent)"
+          fill="color-mix(in oklch, var(--danger) 12%, transparent)"
         />
         {/* axis */}
         <line x1={PADX} y1={AXIS_Y} x2={W - PADX} y2={AXIS_Y} stroke="var(--chrome-border, #444)" strokeWidth={1} />
@@ -230,8 +230,8 @@ function ThresholdExplorer({
         })}
         {/* draggable threshold */}
         <g style={{ cursor: "ew-resize" }} onPointerDown={onDown}>
-          <line x1={tx} y1={6} x2={tx} y2={AXIS_Y + 6} stroke="var(--color-red-400, #f87171)" strokeWidth={2} />
-          <rect x={tx - 16} y={AXIS_Y + 8} width={32} height={16} rx={3} fill="var(--color-red-500, #ef4444)" opacity={0.9} />
+          <line x1={tx} y1={6} x2={tx} y2={AXIS_Y + 6} stroke="var(--danger)" strokeWidth={2} />
+          <rect x={tx - 16} y={AXIS_Y + 8} width={32} height={16} rx={3} fill="var(--danger)" opacity={0.9} />
           <text x={tx} y={AXIS_Y + 19} textAnchor="middle" className="fill-white" style={{ fontSize: 9 }}>
             {numFmt(drag)}
           </text>
@@ -339,7 +339,7 @@ function EpisodeTimeline({
           ) : null,
         )}
         {/* now line */}
-        <line x1={xOf(now)} y1={14} x2={xOf(now)} y2={H - 4} stroke="var(--rvbbit-accent, #4fd1c5)" strokeWidth={1} opacity={0.5} strokeDasharray="2 2" />
+        <line x1={xOf(now)} y1={14} x2={xOf(now)} y2={H - 4} stroke="var(--rvbbit-accent)" strokeWidth={1} opacity={0.5} strokeDasharray="2 2" />
         {/* lanes */}
         {lanes.map((e, i) => {
           const y = 30 + i * ROW_H
@@ -365,7 +365,7 @@ function EpisodeTimeline({
               {/* fire markers */}
               {evs.map((ev, j) =>
                 ev.tsMs != null ? (
-                  <circle key={j} cx={xOf(ev.tsMs)} cy={y} r={4} fill={ev.status === "fired" ? "var(--color-red-500, #ef4444)" : "var(--color-orange-500, #f97316)"}>
+                  <circle key={j} cx={xOf(ev.tsMs)} cy={y} r={4} fill={ev.status === "fired" ? "var(--danger)" : "var(--warning)"}>
                     <title>{`${ev.transition} · ${ev.status} · ${fmtAgo(ev.tsMs)}`}</title>
                   </circle>
                 ) : null,
@@ -406,10 +406,10 @@ function SweepHeartbeat({ sweeps }: { sweeps: AlertSweepRun[] }) {
                 height: h,
                 background:
                   s.errors > 0
-                    ? "var(--color-red-500, #ef4444)"
+                    ? "var(--danger)"
                     : s.transitions > 0
-                      ? "var(--color-amber-400, #fbbf24)"
-                      : "color-mix(in oklch, var(--rvbbit-accent, #4fd1c5) 45%, transparent)",
+                      ? "var(--warning)"
+                      : "color-mix(in oklch, var(--rvbbit-accent) 45%, transparent)",
               }}
             />
           )
@@ -437,13 +437,13 @@ function EventLog({ events }: { events: AlertEvent[] }) {
               <li key={i} className="flex items-center gap-2 px-3 py-1 text-[11px]">
                 <span
                   className="h-2 w-2 shrink-0 rounded-full"
-                  style={{ background: e.status === "fired" ? statusColor("fail") : "var(--color-red-500,#ef4444)" }}
+                  style={{ background: e.status === "fired" ? statusColor("fail") : "var(--danger)" }}
                 />
                 <span className="w-20 shrink-0 truncate font-mono text-chrome-text/80">{e.entityKey || "·"}</span>
                 <span className="shrink-0 text-chrome-text/55">{e.transition}</span>
                 <span
                   className="min-w-0 flex-1 truncate"
-                  style={{ color: e.status === "fired" ? "var(--color-emerald-300,#6ee7b7)" : "var(--color-red-300,#fca5a5)" }}
+                  style={{ color: e.status === "fired" ? "var(--success)" : "var(--danger)" }}
                 >
                   {e.status}
                   {e.error ? ` — ${e.error}` : ""}
@@ -482,7 +482,7 @@ function EntityState({ entities, now }: { entities: AlertEntity[]; now: number }
               {e.lastStatus === "fail" && e.consecutive > 1 ? (
                 <span
                   className="rounded px-1 text-[9px] tabular-nums"
-                  style={{ background: "color-mix(in oklch, var(--color-amber-400,#fbbf24) 25%, transparent)", color: "var(--color-amber-200,#fde68a)" }}
+                  style={{ background: "color-mix(in oklch, var(--warning) 25%, transparent)", color: "var(--warning)" }}
                   title="consecutive fails"
                 >
                   ×{e.consecutive}
@@ -800,7 +800,7 @@ function RuleEditor({
         {editing ? (
           confirmDel ? (
             <span className="flex items-center gap-1 text-[10px]">
-              <button type="button" disabled={deleting} onClick={() => void doDelete()} className="rounded border border-red-500/50 bg-red-500/15 px-1.5 py-0.5 text-red-200 hover:bg-red-500/25">
+              <button type="button" disabled={deleting} onClick={() => void doDelete()} className="rounded border border-danger/50 bg-danger/15 px-1.5 py-0.5 text-danger hover:bg-danger/25">
                 {deleting ? "deleting…" : "confirm delete"}
               </button>
               <button type="button" onClick={() => setConfirmDel(false)} className="text-chrome-text/50 hover:text-chrome-text">
@@ -808,7 +808,7 @@ function RuleEditor({
               </button>
             </span>
           ) : (
-            <button type="button" onClick={() => setConfirmDel(true)} className="rounded border border-red-500/30 px-1.5 py-0.5 text-[10px] text-red-300/80 hover:bg-red-500/10">
+            <button type="button" onClick={() => setConfirmDel(true)} className="rounded border border-danger/30 px-1.5 py-0.5 text-[10px] text-danger/80 hover:bg-danger/10">
               delete
             </button>
           )
@@ -830,7 +830,7 @@ function RuleEditor({
           </button>
         </div>
       </div>
-      {saveErr ? <div className="rounded border border-red-500/40 bg-red-500/10 px-2 py-1 text-[11px] text-red-200">{saveErr}</div> : null}
+      {saveErr ? <div className="rounded border border-danger/40 bg-danger/10 px-2 py-1 text-[11px] text-danger">{saveErr}</div> : null}
 
       <div className="grid grid-cols-2 gap-2">
         <Field label="name">
@@ -892,7 +892,7 @@ function RuleEditor({
               <div className="rounded border border-chrome-border/60 bg-block-bg/40 p-2 text-[10px]">
                 {selectedMetric.description ? <div className="mb-1 text-chrome-text/70">{selectedMetric.description}</div> : null}
                 {!selectedMetric.checkSql ? (
-                  <div className="mb-1 text-amber-300/80">⚠ this metric has no KPI check — add a check_sql so the alert has a pass/fail verdict to ride.</div>
+                  <div className="mb-1 text-warning/80">⚠ this metric has no KPI check — add a check_sql so the alert has a pass/fail verdict to ride.</div>
                 ) : null}
                 {metricObs ? (
                   <div className="flex items-center gap-2">
@@ -901,7 +901,7 @@ function RuleEditor({
                       className="rounded px-1.5 py-0.5 font-medium uppercase"
                       style={{
                         background: "color-mix(in oklch, " + statusColor(metricObs.status === "fail" ? "fail" : "pass") + " 18%, transparent)",
-                        color: metricObs.status === "fail" ? "var(--color-amber-100,#fef3c7)" : "var(--color-emerald-100,#d1fae5)",
+                        color: metricObs.status === "fail" ? "var(--danger)" : "var(--success)",
                       }}
                     >
                       {metricObs.status ?? "—"}
@@ -941,7 +941,7 @@ function RuleEditor({
             <span className="text-chrome-text/60">live preview</span>
             <span className="tabular-nums">
               {previewErr ? (
-                <span className="text-red-300">{previewErr}</span>
+                <span className="text-danger">{previewErr}</span>
               ) : (
                 <span>
                   <span className="font-medium" style={{ color: nBreach > 0 ? statusColor("fail") : statusColor("pass") }}>{nBreach}</span> / {preview.length} would breach
@@ -958,7 +958,7 @@ function RuleEditor({
                   className="inline-flex items-center gap-1 rounded px-1 py-0.5 text-[10px]"
                   style={{
                     background: "color-mix(in oklch, " + (br ? statusColor("fail") : statusColor("pass")) + " 18%, transparent)",
-                    color: br ? "var(--color-amber-100,#fef3c7)" : "var(--color-emerald-100,#d1fae5)",
+                    color: br ? "var(--danger)" : "var(--success)",
                   }}
                 >
                   <span className="font-mono">{row.entityKey || "·"}</span>
@@ -1052,7 +1052,9 @@ function RuleEditor({
               </div>
             ) : null}
             <Field label={`args — {rule} {entity} {transition} fill from context${argsValid ? "" : "  ⚠ invalid JSON"}`}>
-              <textarea value={argsJson} onChange={(e) => setArgsJson(e.target.value)} rows={3} spellCheck={false} className={cn(inputCls, "resize-y font-mono leading-snug", !argsValid && "border-red-500/50")} />
+              <div className={cn("h-24 overflow-hidden rounded border", argsValid ? "border-chrome-border/60" : "border-danger/50")}>
+                <SqlEditor language="json" value={argsJson} onChange={setArgsJson} height="100%" />
+              </div>
             </Field>
           </div>
         ) : null}
@@ -1105,7 +1107,7 @@ function RuleEditor({
                       <span className="font-mono text-foreground">{a.name}</span>
                       <span className="text-chrome-text/45">{a.type}</span>
                       {a.required ? (
-                        <span className="rounded bg-amber-400/15 px-1 text-[8px] uppercase tracking-wide text-amber-200">req</span>
+                        <span className="rounded bg-warning/15 px-1 text-[8px] uppercase tracking-wide text-warning">req</span>
                       ) : null}
                       {a.description ? (
                         <span className="min-w-0 flex-1 truncate text-chrome-text/55" title={a.description}>
@@ -1123,7 +1125,9 @@ function RuleEditor({
               </div>
             ) : null}
             <Field label={`args template — {rule} {entity} {transition} fill from context${argsValid ? "" : "  ⚠ invalid JSON"}`}>
-              <textarea value={argsJson} onChange={(e) => setArgsJson(e.target.value)} rows={3} spellCheck={false} className={cn(inputCls, "resize-y font-mono leading-snug", !argsValid && "border-red-500/50")} />
+              <div className={cn("h-24 overflow-hidden rounded border", argsValid ? "border-chrome-border/60" : "border-danger/50")}>
+                <SqlEditor language="json" value={argsJson} onChange={setArgsJson} height="100%" />
+              </div>
             </Field>
           </div>
         ) : null}
@@ -1259,7 +1263,7 @@ export function AlertsWindow({ payload, activeConnectionId, hasRvbbit, onChangeP
     <div className="flex h-full flex-col text-foreground">
       <style>{`
         @keyframes alerts-sweep-flash {
-          0% { background-color: color-mix(in oklch, var(--color-amber-400, #fbbf24) 45%, transparent); }
+          0% { background-color: color-mix(in oklch, var(--warning) 45%, transparent); }
           100% { background-color: rgba(255,255,255,0.05); }
         }
         .alerts-sweep-flash { animation: alerts-sweep-flash 1.4s ease-out 1; }
@@ -1271,7 +1275,7 @@ export function AlertsWindow({ payload, activeConnectionId, hasRvbbit, onChangeP
       `}</style>
       {/* toolbar */}
       <div className="flex h-9 shrink-0 items-center gap-2 border-b border-chrome-border bg-chrome-bg/40 px-2">
-        <Bell className="h-4 w-4" style={{ color: "var(--color-red-400, #f87171)" }} />
+        <Bell className="h-4 w-4" style={{ color: "var(--danger)" }} />
         <span className="text-[12px] font-medium">Alerts</span>
         <button
           type="button"
@@ -1280,8 +1284,8 @@ export function AlertsWindow({ payload, activeConnectionId, hasRvbbit, onChangeP
           className={cn(
             "ml-1 inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-[10px] transition-colors",
             enabled
-              ? "border-emerald-500/40 bg-emerald-500/15 text-emerald-300"
-              : "border-red-500/40 bg-red-500/15 text-red-300",
+              ? "border-success/40 bg-success/15 text-success"
+              : "border-danger/40 bg-danger/15 text-danger",
           )}
         >
           <Zap className="h-3 w-3" /> {enabled ? "armed" : "paused"}
@@ -1294,7 +1298,7 @@ export function AlertsWindow({ payload, activeConnectionId, hasRvbbit, onChangeP
               title={`sweep ${String(lastSweep.summary.sweep_id ?? "")} · ${String(lastSweep.summary.rules_evaluated ?? 0)} rules evaluated`}
             >
               <span className="text-chrome-text/45">swept</span>
-              <span className={cn(Number(lastSweep.summary.transitions ?? 0) > 0 ? "text-amber-300" : "text-chrome-text/55")}>
+              <span className={cn(Number(lastSweep.summary.transitions ?? 0) > 0 ? "text-warning" : "text-chrome-text/55")}>
                 {Number(lastSweep.summary.transitions ?? 0)} transitions
               </span>
               <span className="text-chrome-text/25">·</span>
@@ -1325,7 +1329,7 @@ export function AlertsWindow({ payload, activeConnectionId, hasRvbbit, onChangeP
       </div>
 
       {error ? (
-        <div className="flex items-center gap-2 border-b border-red-500/30 bg-red-500/10 px-3 py-1 text-[11px] text-red-200">
+        <div className="flex items-center gap-2 border-b border-danger/30 bg-danger/10 px-3 py-1 text-[11px] text-danger">
           <X className="h-3 w-3" /> {error}
         </div>
       ) : null}
@@ -1369,13 +1373,13 @@ export function AlertsWindow({ payload, activeConnectionId, hasRvbbit, onChangeP
                   />
                   <span className="min-w-0 flex-1 truncate text-[12px] font-medium text-foreground">{r.name}</span>
                   {r.muted ? <span className="text-[9px] text-chrome-text/40">muted</span> : null}
-                  {!r.enabled ? <span className="text-[9px] text-amber-400/70">off</span> : null}
+                  {!r.enabled ? <span className="text-[9px] text-warning/70">off</span> : null}
                 </div>
                 <div className="flex items-center gap-2 text-[10px] text-chrome-text/55">
                   <span style={{ color: r.breaching > 0 ? statusColor("fail") : undefined }}>
                     {r.breaching}/{r.entities} breaching
                   </span>
-                  {r.pending > 0 ? <span className="text-amber-400/80">{r.pending} pending</span> : null}
+                  {r.pending > 0 ? <span className="text-warning/80">{r.pending} pending</span> : null}
                   <span className="ml-auto">{r.lastFiredMs ? fmtAgo(r.lastFiredMs) : "—"}</span>
                 </div>
               </button>
@@ -1452,7 +1456,7 @@ export function AlertsWindow({ payload, activeConnectionId, hasRvbbit, onChangeP
                       onClick={() => void act(() => setRuleEnabled(activeConnectionId!, rule.name, !rule.enabled))}
                       className={cn(
                         "rounded border px-1.5 py-0.5 text-[10px]",
-                        rule.enabled ? "border-chrome-border text-chrome-text/70" : "border-amber-500/40 text-amber-300",
+                        rule.enabled ? "border-chrome-border text-chrome-text/70" : "border-warning/40 text-warning",
                       )}
                     >
                       {rule.enabled ? "disable" : "enable"}
@@ -1490,8 +1494,8 @@ export function AlertsWindow({ payload, activeConnectionId, hasRvbbit, onChangeP
                   <span
                     className="rounded border px-1.5 py-0.5 font-mono"
                     style={{
-                      borderColor: "color-mix(in oklch, var(--rvbbit-accent,#4fd1c5) 40%, transparent)",
-                      color: "var(--rvbbit-accent, #4fd1c5)",
+                      borderColor: "color-mix(in oklch, var(--rvbbit-accent) 40%, transparent)",
+                      color: "var(--rvbbit-accent)",
                     }}
                     title={JSON.stringify(rule.actionSpec, null, 2)}
                   >
