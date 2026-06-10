@@ -115,6 +115,7 @@ import {
   WORKSPACE_IDS,
 } from "@/lib/desktop/state-store"
 import { shadowDesktopState, shadowScenes } from "@/lib/desktop/server-sync"
+import { usePresentMode } from "@/lib/desktop/present-mode"
 import type { ConnectionRecord, SchemaSnapshot } from "@/lib/db/types"
 import type {
   RvbbitCachePayload,
@@ -276,6 +277,45 @@ const MIN_WORLD = -20000
 
 type SanitizedConnection = Omit<ConnectionRecord, "password"> & { hasPassword: boolean }
 
+/** Present mode v1 — geometry for the fit-to-screen transform. */
+type PresentFit = { x: number; y: number; scale: number }
+const PRESENT_FIT_PAD = 48
+const PRESENT_MENUBAR_H = 40
+
+function sameFit(a: PresentFit | null, b: PresentFit | null): boolean {
+  if (a === b) return true
+  if (!a || !b) return false
+  return a.x === b.x && a.y === b.y && a.scale === b.scale
+}
+
+/**
+ * Frame the active canvas inside the viewport for Present mode: a translate +
+ * scale that centres the windows' bounding box, capped at 1× so a small
+ * dashboard isn't blown up (and floored at 0.45× to match the editor's zoom
+ * range). Returns null when there's nothing to frame. Kept out of the persisted
+ * `viewport` so present framing never leaks into saved desktops or scenes.
+ */
+function computePresentFit(windows: DesktopWindowState[]): PresentFit | null {
+  if (typeof window === "undefined") return null
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
+  for (const w of windows) {
+    if (w.minimized) continue
+    minX = Math.min(minX, w.x)
+    minY = Math.min(minY, w.y)
+    maxX = Math.max(maxX, w.x + w.width)
+    maxY = Math.max(maxY, w.y + w.height)
+  }
+  if (!Number.isFinite(minX) || maxX <= minX || maxY <= minY) return null
+  const bboxW = maxX - minX
+  const bboxH = maxY - minY
+  const availW = Math.max(1, window.innerWidth - PRESENT_FIT_PAD * 2)
+  const availH = Math.max(1, window.innerHeight - PRESENT_MENUBAR_H - PRESENT_FIT_PAD * 2)
+  const scale = Math.min(1, Math.max(0.45, Math.min(availW / bboxW, availH / bboxH)))
+  const offsetX = PRESENT_FIT_PAD + Math.max(0, (availW - bboxW * scale) / 2)
+  const offsetY = PRESENT_MENUBAR_H + PRESENT_FIT_PAD + Math.max(0, (availH - bboxH * scale) / 2)
+  return { x: offsetX - minX * scale, y: offsetY - minY * scale, scale }
+}
+
 export function DesktopShell() {
   const [connections, setConnections] = useState<SanitizedConnection[]>([])
   const [activeConnectionId, setActiveConnectionId] = useState<string | null>(null)
@@ -324,6 +364,11 @@ export function DesktopShell() {
   const [runSignals, setRunSignals] = useState<Record<string, number>>({})
   const [viewport, setViewport] = useState<DesktopViewportState>(DEFAULT_VIEWPORT)
   const [ctxMenu, setCtxMenu] = useState<ContextMenuState | null>(null)
+  // Present (read-only) mode v1: chrome-off windows (handled per-window) plus a
+  // fit-to-screen framing applied to the active layer. `presentFit` is local —
+  // never persisted — so it can't leak into saved desktops/scenes.
+  const present = usePresentMode()
+  const [presentFit, setPresentFit] = useState<PresentFit | null>(null)
 
   // ── LISTEN/NOTIFY feed ──────────────────────────────────────────────
   const [notifications, setNotifications] = useState<NotifyEvent[]>([])
@@ -336,6 +381,24 @@ export function DesktopShell() {
   const zSeed = activeCanvas.zSeed
   const desktopParams = activeCanvas.params
   const focusedWindowId = activeCanvas.focusedWindowId
+
+  // Present mode: recompute the fit-to-screen framing on enter, on window
+  // resize, and when the active canvas's geometry changes (e.g. switching
+  // workspace). Deferred to a rAF so it measures post-layout, and guarded so a
+  // content-only re-render (filtering, data loads) doesn't churn the transform.
+  useEffect(() => {
+    if (!present) return
+    const recompute = () => setPresentFit((prev) => {
+      const next = computePresentFit(windows)
+      return sameFit(prev, next) ? prev : next
+    })
+    const raf = requestAnimationFrame(recompute)
+    window.addEventListener("resize", recompute)
+    return () => {
+      cancelAnimationFrame(raf)
+      window.removeEventListener("resize", recompute)
+    }
+  }, [present, windows])
 
   // mutateCanvas must stay referentially *stable*. Many handlers
   // (move, resize, close, minimize, updatePayload…) are useCallback'd
@@ -3569,6 +3632,21 @@ export function DesktopShell() {
             )}
             aria-hidden={!isActive}
           >
+            {/* Present mode v1 frames the active canvas: a translate+scale on
+                this inner wrapper (origin top-left) fits the windows' bounding
+                box to the screen. In edit mode the wrapper is a pass-through
+                (no transform) so positioning is byte-identical to before. */}
+            <div
+              className="absolute inset-0"
+              style={
+                present && isActive && presentFit
+                  ? {
+                      transform: `translate(${presentFit.x}px, ${presentFit.y}px) scale(${presentFit.scale})`,
+                      transformOrigin: "0 0",
+                    }
+                  : undefined
+              }
+            >
             {canvas.windows.map((w) => {
               return (
                 <WindowFrame
@@ -3593,6 +3671,7 @@ export function DesktopShell() {
                 />
               )
             })}
+            </div>
             {/* Empty Scene slot = the Scene gallery: pick one to load, or
                 save the current desktop from the Scenes menu. */}
             {wsId === SCENE_SLOT && canvas.windows.length === 0 ? (

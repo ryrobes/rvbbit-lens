@@ -1,5 +1,7 @@
 "use client"
 
+import { useSyncExternalStore } from "react"
+
 /**
  * Present (read-only) mode — Phase 2.2b. A per-tab flag that makes the desktop
  * a stable presentation surface: layout fiddling no longer persists (or
@@ -38,4 +40,13 @@ export function subscribePresentMode(cb: () => void): () => void {
   if (typeof window === "undefined") return () => {}
   window.addEventListener(PRESENT_CHANGED_EVENT, cb)
   return () => window.removeEventListener(PRESENT_CHANGED_EVENT, cb)
+}
+
+/** Reactive present-mode flag for components (re-renders on toggle). */
+export function usePresentMode(): boolean {
+  return useSyncExternalStore(
+    subscribePresentMode,
+    isPresentMode,
+    () => false,
+  )
 }

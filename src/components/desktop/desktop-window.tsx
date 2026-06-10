@@ -32,6 +32,7 @@ import {
   useActiveBlockDragSource,
   type ActiveBlockDragSource,
 } from "@/lib/desktop/block-drag"
+import { usePresentMode } from "@/lib/desktop/present-mode"
 import { availableRollupOps, isNumericRef } from "@/lib/desktop/sql-builder"
 import {
   availableDimensionOps,
@@ -174,6 +175,9 @@ export function DesktopWindow({
   onRowsetChain,
 }: DesktopWindowProps) {
   const chrome = windowChrome(w.kind)
+  // Present (read-only) mode: drop the editor chrome (title-bar buttons, drag,
+  // resize) and render as a clean card. Content + interactions are untouched.
+  const present = usePresentMode()
   const activeColumnDrag = useActiveColumnDragSource()
   const columnDragCompatible = !!columnDropAcceptsFrom
     && !!activeColumnDrag
@@ -662,8 +666,11 @@ export function DesktopWindow({
         zIndex: w.zIndex,
         borderColor: chrome.border,
         // Unfocused windows get a shallower drop shadow and a half-strength
-        // ring so the focused window sits visually forward.
-        boxShadow: columnDragHover
+        // ring so the focused window sits visually forward. Present mode drops
+        // the focus drama for a single, calm card shadow on every window.
+        boxShadow: present
+          ? `0 8px 30px oklch(0% 0 0 / 0.28), 0 0 0 1px color-mix(in oklch, ${chrome.ring} 55%, transparent)`
+          : columnDragHover
           ? `0 24px 80px oklch(0% 0 0 / 0.62), 0 0 0 2px oklch(var(--win-l-icon) var(--win-c) ${chrome.hue} / 0.95), 0 0 56px 10px oklch(var(--win-l-icon) var(--win-c) ${chrome.hue} / 0.55)`
           : columnDragCompatible
             ? `0 16px 56px oklch(0% 0 0 / 0.5), 0 0 0 2px oklch(var(--win-l-icon) var(--win-c) ${chrome.hue} / 0.55), 0 0 24px 2px oklch(var(--win-l-icon) var(--win-c) ${chrome.hue} / 0.25)`
@@ -675,19 +682,23 @@ export function DesktopWindow({
     >
       <div
         className={cn(
-          "flex h-9 cursor-grab select-none items-center border-b px-2 active:cursor-grabbing transition-colors duration-150",
+          "flex select-none items-center border-b transition-colors duration-150",
+          present ? "h-7 px-2.5" : "h-9 cursor-grab px-2 active:cursor-grabbing",
           focused ? "bg-chrome-bg/85" : "bg-chrome-bg/55",
         )}
         style={{ borderColor: chrome.headerBorder }}
-        onPointerDown={onHeaderDown}
-        onPointerMove={onHeaderMove}
-        onPointerUp={onHeaderUp}
+        onPointerDown={present ? undefined : onHeaderDown}
+        onPointerMove={present ? undefined : onHeaderMove}
+        onPointerUp={present ? undefined : onHeaderUp}
       >
         <div className="flex min-w-0 flex-1 items-center gap-2">
           <Icon className="h-4 w-4 shrink-0" style={{ color: chrome.icon }} />
           <h2 className="truncate text-[12px] font-semibold text-foreground">{w.title}</h2>
         </div>
-        <div className="flex items-center gap-1" onPointerDown={(e) => e.stopPropagation()}>
+        <div
+          className={cn("flex items-center gap-1", present && "hidden")}
+          onPointerDown={(e) => e.stopPropagation()}
+        >
           <button
             type="button"
             onClick={() => onMinimize(w.id)}
@@ -717,7 +728,9 @@ export function DesktopWindow({
       {/* Content area lets the section's background show through so the
           glass blur is visible across the whole window when unfocused.
           When focused, the section is opaque enough to read as solid. */}
-      <div className="h-[calc(100%-2.25rem)] overflow-hidden">{children}</div>
+      <div className={cn("overflow-hidden", present ? "h-[calc(100%-1.75rem)]" : "h-[calc(100%-2.25rem)]")}>
+        {children}
+      </div>
 
       {columnDragCompatible && onColumnMerge && (rollupTiles.length > 0 || semanticTiles.length > 0) ? (
         <div
@@ -893,16 +906,18 @@ export function DesktopWindow({
         <DropTargetCard info={hoverCard.info} panelRect={hoverCard.panelRect} tileRect={hoverCard.tileRect} />
       ) : null}
 
-      <button
-        type="button"
-        aria-label="Resize"
-        className="absolute bottom-0 right-0 grid h-6 w-6 cursor-nwse-resize place-items-center rounded-tl bg-foreground/[0.035] text-chrome-text/35 transition-colors hover:bg-foreground/[0.08] hover:text-foreground/65"
-        onPointerDown={onResizeDown}
-        onPointerMove={onResizeMove}
-        onPointerUp={onResizeUp}
-      >
-        <Grip className="h-3.5 w-3.5 rotate-45" />
-      </button>
+      {present ? null : (
+        <button
+          type="button"
+          aria-label="Resize"
+          className="absolute bottom-0 right-0 grid h-6 w-6 cursor-nwse-resize place-items-center rounded-tl bg-foreground/[0.035] text-chrome-text/35 transition-colors hover:bg-foreground/[0.08] hover:text-foreground/65"
+          onPointerDown={onResizeDown}
+          onPointerMove={onResizeMove}
+          onPointerUp={onResizeUp}
+        >
+          <Grip className="h-3.5 w-3.5 rotate-45" />
+        </button>
+      )}
     </section>
   )
 }
