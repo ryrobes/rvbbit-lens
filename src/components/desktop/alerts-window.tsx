@@ -473,29 +473,43 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
 
 function RuleEditor({
   connectionId,
+  initial,
   onSaved,
   onCancel,
 }: {
   connectionId: string
+  initial: AlertRule | null
   onSaved: (name: string) => void
   onCancel: () => void
 }) {
-  const [name, setName] = useState("")
-  const [description, setDescription] = useState("")
-  const [scored, setScored] = useState(true)
-  const [query, setQuery] = useState("SELECT region AS entity_key, drop_pct AS score FROM my_table")
-  const [threshold, setThreshold] = useState("0.15")
-  const [compare, setCompare] = useState<"gte" | "lte">("gte")
-  const [consecutiveN, setConsecutiveN] = useState("1")
-  const [cooldownSecs, setCooldownSecs] = useState("0")
-  const [operator, setOperator] = useState<"noop" | "sql" | "mcp_call" | "flow">("noop")
-  const [actionSql, setActionSql] = useState("INSERT INTO incidents(rule, entity, ts)\n  VALUES ($1->>'rule', $1->>'entity', now())")
-  const [server, setServer] = useState("linear")
-  const [tool, setTool] = useState("create_issue")
-  const [argsJson, setArgsJson] = useState('{\n  "title": "{rule}: {entity} breached",\n  "description": "transition {transition}"\n}')
-  const [spec, setSpec] = useState("")
-  const [cadence, setCadence] = useState<"fast" | "normal" | "slow">("normal")
-  const [fanOutCap, setFanOutCap] = useState("100")
+  const editing = initial != null
+  const cs = initial?.conditionSpec ?? {}
+  const fp = initial?.firePolicy ?? {}
+  const as = initial?.actionSpec ?? {}
+  const opInit = ((): "noop" | "sql" | "mcp_call" | "flow" => {
+    const o = String(as.operator ?? "noop")
+    return o === "sql" || o === "mcp_call" || o === "flow" ? o : "noop"
+  })()
+  const cadInit = (["fast", "normal", "slow"] as const).includes(initial?.cadenceTier as "fast")
+    ? (initial!.cadenceTier as "fast" | "normal" | "slow")
+    : "normal"
+
+  const [name, setName] = useState(initial?.name ?? "")
+  const [description, setDescription] = useState(initial?.description ?? "")
+  const [scored, setScored] = useState(initial ? cs.threshold != null : true)
+  const [query, setQuery] = useState(typeof cs.query === "string" ? cs.query : "SELECT region AS entity_key, drop_pct AS score FROM my_table")
+  const [threshold, setThreshold] = useState(cs.threshold != null ? String(cs.threshold) : "0.15")
+  const [compare, setCompare] = useState<"gte" | "lte">(cs.compare === "lte" ? "lte" : "gte")
+  const [consecutiveN, setConsecutiveN] = useState(fp.consecutive_n != null ? String(fp.consecutive_n) : "1")
+  const [cooldownSecs, setCooldownSecs] = useState(fp.cooldown_secs != null ? String(fp.cooldown_secs) : "0")
+  const [operator, setOperator] = useState<"noop" | "sql" | "mcp_call" | "flow">(opInit)
+  const [actionSql, setActionSql] = useState(typeof as.sql === "string" ? as.sql : "INSERT INTO incidents(rule, entity, ts)\n  VALUES ($1->>'rule', $1->>'entity', now())")
+  const [server, setServer] = useState(typeof as.server === "string" ? as.server : "linear")
+  const [tool, setTool] = useState(typeof as.tool === "string" ? as.tool : "create_issue")
+  const [argsJson, setArgsJson] = useState(as.args != null ? JSON.stringify(as.args, null, 2) : '{\n  "title": "{rule}: {entity} breached",\n  "description": "transition {transition}"\n}')
+  const [spec, setSpec] = useState(typeof as.spec === "string" ? as.spec : "")
+  const [cadence, setCadence] = useState<"fast" | "normal" | "slow">(cadInit)
+  const [fanOutCap, setFanOutCap] = useState(initial ? String(initial.fanOutCap) : "100")
   const [preview, setPreview] = useState<PreviewRow[]>([])
   const [previewErr, setPreviewErr] = useState<string | null>(null)
   const [saveErr, setSaveErr] = useState<string | null>(null)
@@ -587,7 +601,10 @@ function RuleEditor({
   return (
     <div className="flex flex-col gap-3">
       <div className="flex items-center gap-2">
-        <span className="text-[13px] font-semibold text-foreground">New alert</span>
+        <span className="text-[13px] font-semibold text-foreground">{editing ? `Edit ${initial!.name}` : "New alert"}</span>
+        {editing ? (
+          <span className="rounded bg-foreground/[0.06] px-1.5 py-0.5 text-[9px] text-chrome-text/55">saves a new version</span>
+        ) : null}
         <div className="ml-auto flex items-center gap-1.5">
           <button type="button" onClick={onCancel} className="rounded border border-chrome-border px-2 py-0.5 text-[11px] text-chrome-text/70 hover:bg-foreground/[0.06]">
             Cancel
@@ -601,7 +618,7 @@ function RuleEditor({
               canSave ? "border-rvbbit-accent/50 bg-rvbbit-accent/15 text-rvbbit-accent hover:bg-rvbbit-accent/25" : "border-chrome-border text-chrome-text/40",
             )}
           >
-            {saving ? "Creating…" : "Create alert"}
+            {saving ? "Saving…" : editing ? "Save new version" : "Create alert"}
           </button>
         </div>
       </div>
@@ -609,7 +626,7 @@ function RuleEditor({
 
       <div className="grid grid-cols-2 gap-2">
         <Field label="name">
-          <input value={name} onChange={(e) => setName(e.target.value)} placeholder="revenue_drop" spellCheck={false} className={inputCls} />
+          <input value={name} onChange={(e) => setName(e.target.value)} readOnly={editing} placeholder="revenue_drop" spellCheck={false} className={cn(inputCls, editing && "cursor-not-allowed opacity-60")} />
         </Field>
         <Field label="description">
           <input value={description} onChange={(e) => setDescription(e.target.value)} placeholder="what this watches" className={inputCls} />
@@ -766,6 +783,7 @@ export function AlertsWindow({ payload, activeConnectionId, hasRvbbit, onChangeP
   // stays a pure deterministic render).
   const [now, setNow] = useState(() => Date.now())
   const [editing, setEditing] = useState(false)
+  const [editTarget, setEditTarget] = useState<AlertRule | null>(null)
 
   const selected = payload.rule ?? null
   const rule = useMemo(() => rules.find((r) => r.name === selected) ?? null, [rules, selected])
@@ -890,10 +908,13 @@ export function AlertsWindow({ payload, activeConnectionId, hasRvbbit, onChangeP
         <div className="w-56 shrink-0 overflow-auto border-r border-chrome-border bg-doc-bg/30">
           <button
             type="button"
-            onClick={() => setEditing(true)}
+            onClick={() => {
+              setEditTarget(null)
+              setEditing(true)
+            }}
             className={cn(
               "flex w-full items-center gap-1.5 border-b border-chrome-border/40 px-2.5 py-1.5 text-left text-[11px] font-medium transition-colors",
-              editing ? "bg-rvbbit-accent/15 text-rvbbit-accent" : "text-chrome-text/70 hover:bg-foreground/[0.04]",
+              editing && !editTarget ? "bg-rvbbit-accent/15 text-rvbbit-accent" : "text-chrome-text/70 hover:bg-foreground/[0.04]",
             )}
           >
             <span className="grid h-4 w-4 place-items-center rounded border border-current text-[11px] leading-none">+</span>
@@ -944,10 +965,16 @@ export function AlertsWindow({ payload, activeConnectionId, hasRvbbit, onChangeP
         <div className="min-w-0 flex-1 overflow-auto p-3">
           {editing ? (
             <RuleEditor
+              key={editTarget?.name ?? "new"}
               connectionId={activeConnectionId!}
-              onCancel={() => setEditing(false)}
+              initial={editTarget}
+              onCancel={() => {
+                setEditing(false)
+                setEditTarget(null)
+              }}
               onSaved={(nm) => {
                 setEditing(false)
+                setEditTarget(null)
                 onChangePayload((p) => ({ ...p, rule: nm }))
                 void loadRules()
                 void loadDetail()
@@ -966,6 +993,16 @@ export function AlertsWindow({ payload, activeConnectionId, hasRvbbit, onChangeP
                   </span>
                   <span className="text-[9px] text-chrome-text/50">{rule.cardinality}</span>
                   <div className="ml-auto flex items-center gap-1">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setEditTarget(rule)
+                        setEditing(true)
+                      }}
+                      className="rounded border border-chrome-border px-1.5 py-0.5 text-[10px] text-chrome-text/70 hover:bg-foreground/[0.06]"
+                    >
+                      edit
+                    </button>
                     <button
                       type="button"
                       onClick={() => void act(() => setRuleEnabled(activeConnectionId!, rule.name, !rule.enabled))}
