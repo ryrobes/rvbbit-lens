@@ -83,9 +83,28 @@ seam to swap SQLite for Postgres without touching the client.
      enter/resize/workspace-switch. The framing is local state, never written to
      the persisted `viewport`, so it can't leak into saved desktops or scenes;
      edit mode renders byte-identical to before (the wrapper is a no-transform
-     pass-through). Deferred to **v2**: scene-level *authored* alternative
-     geometry (a breakpoint-keyed present layout, Tableau-style) for when
-     fit-to-screen isn't enough.
+     pass-through).
+   - **2.2d present content chrome v1.1 (DONE)** — v1 only quieted the window
+     *frame*; the *content* still rendered its editor rails. This pass threads
+     `usePresentMode()` into the dashboard content components so present mode is
+     truly "content-only" (the chosen design: no tabs — each tile shows just its
+     saved view, full-bleed). **DataGridWindow**: hides the tab strip, SQL rail,
+     header toolbar (Run/Export/Save-as-app/SQL-toggle/block-rename/notify),
+     rollup shelf, view-kind switcher, and time-travel rail; editor-only tabs
+     (sql/explain/steps) fall back to the table via a `bodyTab` so a viewer never
+     lands on a code editor. **ChartView** → Vega canvas only (keeps hover,
+     tooltips, click-to-emit-param, resize). **ControlView** → the control only
+     (drops the field-selector + gte/lte toggle). **ResultGrid** → keeps
+     cell-click filtering + sort + scroll; drops column drag-grips, resize, and
+     header multi-select. **ViewAppWindow** → drops Re-run (auto-runs on mount).
+     **MetricBoardWindow** → drops the control bar + footer; keeps the KPI matrix,
+     drill popovers, and what-if slider. **ScryResultsWindow** → drops the cascade
+     breadcrumb. RollupShelf/TimeTravelStrip/ViewKindBar are gated at the
+     DataGridWindow level (not rendered in present), so their own files are
+     untouched. All edits are `{!present && …}` gates — edit mode is unchanged.
+     Deferred to **v2**: scene-level *authored* alternative geometry (a
+     breakpoint-keyed present layout, Tableau-style) for when fit-to-screen +
+     chrome-off isn't enough.
 3. **Close the loop / home discovery (DONE)** — connections turned out to be
    **already server-global**: `lib/db/registry.ts` keeps them in a single
    server-side `connections.json` (`~/.config/rvbbit-lens/`, 0600, managed via

@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button"
 import { ResultGrid } from "./result-grid"
 import { getViewApp } from "@/lib/desktop/view-apps"
 import { iconFor } from "@/lib/desktop/icon-glyphs"
+import { usePresentMode } from "@/lib/desktop/present-mode"
 import type { QueryResult } from "@/lib/db/types"
 import type { ViewAppPayload } from "@/lib/desktop/types"
 
@@ -19,6 +20,9 @@ export function ViewAppWindow({ payload, activeConnectionId }: ViewAppWindowProp
   const [result, setResult] = useState<QueryResult | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [running, setRunning] = useState(false)
+  // Present mode: the query auto-runs on mount, so the manual Re-run control is
+  // editor chrome — drop it and keep the branded title/description header.
+  const present = usePresentMode()
 
   const run = useCallback(async () => {
     if (!app) return
@@ -76,9 +80,11 @@ export function ViewAppWindow({ payload, activeConnectionId }: ViewAppWindowProp
             <div className="truncate text-[10px] text-chrome-text">{app.description}</div>
           ) : null}
         </div>
-        <Button size="sm" variant="neutral" onClick={run} disabled={running} title="Re-run">
-          <RefreshCw className={running ? "h-3 w-3 animate-spin" : "h-3 w-3"} />
-        </Button>
+        {present ? null : (
+          <Button size="sm" variant="neutral" onClick={run} disabled={running} title="Re-run">
+            <RefreshCw className={running ? "h-3 w-3 animate-spin" : "h-3 w-3"} />
+          </Button>
+        )}
       </div>
 
       <div className="flex-1 overflow-hidden">

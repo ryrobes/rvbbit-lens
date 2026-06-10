@@ -23,6 +23,7 @@ import {
 } from "@/lib/rvbbit/metrics"
 import { inputCls, VerdictBadge, fmtTime } from "./metric-shared"
 import { useWorkspaceActive } from "./workspace-active-context"
+import { usePresentMode } from "@/lib/desktop/present-mode"
 import type { MetricBoardPayload } from "@/lib/desktop/types"
 
 type EmitParamInput = {
@@ -121,6 +122,10 @@ export function MetricBoardWindow({
   onChangePayload,
 }: MetricBoardWindowProps) {
   const wsActive = useWorkspaceActive()
+  // Present mode: the control bar (range/rollup/mode/def-time/refresh) and the
+  // footer legend are board-configuration chrome — drop them; the KPI matrix,
+  // cell drill popovers, and what-if slider all stay live.
+  const present = usePresentMode()
   const [metrics, setMetrics] = useState<MetricSummary[]>([])
   const [cells, setCells] = useState<MetricBoardCell[]>([])
   const [loaded, setLoaded] = useState(false)
@@ -380,6 +385,7 @@ export function MetricBoardWindow({
   return (
     <div className="flex h-full flex-col text-[12px] text-chrome-text">
       {/* header / controls */}
+      {present ? null : (
       <div className="flex flex-wrap items-center gap-2 border-b border-chrome-border bg-chrome-bg/40 px-3 py-1.5">
         <Table2 className="h-4 w-4 text-amber-300/80" />
         <span className="font-medium">KPI Board</span>
@@ -486,6 +492,7 @@ export function MetricBoardWindow({
           Refresh
         </button>
       </div>
+      )}
 
       {error ? (
         <div className="border-b border-red-500/30 bg-red-500/10 px-3 py-1.5 text-[11px] text-red-200">{error}</div>
@@ -685,6 +692,7 @@ export function MetricBoardWindow({
       ) : null}
 
       {/* footer */}
+      {present ? null : (
       <div className="flex items-center gap-3 border-t border-chrome-border bg-chrome-bg/40 px-3 py-1 text-[10px] text-chrome-text/50">
         <span>{rows.length} metrics</span>
         <span>
@@ -710,6 +718,7 @@ export function MetricBoardWindow({
           )}
         </span>
       </div>
+      )}
     </div>
   )
 }

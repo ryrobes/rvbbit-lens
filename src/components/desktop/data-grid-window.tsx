@@ -73,6 +73,7 @@ import {
   uniqueBlockName,
 } from "@/lib/desktop/reactive-sql"
 import { setActiveBlockDragSource, writeBlockDragPayload } from "@/lib/desktop/block-drag"
+import { usePresentMode } from "@/lib/desktop/present-mode"
 import { hasParamDragPayload, readParamDragPayload } from "@/lib/desktop/param-drag"
 import { attachDragGhost } from "@/lib/desktop/drag-ghost"
 
@@ -176,6 +177,11 @@ export function DataGridWindow({
   onOpenKgForSource,
 }: DataGridWindowProps) {
   const view = payload.view ?? {}
+  // Present mode = "content-only": no tab strip, SQL rail, header toolbar,
+  // rollup shelf, view-kind switcher, or time-travel rail — just the saved
+  // view's data, full-bleed. Editor-only tabs (sql/explain/steps) fall back to
+  // the table so a viewer never lands on a code editor.
+  const present = usePresentMode()
   // Schema-aware SQL completion (tables + columns w/ type hints, + rvbbit
   // function snippets), rebuilt only when the connection's schema changes.
   const sqlCompletion = useMemo(() => buildSqlCompletionSchema(schema), [schema])
@@ -996,6 +1002,13 @@ export function DataGridWindow({
     }
   }, [blockName, payload, result, w.id, w.title])
 
+  // The view the body renders. In present mode the editor-only tabs collapse to
+  // the table so a presented tile always shows data, never a code surface.
+  const bodyTab =
+    present && (activeTab === "sql" || activeTab === "explain" || activeTab === "steps")
+      ? "rows"
+      : activeTab
+
   return (
     <div
       className={cn("relative flex h-full")}
@@ -1015,7 +1028,7 @@ export function DataGridWindow({
           </div>
         </div>
       ) : null}
-      {sqlRailOpen ? (
+      {sqlRailOpen && !present ? (
         <aside
           className="flex flex-col border-r border-chrome-border bg-doc-bg/80"
           style={{ width: view.sqlRailWidthPx ?? 380, minWidth: 280, maxWidth: 700 }}
@@ -1054,6 +1067,7 @@ export function DataGridWindow({
       ) : null}
 
       <section className="flex flex-1 flex-col overflow-hidden">
+        {present ? null : (
         <div className="flex h-9 shrink-0 items-center border-b border-chrome-border bg-chrome-bg/30 pl-1 pr-2">
           {/* Left group scrolls horizontally when narrow rather than wrapping —
               keeps the rail a fixed height and every tab reachable. */}
@@ -1152,8 +1166,9 @@ export function DataGridWindow({
             </div>
           ) : null}
         </div>
+        )}
 
-        {rollupSpec && onEditRollup ? (
+        {rollupSpec && onEditRollup && !present ? (
           <RollupShelf
             spec={rollupSpec}
             onEdit={onEditRollup}
@@ -1164,7 +1179,7 @@ export function DataGridWindow({
         ) : null}
 
         <div className="min-h-0 flex-1 overflow-hidden">
-          {activeTab === "rows" && result ? (
+          {bodyTab === "rows" && result ? (
             result.rows.length === 1 && result.columns.length === 1 ? (
               <SingleCellCallout
                 column={result.columns[0]}
@@ -1191,14 +1206,14 @@ export function DataGridWindow({
               />
             )
           ) : null}
-          {activeTab === "rows" && !result ? (
+          {bodyTab === "rows" && !result ? (
             <EmptyResult error={error} running={isRunning} progress={progress} onRun={onRun} />
           ) : null}
-          {activeTab === "profile" && result ? <ProfileView result={result} /> : null}
-          {activeTab === "profile" && !result ? <EmptyResult error={error} running={isRunning} progress={progress} onRun={onRun} /> : null}
-          {activeTab === "chart" && result ? (
+          {bodyTab === "profile" && result ? <ProfileView result={result} /> : null}
+          {bodyTab === "profile" && !result ? <EmptyResult error={error} running={isRunning} progress={progress} onRun={onRun} /> : null}
+          {bodyTab === "chart" && result ? (
             <div className="flex h-full flex-col">
-              <ViewKindBar kind={viewKind} onChange={setViewKind} />
+              {present ? null : <ViewKindBar kind={viewKind} onChange={setViewKind} />}
               <div className="min-h-0 flex-1">
                 {viewKind === "chart" ? (
                   <ChartView
@@ -1251,10 +1266,10 @@ export function DataGridWindow({
               </div>
             </div>
           ) : null}
-          {activeTab === "chart" && !result ? (
+          {bodyTab === "chart" && !result ? (
             <EmptyResult error={error} running={isRunning} progress={progress} onRun={onRun} />
           ) : null}
-          {activeTab === "sql" ? (
+          {bodyTab === "sql" ? (
             <div className="h-full bg-doc-bg group-data-[focused=false]/window:bg-doc-bg/70">
               <SqlEditor
                 value={draftSql}
@@ -1267,7 +1282,7 @@ export function DataGridWindow({
               />
             </div>
           ) : null}
-          {activeTab === "explain" ? (
+          {bodyTab === "explain" ? (
             <ExplainTab
               state={explainState}
               busy={explainBusy}
@@ -1279,7 +1294,7 @@ export function DataGridWindow({
               onAnalyze={onAnalyze}
             />
           ) : null}
-          {activeTab === "steps" ? (
+          {bodyTab === "steps" ? (
             <FlowStepsView
               steps={flowSteps}
               error={flowStepsError}
@@ -1289,14 +1304,16 @@ export function DataGridWindow({
           ) : null}
         </div>
       </section>
-      <TimeTravelStrip
-        sql={draftSql}
-        detectSql={compiledSql}
-        onChange={setDraftSql}
-        onRun={onRun}
-        connectionId={activeConnectionId}
-        hasRvbbit={hasRvbbit}
-      />
+      {present ? null : (
+        <TimeTravelStrip
+          sql={draftSql}
+          detectSql={compiledSql}
+          onChange={setDraftSql}
+          onRun={onRun}
+          connectionId={activeConnectionId}
+          hasRvbbit={hasRvbbit}
+        />
+      )}
     </div>
   )
 }

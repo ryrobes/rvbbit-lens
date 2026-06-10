@@ -29,6 +29,7 @@ import type { DesktopParamValue } from "@/lib/desktop/types"
 import { inferChartSpec, schemaComment, type InferResult } from "@/lib/desktop/chart-infer"
 import { themeFingerprint, vegaConfigFromTheme } from "@/lib/desktop/chart-theme"
 import { rvbbitLensCodeMirrorTheme } from "@/lib/desktop/codemirror-theme"
+import { usePresentMode } from "@/lib/desktop/present-mode"
 import { ChartShelf } from "./chart-shelf"
 
 export interface ChartViewProps {
@@ -54,6 +55,10 @@ type EditorMode = "shelf" | "yaml"
 export function ChartView({ result, userSpec, onChangeUserSpec, seedSpec, onEmitParam, activeParams }: ChartViewProps) {
   const [mode, setMode] = useState<EditorMode>("shelf")
   const [themeStamp, setThemeStamp] = useState(0)
+  // Present mode: the Tableau-style shelf + spec editor are pure authoring —
+  // render just the Vega canvas (which keeps hover, tooltips, click-to-emit
+  // params, and its resize observer, since the ref lives on the canvas wrapper).
+  const present = usePresentMode()
 
   // Bump on :root mutations — palette overrides + font writes touch
   // .style, dark/light toggles flip `data-theme`, and the chrome
@@ -372,6 +377,11 @@ export function ChartView({ result, userSpec, onChangeUserSpec, seedSpec, onEmit
         />
       </div>
     )
+
+  if (present) {
+    // Content-only: just the chart, full-bleed.
+    return <div className="flex h-full flex-col">{canvas}</div>
+  }
 
   return (
     <div className="flex h-full flex-col">

@@ -9,6 +9,7 @@ import { cn } from "@/lib/utils"
 import { formatCellValue } from "@/lib/sql/format"
 import { setActiveColumnDragSource, writeColumnDragPayload } from "@/lib/desktop/column-drag"
 import { attachDragGhost } from "@/lib/desktop/drag-ghost"
+import { usePresentMode } from "@/lib/desktop/present-mode"
 
 interface ColumnDragSource {
   parentWindowId: string
@@ -55,6 +56,10 @@ export function ResultGrid({
   const parentRef = useRef<HTMLDivElement>(null)
   const [colWidths, setColWidths] = useState<Record<string, number>>({})
   const [selectedHeaders, setSelectedHeaders] = useState<Set<string>>(new Set())
+  // Present mode: cell-click filtering stays, but column drag-to-group, header
+  // multi-select, and width-resize are authoring affordances — turn them off.
+  const present = usePresentMode()
+  const dragEnabled = !!columnDragSource && !present
 
   // Per-column lookup of values that are an active param for this block, so the
   // matching cells can be highlighted (cascade = the live filter; otherwise a
@@ -74,7 +79,7 @@ export function ResultGrid({
   }, [activeParams])
 
   function onHeaderDragStart(e: React.DragEvent<HTMLDivElement>, name: string) {
-    if (!columnDragSource) return
+    if (!columnDragSource || present) return
     const sourceCol = columnDragSource.columns.find((c) => c.name === name)
     if (!sourceCol) return
     const multi = columnDragSource.columns.filter((c) => selectedHeaders.has(c.name))
@@ -112,7 +117,7 @@ export function ResultGrid({
   }
 
   function onHeaderClick(e: React.MouseEvent<HTMLDivElement>, name: string) {
-    if (!columnDragSource) return
+    if (!columnDragSource || present) return
     if (!e.metaKey && !e.ctrlKey && !e.shiftKey) {
       // Single click → toggle role hint? For now we just toggle selection.
       setSelectedHeaders((s) => {
@@ -184,29 +189,31 @@ export function ResultGrid({
           return (
             <div
               key={c.name}
-              draggable={!!columnDragSource}
+              draggable={dragEnabled}
               onDragStart={(e) => onHeaderDragStart(e, c.name)}
               onDragEnd={() => setActiveColumnDragSource(null)}
               onClick={(e) => onHeaderClick(e, c.name)}
               className={cn(
                 "relative flex select-none items-center border-r border-chrome-border/60 px-2 py-1 text-[11px] uppercase tracking-wider text-chrome-text",
-                columnDragSource && "cursor-grab active:cursor-grabbing hover:bg-foreground/[0.05]",
+                dragEnabled && "cursor-grab active:cursor-grabbing hover:bg-foreground/[0.05]",
                 isSelected && "bg-main/15 text-foreground",
               )}
               style={{ width: columnWidths[i] }}
-              title={columnDragSource ? "Drag onto canvas to GROUP BY this column. Cmd/Ctrl-click to multi-select." : undefined}
+              title={dragEnabled ? "Drag onto canvas to GROUP BY this column. Cmd/Ctrl-click to multi-select." : undefined}
             >
-              {columnDragSource ? (
+              {dragEnabled ? (
                 <GripVertical className={cn("mr-1 h-3 w-3 shrink-0", role === "metric" ? "text-chart-3" : "text-main/70")} />
               ) : null}
               <span className="truncate text-foreground">{c.name}</span>
               <span className="ml-2 truncate text-[10px] text-chrome-text/70">
                 {c.dataTypeName ?? `oid:${c.dataTypeId}`}
               </span>
-              <div
-                onPointerDown={(e) => startResize(c.name, e)}
-                className="absolute right-0 top-0 h-full w-1.5 cursor-col-resize hover:bg-main/50"
-              />
+              {present ? null : (
+                <div
+                  onPointerDown={(e) => startResize(c.name, e)}
+                  className="absolute right-0 top-0 h-full w-1.5 cursor-col-resize hover:bg-main/50"
+                />
+              )}
             </div>
           )
         })}

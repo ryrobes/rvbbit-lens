@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from "react"
 import { Check, Search, X } from "@/lib/icons"
 import type { QueryResult, QueryResultColumn } from "@/lib/db/types"
 import type { DesktopParamValue } from "@/lib/desktop/types"
+import { usePresentMode } from "@/lib/desktop/present-mode"
 import { classifyColumn } from "@/lib/desktop/chart-infer"
 import { formatCellValue } from "@/lib/sql/format"
 import { cn } from "@/lib/utils"
@@ -58,6 +59,9 @@ interface ControlViewProps {
 export function ControlView({ result, field, kind, activeParams, onChangeField, onEmit, onProbeBounds }: ControlViewProps) {
   const multi = kind === "multiselect"
   const isRange = kind === "datepicker" || kind === "slider"
+  // Present mode: the control itself IS the content (the viewer picks values) —
+  // only its *binding* affordance (which column it targets) is editor chrome.
+  const present = usePresentMode()
 
   const col = useMemo<QueryResultColumn | undefined>(
     () =>
@@ -169,6 +173,7 @@ export function ControlView({ result, field, kind, activeParams, onChangeField, 
 
   return (
     <div className="flex h-full flex-col bg-doc-bg">
+      {present ? null : (
       <div className="flex shrink-0 items-center gap-2 border-b border-chrome-border bg-chrome-bg/30 px-2 py-1.5">
         <span className="shrink-0 text-[9px] uppercase tracking-wider text-chrome-text/55">field</span>
         <select
@@ -182,6 +187,7 @@ export function ControlView({ result, field, kind, activeParams, onChangeField, 
         </select>
         <span className="max-w-[42%] shrink-0 truncate text-[10px] text-chrome-text/45">{status}</span>
       </div>
+      )}
 
       {isRange ? (
         <RangeBody
@@ -279,6 +285,9 @@ function RangeBody({
   onSet: (v: unknown) => void
   onClear: () => void
 }) {
+  // Present mode: the threshold direction (≥/≤) is fixed to what was saved —
+  // render it as a static label rather than an interactive toggle.
+  const present = usePresentMode()
   if (!bounds) {
     return <div className="grid flex-1 place-items-center px-3 text-center text-[11px] text-chrome-text/55">No range available for this column.</div>
   }
@@ -286,19 +295,25 @@ function RangeBody({
     <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-auto p-3">
       <div className="flex items-center gap-1">
         <span className="mr-1 text-[9px] uppercase tracking-wider text-chrome-text/55">match</span>
-        {(["gte", "lte"] as const).map((id) => (
-          <button
-            key={id}
-            type="button"
-            onClick={() => onChangeOp(id)}
-            className={cn(
-              "rounded px-1.5 py-0.5 text-[10px] transition-colors",
-              op === id ? "bg-main/20 text-foreground" : "text-chrome-text/65 hover:bg-foreground/[0.06] hover:text-foreground",
-            )}
-          >
-            {id === "gte" ? "≥ at least" : "≤ at most"}
-          </button>
-        ))}
+        {present ? (
+          <span className="rounded px-1.5 py-0.5 text-[10px] text-foreground">
+            {op === "gte" ? "≥ at least" : "≤ at most"}
+          </span>
+        ) : (
+          (["gte", "lte"] as const).map((id) => (
+            <button
+              key={id}
+              type="button"
+              onClick={() => onChangeOp(id)}
+              className={cn(
+                "rounded px-1.5 py-0.5 text-[10px] transition-colors",
+                op === id ? "bg-main/20 text-foreground" : "text-chrome-text/65 hover:bg-foreground/[0.06] hover:text-foreground",
+              )}
+            >
+              {id === "gte" ? "≥ at least" : "≤ at most"}
+            </button>
+          ))
+        )}
       </div>
       {kind === "datepicker" ? (
         <DateInput min={bounds.min} max={bounds.max} current={current} onSet={onSet} />

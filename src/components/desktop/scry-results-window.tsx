@@ -2,6 +2,7 @@
 
 import { Fragment } from "react"
 import type { ScryResultsPayload } from "@/lib/desktop/types"
+import { usePresentMode } from "@/lib/desktop/present-mode"
 import { hitLabel, KindBadge, ScoreBar } from "./scry-shared"
 
 /**
@@ -20,10 +21,14 @@ export function ScryResultsWindow({
   const chain = payload.chain ?? []
   const hits = payload.hits ?? []
   const relCount = new Set(hits.map((h) => `${h.schema}.${h.rel}`)).size
+  // Present mode: the cascade breadcrumb is search/authoring context — drop it
+  // and show only the results, which are self-explanatory.
+  const present = usePresentMode()
 
   return (
     <div className="flex h-full flex-col text-[12px] text-chrome-text">
       {/* cascade breadcrumb — the "it" chain that produced these results */}
+      {present ? null : (
       <div className="flex flex-wrap items-center gap-1.5 border-b border-chrome-border/60 bg-chrome-bg/40 px-3 py-2">
         {chain.map((c, i) => (
           <Fragment key={i}>
@@ -37,6 +42,7 @@ export function ScryResultsWindow({
           {hits.length} results · {relCount} relations
         </span>
       </div>
+      )}
 
       <div className="min-h-0 flex-1 overflow-auto">
         {hits.length === 0 ? (
