@@ -76,8 +76,22 @@ function ThresholdExplorer({
   const scored = entities.filter((e) => e.score != null) as (AlertEntity & { score: number })[]
   const [drag, setDrag] = useState(ruleThresh)
   const svgRef = useRef<SVGSVGElement>(null)
+  const boxRef = useRef<HTMLDivElement>(null)
+  const [boxW, setBoxW] = useState(640)
+  // Drive the viewBox width from the measured container so the plot fills any
+  // window width 1:1 (no aspect-ratio cap from a fixed viewBox).
+  useEffect(() => {
+    const el = boxRef.current
+    if (!el) return
+    const ro = new ResizeObserver((entries) => {
+      const w = entries[0]?.contentRect.width
+      if (w && w > 0) setBoxW(w)
+    })
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [])
 
-  const W = 640
+  const W = Math.max(boxW, 240)
   const H = 132
   const PADX = 28
   const AXIS_Y = 92
@@ -94,21 +108,20 @@ function ThresholdExplorer({
     return { dMin: lo - pad, dMax: hi + pad }
   }, [scored, ruleThresh, drag])
 
-  const xOf = useCallback((v: number) => PADX + ((v - dMin) / (dMax - dMin)) * (W - 2 * PADX), [dMin, dMax])
-  const breaches = useCallback((s: number) => (compare === "lte" ? s <= drag : s >= drag), [compare, drag])
+  // Plain closures (recomputed each render) so a width/domain change can't leave
+  // a stale W captured in a memoized callback.
+  const xOf = (v: number) => PADX + ((v - dMin) / (dMax - dMin)) * (W - 2 * PADX)
+  const breaches = (s: number) => (compare === "lte" ? s <= drag : s >= drag)
   const nBreach = scored.filter((e) => breaches(e.score)).length
 
-  const xToVal = useCallback(
-    (clientX: number) => {
-      const el = svgRef.current
-      if (!el) return drag
-      const r = el.getBoundingClientRect()
-      const vx = ((clientX - r.left) / r.width) * W
-      const v = dMin + ((vx - PADX) / (W - 2 * PADX)) * (dMax - dMin)
-      return Math.min(dMax, Math.max(dMin, v))
-    },
-    [dMin, dMax, drag],
-  )
+  const xToVal = (clientX: number) => {
+    const el = svgRef.current
+    if (!el) return drag
+    const r = el.getBoundingClientRect()
+    const vx = ((clientX - r.left) / r.width) * W
+    const v = dMin + ((vx - PADX) / (W - 2 * PADX)) * (dMax - dMin)
+    return Math.min(dMax, Math.max(dMin, v))
+  }
 
   const onDown = (e: React.PointerEvent) => {
     e.currentTarget.setPointerCapture(e.pointerId)
@@ -123,7 +136,7 @@ function ThresholdExplorer({
   const tx = xOf(drag)
 
   return (
-    <div className="rounded-md border border-chrome-border bg-doc-bg/40 p-3">
+    <div ref={boxRef} className="rounded-md border border-chrome-border bg-doc-bg/40 p-3">
       <div className="mb-1.5 flex items-center justify-between text-[11px]">
         <span className="font-medium text-foreground">
           Threshold explorer · <span className="text-chrome-text/70">score {compare === "lte" ? "≤" : "≥"} t</span>
@@ -193,6 +206,130 @@ function ThresholdExplorer({
           Set threshold → {numFmt(drag)}
         </button>
       </div>
+    </div>
+  )
+}
+
+// ── episode timeline (per-entity firing history + current episode over time) ──
+
+function EpisodeTimeline({
+  entities,
+  events,
+  sweeps,
+  now,
+}: {
+  entities: AlertEntity[]
+  events: AlertEvent[]
+  sweeps: AlertSweepRun[]
+  now: number
+}) {
+  const boxRef = useRef<HTMLDivElement>(null)
+  const [boxW, setBoxW] = useState(640)
+  useEffect(() => {
+    const el = boxRef.current
+    if (!el) return
+    const ro = new ResizeObserver((entries) => {
+      const w = entries[0]?.contentRect.width
+      if (w && w > 0) setBoxW(w)
+    })
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [])
+
+  const W = Math.max(boxW, 240)
+  const PADL = 76
+  const PADR = 12
+  const ROW_H = 18
+
+  const evByEntity = useMemo(() => {
+    const m = new Map<string, AlertEvent[]>()
+    for (const e of events) {
+      const k = e.entityKey || ""
+      const a = m.get(k) ?? []
+      a.push(e)
+      m.set(k, a)
+    }
+    return m
+  }, [events])
+
+  // lanes: most-active entities first (most fires, then currently-failing)
+  const lanes = useMemo(
+    () =>
+      [...entities].sort((a, b) => {
+        const af = evByEntity.get(a.entityKey)?.length ?? 0
+        const bf = evByEntity.get(b.entityKey)?.length ?? 0
+        if (af !== bf) return bf - af
+        const ar = a.lastStatus === "fail" ? 0 : 1
+        const br = b.lastStatus === "fail" ? 0 : 1
+        return ar - br
+      }),
+    [entities, evByEntity],
+  )
+
+  const tsList = [
+    ...events.map((e) => e.tsMs),
+    ...entities.map((e) => e.changedMs),
+    ...sweeps.map((s) => s.startedMs),
+  ].filter((t): t is number => t != null)
+  const t0 = tsList.length ? Math.min(...tsList) : now - 3_600_000
+  const span = Math.max(now - t0, 60_000)
+  const xOf = (ms: number) => PADL + ((ms - t0) / span) * (W - PADL - PADR)
+  const H = 30 + Math.max(1, lanes.length) * ROW_H
+
+  return (
+    <div ref={boxRef} className="rounded-md border border-chrome-border bg-doc-bg/40 p-3">
+      <div className="mb-1 flex items-center justify-between text-[11px]">
+        <span className="font-medium text-foreground">Episode timeline</span>
+        <span className="text-[10px] text-chrome-text/50">{fmtAgo(t0)} → now · ● fire · ▬ current episode · ┊ sweeps</span>
+      </div>
+      <svg viewBox={`0 0 ${W} ${H}`} className="w-full" style={{ height: H }}>
+        {/* sweep ticks */}
+        {sweeps.map((s) =>
+          s.startedMs != null ? (
+            <line key={s.sweepId} x1={xOf(s.startedMs)} y1={18} x2={xOf(s.startedMs)} y2={H - 4} stroke="var(--chrome-border, #444)" strokeWidth={1} opacity={0.22} />
+          ) : null,
+        )}
+        {/* now line */}
+        <line x1={xOf(now)} y1={14} x2={xOf(now)} y2={H - 4} stroke="var(--rvbbit-accent, #4fd1c5)" strokeWidth={1} opacity={0.5} strokeDasharray="2 2" />
+        {/* lanes */}
+        {lanes.map((e, i) => {
+          const y = 30 + i * ROW_H
+          const evs = evByEntity.get(e.entityKey) ?? []
+          const segStart = e.changedMs != null ? xOf(e.changedMs) : xOf(now)
+          const segColor = statusColor(e.lastStatus)
+          return (
+            <g key={e.entityKey || i}>
+              <text x={4} y={y + 3} className="fill-chrome-text/75 font-mono" style={{ fontSize: 9 }}>
+                {(e.entityKey || "(scalar)").slice(0, 11)}
+              </text>
+              <line x1={PADL} y1={y} x2={W - PADR} y2={y} stroke="var(--chrome-border, #444)" strokeWidth={1} opacity={0.18} />
+              {/* current-episode trailing segment (changed → now) */}
+              <rect
+                x={segStart}
+                y={y - 3}
+                width={Math.max(2, xOf(now) - segStart)}
+                height={6}
+                rx={2}
+                fill={segColor}
+                opacity={e.lastStatus === "fail" ? 0.5 : 0.28}
+              />
+              {/* fire markers */}
+              {evs.map((ev, j) =>
+                ev.tsMs != null ? (
+                  <circle key={j} cx={xOf(ev.tsMs)} cy={y} r={4} fill={ev.status === "fired" ? "var(--color-red-500, #ef4444)" : "var(--color-orange-500, #f97316)"}>
+                    <title>{`${ev.transition} · ${ev.status} · ${fmtAgo(ev.tsMs)}`}</title>
+                  </circle>
+                ) : null,
+              )}
+            </g>
+          )
+        })}
+        {lanes.length === 0 ? (
+          <text x={PADL} y={30} className="fill-chrome-text/45" style={{ fontSize: 11 }}>
+            no entities yet — run a sweep
+          </text>
+        ) : null}
+      </svg>
     </div>
   )
 }
@@ -327,6 +464,9 @@ export function AlertsWindow({ payload, activeConnectionId, hasRvbbit, onChangeP
   const [sweeps, setSweeps] = useState<AlertSweepRun[]>([])
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
+  // wall-clock for the timeline, advanced by the poll (kept out of render so it
+  // stays a pure deterministic render).
+  const [now, setNow] = useState(() => Date.now())
 
   const selected = payload.rule ?? null
   const rule = useMemo(() => rules.find((r) => r.name === selected) ?? null, [rules, selected])
@@ -363,6 +503,7 @@ export function AlertsWindow({ payload, activeConnectionId, hasRvbbit, onChangeP
     let cancelled = false
     const tick = async () => {
       if (cancelled) return
+      setNow(Date.now())
       await loadRules()
       await loadDetail()
     }
@@ -567,6 +708,8 @@ export function AlertsWindow({ payload, activeConnectionId, hasRvbbit, onChangeP
                   onCommit={(t) => void act(() => commitThreshold(activeConnectionId!, rule, t))}
                 />
               ) : null}
+
+              <EpisodeTimeline entities={entities} events={events} sweeps={sweeps} now={now} />
 
               <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
                 <EntityState entities={entities} />
