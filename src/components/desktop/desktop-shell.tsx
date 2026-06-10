@@ -114,6 +114,7 @@ import {
   SCENE_SLOT,
   WORKSPACE_IDS,
 } from "@/lib/desktop/state-store"
+import { shadowDesktopState, shadowScenes } from "@/lib/desktop/server-sync"
 import type { ConnectionRecord, SchemaSnapshot } from "@/lib/db/types"
 import type {
   RvbbitCachePayload,
@@ -698,6 +699,15 @@ export function DesktopShell() {
     if (!stateLoadedRef.current) return
     saveDesktopState({ workspaces, activeWorkspace, viewport, activeConnectionId, currentSceneId })
   }, [workspaces, activeWorkspace, viewport, activeConnectionId, currentSceneId])
+
+  // Phase 1 homebase: seed the durable server shadow once on mount, so existing
+  // browser data — especially saved scenes, which otherwise only shadow on
+  // mutation — is backed up immediately. Best-effort; no-ops if unreachable.
+  useEffect(() => {
+    shadowDesktopState(loadDesktopState())
+    shadowScenes(listScenes())
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   // ── Wallpaper ──────────────────────────────────────────────────────
 
