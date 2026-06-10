@@ -73,8 +73,17 @@ seam to swap SQLite for Postgres without touching the client.
      `saveDesktopState` no-ops in present mode, so a presented desktop is a stable
      read-only surface (React state still updates; only persistence stops). The
      "less chrome" rendering pass is still deferred.
-3. **Globalize connections** — move connections into `lens_connection`
-   (server-authoritative, shared creds in the server secret store).
+3. **Close the loop / home discovery (DONE)** — connections turned out to be
+   **already server-global**: `lib/db/registry.ts` keeps them in a single
+   server-side `connections.json` (`~/.config/rvbbit-lens/`, 0600, managed via
+   `/api/db/connections`), so every browser at the same server already shares
+   them with creds resolved server-side. No `lens_connection` migration needed —
+   the "global connections" decision is the existing architecture. The actual
+   missing piece was **home discovery**: `listHomes()` + `GET /api/lens/homes`
+   (named homes only — UUID scratch homes stay private) feed a "homes on this
+   server" list in the Home switcher, so a fresh browser can *see* and adopt
+   existing workspaces. Verified end-to-end: fresh browser → global connections +
+   discover named homes → adopt → its desktop + scenes load.
 
 ## Phase 1 as-built
 

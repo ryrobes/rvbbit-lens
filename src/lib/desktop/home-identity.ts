@@ -33,6 +33,22 @@ export function slugifyHome(name: string): string {
   )
 }
 
+export interface HomeSummary {
+  id: string
+  scenes: number
+  updatedAt: string
+}
+
+/** Named homes on this server (for discovery — a fresh browser can pick one). */
+export async function fetchHomes(): Promise<HomeSummary[]> {
+  try {
+    const r = (await fetch("/api/lens/homes").then((x) => x.json())) as { homes?: HomeSummary[] }
+    return Array.isArray(r?.homes) ? r.homes : []
+  } catch {
+    return []
+  }
+}
+
 /** Does this home already hold a desktop on the server? (decides adopt vs claim) */
 export async function peekHome(slug: string): Promise<{ hasData: boolean }> {
   try {

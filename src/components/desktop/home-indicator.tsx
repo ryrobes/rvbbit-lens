@@ -5,10 +5,11 @@ import { Home } from "@/lib/icons"
 import {
   adoptHome,
   claimHome,
+  fetchHomes,
   getHomeId,
   peekHome,
-  recentHomes,
   slugifyHome,
+  type HomeSummary,
 } from "@/lib/desktop/home-identity"
 
 // A fresh per-browser id is an opaque UUID — show it as "unnamed" until named.
@@ -26,7 +27,7 @@ export function HomeIndicator() {
   const [home, setHome] = useState("…")
   const [open, setOpen] = useState(false)
   const [input, setInput] = useState("")
-  const [recents, setRecents] = useState<string[]>([])
+  const [homes, setHomes] = useState<HomeSummary[]>([])
   const [pendingAdopt, setPendingAdopt] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const rootRef = useRef<HTMLDivElement>(null)
@@ -60,7 +61,7 @@ export function HomeIndicator() {
   }, [])
 
   const openMenu = useCallback(() => {
-    setRecents(recentHomes().filter((h) => h !== getHomeId()))
+    void fetchHomes().then((h) => setHomes(h.filter((x) => x.id !== getHomeId())))
     setPendingAdopt(null)
     setOpen(true)
   }, [])
@@ -170,20 +171,23 @@ export function HomeIndicator() {
                   {busy ? "…" : "Go"}
                 </button>
               </form>
-              {recents.length > 0 ? (
+              {homes.length > 0 ? (
                 <div className="mt-2">
                   <div className="mb-1 text-[9px] uppercase tracking-wider text-chrome-text/45">
-                    recent
+                    homes on this server
                   </div>
-                  <div className="flex flex-wrap gap-1">
-                    {recents.map((h) => (
+                  <div className="max-h-[30vh] space-y-0.5 overflow-auto">
+                    {homes.map((h) => (
                       <button
-                        key={h}
+                        key={h.id}
                         type="button"
-                        onClick={() => void choose(h)}
-                        className="rounded-full border border-chrome-border bg-foreground/[0.04] px-1.5 py-px font-mono text-[10px] text-chrome-text/70 hover:border-rvbbit-accent/40 hover:text-foreground"
+                        onClick={() => void choose(h.id)}
+                        className="flex w-full items-center justify-between gap-2 rounded px-1.5 py-1 text-left hover:bg-foreground/[0.06]"
                       >
-                        {displayHome(h)}
+                        <span className="truncate font-mono text-foreground">{h.id}</span>
+                        <span className="shrink-0 text-[9px] text-chrome-text/45">
+                          {h.scenes} {h.scenes === 1 ? "scene" : "scenes"}
+                        </span>
                       </button>
                     ))}
                   </div>

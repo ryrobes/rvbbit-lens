@@ -119,6 +119,34 @@ export function putProfile(homeId: string, state: unknown): void {
     .run(homeId, JSON.stringify(state ?? null), new Date().toISOString())
 }
 
+// ── home discovery ───────────────────────────────────────────────────────────
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
+/**
+ * Named homes on this server, for the Home switcher's discovery list. Excludes
+ * the per-browser UUID "unnamed" scratch homes by design — those stay private;
+ * only homes someone deliberately named are discoverable.
+ */
+export function listHomes(): Array<{ id: string; scenes: number; updatedAt: string }> {
+  const rows = lensDb()
+    .prepare(
+      `SELECT h.home_id AS id, MAX(h.updated_at) AS updated_at,
+              (SELECT count(*) FROM lens_scene s WHERE s.home_id = h.home_id) AS scenes
+       FROM (
+         SELECT home_id, updated_at FROM lens_profile
+         UNION ALL
+         SELECT home_id, updated_at FROM lens_scene
+       ) h
+       GROUP BY h.home_id`,
+    )
+    .all() as Array<{ id?: string; updated_at?: string; scenes?: number }>
+  return rows
+    .filter((r) => typeof r.id === "string" && !UUID_RE.test(r.id))
+    .map((r) => ({ id: r.id as string, scenes: Number(r.scenes ?? 0), updatedAt: r.updated_at ?? "" }))
+    .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+}
+
 // ── scenes (one row per saved desktop, owned by a home) ──────────────────────
 
 interface SceneLike {
