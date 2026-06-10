@@ -66,6 +66,8 @@ export interface AlertRule {
   enabled: boolean
   muted: boolean
   cadenceTier: string
+  category: string | null
+  subcategory: string | null
   createdMs: number | null
   breaching: number
   entities: number
@@ -111,7 +113,7 @@ export async function fetchAlertRules(
   const r = await run(
     connectionId,
     `SELECT c.name, c.condition_spec, c.fire_policy, c.action_spec, c.cardinality, c.fan_out_cap,
-            c.description, c.enabled, c.muted, c.cadence_tier,
+            c.description, c.enabled, c.muted, c.cadence_tier, c.category, c.subcategory,
             extract(epoch FROM c.created_at) * 1000 AS created_ms,
             (SELECT count(*) FROM rvbbit.alert_state s WHERE s.rule_name = c.name AND s.last_status = 'fail') AS breaching,
             (SELECT count(*) FROM rvbbit.alert_state s WHERE s.rule_name = c.name) AS entities,
@@ -133,6 +135,8 @@ export async function fetchAlertRules(
     enabled: row.enabled === true || row.enabled === "t",
     muted: row.muted === true || row.muted === "t",
     cadenceTier: String(row.cadence_tier ?? "normal"),
+    category: str(row.category),
+    subcategory: str(row.subcategory),
     createdMs: num(row.created_ms),
     breaching: Number(row.breaching ?? 0),
     entities: Number(row.entities ?? 0),

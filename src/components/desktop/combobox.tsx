@@ -1,7 +1,7 @@
 "use client"
 
 import { useEffect, useMemo, useRef, useState } from "react"
-import { Check, ChevronDown, Search } from "@/lib/icons"
+import { Check, ChevronDown, Plus, Search } from "@/lib/icons"
 import { cn } from "@/lib/utils"
 
 export interface ComboboxOption {
@@ -26,6 +26,7 @@ export function Combobox({
   searchPlaceholder = "search…",
   emptyText = "no matches",
   disabled = false,
+  allowCustom = false,
   className,
 }: {
   value: string
@@ -35,6 +36,9 @@ export function Combobox({
   searchPlaceholder?: string
   emptyText?: string
   disabled?: boolean
+  /** Let the user commit the typed search text as a brand-new value (a "+ add"
+   *  row appears when the query has no exact match). For reusable free taxonomies. */
+  allowCustom?: boolean
   className?: string
 }) {
   const [open, setOpen] = useState(false)
@@ -116,10 +120,10 @@ export function Combobox({
         onClick={() => (open ? close() : openMenu())}
         className={cn(
           "flex w-full items-center gap-1.5 rounded border border-chrome-border bg-block-bg/60 px-1.5 py-1 text-[11px] outline-none focus:ring-1 focus:ring-rvbbit-accent/50 disabled:opacity-50",
-          selected ? "text-foreground" : "text-chrome-text/45",
+          value ? "text-foreground" : "text-chrome-text/45",
         )}
       >
-        <span className="min-w-0 flex-1 truncate text-left font-mono">{selected ? selected.label ?? selected.value : placeholder}</span>
+        <span className="min-w-0 flex-1 truncate text-left font-mono">{value ? selected?.label ?? value : placeholder}</span>
         <ChevronDown className={cn("h-3 w-3 shrink-0 text-chrome-text/50 transition-transform", open && "rotate-180")} />
       </button>
       {open && rect ? (
@@ -158,7 +162,24 @@ export function Combobox({
                 {o.hint ? <span className="shrink-0 text-[9px] text-chrome-text/45">{o.hint}</span> : null}
               </button>
             ))}
-            {filtered.length === 0 ? <div className="px-2 py-2 text-[11px] text-chrome-text/40">{emptyText}</div> : null}
+            {allowCustom && query.trim() !== "" && !options.some((o) => o.value === query.trim()) ? (
+              <button
+                type="button"
+                onClick={() => {
+                  onChange(query.trim())
+                  close()
+                }}
+                className="flex w-full items-center gap-2 px-2 py-1 text-left text-[11px] text-chrome-text/70 hover:bg-foreground/[0.06]"
+              >
+                <Plus className="h-3 w-3 shrink-0 text-rvbbit-accent" />
+                <span className="min-w-0 flex-1 truncate">
+                  add <span className="font-mono text-foreground">{query.trim()}</span>
+                </span>
+              </button>
+            ) : null}
+            {filtered.length === 0 && !(allowCustom && query.trim() !== "") ? (
+              <div className="px-2 py-2 text-[11px] text-chrome-text/40">{emptyText}</div>
+            ) : null}
           </div>
         </div>
       ) : null}

@@ -16,8 +16,10 @@ import {
   type MetricSummary,
   type MetricVerdict,
 } from "@/lib/rvbbit/metrics"
+import { categoriesFrom, fetchCategoryOptions, setCategory, subcategoriesFor, type CategoryPair } from "@/lib/rvbbit/categories"
 import type { MetricCreatorPayload } from "@/lib/desktop/types"
 import { SqlEditor } from "./sql-editor"
+import { Combobox } from "./combobox"
 import {
   areaCls,
   Field,
@@ -45,6 +47,8 @@ interface FormState {
   description: string
   owner: string
   check: string
+  category: string
+  subcategory: string
 }
 
 const BLANK: FormState = {
@@ -55,6 +59,8 @@ const BLANK: FormState = {
   description: "",
   owner: "",
   check: "",
+  category: "",
+  subcategory: "",
 }
 
 function fromSummary(m: MetricSummary): FormState {
@@ -67,6 +73,8 @@ function fromSummary(m: MetricSummary): FormState {
     description: m.description ?? "",
     owner: m.owner ?? "",
     check: m.checkSql ? formatMetricBody(m.checkSql) : "",
+    category: m.category ?? "",
+    subcategory: m.subcategory ?? "",
   }
 }
 
@@ -84,6 +92,7 @@ export function MetricCreatorWindow({
   const [editing, setEditing] = useState<string | null>(payload.metricName ?? null)
   const [form, setForm] = useState<FormState>(BLANK)
   const [bootstrapped, setBootstrapped] = useState(false)
+  const [catPairs, setCatPairs] = useState<CategoryPair[]>([])
 
   const [preview, setPreview] = useState<string | null>(null)
   const [previewError, setPreviewError] = useState<string | null>(null)
@@ -110,6 +119,19 @@ export function MetricCreatorWindow({
     setListLoading(false)
     return metrics
   }, [activeConnectionId])
+
+  // the shared in-use category tree for the pickers
+  useEffect(() => {
+    if (!activeConnectionId || !hasRvbbit) return
+    let cancelled = false
+    void (async () => {
+      const r = await fetchCategoryOptions(activeConnectionId)
+      if (!cancelled) setCatPairs(r.pairs)
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [activeConnectionId, hasRvbbit])
 
   // Initial load: fetch the catalog, and seed the form from payload.metricName.
   useEffect(() => {
@@ -219,10 +241,15 @@ export function MetricCreatorWindow({
       setSaving(false)
       return
     }
+    // category lives apart from the versioned def; set it after the metric exists.
+    // The metric IS saved even if this fails, so proceed + surface non-blockingly.
+    const catErr = await setCategory(activeConnectionId, "metric", name, form.category, form.subcategory)
     setSavedVersion(version)
     setSavedName(name)
     setEditing(name) // now editing this metric (next Save appends another version)
     await refreshList()
+    await fetchCategoryOptions(activeConnectionId).then((r) => setCatPairs(r.pairs))
+    if (catErr) setSaveError(`Saved, but the category wasn't applied: ${catErr}`)
     setSaving(false)
   }, [activeConnectionId, canSave, form, refreshList])
 
@@ -345,6 +372,33 @@ export function MetricCreatorWindow({
                     onChange={(e) => setForm((f) => ({ ...f, owner: e.target.value }))}
                     placeholder="analytics"
                     className={inputCls}
+                  />
+                </Field>
+              </div>
+            </div>
+            <div className="flex gap-2">
+              <div className="flex-1">
+                <Field label="category">
+                  <Combobox
+                    value={form.category}
+                    onChange={(c) => setForm((f) => ({ ...f, category: c, subcategory: "" }))}
+                    options={categoriesFrom(catPairs).map((c) => ({ value: c }))}
+                    placeholder="— none —"
+                    searchPlaceholder="search or add…"
+                    allowCustom
+                  />
+                </Field>
+              </div>
+              <div className="flex-1">
+                <Field label="subcategory">
+                  <Combobox
+                    value={form.subcategory}
+                    onChange={(s) => setForm((f) => ({ ...f, subcategory: s }))}
+                    options={subcategoriesFor(catPairs, form.category).map((s) => ({ value: s }))}
+                    placeholder={form.category ? "— none —" : "set a category first"}
+                    searchPlaceholder="search or add…"
+                    allowCustom
+                    disabled={!form.category}
                   />
                 </Field>
               </div>

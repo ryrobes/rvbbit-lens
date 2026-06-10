@@ -23,6 +23,8 @@ export interface MetricSummary {
   sql: string
   /** When non-null the metric is a KPI (has a threshold/assertion check). */
   checkSql: string | null
+  category: string | null
+  subcategory: string | null
 }
 
 export interface MetricVersion {
@@ -143,6 +145,7 @@ export async function listMetrics(
   const r = await run(
     connectionId,
     `SELECT name, version, grain, description, owner, params, labels, sql, check_sql,
+            category, subcategory,
             extract(epoch FROM created_at) * 1000 AS created_ms
      FROM rvbbit.metric_catalog ORDER BY name`,
   )
@@ -160,6 +163,8 @@ export async function listMetrics(
       createdAt: num(row.created_ms),
       sql: String(row.sql ?? ""),
       checkSql: str(row.check_sql),
+      category: str(row.category),
+      subcategory: str(row.subcategory),
     })),
   }
 }

@@ -6,6 +6,7 @@ import { cn } from "@/lib/utils"
 import { useWorkspaceActive } from "./workspace-active-context"
 import { SqlEditor } from "./sql-editor"
 import { Combobox } from "./combobox"
+import { categoriesFrom, fetchCategoryOptions, setCategory, subcategoriesFor, type CategoryPair } from "@/lib/rvbbit/categories"
 import { fetchAllToolsLite, schemaType, type McpToolLite } from "@/lib/rvbbit/mcp"
 import { listMetrics, type MetricSummary } from "@/lib/rvbbit/metrics"
 import { fetchOperators, type RvbbitOperator } from "@/lib/rvbbit/operators"
@@ -548,6 +549,9 @@ function RuleEditor({
 
   const [name, setName] = useState(initial?.name ?? "")
   const [description, setDescription] = useState(initial?.description ?? "")
+  const [category, setCat] = useState(initial?.category ?? "")
+  const [subcategory, setSub] = useState(initial?.subcategory ?? "")
+  const [catPairs, setCatPairs] = useState<CategoryPair[]>([])
   // how a sql condition decides fail/pass: 'scored' (threshold/compare on a score
   // column), 'status' (the query returns a status), or 'expr' (a boolean SQL
   // expression over the query's columns).
@@ -646,6 +650,18 @@ function RuleEditor({
       cancelled = true
     }
   }, [operator, connectionId])
+
+  // the in-use category tree (shared metric+alert taxonomy) for the pickers
+  useEffect(() => {
+    let cancelled = false
+    void (async () => {
+      const r = await fetchCategoryOptions(connectionId)
+      if (!cancelled) setCatPairs(r.pairs)
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [connectionId])
 
   // debounced live preview of the condition query (all setState in the async
   // callback so nothing runs synchronously in the effect body)
@@ -800,9 +816,16 @@ function RuleEditor({
   const save = async () => {
     setSaving(true)
     const err = await createAlert(connectionId, buildDraft())
+    // category lives apart from the versioned def; set it after the rule exists
+    const catErr = err ? null : await setCategory(connectionId, "alert", name.trim(), category, subcategory)
     setSaving(false)
     if (err) {
       setSaveErr(err)
+      return
+    }
+    if (catErr) {
+      // the rule saved; only the category step failed — surface it, stay open
+      setSaveErr(`Rule saved, but the category wasn't applied: ${catErr}`)
       return
     }
     onSaved(name.trim())
@@ -868,6 +891,33 @@ function RuleEditor({
         </Field>
         <Field label="description">
           <input value={description} onChange={(e) => setDescription(e.target.value)} placeholder="what this watches" className={inputCls} />
+        </Field>
+      </div>
+
+      <div className="grid grid-cols-2 gap-2">
+        <Field label="category">
+          <Combobox
+            value={category}
+            onChange={(c) => {
+              setCat(c)
+              setSub("")
+            }}
+            options={categoriesFrom(catPairs).map((c) => ({ value: c }))}
+            placeholder="— none —"
+            searchPlaceholder="search or add…"
+            allowCustom
+          />
+        </Field>
+        <Field label="subcategory">
+          <Combobox
+            value={subcategory}
+            onChange={setSub}
+            options={subcategoriesFor(catPairs, category).map((s) => ({ value: s }))}
+            placeholder={category ? "— none —" : "set a category first"}
+            searchPlaceholder="search or add…"
+            allowCustom
+            disabled={!category}
+          />
         </Field>
       </div>
 
@@ -1477,6 +1527,12 @@ export function AlertsWindow({ payload, activeConnectionId, hasRvbbit, onChangeP
               <div className="rounded-md border border-chrome-border bg-doc-bg/40 p-3">
                 <div className="flex items-center gap-2">
                   <span className="text-[13px] font-semibold text-foreground">{rule.name}</span>
+                  {rule.category ? (
+                    <span className="rounded border border-chrome-border/60 px-1.5 py-0.5 text-[9px] text-chrome-text/70">
+                      {rule.category}
+                      {rule.subcategory ? <span className="text-chrome-text/40"> › {rule.subcategory}</span> : null}
+                    </span>
+                  ) : null}
                   <span className="rounded bg-foreground/[0.06] px-1.5 py-0.5 text-[9px] uppercase tracking-wider text-chrome-text/60">
                     {rule.cadenceTier}
                   </span>
