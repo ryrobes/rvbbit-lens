@@ -9,7 +9,7 @@ import { NextResponse } from "next/server"
 // service name. Override with MCP_GATEWAY_URL.
 export const runtime = "nodejs"
 
-const GATEWAY_URL = (process.env.MCP_GATEWAY_URL ?? "http://127.0.0.1:9100").replace(/\/$/, "")
+const GATEWAY_URL = (process.env.MCP_GATEWAY_URL ?? "http://127.0.0.1:9180").replace(/\/$/, "")
 const GATEWAY_TOKEN = process.env.MCP_GATEWAY_TOKEN || null
 
 function authHeaders(): Record<string, string> {
