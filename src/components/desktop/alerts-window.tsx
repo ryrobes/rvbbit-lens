@@ -5,6 +5,7 @@ import { Activity, Bell, Play, RefreshCw, X, Zap } from "@/lib/icons"
 import { cn } from "@/lib/utils"
 import { useWorkspaceActive } from "./workspace-active-context"
 import { SqlEditor } from "./sql-editor"
+import { Combobox } from "./combobox"
 import { fetchAllToolsLite, schemaType, type McpToolLite } from "@/lib/rvbbit/mcp"
 import { listMetrics, type MetricSummary } from "@/lib/rvbbit/metrics"
 import { fetchOperators, type RvbbitOperator } from "@/lib/rvbbit/operators"
@@ -878,15 +879,14 @@ function RuleEditor({
         {condMode === "metric" ? (
           <div className="flex flex-col gap-2">
             <Field label="metric (KPI)">
-              <select value={metricName} onChange={(e) => setMetricName(e.target.value)} className={cn(inputCls, "font-mono")}>
-                <option value="">— pick a metric —</option>
-                {metrics.map((m) => (
-                  <option key={m.name} value={m.name}>
-                    {m.name}
-                    {m.checkSql ? "" : "  (no check)"}
-                  </option>
-                ))}
-              </select>
+              <Combobox
+                value={metricName}
+                onChange={setMetricName}
+                options={metrics.map((m) => ({ value: m.name, hint: m.checkSql ? undefined : "no check" }))}
+                placeholder="— pick a metric —"
+                searchPlaceholder="search metrics…"
+                emptyText="no metrics defined"
+              />
             </Field>
             {selectedMetric ? (
               <div className="rounded border border-chrome-border/60 bg-block-bg/40 p-2 text-[10px]">
@@ -1008,12 +1008,14 @@ function RuleEditor({
         {operator === "operator" ? (
           <div className="flex flex-col gap-1.5">
             <Field label="operator">
-              <input value={operatorName} onChange={(e) => setOperatorName(e.target.value)} list="alerts-operators" className={cn(inputCls, "font-mono")} />
-              <datalist id="alerts-operators">
-                {operators.map((o) => (
-                  <option key={o.name} value={o.name} />
-                ))}
-              </datalist>
+              <Combobox
+                value={operatorName}
+                onChange={setOperatorName}
+                options={operators.map((o) => ({ value: o.name, hint: `${o.shape}→${o.return_type}` }))}
+                placeholder="— pick an operator —"
+                searchPlaceholder="search operators…"
+                emptyText="no operators in the catalog"
+              />
             </Field>
             {selectedOperator ? (
               <div className="rounded border border-chrome-border/60 bg-block-bg/40 p-2 text-[10px]">
@@ -1058,20 +1060,24 @@ function RuleEditor({
           <div className="flex flex-col gap-1.5">
             <div className="grid grid-cols-2 gap-2">
               <Field label="server">
-                <input value={server} onChange={(e) => setServer(e.target.value)} list="alerts-mcp-servers" className={cn(inputCls, "font-mono")} />
-                <datalist id="alerts-mcp-servers">
-                  {mcpServers.map((s) => (
-                    <option key={s} value={s} />
-                  ))}
-                </datalist>
+                <Combobox
+                  value={server}
+                  onChange={setServer}
+                  options={mcpServers.map((s) => ({ value: s }))}
+                  placeholder="— server —"
+                  searchPlaceholder="search servers…"
+                  emptyText="no MCP servers"
+                />
               </Field>
               <Field label="tool">
-                <input value={tool} onChange={(e) => setTool(e.target.value)} list="alerts-mcp-tools" className={cn(inputCls, "font-mono")} />
-                <datalist id="alerts-mcp-tools">
-                  {toolsForServer.map((t) => (
-                    <option key={t.name} value={t.name} />
-                  ))}
-                </datalist>
+                <Combobox
+                  value={tool}
+                  onChange={setTool}
+                  options={toolsForServer.map((t) => ({ value: t.name, hint: t.description ? t.description.slice(0, 28) : undefined }))}
+                  placeholder="— tool —"
+                  searchPlaceholder="search tools…"
+                  emptyText={server ? "no tools for this server" : "pick a server first"}
+                />
               </Field>
             </div>
             {/* docstring for the picked tool — informational, so you know what to provide */}
