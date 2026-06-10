@@ -7,6 +7,7 @@ import { useWorkspaceActive } from "./workspace-active-context"
 import {
   commitThreshold,
   createAlert,
+  deleteRule,
   fetchAlertEvents,
   fetchAlertRules,
   fetchAlertState,
@@ -69,10 +70,12 @@ function numFmt(n: number | null): string {
 function ThresholdExplorer({
   rule,
   entities,
+  now,
   onCommit,
 }: {
   rule: AlertRule
   entities: AlertEntity[]
+  now: number
   onCommit: (threshold: number) => void
 }) {
   const compare = String(rule.conditionSpec.compare ?? "gte")
@@ -174,10 +177,31 @@ function ThresholdExplorer({
           const x = xOf(e.score)
           const br = breaches(e.score)
           const y = AXIS_Y - 12 - (i % 4) * 14
+          // entities the most recent sweep just transitioned pulse for a few seconds
+          const recent = e.changedMs != null && now - e.changedMs < 6000
           return (
             <g key={e.entityKey || i}>
-              <circle cx={x} cy={y} r={5} fill={br ? statusColor("fail") : statusColor("pass")} opacity={br ? 1 : 0.55} />
-              <text x={x} y={y - 8} textAnchor="middle" className="fill-chrome-text/70" style={{ fontSize: 8 }}>
+              {recent ? (
+                <circle
+                  cx={x}
+                  cy={y}
+                  r={9}
+                  fill="none"
+                  stroke={statusColor(br ? "fail" : "pass")}
+                  strokeWidth={1.5}
+                  className="alerts-just-changed"
+                  style={{ transition: "cx 0.5s ease" }}
+                />
+              ) : null}
+              <circle
+                cx={x}
+                cy={y}
+                r={5}
+                fill={br ? statusColor("fail") : statusColor("pass")}
+                opacity={br ? 1 : 0.55}
+                style={{ transition: "cx 0.5s ease, fill 0.4s, opacity 0.4s" }}
+              />
+              <text x={x} y={y - 8} textAnchor="middle" className="fill-chrome-text/70" style={{ fontSize: 8, transition: "x 0.5s ease" }}>
                 {e.entityKey || "·"}
               </text>
             </g>
@@ -415,7 +439,7 @@ function EventLog({ events }: { events: AlertEvent[] }) {
 
 // ── entity state grid ─────────────────────────────────────────────────────────
 
-function EntityState({ entities }: { entities: AlertEntity[] }) {
+function EntityState({ entities, now }: { entities: AlertEntity[]; now: number }) {
   return (
     <div className="rounded-md border border-chrome-border bg-doc-bg/40">
       <div className="border-b border-chrome-border/60 px-3 py-1.5 text-[11px] font-medium text-foreground">
@@ -423,10 +447,12 @@ function EntityState({ entities }: { entities: AlertEntity[] }) {
       </div>
       <div className="max-h-44 overflow-auto p-2">
         <div className="grid grid-cols-1 gap-1 sm:grid-cols-2">
-          {entities.map((e) => (
+          {entities.map((e) => {
+            const recent = e.changedMs != null && now - e.changedMs < 6000
+            return (
             <div
               key={e.entityKey}
-              className="flex items-center gap-2 rounded border px-2 py-1 text-[11px]"
+              className={cn("flex items-center gap-2 rounded border px-2 py-1 text-[11px]", recent && "alerts-just-changed")}
               style={{ borderColor: "color-mix(in oklch, " + statusColor(e.lastStatus) + " 40%, transparent)" }}
             >
               <span className="h-2 w-2 shrink-0 rounded-full" style={{ background: statusColor(e.lastStatus) }} />
@@ -445,7 +471,8 @@ function EntityState({ entities }: { entities: AlertEntity[] }) {
                 <span className="shrink-0 text-[9px] text-chrome-text/45" title="last fired">{fmtAgo(e.firedMs)}</span>
               ) : null}
             </div>
-          ))}
+            )
+          })}
           {entities.length === 0 ? (
             <div className="col-span-full px-1 py-3 text-center text-[11px] text-chrome-text/45">
               no state yet — run a sweep
@@ -476,11 +503,13 @@ function RuleEditor({
   initial,
   onSaved,
   onCancel,
+  onDeleted,
 }: {
   connectionId: string
   initial: AlertRule | null
   onSaved: (name: string) => void
   onCancel: () => void
+  onDeleted: () => void
 }) {
   const editing = initial != null
   const cs = initial?.conditionSpec ?? {}
@@ -514,6 +543,8 @@ function RuleEditor({
   const [previewErr, setPreviewErr] = useState<string | null>(null)
   const [saveErr, setSaveErr] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
+  const [confirmDel, setConfirmDel] = useState(false)
+  const [deleting, setDeleting] = useState(false)
 
   // debounced live preview of the condition query (all setState in the async
   // callback so nothing runs synchronously in the effect body)
@@ -598,12 +629,40 @@ function RuleEditor({
     onSaved(name.trim())
   }
 
+  const doDelete = async () => {
+    if (!editing) return
+    setDeleting(true)
+    const err = await deleteRule(connectionId, initial!.name)
+    setDeleting(false)
+    if (err) {
+      setSaveErr(err)
+      return
+    }
+    onDeleted()
+  }
+
   return (
     <div className="flex flex-col gap-3">
       <div className="flex items-center gap-2">
         <span className="text-[13px] font-semibold text-foreground">{editing ? `Edit ${initial!.name}` : "New alert"}</span>
         {editing ? (
           <span className="rounded bg-foreground/[0.06] px-1.5 py-0.5 text-[9px] text-chrome-text/55">saves a new version</span>
+        ) : null}
+        {editing ? (
+          confirmDel ? (
+            <span className="flex items-center gap-1 text-[10px]">
+              <button type="button" disabled={deleting} onClick={() => void doDelete()} className="rounded border border-red-500/50 bg-red-500/15 px-1.5 py-0.5 text-red-200 hover:bg-red-500/25">
+                {deleting ? "deleting…" : "confirm delete"}
+              </button>
+              <button type="button" onClick={() => setConfirmDel(false)} className="text-chrome-text/50 hover:text-chrome-text">
+                keep
+              </button>
+            </span>
+          ) : (
+            <button type="button" onClick={() => setConfirmDel(true)} className="rounded border border-red-500/30 px-1.5 py-0.5 text-[10px] text-red-300/80 hover:bg-red-500/10">
+              delete
+            </button>
+          )
         ) : null}
         <div className="ml-auto flex items-center gap-1.5">
           <button type="button" onClick={onCancel} className="rounded border border-chrome-border px-2 py-0.5 text-[11px] text-chrome-text/70 hover:bg-foreground/[0.06]">
@@ -784,6 +843,8 @@ export function AlertsWindow({ payload, activeConnectionId, hasRvbbit, onChangeP
   const [now, setNow] = useState(() => Date.now())
   const [editing, setEditing] = useState(false)
   const [editTarget, setEditTarget] = useState<AlertRule | null>(null)
+  // last manual sweep result + when we ran it — drives the "watch the sweep" readout.
+  const [lastSweep, setLastSweep] = useState<{ at: number; summary: Record<string, unknown> } | null>(null)
 
   const selected = payload.rule ?? null
   const rule = useMemo(() => rules.find((r) => r.name === selected) ?? null, [rules, selected])
@@ -845,6 +906,23 @@ export function AlertsWindow({ payload, activeConnectionId, hasRvbbit, onChangeP
     [activeConnectionId, loadRules, loadDetail],
   )
 
+  // Sweep is its own handler (not act()) so we can surface what the sweep DID —
+  // the returned summary feeds the toolbar readout and the just-changed pulse.
+  const doSweep = useCallback(
+    async (sweepTier: string) => {
+      if (!activeConnectionId) return
+      setBusy(true)
+      const r = await runSweep(activeConnectionId, sweepTier)
+      if (r.error) setError(r.error)
+      else if (r.summary) setLastSweep({ at: Date.now(), summary: r.summary })
+      await loadRules()
+      await loadDetail()
+      setNow(Date.now())
+      setBusy(false)
+    },
+    [activeConnectionId, loadRules, loadDetail],
+  )
+
   if (!hasRvbbit) {
     return (
       <div className="grid h-full place-items-center bg-block-bg p-6 text-center text-[12px] text-chrome-text/60">
@@ -858,6 +936,18 @@ export function AlertsWindow({ payload, activeConnectionId, hasRvbbit, onChangeP
 
   return (
     <div className="flex h-full flex-col bg-block-bg text-foreground">
+      <style>{`
+        @keyframes alerts-sweep-flash {
+          0% { background-color: color-mix(in oklch, var(--color-amber-400, #fbbf24) 45%, transparent); }
+          100% { background-color: rgba(255,255,255,0.05); }
+        }
+        .alerts-sweep-flash { animation: alerts-sweep-flash 1.4s ease-out 1; }
+        @keyframes alerts-just-changed {
+          0%, 100% { opacity: 1; }
+          50% { opacity: 0.3; }
+        }
+        .alerts-just-changed { animation: alerts-just-changed 0.9s ease-in-out 3; }
+      `}</style>
       {/* toolbar */}
       <div className="flex h-9 shrink-0 items-center gap-2 border-b border-chrome-border bg-chrome-bg/40 px-2">
         <Bell className="h-4 w-4" style={{ color: "var(--color-red-400, #f87171)" }} />
@@ -876,10 +966,26 @@ export function AlertsWindow({ payload, activeConnectionId, hasRvbbit, onChangeP
           <Zap className="h-3 w-3" /> {enabled ? "armed" : "paused"}
         </button>
         <div className="ml-auto flex items-center gap-1">
+          {lastSweep ? (
+            <span
+              key={lastSweep.at}
+              className="alerts-sweep-flash inline-flex items-center gap-1 rounded bg-foreground/[0.05] px-1.5 py-0.5 text-[10px] tabular-nums text-chrome-text/70"
+              title={`sweep ${String(lastSweep.summary.sweep_id ?? "")} · ${String(lastSweep.summary.rules_evaluated ?? 0)} rules evaluated`}
+            >
+              <span className="text-chrome-text/45">swept</span>
+              <span className={cn(Number(lastSweep.summary.transitions ?? 0) > 0 ? "text-amber-300" : "text-chrome-text/55")}>
+                {Number(lastSweep.summary.transitions ?? 0)} transitions
+              </span>
+              <span className="text-chrome-text/25">·</span>
+              <span className={cn(Number(lastSweep.summary.enqueued ?? 0) > 0 ? "text-rvbbit-accent" : "text-chrome-text/55")}>
+                {Number(lastSweep.summary.enqueued ?? 0)} fired
+              </span>
+            </span>
+          ) : null}
           <button
             type="button"
             disabled={busy || !rule}
-            onClick={() => void act(() => runSweep(activeConnectionId!, tier))}
+            onClick={() => void doSweep(tier)}
             title={`Run a ${tier}-tier sweep now`}
             className="inline-flex items-center gap-1 rounded border border-chrome-border px-2 py-0.5 text-[11px] text-chrome-text/80 hover:bg-foreground/[0.06] disabled:opacity-40"
           >
@@ -979,6 +1085,13 @@ export function AlertsWindow({ payload, activeConnectionId, hasRvbbit, onChangeP
                 void loadRules()
                 void loadDetail()
               }}
+              onDeleted={() => {
+                setEditing(false)
+                setEditTarget(null)
+                onChangePayload((p) => ({ ...p, rule: undefined }))
+                void loadRules()
+                void loadDetail()
+              }}
             />
           ) : !rule ? (
             <div className="grid h-full place-items-center text-[12px] text-chrome-text/45">Select an alert.</div>
@@ -1066,6 +1179,7 @@ export function AlertsWindow({ payload, activeConnectionId, hasRvbbit, onChangeP
                   key={rule.name}
                   rule={rule}
                   entities={entities}
+                  now={now}
                   onCommit={(t) => void act(() => commitThreshold(activeConnectionId!, rule, t))}
                 />
               ) : null}
@@ -1073,7 +1187,7 @@ export function AlertsWindow({ payload, activeConnectionId, hasRvbbit, onChangeP
               <EpisodeTimeline entities={entities} events={events} sweeps={sweeps} now={now} />
 
               <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
-                <EntityState entities={entities} />
+                <EntityState entities={entities} now={now} />
                 <EventLog events={events} />
               </div>
 

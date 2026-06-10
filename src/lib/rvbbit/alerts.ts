@@ -232,9 +232,13 @@ export async function fetchAlertSweepRuns(
 
 // ── actions ──────────────────────────────────────────────────────────────────
 
-export async function runSweep(connectionId: string, tier: string): Promise<string | null> {
-  const r = await run(connectionId, `SELECT rvbbit.alert_sweep(${q(tier)})::text AS j`)
-  return r.ok ? null : r.error
+export async function runSweep(
+  connectionId: string,
+  tier: string,
+): Promise<{ summary: Record<string, unknown> | null; error: string | null }> {
+  const r = await run(connectionId, `SELECT rvbbit.alert_sweep(${q(tier)}) AS j`)
+  if (!r.ok) return { summary: null, error: r.error }
+  return { summary: obj(r.rows[0]?.j), error: null }
 }
 
 export async function runWorker(connectionId: string, max = 50): Promise<string | null> {
@@ -265,6 +269,12 @@ export async function muteRule(
 
 export async function unmuteRule(connectionId: string, rule: string): Promise<string | null> {
   const r = await run(connectionId, `SELECT rvbbit.unmute_alert(${q(rule)})`)
+  return r.ok ? null : r.error
+}
+
+/** Delete a rule and everything keyed to it. */
+export async function deleteRule(connectionId: string, rule: string): Promise<string | null> {
+  const r = await run(connectionId, `SELECT rvbbit.delete_alert(${q(rule)})`)
   return r.ok ? null : r.error
 }
 
