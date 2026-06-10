@@ -268,6 +268,60 @@ export async function unmuteRule(connectionId: string, rule: string): Promise<st
   return r.ok ? null : r.error
 }
 
+/** A row from a live condition-query preview (which entities + score/status). */
+export interface PreviewRow {
+  entityKey: string
+  score: number | null
+  status: string | null
+}
+
+/** Run a condition query read-only to preview its (entity_key, score/status) rows
+ *  — the observable feedback while authoring a rule. */
+export async function previewCondition(
+  connectionId: string,
+  query: string,
+): Promise<{ rows: PreviewRow[]; error: string | null }> {
+  const trimmed = query.trim().replace(/;+\s*$/, "")
+  if (!trimmed) return { rows: [], error: null }
+  const r = await run(connectionId, `SELECT to_jsonb(q) AS j FROM (${trimmed}) q LIMIT 500`, 500)
+  if (!r.ok) return { rows: [], error: r.error }
+  return {
+    rows: r.rows.map((row) => {
+      const j = obj(row.j)
+      return {
+        entityKey: j.entity_key == null ? "" : String(j.entity_key),
+        score: j.score == null ? null : Number(j.score),
+        status: j.status == null ? null : String(j.status),
+      }
+    }),
+    error: null,
+  }
+}
+
+export interface AlertDraft {
+  name: string
+  description: string
+  conditionSpec: Record<string, unknown>
+  firePolicy: Record<string, unknown>
+  actionSpec: Record<string, unknown>
+  cardinality: string
+  fanOutCap: number
+  cadenceTier: string
+}
+
+/** Author (or re-version) a rule via rvbbit.define_alert. */
+export async function createAlert(connectionId: string, d: AlertDraft): Promise<string | null> {
+  const lit = (v: unknown) => `'${JSON.stringify(v ?? {}).replace(/'/g, "''")}'::jsonb`
+  const r = await run(
+    connectionId,
+    `SELECT rvbbit.define_alert(${q(d.name)}, ${lit(d.conditionSpec)}, ${lit(d.actionSpec)}, ` +
+      `p_fire_policy => ${lit(d.firePolicy)}, p_cardinality => ${q(d.cardinality)}, ` +
+      `p_fan_out_cap => ${Math.max(1, Math.floor(d.fanOutCap))}, p_cadence => ${q(d.cadenceTier)}, ` +
+      `p_description => ${d.description.trim() ? q(d.description.trim()) : "NULL"})`,
+  )
+  return r.ok ? null : r.error
+}
+
 /** Re-define a rule with a new scalar threshold (a new immutable version). */
 export async function commitThreshold(connectionId: string, rule: AlertRule, threshold: number): Promise<string | null> {
   const cond = { ...rule.conditionSpec, threshold }

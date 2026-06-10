@@ -6,20 +6,24 @@ import { cn } from "@/lib/utils"
 import { useWorkspaceActive } from "./workspace-active-context"
 import {
   commitThreshold,
+  createAlert,
   fetchAlertEvents,
   fetchAlertRules,
   fetchAlertState,
   fetchAlertSweepRuns,
   muteRule,
+  previewCondition,
   runSweep,
   runWorker,
   setAlertsEnabled,
   setRuleEnabled,
   unmuteRule,
+  type AlertDraft,
   type AlertEntity,
   type AlertEvent,
   type AlertRule,
   type AlertSweepRun,
+  type PreviewRow,
 } from "@/lib/rvbbit/alerts"
 import type { AlertsPayload } from "@/lib/desktop/types"
 
@@ -453,6 +457,300 @@ function EntityState({ entities }: { entities: AlertEntity[] }) {
   )
 }
 
+// ── rule editor (author a rule; live-previews the condition as you write) ─────
+
+const inputCls =
+  "w-full rounded border border-chrome-border bg-block-bg/60 px-1.5 py-0.5 text-[11px] text-foreground outline-none focus:ring-1 focus:ring-rvbbit-accent/50"
+
+function Field({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <label className="flex flex-col gap-0.5">
+      <span className="text-[9px] uppercase tracking-wider text-chrome-text/55">{label}</span>
+      {children}
+    </label>
+  )
+}
+
+function RuleEditor({
+  connectionId,
+  onSaved,
+  onCancel,
+}: {
+  connectionId: string
+  onSaved: (name: string) => void
+  onCancel: () => void
+}) {
+  const [name, setName] = useState("")
+  const [description, setDescription] = useState("")
+  const [scored, setScored] = useState(true)
+  const [query, setQuery] = useState("SELECT region AS entity_key, drop_pct AS score FROM my_table")
+  const [threshold, setThreshold] = useState("0.15")
+  const [compare, setCompare] = useState<"gte" | "lte">("gte")
+  const [consecutiveN, setConsecutiveN] = useState("1")
+  const [cooldownSecs, setCooldownSecs] = useState("0")
+  const [operator, setOperator] = useState<"noop" | "sql" | "mcp_call" | "flow">("noop")
+  const [actionSql, setActionSql] = useState("INSERT INTO incidents(rule, entity, ts)\n  VALUES ($1->>'rule', $1->>'entity', now())")
+  const [server, setServer] = useState("linear")
+  const [tool, setTool] = useState("create_issue")
+  const [argsJson, setArgsJson] = useState('{\n  "title": "{rule}: {entity} breached",\n  "description": "transition {transition}"\n}')
+  const [spec, setSpec] = useState("")
+  const [cadence, setCadence] = useState<"fast" | "normal" | "slow">("normal")
+  const [fanOutCap, setFanOutCap] = useState("100")
+  const [preview, setPreview] = useState<PreviewRow[]>([])
+  const [previewErr, setPreviewErr] = useState<string | null>(null)
+  const [saveErr, setSaveErr] = useState<string | null>(null)
+  const [saving, setSaving] = useState(false)
+
+  // debounced live preview of the condition query (all setState in the async
+  // callback so nothing runs synchronously in the effect body)
+  useEffect(() => {
+    let cancelled = false
+    const t = setTimeout(async () => {
+      if (cancelled) return
+      if (!query.trim()) {
+        setPreview([])
+        setPreviewErr(null)
+        return
+      }
+      const r = await previewCondition(connectionId, query)
+      if (cancelled) return
+      setPreview(r.rows)
+      setPreviewErr(r.error)
+    }, 350)
+    return () => {
+      cancelled = true
+      clearTimeout(t)
+    }
+  }, [query, connectionId])
+
+  const thr = Number(threshold)
+  const breaches = (row: PreviewRow) =>
+    scored
+      ? row.score != null && (compare === "lte" ? row.score <= thr : row.score >= thr)
+      : row.status === "fail"
+  const nBreach = preview.filter(breaches).length
+
+  const argsValid = useMemo(() => {
+    if (operator !== "mcp_call") return true
+    try {
+      JSON.parse(argsJson)
+      return true
+    } catch {
+      return false
+    }
+  }, [operator, argsJson])
+
+  const buildDraft = (): AlertDraft => {
+    const condition: Record<string, unknown> = { kind: "sql", query: query.trim() }
+    if (scored) {
+      condition.threshold = Number(threshold)
+      condition.compare = compare
+    }
+    const action: Record<string, unknown> = { operator }
+    if (operator === "sql") action.sql = actionSql
+    else if (operator === "mcp_call") {
+      action.server = server
+      action.tool = tool
+      try {
+        action.args = JSON.parse(argsJson)
+      } catch {
+        action.args = {}
+      }
+    } else if (operator === "flow") action.spec = spec
+    return {
+      name: name.trim(),
+      description,
+      conditionSpec: condition,
+      firePolicy: {
+        consecutive_n: Math.max(1, Number(consecutiveN) || 1),
+        cooldown_secs: Math.max(0, Number(cooldownSecs) || 0),
+      },
+      actionSpec: action,
+      cardinality: "per_entity",
+      fanOutCap: Number(fanOutCap) || 100,
+      cadenceTier: cadence,
+    }
+  }
+
+  const canSave = name.trim().length > 0 && query.trim().length > 0 && argsValid && !saving
+  const save = async () => {
+    setSaving(true)
+    const err = await createAlert(connectionId, buildDraft())
+    setSaving(false)
+    if (err) {
+      setSaveErr(err)
+      return
+    }
+    onSaved(name.trim())
+  }
+
+  return (
+    <div className="flex flex-col gap-3">
+      <div className="flex items-center gap-2">
+        <span className="text-[13px] font-semibold text-foreground">New alert</span>
+        <div className="ml-auto flex items-center gap-1.5">
+          <button type="button" onClick={onCancel} className="rounded border border-chrome-border px-2 py-0.5 text-[11px] text-chrome-text/70 hover:bg-foreground/[0.06]">
+            Cancel
+          </button>
+          <button
+            type="button"
+            disabled={!canSave}
+            onClick={() => void save()}
+            className={cn(
+              "rounded border px-2.5 py-0.5 text-[11px] transition-colors",
+              canSave ? "border-rvbbit-accent/50 bg-rvbbit-accent/15 text-rvbbit-accent hover:bg-rvbbit-accent/25" : "border-chrome-border text-chrome-text/40",
+            )}
+          >
+            {saving ? "Creating…" : "Create alert"}
+          </button>
+        </div>
+      </div>
+      {saveErr ? <div className="rounded border border-red-500/40 bg-red-500/10 px-2 py-1 text-[11px] text-red-200">{saveErr}</div> : null}
+
+      <div className="grid grid-cols-2 gap-2">
+        <Field label="name">
+          <input value={name} onChange={(e) => setName(e.target.value)} placeholder="revenue_drop" spellCheck={false} className={inputCls} />
+        </Field>
+        <Field label="description">
+          <input value={description} onChange={(e) => setDescription(e.target.value)} placeholder="what this watches" className={inputCls} />
+        </Field>
+      </div>
+
+      {/* condition + live preview */}
+      <div className="rounded-md border border-chrome-border bg-doc-bg/40 p-2.5">
+        <div className="mb-1 flex items-center gap-2 text-[11px]">
+          <span className="font-medium text-foreground">Condition</span>
+          <div className="flex items-center overflow-hidden rounded border border-chrome-border text-[10px]">
+            {(["scored", "status"] as const).map((m) => (
+              <button
+                key={m}
+                type="button"
+                onClick={() => setScored(m === "scored")}
+                className={cn("px-1.5 py-0.5", (m === "scored") === scored ? "bg-rvbbit-accent/20 text-foreground" : "text-chrome-text/60")}
+              >
+                {m}
+              </button>
+            ))}
+          </div>
+          <span className="ml-auto text-[10px] text-chrome-text/50">
+            returns <span className="font-mono">entity_key</span> + <span className="font-mono">{scored ? "score" : "status"}</span>
+          </span>
+        </div>
+        <textarea value={query} onChange={(e) => setQuery(e.target.value)} rows={3} spellCheck={false} className={cn(inputCls, "resize-y font-mono leading-snug")} />
+        {scored ? (
+          <div className="mt-1.5 flex items-center gap-2">
+            <Field label="compare">
+              <div className="flex items-center overflow-hidden rounded border border-chrome-border text-[10px]">
+                {(["gte", "lte"] as const).map((c) => (
+                  <button key={c} type="button" onClick={() => setCompare(c)} className={cn("px-1.5 py-0.5", compare === c ? "bg-rvbbit-accent/20 text-foreground" : "text-chrome-text/60")}>
+                    {c === "gte" ? "≥" : "≤"}
+                  </button>
+                ))}
+              </div>
+            </Field>
+            <Field label="threshold">
+              <input value={threshold} onChange={(e) => setThreshold(e.target.value)} className={cn(inputCls, "w-24 tabular-nums")} />
+            </Field>
+          </div>
+        ) : null}
+        {/* live preview */}
+        <div className="mt-2 rounded border border-chrome-border/60 bg-block-bg/40 p-1.5">
+          <div className="mb-1 flex items-center justify-between text-[10px]">
+            <span className="text-chrome-text/60">live preview</span>
+            <span className="tabular-nums">
+              {previewErr ? (
+                <span className="text-red-300">{previewErr}</span>
+              ) : (
+                <span>
+                  <span className="font-medium" style={{ color: nBreach > 0 ? statusColor("fail") : statusColor("pass") }}>{nBreach}</span> / {preview.length} would breach
+                </span>
+              )}
+            </span>
+          </div>
+          <div className="flex max-h-20 flex-wrap gap-1 overflow-auto">
+            {preview.slice(0, 60).map((row, i) => {
+              const br = breaches(row)
+              return (
+                <span
+                  key={i}
+                  className="inline-flex items-center gap-1 rounded px-1 py-0.5 text-[10px]"
+                  style={{
+                    background: "color-mix(in oklch, " + (br ? statusColor("fail") : statusColor("pass")) + " 18%, transparent)",
+                    color: br ? "var(--color-amber-100,#fef3c7)" : "var(--color-emerald-100,#d1fae5)",
+                  }}
+                >
+                  <span className="font-mono">{row.entityKey || "·"}</span>
+                  <span className="opacity-70">{scored ? numFmt(row.score) : row.status}</span>
+                </span>
+              )
+            })}
+            {preview.length === 0 && !previewErr ? <span className="text-[10px] text-chrome-text/40">no rows — adjust the query</span> : null}
+          </div>
+        </div>
+      </div>
+
+      {/* fire policy */}
+      <div className="grid grid-cols-3 gap-2">
+        <Field label="fire after N×">
+          <input value={consecutiveN} onChange={(e) => setConsecutiveN(e.target.value)} className={cn(inputCls, "tabular-nums")} />
+        </Field>
+        <Field label="cooldown (s)">
+          <input value={cooldownSecs} onChange={(e) => setCooldownSecs(e.target.value)} className={cn(inputCls, "tabular-nums")} />
+        </Field>
+        <Field label="fan-out cap">
+          <input value={fanOutCap} onChange={(e) => setFanOutCap(e.target.value)} className={cn(inputCls, "tabular-nums")} />
+        </Field>
+      </div>
+
+      {/* action */}
+      <div className="rounded-md border border-chrome-border bg-doc-bg/40 p-2.5">
+        <div className="mb-1 flex items-center gap-2 text-[11px]">
+          <span className="font-medium text-foreground">Action</span>
+          <div className="flex items-center overflow-hidden rounded border border-chrome-border text-[10px]">
+            {(["noop", "sql", "mcp_call", "flow"] as const).map((op) => (
+              <button key={op} type="button" onClick={() => setOperator(op)} className={cn("px-1.5 py-0.5 font-mono", operator === op ? "bg-rvbbit-accent/20 text-foreground" : "text-chrome-text/60")}>
+                {op}
+              </button>
+            ))}
+          </div>
+        </div>
+        {operator === "sql" ? (
+          <Field label="sql (the alert context is bound to $1, a jsonb of rule/entity/transition)">
+            <textarea value={actionSql} onChange={(e) => setActionSql(e.target.value)} rows={2} spellCheck={false} className={cn(inputCls, "resize-y font-mono leading-snug")} />
+          </Field>
+        ) : null}
+        {operator === "mcp_call" ? (
+          <div className="flex flex-col gap-1.5">
+            <div className="grid grid-cols-2 gap-2">
+              <Field label="server"><input value={server} onChange={(e) => setServer(e.target.value)} className={cn(inputCls, "font-mono")} /></Field>
+              <Field label="tool"><input value={tool} onChange={(e) => setTool(e.target.value)} className={cn(inputCls, "font-mono")} /></Field>
+            </div>
+            <Field label={`args template — {rule} {entity} {transition} fill from context${argsValid ? "" : "  ⚠ invalid JSON"}`}>
+              <textarea value={argsJson} onChange={(e) => setArgsJson(e.target.value)} rows={3} spellCheck={false} className={cn(inputCls, "resize-y font-mono leading-snug", !argsValid && "border-red-500/50")} />
+            </Field>
+          </div>
+        ) : null}
+        {operator === "flow" ? (
+          <Field label="flow spec (interpolated with the context, then run via rvbbit.flow)">
+            <textarea value={spec} onChange={(e) => setSpec(e.target.value)} rows={2} spellCheck={false} className={cn(inputCls, "resize-y font-mono leading-snug")} />
+          </Field>
+        ) : null}
+        {operator === "noop" ? <div className="text-[10px] text-chrome-text/45">no-op — fires + logs an event without reaching out (good for testing).</div> : null}
+      </div>
+
+      <Field label="cadence tier">
+        <div className="flex items-center overflow-hidden rounded border border-chrome-border text-[11px]" style={{ width: "fit-content" }}>
+          {(["fast", "normal", "slow"] as const).map((c) => (
+            <button key={c} type="button" onClick={() => setCadence(c)} className={cn("px-2 py-0.5", cadence === c ? "bg-rvbbit-accent/20 text-foreground" : "text-chrome-text/60")}>
+              {c}
+            </button>
+          ))}
+        </div>
+      </Field>
+    </div>
+  )
+}
+
 // ── main cockpit ──────────────────────────────────────────────────────────────
 
 export function AlertsWindow({ payload, activeConnectionId, hasRvbbit, onChangePayload }: AlertsWindowProps) {
@@ -467,6 +765,7 @@ export function AlertsWindow({ payload, activeConnectionId, hasRvbbit, onChangeP
   // wall-clock for the timeline, advanced by the poll (kept out of render so it
   // stays a pure deterministic render).
   const [now, setNow] = useState(() => Date.now())
+  const [editing, setEditing] = useState(false)
 
   const selected = payload.rule ?? null
   const rule = useMemo(() => rules.find((r) => r.name === selected) ?? null, [rules, selected])
@@ -589,13 +888,27 @@ export function AlertsWindow({ payload, activeConnectionId, hasRvbbit, onChangeP
       <div className="flex min-h-0 flex-1">
         {/* rule rail */}
         <div className="w-56 shrink-0 overflow-auto border-r border-chrome-border bg-doc-bg/30">
+          <button
+            type="button"
+            onClick={() => setEditing(true)}
+            className={cn(
+              "flex w-full items-center gap-1.5 border-b border-chrome-border/40 px-2.5 py-1.5 text-left text-[11px] font-medium transition-colors",
+              editing ? "bg-rvbbit-accent/15 text-rvbbit-accent" : "text-chrome-text/70 hover:bg-foreground/[0.04]",
+            )}
+          >
+            <span className="grid h-4 w-4 place-items-center rounded border border-current text-[11px] leading-none">+</span>
+            New alert
+          </button>
           {rules.map((r) => {
             const sel = r.name === selected
             return (
               <button
                 key={r.name}
                 type="button"
-                onClick={() => onChangePayload((p) => ({ ...p, rule: r.name }))}
+                onClick={() => {
+                  setEditing(false)
+                  onChangePayload((p) => ({ ...p, rule: r.name }))
+                }}
                 className={cn(
                   "flex w-full flex-col gap-0.5 border-b border-chrome-border/30 px-2.5 py-1.5 text-left transition-colors",
                   sel ? "bg-rvbbit-accent/10" : "hover:bg-foreground/[0.04]",
@@ -629,7 +942,18 @@ export function AlertsWindow({ payload, activeConnectionId, hasRvbbit, onChangeP
 
         {/* main observable panel */}
         <div className="min-w-0 flex-1 overflow-auto p-3">
-          {!rule ? (
+          {editing ? (
+            <RuleEditor
+              connectionId={activeConnectionId!}
+              onCancel={() => setEditing(false)}
+              onSaved={(nm) => {
+                setEditing(false)
+                onChangePayload((p) => ({ ...p, rule: nm }))
+                void loadRules()
+                void loadDetail()
+              }}
+            />
+          ) : !rule ? (
             <div className="grid h-full place-items-center text-[12px] text-chrome-text/45">Select an alert.</div>
           ) : (
             <div className="flex flex-col gap-3">
