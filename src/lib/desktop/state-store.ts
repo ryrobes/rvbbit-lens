@@ -11,6 +11,7 @@ import type {
   WorkspaceId,
 } from "./types"
 import { shadowDesktopState } from "./server-sync"
+import { isPresentMode } from "./present-mode"
 
 /**
  * Permissive shape for whatever JSON.parse hands back — covers both the
@@ -138,6 +139,9 @@ export function saveDesktopState(state: {
   currentSceneId: string | null
 }): void {
   if (typeof window === "undefined") return
+  // Present (read-only) mode: don't persist layout fiddling — the presented
+  // desktop stays as saved. (React state still updates; only persistence stops.)
+  if (isPresentMode()) return
   try {
     const body: DesktopSavedState = {
       version: VERSION,

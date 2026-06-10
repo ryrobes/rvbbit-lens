@@ -5,6 +5,7 @@ import { Activity, CaretRight, ChevronDown, Database, Layers, Plug, Plus } from 
 import { cn } from "@/lib/utils"
 import { RvbbitLogo } from "./rvbbit-logo"
 import { HomeIndicator } from "./home-indicator"
+import { PresentToggle } from "./present-toggle"
 import { SchedulerTray } from "./scheduler-tray"
 import { SceneTray } from "./scene-tray"
 import { APP_NAME, APP_VERSION } from "@/lib/version"
@@ -366,6 +367,8 @@ export function DesktopMenuBar({
         <MenuBarClock />
         <span className="text-chrome-text/30">·</span>
         <HomeIndicator />
+        <span className="text-chrome-text/30">·</span>
+        <PresentToggle />
         <span className="text-chrome-text/30">·</span>
         {hasRvbbit ? (
           <span className="rounded-full border border-rvbbit-accent/60 bg-rvbbit-bg/40 px-2 py-0.5 text-[10px] uppercase tracking-wide text-rvbbit-accent">

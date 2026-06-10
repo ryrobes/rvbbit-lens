@@ -68,7 +68,11 @@ seam to swap SQLite for Postgres without touching the client.
      globe) and a "Shared by other homes" section that lists others' shared scenes
      with a **Fork** (copies into your home). `GET /api/lens/library?home=` returns
      shared scenes from all *other* homes.
-   - 2.2b (next) — the present flag (`readOnly` via toggle / `?present=1`).
+   - **2.2b present flag (DONE)** — `present-mode.ts` (a per-tab sessionStorage
+     flag) + a menu-bar `PresentToggle`; `?present=1` enters it on load.
+     `saveDesktopState` no-ops in present mode, so a presented desktop is a stable
+     read-only surface (React state still updates; only persistence stops). The
+     "less chrome" rendering pass is still deferred.
 3. **Globalize connections** — move connections into `lens_connection`
    (server-authoritative, shared creds in the server secret store).
 
