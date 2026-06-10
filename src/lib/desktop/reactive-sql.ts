@@ -136,9 +136,16 @@ export function stripTrailingLimitOffset(sql: string): string {
   //   LIMIT 200 OFFSET 10
   //   OFFSET 10
   //   OFFSET 10 LIMIT 200
-  const RE = /\s+(?:LIMIT\s+(?:\d+|ALL)(?:\s+OFFSET\s+\d+)?|OFFSET\s+\d+(?:\s+LIMIT\s+(?:\d+|ALL))?)\s*$/i
+  // Anchor on the LIMIT/OFFSET keyword itself (NOT a leading `\s+`): a leading
+  // `\s+` would greedily consume a preceding string literal that maskSql blanked
+  // to spaces (e.g. `WHERE x='Class A' LIMIT 200`) and truncate it. The keyword
+  // matched against `masked` is guaranteed real (a literal `LIMIT` is blanked).
+  const RE = /(?:LIMIT\s+(?:\d+|ALL)(?:\s+OFFSET\s+\d+)?|OFFSET\s+\d+(?:\s+LIMIT\s+(?:\d+|ALL))?)\s*$/i
   const m = masked.match(RE)
-  if (!m || m.index === undefined) return stripped
+  if (!m || m.index === undefined || m.index === 0) return stripped
+  // The keyword must be whitespace-delimited in the SOURCE (also guards against a
+  // mid-token match like `fooLIMIT`).
+  if (!/\s/.test(stripped[m.index - 1]!)) return stripped
   return stripped.slice(0, m.index).trimEnd()
 }
 
@@ -521,6 +528,13 @@ function replaceMasked(
 
 const SQL_IDENT = `(?:"[^"]*"|[A-Za-z_][A-Za-z0-9_$]*)`
 const FROM_CLAUSE_KW = "WHERE|GROUP|ORDER|HAVING|LIMIT|OFFSET|WINDOW|UNION|INTERSECT|EXCEPT|FETCH|FOR|RETURNING"
+// Keywords that may legitimately TERMINATE a single FROM-item. Excludes the
+// set-ops (UNION/INTERSECT/EXCEPT): a top-level set-op means MULTIPLE selects, so
+// a FROM-item followed by one is NOT the query's sole relation — we must bail to
+// the whole-result wrap (which filters all arms) rather than rewrite only the
+// first. (FROM_CLAUSE_KW keeps the set-ops for alias-exclusion lookaheads, where
+// excluding them as possible aliases is still correct.)
+const FROM_ITEM_END_KW = "WHERE|GROUP|ORDER|HAVING|LIMIT|OFFSET|WINDOW|FETCH|FOR|RETURNING"
 const FROM_JOIN_KW = "JOIN|INNER|LEFT|RIGHT|FULL|CROSS|NATURAL|LATERAL|ON|USING"
 
 export interface SqlTableRef {
@@ -569,7 +583,7 @@ export function singleTableRef(sql: string): SqlTableRef | null {
   // (those are multi-relation → bail). Tolerate a trailing `;` so the raw,
   // un-stripped payload SQL resolves the same as the compiled form.
   const rest = sub.slice(mm[0].length).trimStart().replace(/;\s*$/, "")
-  if (rest !== "" && !new RegExp(`^(?:${FROM_CLAUSE_KW})\\b`, "i").test(rest) && !rest.startsWith(")")) {
+  if (rest !== "" && !new RegExp(`^(?:${FROM_ITEM_END_KW})\\b`, "i").test(rest) && !rest.startsWith(")")) {
     return null
   }
   const relation = mm[2] // unquoted region: masked === source here
@@ -651,7 +665,7 @@ function topLevelFromEnd(masked: string): number {
  *  / end — anything else (JOIN, comma, …) means multiple relations → bail. */
 function fromItemTailOk(maskedTail: string): boolean {
   const rest = maskedTail.trimStart().replace(/;\s*$/, "")
-  return rest === "" || new RegExp(`^(?:${FROM_CLAUSE_KW})\\b`, "i").test(rest) || rest.startsWith(")")
+  return rest === "" || new RegExp(`^(?:${FROM_ITEM_END_KW})\\b`, "i").test(rest) || rest.startsWith(")")
 }
 
 export function singleFromItem(sql: string): SqlFromItem | null {
@@ -679,16 +693,17 @@ export function singleFromItem(sql: string): SqlFromItem | null {
     return { type: "subquery", itemText: sql.slice(start, end), alias: aliasM[1], start, end }
   }
 
-  // Leading block reference: `{name} [alias]`
+  // Leading block reference: `{name}`. An EXPLICIT trailing alias (`{name} c`) is
+  // bailed: the compiler inlines `{name}` → `(…) AS name`, so a user alias would
+  // become a double-alias `(…) AS name c` (invalid) — the compiler can't push
+  // there, so the gate must not promise it either.
   if (head === "{") {
     const refM = REF_HEAD_RE.exec(sub)
     if (!refM) return null
-    let end = fromEnd + refM[0].length
-    let alias = refM[2]
-    const aliasM = FROM_ITEM_ALIAS_RE.exec(sql.slice(end))
-    if (aliasM) { alias = aliasM[1]; end += aliasM[0].length }
+    const end = fromEnd + refM[0].length
+    if (FROM_ITEM_ALIAS_RE.test(sql.slice(end))) return null // explicit alias → not pushable
     if (!fromItemTailOk(masked.slice(end))) return null
-    return { type: "ref", refName: refM[2], alias, start: fromEnd + refM[1].length, end }
+    return { type: "ref", refName: refM[2], alias: refM[2], start: fromEnd + refM[1].length, end }
   }
 
   // Plain base table (keeps all of singleTableRef's safety bails).
@@ -716,7 +731,7 @@ function singleFromRelation(sql: string): string | null {
   const mm = refRe.exec(sub)
   if (!mm) return null
   const rest = sub.slice(mm[0].length).trimStart().replace(/;\s*$/, "")
-  if (rest !== "" && !new RegExp(`^(?:${FROM_CLAUSE_KW})\\b`, "i").test(rest) && !rest.startsWith(")")) return null
+  if (rest !== "" && !new RegExp(`^(?:${FROM_ITEM_END_KW})\\b`, "i").test(rest) && !rest.startsWith(")")) return null
   return mm[2]
 }
 
@@ -737,7 +752,9 @@ function tableColumnSet(schema: SchemaSnapshot | null, relation: string): Set<st
  *  columns equal its FROM-item's columns — the only case we can resolve a
  *  referenced block's output without running it. */
 function selectsStar(sql: string): boolean {
-  return /^\s*SELECT\s+(?:ALL\s+|DISTINCT\s+)?\*\s+FROM\b/i.test(maskSql(sql).trimStart())
+  // SELECT [ALL | DISTINCT [ON (...)]] * FROM …  (DISTINCT ON (…) * is still a
+  // pass-through: its output columns equal the FROM-item's.)
+  return /^\s*SELECT\s+(?:ALL\s+|DISTINCT\s+(?:ON\s*\([^)]*\)\s+)?)?\*\s+FROM\b/i.test(maskSql(sql).trimStart())
 }
 
 /** Lowercased output-column set of a block's single FROM-item, following
@@ -768,11 +785,17 @@ function fromItemColumnSet(
 
 /**
  * Decide how a param dropped on a block should be placed:
- *  - "from-item": the field is a column of the single FROM-item (possibly via a
- *    pass-through {ref}) → push the predicate INTO it (surgical).
+ *  - "from-item": the field is PROVABLY a column of the single FROM-item (a base
+ *    table, or a pass-through {ref} chain) → push the predicate INTO it (surgical).
  *  - "query": the field is in the block's own output → wrap the whole result.
- *  - "none": provably neither → the drop can't produce valid SQL, refuse it.
- * Unknown cases stay permissive (never "none") to avoid false refusals.
+ *  - "none": no valid placement we can prove → refuse rather than emit bad SQL.
+ *
+ * The guiding rule is "never emit SQL we can't prove is valid": we only push when
+ * the field is known to be a FROM-item column (never gamble into an opaque
+ * subquery / non-pass-through ref — that 42703s), and only wrap when the field is
+ * known to be in the output. When neither is provable we refuse, except where the
+ * field could still be a computed output alias (FROM-item columns known & lack it,
+ * output unknown) — there a wrap is the least-bad bet.
  */
 export function resolveParamPlacement(
   sql: string,
@@ -781,17 +804,24 @@ export function resolveParamPlacement(
   opts: { ownColumns?: readonly string[] | null; blockSource?: (name: string) => string | null } = {},
 ): "from-item" | "query" | "none" {
   const f = field.toLowerCase()
-  // `item` is what the COMPILER can actually push into (strict — bails on the
-  // qualified/no-alias and quoted-alias shapes that break the rewrite). It must
-  // be non-null for a from-item push; `fromCols` (permissive, follows {ref}s) is
-  // only the column knowledge that tells us whether the field lives there.
+  // `pushable`: a FROM-item the COMPILER can actually wrap (strict — bails on the
+  // qualified/no-alias, quoted-alias, ref-with-alias and multi-relation shapes).
   const pushable = singleFromItem(sql) !== null
   const fromCols = fromItemColumnSet(sql, schema, opts.blockSource, new Set())
-  if (pushable && fromCols && fromCols.has(f)) return "from-item"
+  const inFrom = fromCols ? fromCols.has(f) : null // true | false | unknown(null)
   const own = opts.ownColumns
-  if (own && own.some((c) => c.toLowerCase() === f)) return "query"
-  if (fromCols && own) return "none" // both sets known, field in neither → certainly absent
-  return pushable ? "from-item" : "query" // unknown → best-effort, never refuse
+  const inOwn = own ? own.some((c) => c.toLowerCase() === f) : null
+
+  if (pushable && inFrom === true) return "from-item" // provably-safe surgical push
+  if (inOwn === true) return "query" // provably-safe wrap (field is in the output)
+  if (inFrom === false && inOwn === false) return "none" // both known, absent everywhere
+  // FROM-item columns known & lack the field, output unknown: the field could
+  // only be a computed output alias → wrap (works for aliases; a truly bogus
+  // field errors at run time, recoverable). Never push (would 42703).
+  if (inFrom === false) return "query"
+  // FROM-item opaque (subquery / non-pass-through ref / CTE): we can't prove the
+  // field is there. If the output is known and lacks it, refuse; else wrap.
+  return inOwn === false ? "none" : "query"
 }
 
 export function sameParamValue(a: unknown, b: unknown): boolean {
