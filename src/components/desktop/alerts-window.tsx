@@ -17,6 +17,7 @@ import {
   fetchAlertRules,
   fetchAlertState,
   fetchAlertSweepRuns,
+  fetchExprColumns,
   muteRule,
   previewCondition,
   previewExprCondition,
@@ -554,7 +555,10 @@ function RuleEditor({
     typeof cs.expr === "string" && cs.expr !== "" ? "expr" : initial ? (cs.threshold != null ? "scored" : "status") : "scored"
   const [condShape, setCondShape] = useState<"scored" | "status" | "expr">(condShapeInit)
   const scored = condShape === "scored"
-  const [expr, setExpr] = useState(typeof cs.expr === "string" ? cs.expr : "drop_pct > 0.15")
+  // default references `score` — the default query's output column (it aliases
+  // drop_pct AS score), since the expr sees the query's OUTPUT columns.
+  const [expr, setExpr] = useState(typeof cs.expr === "string" ? cs.expr : "score >= 0.15")
+  const [exprColumns, setExprColumns] = useState<string[]>([])
   const [query, setQuery] = useState(typeof cs.query === "string" ? cs.query : "SELECT region AS entity_key, drop_pct AS score FROM my_table")
   const [threshold, setThreshold] = useState(cs.threshold != null ? String(cs.threshold) : "0.15")
   const [compare, setCompare] = useState<"gte" | "lte">(cs.compare === "lte" ? "lte" : "gte")
@@ -654,13 +658,23 @@ function RuleEditor({
         setPreviewErr(null)
         return
       }
-      const r =
-        condShape === "expr"
-          ? await previewExprCondition(connectionId, query, expr)
-          : await previewCondition(connectionId, query)
-      if (cancelled) return
-      setPreview(r.rows)
-      setPreviewErr(r.error)
+      if (condShape === "expr") {
+        // columns from the bare query (so the available names show even when the
+        // expr itself is invalid), plus the wrapped expr preview for breaches
+        const [cols, r] = await Promise.all([
+          fetchExprColumns(connectionId, query),
+          previewExprCondition(connectionId, query, expr),
+        ])
+        if (cancelled) return
+        setExprColumns(cols.columns)
+        setPreview(r.rows)
+        setPreviewErr(r.error)
+      } else {
+        const r = await previewCondition(connectionId, query)
+        if (cancelled) return
+        setPreview(r.rows)
+        setPreviewErr(r.error)
+      }
     }, 350)
     return () => {
       cancelled = true
@@ -955,11 +969,21 @@ function RuleEditor({
         ) : null}
             {condShape === "expr" ? (
               <div className="mt-1.5">
-                <Field label="fail when (a SQL boolean over the query's columns)">
+                <Field label="fail when — a SQL boolean over the query's output columns">
                   <div className={cn("overflow-hidden rounded border", previewErr ? "border-danger/50" : "border-chrome-border/60")}>
                     <SqlEditor language="sql" compact value={expr} onChange={setExpr} height="30px" />
                   </div>
                 </Field>
+                {exprColumns.length > 0 ? (
+                  <div className="mt-1 flex flex-wrap items-center gap-1 text-[10px] text-chrome-text/50">
+                    <span>columns:</span>
+                    {exprColumns.map((c) => (
+                      <span key={c} className="rounded bg-foreground/[0.06] px-1 py-0.5 font-mono text-chrome-text/70">
+                        {c}
+                      </span>
+                    ))}
+                  </div>
+                ) : null}
               </div>
             ) : null}
         {/* live preview */}

@@ -367,6 +367,20 @@ export async function previewExprCondition(
   }
 }
 
+/** The output column names of a condition query — exactly what an expr can
+ *  reference (the SELECT's aliases, not the underlying table columns). Reads the
+ *  result metadata so it works even when the query returns zero rows. */
+export async function fetchExprColumns(
+  connectionId: string,
+  query: string,
+): Promise<{ columns: string[]; error: string | null }> {
+  const trimmed = query.trim().replace(/;+\s*$/, "")
+  if (!trimmed) return { columns: [], error: null }
+  const r = await run(connectionId, `SELECT * FROM (${trimmed}) q LIMIT 1`, 1)
+  if (!r.ok) return { columns: [], error: r.error }
+  return { columns: r.columns.map((c) => c.name), error: null }
+}
+
 export interface AlertDraft {
   name: string
   description: string
