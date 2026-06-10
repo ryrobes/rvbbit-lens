@@ -29,6 +29,7 @@ import {
   flagsToStates,
   importCapabilityCatalogUrl,
   joinCatalogToInstalled,
+  searchCapabilities,
   type CatalogDoc,
   type InstalledBackend,
   type InstalledRuntime,
@@ -100,6 +101,11 @@ export function CapabilitiesWindow({
     () => new Set(initialTag ? [initialTag] : []),
   )
   const [search, setSearch] = useState("")
+  // Semantic re-rank layer (Tier A): id -> similarity score for the current
+  // query. Blended *under* the substring matches, so exact keyword hits stay on
+  // top and semantically-related capabilities surface below. Empty when the
+  // query is short or the embed backend is offline (→ silent substring-only).
+  const [semanticScores, setSemanticScores] = useState<Map<string, number>>(new Map())
   const [paused, setPaused] = useState(false)
   const [intervalMs, setIntervalMs] = useState(5000)
   const [updatedAt, setUpdatedAt] = useState(0)
@@ -201,6 +207,28 @@ export function CapabilitiesWindow({
     return () => clearInterval(id)
   }, [activeConnectionId, hasRvbbit, paused, intervalMs, pollWarrenInventory])
 
+  // ── semantic re-rank: debounced embed-and-rank for the current query ──
+  useEffect(() => {
+    if (!activeConnectionId || !hasRvbbit) return
+    const q = search.trim()
+    let cancelled = false
+    const t = window.setTimeout(async () => {
+      if (q.length < 3) {
+        if (!cancelled) setSemanticScores(new Map())
+        return
+      }
+      // Scores cluster tightly (~0.5–0.7) so a floor doesn't discriminate well;
+      // the *ranking* is what's meaningful, so cap to a small top-k — the "related"
+      // tag stays a signal, not the whole catalog.
+      const { scores } = await searchCapabilities(activeConnectionId, q, 8)
+      if (!cancelled) setSemanticScores(scores)
+    }, 250)
+    return () => {
+      cancelled = true
+      window.clearTimeout(t)
+    }
+  }, [search, activeConnectionId, hasRvbbit])
+
   // ── derive ──
   const join = useMemo(() => {
     if (!catalog) return null
@@ -242,33 +270,53 @@ export function CapabilitiesWindow({
     return m
   }, [catalog, search])
 
-  const visible = useMemo(() => {
-    if (!join) return [] as JoinedCatalogEntry[]
-    let v = join.entries
+  const searchResult = useMemo(() => {
+    const empty = {
+      entries: [] as JoinedCatalogEntry[],
+      semanticOnlyIds: new Set<string>(),
+    }
+    if (!join) return empty
+    // Tag + source filters apply to both exact and semantic candidates.
+    let pool = join.entries
     if (selectedTags.size > 0) {
       // OR semantics — keep an entry if it carries any of the selected tags.
-      v = v.filter((e) => {
+      pool = pool.filter((e) => {
         const tags = new Set(e.catalog.tags ?? [])
         for (const t of selectedTags) if (tags.has(t)) return true
         return false
       })
     }
     if (selectedSources.size > 0) {
-      v = v.filter((e) => selectedSources.has(e.catalog.catalog_source || "unknown"))
-    }
-    if (search.trim().length > 0) {
-      v = filterBySearchOnly(v, search) as JoinedCatalogEntry[]
+      pool = pool.filter((e) => selectedSources.has(e.catalog.catalog_source || "unknown"))
     }
     // sort: installed-and-used first, then registered, then catalog-only.
-    return [...v].sort((a, b) => {
+    const byInstall = (a: JoinedCatalogEntry, b: JoinedCatalogEntry) => {
       const order = (e: JoinedCatalogEntry) =>
         (e.flags.used ? 0 : e.flags.registered ? 1 : 2) * 1000 -
         (e.installed?.n_calls ?? 0)
       const r = order(a) - order(b)
-      if (r !== 0) return r
-      return a.catalog.title.localeCompare(b.catalog.title)
-    })
-  }, [join, selectedTags, selectedSources, search])
+      return r !== 0 ? r : a.catalog.title.localeCompare(b.catalog.title)
+    }
+    if (search.trim().length === 0) {
+      return { entries: [...pool].sort(byInstall), semanticOnlyIds: new Set<string>() }
+    }
+    // Exact substring matches stay on top (install-sorted); semantically-related
+    // entries the substring filter missed are appended, ranked by similarity.
+    const exact = (filterBySearchOnly(pool, search) as JoinedCatalogEntry[]).sort(byInstall)
+    const exactIds = new Set(exact.map((e) => e.catalog.id))
+    const semantic = pool
+      .filter((e) => !exactIds.has(e.catalog.id) && semanticScores.has(e.catalog.id))
+      .sort(
+        (a, b) =>
+          (semanticScores.get(b.catalog.id) ?? 0) - (semanticScores.get(a.catalog.id) ?? 0),
+      )
+    return {
+      entries: [...exact, ...semantic],
+      semanticOnlyIds: new Set(semantic.map((e) => e.catalog.id)),
+    }
+  }, [join, selectedTags, selectedSources, search, semanticScores])
+  const visible = searchResult.entries
+  const semanticOnlyIds = searchResult.semanticOnlyIds
 
   // Heaviest VRAM reservation among the visible packs — the gauge on each
   // card is normalized to this, so the bars read as relative "weight".
@@ -637,6 +685,7 @@ export function CapabilitiesWindow({
                 entry={e}
                 warrenNodes={uniqueNodesFromInventory(warrenInventory)}
                 maxVram={maxVram}
+                semanticMatch={semanticOnlyIds.has(e.catalog.id)}
                 onOpen={() => onOpenCapability(e.catalog.id)}
               />
             ))}
@@ -809,11 +858,14 @@ function CapabilityCard({
   entry,
   warrenNodes,
   maxVram,
+  semanticMatch,
   onOpen,
 }: {
   entry: JoinedCatalogEntry
   warrenNodes: WarrenInventoryRow[]
   maxVram: number
+  /** Surfaced by the semantic re-rank (no keyword match) — gets a subtle tag. */
+  semanticMatch?: boolean
   onOpen: () => void
 }) {
   const { catalog, installed, installedRuntime, flags } = entry
@@ -900,6 +952,15 @@ function CapabilityCard({
             {catalog.name}
           </div>
         </div>
+        {semanticMatch ? (
+          <span
+            className="inline-flex shrink-0 items-center gap-0.5 rounded-full border border-brand-capability/30 bg-brand-capability/10 px-1.5 py-px text-[9px] text-brand-capability/90"
+            title="Surfaced by semantic search — related to your query (no keyword match)"
+          >
+            <Sparkles className="h-2.5 w-2.5" />
+            related
+          </span>
+        ) : null}
         <DeviceChip device={catalog.device} />
       </div>
 

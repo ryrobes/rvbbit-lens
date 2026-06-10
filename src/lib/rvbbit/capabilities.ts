@@ -354,6 +354,33 @@ function numOrNull(v: unknown): number | null {
   return Number.isFinite(n) ? n : null
 }
 
+/**
+ * Semantic capability search (Tier A) — embeds the query and ranks catalog
+ * entries by similarity to their def docs (rvbbit.search_capabilities, which
+ * reuses the hash-keyed embedding cache; no stored vector). Returns id→score.
+ * On any error (e.g. the embed backend is offline) returns an empty map so the
+ * caller silently falls back to substring search.
+ */
+export async function searchCapabilities(
+  connectionId: string,
+  query: string,
+  k = 30,
+): Promise<{ scores: Map<string, number>; error?: string }> {
+  const q = query.replace(/'/g, "''")
+  const kClamped = Math.max(1, Math.min(100, Math.floor(k)))
+  const res = await runQuery(
+    connectionId,
+    `SELECT id, score FROM rvbbit.search_capabilities('${q}', ${kClamped})`,
+  )
+  if (!res.ok) return { scores: new Map(), error: res.error }
+  const scores = new Map<string, number>()
+  for (const row of res.rows) {
+    const id = String(row.id ?? "")
+    if (id) scores.set(id, num(row.score))
+  }
+  return { scores }
+}
+
 function epoch(v: unknown): number | null {
   if (v == null) return null
   const t = new Date(String(v)).getTime()
