@@ -92,6 +92,7 @@ import { MetricCatalogWindow } from "./metric-catalog-window"
 import { MetricCreatorWindow } from "./metric-creator-window"
 import { MetricInspectorWindow } from "./metric-inspector-window"
 import { MetricBoardWindow } from "./metric-board-window"
+import { AlertsWindow } from "./alerts-window"
 import { CapabilitiesWindow } from "./capabilities-window"
 import { CapabilityDetailWindow } from "./capability-detail-window"
 import { HfDeployWindow } from "./hf-deploy-window"
@@ -183,6 +184,7 @@ import type {
   MetricCreatorPayload,
   MetricInspectorPayload,
   MetricBoardPayload,
+  AlertsPayload,
 } from "@/lib/desktop/types"
 
 interface WorkspaceTransition {
@@ -2168,6 +2170,18 @@ export function DesktopShell() {
     })
   }, [focus, openWindow, liveWindows])
 
+  const openAlerts = useCallback(() => {
+    const existing = liveWindows().find((w) => w.kind === "alerts")
+    if (existing) return focus(existing.id)
+    openWindow({
+      id: randomUUID(),
+      kind: "alerts",
+      title: "Alerts",
+      x: 150, y: 78, width: 1080, height: 680,
+      payload: { kind: "alerts" } satisfies AlertsPayload,
+    })
+  }, [focus, openWindow, liveWindows])
+
   const openKgExtractionRuns = useCallback(
     (graphId?: string | null, runId?: number | null) => {
       const existing = liveWindows().find((w) => w.kind === "kg-extraction-runs")
@@ -3332,6 +3346,7 @@ export function DesktopShell() {
     { id: "metric-creator", label: "Metric Creator", icon: Calculator, color: "oklch(78% 0.13 95)", description: "Author & version metrics", activate: () => openMetricCreator(), folder: "metrics", rvbbit: true },
     { id: "metric-inspector", label: "Metric Inspector", icon: LineChart, color: "oklch(78% 0.13 95)", description: "Run metrics across def-time & data-time", activate: () => openMetricInspector(), folder: "metrics", rvbbit: true },
     { id: "metric-board", label: "KPI Board", icon: Table2, color: "oklch(78% 0.13 95)", description: "Matrix of metric values & KPI verdicts over time", activate: () => openMetricBoard(), folder: "metrics", rvbbit: true },
+    { id: "alerts", label: "Alerts", icon: Bell, color: "oklch(68% 0.19 25)", description: "Observable alert rules — thresholds, episodes & firing", activate: () => openAlerts(), rvbbit: true },
     // Knowledge
     { id: "kg", label: "Knowledge Graph", icon: TreeStructure, color: "var(--brand-kg)", description: "Browse the extracted graph", activate: () => openKgBrowser(), folder: "knowledge", rvbbit: true },
     { id: "kg-explorer", label: "Graph Explorer", icon: TreeStructure, color: "var(--brand-kg)", description: "Walk entities & relations", activate: () => openKgExplorer(), folder: "knowledge", rvbbit: true },
@@ -3343,7 +3358,7 @@ export function DesktopShell() {
     openSystemObjects, openExtensions, openPgMonitor, openCache, openRvbbitCache,
     openCosts, openSyncMirror, openOperators, openSpecialists, openRouting,
     openMcpServers, openCapabilities, openHfDeploy, openWarren, openModelStudio,
-    openDuck, openMetricCatalog, openMetricCreator, openMetricInspector, openMetricBoard,
+    openDuck, openMetricCatalog, openMetricCreator, openMetricInspector, openMetricBoard, openAlerts,
     openKgBrowser, openKgExplorer, openQueryLens, openDrift,
   ])
 
@@ -4313,6 +4328,15 @@ function renderWindowContent(
           onOpenSqlData={ctx.openSqlData}
           onEmitParam={ctx.emitParam}
           onChangePayload={(mut) => ctx.updatePayload(w.id, (p) => mut(p as MetricBoardPayload))}
+        />
+      )
+    case "alerts":
+      return (
+        <AlertsWindow
+          payload={w.payload as AlertsPayload}
+          activeConnectionId={ctx.activeConnectionId}
+          hasRvbbit={ctx.hasRvbbit}
+          onChangePayload={(mut) => ctx.updatePayload(w.id, (p) => mut(p as AlertsPayload))}
         />
       )
     case "folder": {

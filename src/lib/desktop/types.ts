@@ -48,6 +48,7 @@ export type DesktopWindowKind =
   | "metric-creator"
   | "metric-inspector"
   | "metric-board"
+  | "alerts"
 
 export interface DesktopWindowPosition {
   x: number
@@ -120,6 +121,14 @@ export type WindowPayload =
   | MetricCreatorPayload
   | MetricInspectorPayload
   | MetricBoardPayload
+  | AlertsPayload
+
+/** The Alerts cockpit — an observable view over rvbbit.alert_* (rules, state,
+ *  queue, events, sweep heartbeats). `rule` is the selected rule name. */
+export interface AlertsPayload {
+  kind?: "alerts"
+  rule?: string
+}
 
 export interface FinderPayload {
   kind?: "finder"
