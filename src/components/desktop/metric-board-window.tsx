@@ -90,6 +90,19 @@ function tint(ok: boolean | null | undefined): string {
   return "text-chrome-text/90"
 }
 
+/** A roll-up "temperature" color for a pass-rate %: a continuous gradient routed
+ *  through the theme tokens danger(0%) → warning(50%) → success(100%), so a
+ *  category's health reads at a glance. Null pct = no KPI data this bucket. */
+function heatColor(pct: number | null): { bg: string; fg: string } | null {
+  if (pct == null) return null
+  const p = Math.max(0, Math.min(100, pct))
+  const stop =
+    p >= 50
+      ? `color-mix(in oklch, var(--success) ${Math.round((p - 50) * 2)}%, var(--warning))`
+      : `color-mix(in oklch, var(--warning) ${Math.round(p * 2)}%, var(--danger))`
+  return { bg: `color-mix(in oklch, ${stop} 28%, transparent)`, fg: `color-mix(in oklch, ${stop} 70%, var(--foreground))` }
+}
+
 /** Tiny inline sparkline of a row's headline series. */
 function Sparkline({ points }: { points: (number | null)[] }) {
   const vals = points.filter((p): p is number => p != null)
@@ -139,6 +152,10 @@ export function MetricBoardWindow({
   const bucket: BoardBucket = showAll ? "raw" : range.bucket
   const [sel, setSel] = useState<{ cell: MetricBoardCell; x: number; y: number } | null>(null)
   const [drilling, setDrilling] = useState(false)
+  // group the matrix by category › subcategory; each group header shows a rolled-up
+  // health "temperature" (% of its KPIs passing) per bucket. Collapse = roll up.
+  const [groupBy, setGroupBy] = useState(true)
+  const [collapsed, setCollapsed] = useState<Set<string>>(new Set())
 
   const [mode, setMode] = useState<"value" | "restate">(payload.mode ?? "value")
   const [defDate, setDefDate] = useState<string>(payload.defDate ?? "")
@@ -317,6 +334,69 @@ export function MetricBoardWindow({
     return all.filter((n) => !q || n.toLowerCase().includes(q))
   }, [metrics, cells, search])
 
+  const anyCategorized = useMemo(() => metrics.some((m) => m.category), [metrics])
+
+  // Ordered render list: category/subcategory group headers interleaved with their
+  // metric rows. A null category sorts last as "(uncategorized)"; a category-only
+  // metric (no subcategory) sits directly under its category.
+  type RR =
+    | { type: "group"; depth: 0 | 1; key: string; label: string; members: string[] }
+    | { type: "metric"; name: string; depth: number }
+  const renderRows = useMemo<RR[]>(() => {
+    if (!groupBy) return rows.map((name) => ({ type: "metric", name, depth: 0 }))
+    const metaOf = (n: string) => metrics.find((m) => m.name === n)
+    const cmpNull = (a: string | null, b: string | null) => (a == null ? 1 : b == null ? -1 : a.localeCompare(b))
+    const cats = [...new Set(rows.map((n) => metaOf(n)?.category ?? null))].sort(cmpNull)
+    const out: RR[] = []
+    for (const cat of cats) {
+      const catKey = cat ?? " uncat"
+      const catMembers = rows.filter((n) => (metaOf(n)?.category ?? null) === cat)
+      out.push({ type: "group", depth: 0, key: catKey, label: cat ?? "(uncategorized)", members: catMembers })
+      if (collapsed.has(catKey)) continue
+      const subs = [...new Set(catMembers.map((n) => metaOf(n)?.subcategory ?? null))].sort(cmpNull)
+      for (const sub of subs) {
+        const subMembers = catMembers.filter((n) => (metaOf(n)?.subcategory ?? null) === sub)
+        if (sub == null) {
+          for (const n of subMembers) out.push({ type: "metric", name: n, depth: 1 })
+        } else {
+          const subKey = `${catKey} ${sub}`
+          out.push({ type: "group", depth: 1, key: subKey, label: sub, members: subMembers })
+          if (collapsed.has(subKey)) continue
+          for (const n of subMembers) out.push({ type: "metric", name: n, depth: 2 })
+        }
+      }
+    }
+    return out
+  }, [groupBy, rows, metrics, collapsed])
+
+  // % of a group's KPIs passing their check at a bucket (the roll-up temperature).
+  const rollup = (members: string[], col: number): { pct: number | null; passing: number; total: number } => {
+    let passing = 0
+    let total = 0
+    for (const name of members) {
+      const c = byKey.get(`${name} ${col}`) // byKey keys use a NUL separator
+      if (c?.verdict && c.verdict.ok != null) {
+        total++
+        if (c.verdict.ok) passing++
+      }
+    }
+    return total > 0 ? { pct: (passing / total) * 100, passing, total } : { pct: null, passing: 0, total: 0 }
+  }
+
+  const categoryKeys = useMemo(
+    () => new Set(rows.map((n) => (metrics.find((m) => m.name === n)?.category ?? null) ?? " uncat")),
+    [rows, metrics],
+  )
+  const toggleCollapse = (key: string) =>
+    setCollapsed((s) => {
+      const n = new Set(s)
+      if (n.has(key)) n.delete(key)
+      else n.add(key)
+      return n
+    })
+  const rollUp = () => setCollapsed(new Set(categoryKeys)) // collapse every category
+  const rollDown = () => setCollapsed(new Set()) // expand everything
+
   // What a cell shows, given the mode: stored value, def-scrubbed recompute,
   // or restatement (recomputed-now, tinted amber when it diverges from what
   // was reported — i.e. the underlying data was backfilled/corrected).
@@ -476,6 +556,31 @@ export function MetricBoardWindow({
             </button>
           ) : null}
         </label>
+        {/* category grouping + roll-up health heatmap */}
+        {anyCategorized ? (
+          <div className="flex items-center gap-1">
+            <button
+              onClick={() => setGroupBy((v) => !v)}
+              title="Group rows by category › subcategory, with a rolled-up health heatmap (% of KPIs passing) per group"
+              className={cn(
+                "rounded border px-2 py-1 text-[11px] transition-colors",
+                groupBy ? "border-amber-400/50 bg-amber-400/20 text-amber-100" : "border-chrome-border text-chrome-text/70 hover:bg-chrome-bg/60",
+              )}
+            >
+              Group
+            </button>
+            {groupBy ? (
+              <div className="flex items-center overflow-hidden rounded border border-chrome-border">
+                <button onClick={rollUp} title="Collapse all categories (roll up to the heatmap)" className="px-2 py-1 text-[11px] text-chrome-text/70 hover:bg-chrome-bg/60">
+                  roll up
+                </button>
+                <button onClick={rollDown} title="Expand all categories (roll down to metrics)" className="px-2 py-1 text-[11px] text-chrome-text/70 hover:bg-chrome-bg/60">
+                  roll down
+                </button>
+              </div>
+            ) : null}
+          </div>
+        ) : null}
         {whatIf ? (
           <span className="flex items-center gap-1 rounded border border-amber-400/50 bg-amber-400/10 px-1.5 py-0.5 text-[11px] text-amber-100">
             what-if: {whatIf.metric} @ {compactNum(whatIf.target)}
@@ -525,7 +630,47 @@ export function MetricBoardWindow({
               </tr>
             </thead>
             <tbody>
-              {rows.map((name) => {
+              {renderRows.map((rr) => {
+                if (rr.type === "group") {
+                  const expanded = !collapsed.has(rr.key)
+                  const kpiCount = rr.members.filter((n) => metrics.find((m) => m.name === n)?.checkSql).length
+                  return (
+                    <tr key={`g:${rr.key}`}>
+                      <th
+                        onClick={() => toggleCollapse(rr.key)}
+                        style={{ paddingLeft: rr.depth * 12 + 6 }}
+                        className={cn(
+                          "sticky left-0 z-10 cursor-pointer select-none border-b border-r border-chrome-border bg-chrome-bg py-1 pr-2 text-left hover:bg-chrome-bg/70",
+                          rr.depth === 0 ? "font-semibold text-foreground" : "font-medium text-chrome-text/85",
+                        )}
+                      >
+                        <span className="flex items-center gap-1">
+                          <ChevronRight className={cn("h-3 w-3 shrink-0 text-chrome-text/50 transition-transform", expanded && "rotate-90")} />
+                          <span className="truncate">{rr.label}</span>
+                          <span className="ml-1 shrink-0 text-[9px] uppercase tracking-wide text-chrome-text/40">{kpiCount} kpi</span>
+                        </span>
+                      </th>
+                      {columns.map((col) => {
+                        const r = rollup(rr.members, col)
+                        const heat = heatColor(r.pct)
+                        return (
+                          <td
+                            key={col}
+                            title={r.pct != null ? `${rr.label} @ ${fmtCol(col, bucket)} · ${r.passing}/${r.total} KPIs passing (${Math.round(r.pct)}%)` : "no KPI data this period"}
+                            style={heat ? { background: heat.bg, color: heat.fg } : undefined}
+                            className={cn("border-b border-chrome-border/60 px-2.5 py-1 text-right text-[10px] font-medium tabular-nums", !heat && "text-chrome-text/20")}
+                          >
+                            {r.pct != null ? `${Math.round(r.pct)}%` : "·"}
+                          </td>
+                        )
+                      })}
+                      <td className="border-b border-l border-chrome-border/60 px-2 py-1">
+                        <Sparkline points={columns.map((col) => rollup(rr.members, col).pct)} />
+                      </td>
+                    </tr>
+                  )
+                }
+                const name = rr.name
                 const meta = metrics.find((m) => m.name === name)
                 const isKpi = !!meta?.checkSql
                 const series = columns.map((col) => {
@@ -537,7 +682,8 @@ export function MetricBoardWindow({
                     <th
                       title={meta?.description ?? name}
                       onClick={() => onOpenInspector?.(name)}
-                      className="sticky left-0 z-10 cursor-pointer border-b border-r border-chrome-border bg-chrome-bg px-2 py-1 text-left font-normal text-chrome-text/90 group-hover:bg-chrome-bg/70"
+                      style={{ paddingLeft: rr.depth * 12 + 8 }}
+                      className="sticky left-0 z-10 cursor-pointer border-b border-r border-chrome-border bg-chrome-bg py-1 pr-2 text-left font-normal text-chrome-text/90 group-hover:bg-chrome-bg/70"
                     >
                       <span className="flex items-center gap-1.5">
                         <span
