@@ -10,6 +10,7 @@ import type {
   WorkspaceCanvas,
   WorkspaceId,
 } from "./types"
+import { shadowDesktopState } from "./server-sync"
 
 /**
  * Permissive shape for whatever JSON.parse hands back — covers both the
@@ -148,6 +149,8 @@ export function saveDesktopState(state: {
       updatedAt: new Date().toISOString(),
     }
     window.localStorage.setItem(STORAGE_KEY, JSON.stringify(body))
+    // Best-effort durable shadow to the server homebase (debounced, fail-safe).
+    shadowDesktopState(body)
   } catch {
     // localStorage is best-effort.
   }

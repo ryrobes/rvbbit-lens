@@ -1,6 +1,7 @@
 "use client"
 
 import { randomUUID } from "@/lib/uuid"
+import { shadowScenes } from "./server-sync"
 import { getArtifact, upsertArtifact } from "./artifacts"
 import { getViewApp, upsertViewApp } from "./view-apps"
 import { SCENE_SCHEMA_VERSION } from "./types"
@@ -58,6 +59,8 @@ function writeStore(scenes: Scene[]): void {
     // Same-tab listeners (the tray, the empty-slot gallery) refresh off this;
     // cross-tab refresh rides the native `storage` event on STORAGE_KEY.
     window.dispatchEvent(new Event(SCENES_CHANGED_EVENT))
+    // Best-effort durable shadow to the server homebase (debounced, fail-safe).
+    shadowScenes(scenes)
   } catch {
     // best-effort
   }

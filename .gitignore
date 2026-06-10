@@ -39,3 +39,6 @@ next-env.d.ts
 *.png
 *.jpeg
 *.jpg
+
+# Lens homebase (server SQLite store)
+.lens-data/
