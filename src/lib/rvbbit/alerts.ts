@@ -340,6 +340,33 @@ export async function previewCondition(
   }
 }
 
+/** Preview a boolean-expression condition: wraps the query in the same
+ *  CASE-over-columns the sweep uses, so a non-boolean expr surfaces as an error
+ *  (the validation). Each row's status is the expr verdict. */
+export async function previewExprCondition(
+  connectionId: string,
+  query: string,
+  expr: string,
+): Promise<{ rows: PreviewRow[]; error: string | null }> {
+  const trimmed = query.trim().replace(/;+\s*$/, "")
+  const e = expr.trim()
+  if (!trimmed || !e) return { rows: [], error: null }
+  const wrapped = `SELECT q2.*, CASE WHEN (${e}) THEN 'fail' ELSE 'pass' END AS _alert_status FROM (${trimmed}) q2`
+  const r = await run(connectionId, `SELECT to_jsonb(q) AS j FROM (${wrapped}) q LIMIT 500`, 500)
+  if (!r.ok) return { rows: [], error: r.error }
+  return {
+    rows: r.rows.map((row) => {
+      const j = obj(row.j)
+      return {
+        entityKey: j.entity_key == null ? "" : String(j.entity_key),
+        score: j.score == null ? null : Number(j.score),
+        status: j._alert_status == null ? null : String(j._alert_status),
+      }
+    }),
+    error: null,
+  }
+}
+
 export interface AlertDraft {
   name: string
   description: string

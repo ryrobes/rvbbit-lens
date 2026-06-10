@@ -33,6 +33,9 @@ interface SqlEditorProps {
   /** Soft-wrap long lines instead of scrolling horizontally — for read-only
    *  previews where a long line would otherwise widen the container. */
   wrap?: boolean
+  /** Drop the line-number gutter + active-line highlight — for single-line
+   *  expression/field use where the chrome would be noise. */
+  compact?: boolean
   /** Live schema (pg schema → table → columns) for table/column autocomplete.
    *  Built from the connection's SchemaSnapshot; omit for keyword-only. */
   schema?: SQLNamespace
@@ -54,6 +57,7 @@ export function SqlEditor({
   fontSize = 13,
   language = "sql",
   wrap = false,
+  compact = false,
   schema,
   defaultSchema,
   completionSources,
@@ -141,8 +145,8 @@ export function SqlEditor({
         extensions={[...extensions, ...rvbbitLensCodeMirrorTheme]}
         onChange={onChange}
         basicSetup={{
-          highlightActiveLine: !plain,
-          lineNumbers: !plain,
+          highlightActiveLine: !plain && !compact,
+          lineNumbers: !plain && !compact,
           foldGutter: false,
           dropCursor: true,
           autocompletion: !plain && !isJson,

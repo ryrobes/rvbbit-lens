@@ -19,6 +19,7 @@ import {
   fetchAlertSweepRuns,
   muteRule,
   previewCondition,
+  previewExprCondition,
   previewMetricObservation,
   runSweep,
   runWorker,
@@ -546,7 +547,14 @@ function RuleEditor({
 
   const [name, setName] = useState(initial?.name ?? "")
   const [description, setDescription] = useState(initial?.description ?? "")
-  const [scored, setScored] = useState(initial ? cs.threshold != null : true)
+  // how a sql condition decides fail/pass: 'scored' (threshold/compare on a score
+  // column), 'status' (the query returns a status), or 'expr' (a boolean SQL
+  // expression over the query's columns).
+  const condShapeInit: "scored" | "status" | "expr" =
+    typeof cs.expr === "string" && cs.expr !== "" ? "expr" : initial ? (cs.threshold != null ? "scored" : "status") : "scored"
+  const [condShape, setCondShape] = useState<"scored" | "status" | "expr">(condShapeInit)
+  const scored = condShape === "scored"
+  const [expr, setExpr] = useState(typeof cs.expr === "string" ? cs.expr : "drop_pct > 0.15")
   const [query, setQuery] = useState(typeof cs.query === "string" ? cs.query : "SELECT region AS entity_key, drop_pct AS score FROM my_table")
   const [threshold, setThreshold] = useState(cs.threshold != null ? String(cs.threshold) : "0.15")
   const [compare, setCompare] = useState<"gte" | "lte">(cs.compare === "lte" ? "lte" : "gte")
@@ -646,7 +654,10 @@ function RuleEditor({
         setPreviewErr(null)
         return
       }
-      const r = await previewCondition(connectionId, query)
+      const r =
+        condShape === "expr"
+          ? await previewExprCondition(connectionId, query, expr)
+          : await previewCondition(connectionId, query)
       if (cancelled) return
       setPreview(r.rows)
       setPreviewErr(r.error)
@@ -655,13 +666,13 @@ function RuleEditor({
       cancelled = true
       clearTimeout(t)
     }
-  }, [query, connectionId])
+  }, [query, expr, condShape, connectionId])
 
   const thr = Number(threshold)
   const breaches = (row: PreviewRow) =>
-    scored
+    condShape === "scored"
       ? row.score != null && (compare === "lte" ? row.score <= thr : row.score >= thr)
-      : row.status === "fail"
+      : row.status === "fail" // 'status' + 'expr' both surface a status of 'fail'
   const nBreach = preview.filter(breaches).length
 
   const argsValid = useMemo(() => {
@@ -726,9 +737,11 @@ function RuleEditor({
       condition = { kind: "metric", metric: metricName.trim() }
     } else {
       condition = { kind: "sql", query: query.trim() }
-      if (scored) {
+      if (condShape === "scored") {
         condition.threshold = Number(threshold)
         condition.compare = compare
+      } else if (condShape === "expr") {
+        condition.expr = expr.trim()
       }
     }
     const action: Record<string, unknown> = { operator }
@@ -764,7 +777,10 @@ function RuleEditor({
     }
   }
 
-  const conditionReady = condMode === "metric" ? metricName.trim().length > 0 : query.trim().length > 0
+  const conditionReady =
+    condMode === "metric"
+      ? metricName.trim().length > 0
+      : query.trim().length > 0 && (condShape !== "expr" || expr.trim().length > 0)
   const operatorReady = operator !== "operator" || operatorName.trim().length > 0
   const canSave = name.trim().length > 0 && conditionReady && operatorReady && argsValid && !saving
   const save = async () => {
@@ -854,12 +870,12 @@ function RuleEditor({
           </div>
           {condMode === "sql" ? (
             <div className="flex items-center overflow-hidden rounded border border-chrome-border text-[10px]">
-              {(["scored", "status"] as const).map((m) => (
+              {(["scored", "status", "expr"] as const).map((m) => (
                 <button
                   key={m}
                   type="button"
-                  onClick={() => setScored(m === "scored")}
-                  className={cn("px-1.5 py-0.5", (m === "scored") === scored ? "bg-rvbbit-accent/20 text-foreground" : "text-chrome-text/60")}
+                  onClick={() => setCondShape(m)}
+                  className={cn("px-1.5 py-0.5", condShape === m ? "bg-rvbbit-accent/20 text-foreground" : "text-chrome-text/60")}
                 >
                   {m}
                 </button>
@@ -867,12 +883,14 @@ function RuleEditor({
             </div>
           ) : null}
           <span className="ml-auto text-[10px] text-chrome-text/50">
-            {condMode === "sql" ? (
-              <>
-                returns <span className="font-mono">entity_key</span> + <span className="font-mono">{scored ? "score" : "status"}</span>
-              </>
-            ) : (
+            {condMode !== "sql" ? (
               "fires when the metric's KPI check fails"
+            ) : condShape === "expr" ? (
+              "fails the rows where the expression is true"
+            ) : (
+              <>
+                returns <span className="font-mono">entity_key</span> + <span className="font-mono">{condShape === "scored" ? "score" : "status"}</span>
+              </>
             )}
           </span>
         </div>
@@ -923,7 +941,7 @@ function RuleEditor({
               <div className="mt-1.5 flex items-center gap-2">
             <Field label="compare">
               <div className="flex items-center overflow-hidden rounded border border-chrome-border text-[10px]">
-                {(["gte", "lte"] as const).map((c) => (
+                {(["lte", "gte"] as const).map((c) => (
                   <button key={c} type="button" onClick={() => setCompare(c)} className={cn("px-1.5 py-0.5", compare === c ? "bg-rvbbit-accent/20 text-foreground" : "text-chrome-text/60")}>
                     {c === "gte" ? "≥" : "≤"}
                   </button>
@@ -935,6 +953,15 @@ function RuleEditor({
             </Field>
           </div>
         ) : null}
+            {condShape === "expr" ? (
+              <div className="mt-1.5">
+                <Field label="fail when (a SQL boolean over the query's columns)">
+                  <div className={cn("overflow-hidden rounded border", previewErr ? "border-danger/50" : "border-chrome-border/60")}>
+                    <SqlEditor language="sql" compact value={expr} onChange={setExpr} height="30px" />
+                  </div>
+                </Field>
+              </div>
+            ) : null}
         {/* live preview */}
         <div className="mt-2 rounded border border-chrome-border/60 bg-block-bg/40 p-1.5">
           <div className="mb-1 flex items-center justify-between text-[10px]">
@@ -1481,9 +1508,11 @@ export function AlertsWindow({ payload, activeConnectionId, hasRvbbit, onChangeP
                   <span className="rounded border border-chrome-border bg-block-bg/60 px-1.5 py-0.5 font-mono text-chrome-text/80">
                     {rule.conditionSpec.kind === "metric"
                       ? `metric: ${rule.conditionSpec.metric}`
-                      : isScored
-                        ? `score ${rule.conditionSpec.compare === "lte" ? "≤" : "≥"} ${numFmt(Number(rule.conditionSpec.threshold))}`
-                        : "status = fail"}
+                      : typeof rule.conditionSpec.expr === "string" && rule.conditionSpec.expr !== ""
+                        ? `fail when: ${rule.conditionSpec.expr}`
+                        : isScored
+                          ? `score ${rule.conditionSpec.compare === "lte" ? "≤" : "≥"} ${numFmt(Number(rule.conditionSpec.threshold))}`
+                          : "status = fail"}
                   </span>
                   <span className="text-chrome-text/40">→</span>
                   <span className="rounded border border-chrome-border bg-block-bg/60 px-1.5 py-0.5 text-chrome-text/80">
