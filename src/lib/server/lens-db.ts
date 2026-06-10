@@ -124,6 +124,7 @@ export function putProfile(homeId: string, state: unknown): void {
 interface SceneLike {
   id?: unknown
   name?: unknown
+  visibility?: unknown
   createdAt?: unknown
   updatedAt?: unknown
 }
@@ -145,6 +146,30 @@ export function listScenes(homeId: string): unknown[] {
 }
 
 /**
+ * Scenes other homes have shared (visibility='shared'), for the Scene Library.
+ * Returns the owning home + the full scene spec (scenes are small, so one call
+ * gives the library everything it needs to render + fork).
+ */
+export function listSharedScenes(excludeHome: string): Array<{ owner: string; scene: unknown }> {
+  const rows = lensDb()
+    .prepare(
+      `SELECT home_id, spec_json FROM lens_scene
+       WHERE visibility = 'shared' AND home_id <> ? ORDER BY updated_at DESC`,
+    )
+    .all(excludeHome) as Array<{ home_id?: string; spec_json?: string }>
+  const out: Array<{ owner: string; scene: unknown }> = []
+  for (const r of rows) {
+    if (!r.spec_json) continue
+    try {
+      out.push({ owner: r.home_id ?? "", scene: JSON.parse(r.spec_json) })
+    } catch {
+      /* skip a corrupt row */
+    }
+  }
+  return out
+}
+
+/**
  * Replace this home's scene set with the supplied list: upsert each incoming
  * scene (preserving its original created_at) and delete any of the home's
  * scenes no longer present. Runs in one transaction so a reader never sees a
@@ -158,9 +183,10 @@ export function replaceScenes(homeId: string, scenes: unknown[]): void {
   try {
     const upsert = db.prepare(
       `INSERT INTO lens_scene (id, home_id, name, visibility, spec_json, created_at, updated_at)
-       VALUES (?, ?, ?, 'private', ?, ?, ?)
+       VALUES (?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(id) DO UPDATE SET
-         name = excluded.name, spec_json = excluded.spec_json, updated_at = excluded.updated_at`,
+         name = excluded.name, visibility = excluded.visibility,
+         spec_json = excluded.spec_json, updated_at = excluded.updated_at`,
     )
     for (const s of scenes) {
       const scene = (s ?? {}) as SceneLike
@@ -168,9 +194,10 @@ export function replaceScenes(homeId: string, scenes: unknown[]): void {
       if (!id) continue
       keepIds.push(id)
       const name = typeof scene.name === "string" ? scene.name : "Untitled scene"
+      const visibility = scene.visibility === "shared" ? "shared" : "private"
       const createdAt = typeof scene.createdAt === "string" ? scene.createdAt : now
       const updatedAt = typeof scene.updatedAt === "string" ? scene.updatedAt : now
-      upsert.run(id, homeId, name, JSON.stringify(s), createdAt, updatedAt)
+      upsert.run(id, homeId, name, visibility, JSON.stringify(s), createdAt, updatedAt)
     }
     // Delete the home's scenes that weren't in the incoming set.
     const existing = db

@@ -179,6 +179,7 @@ export interface SceneInput {
   viewport?: DesktopViewportState
   connection?: SceneConnectionFingerprint
   bundle?: SceneBundle
+  visibility?: "private" | "shared"
 }
 
 export function upsertScene(input: SceneInput): Scene {
@@ -200,6 +201,7 @@ export function upsertScene(input: SceneInput): Scene {
     bundle: "bundle" in input ? input.bundle : existing?.bundle,
     contentHash: contentHashOf(input.body),
     windowCount: input.body.windows.length,
+    visibility: input.visibility ?? existing?.visibility ?? "private",
     createdAt: existing?.createdAt ?? now,
     updatedAt: now,
   }
@@ -244,5 +246,58 @@ export function hydrateScenes(scenes: Scene[]): void {
     window.dispatchEvent(new Event(SCENES_CHANGED_EVENT))
   } catch {
     // best-effort
+  }
+}
+
+// ── sharing (Scene Library) ──────────────────────────────────────────
+
+/** Flip one of your scenes between private and shared (carried to the shadow). */
+export function setSceneVisibility(id: string, shared: boolean): Scene | null {
+  const scene = getScene(id)
+  if (!scene) return null
+  return upsertScene({
+    id: scene.id,
+    name: scene.name,
+    description: scene.description,
+    body: scene.body,
+    viewport: scene.viewport,
+    connection: scene.connection,
+    bundle: scene.bundle,
+    visibility: shared ? "shared" : "private",
+  })
+}
+
+/** Copy a (typically shared, from another home) scene into your own home. */
+export function forkScene(remote: Scene): Scene {
+  const name = sceneNameExists(remote.name) ? `${remote.name} (copy)` : remote.name
+  return upsertScene({
+    // no id → a fresh scene owned by this home
+    name,
+    description: remote.description,
+    body: remote.body,
+    viewport: remote.viewport,
+    connection: remote.connection,
+    bundle: remote.bundle,
+    visibility: "private",
+  })
+}
+
+export interface SharedScene {
+  owner: string
+  scene: Scene
+}
+
+/** Scenes other homes have shared (the Scene Library). Best-effort → []. */
+export async function fetchSharedScenes(home: string): Promise<SharedScene[]> {
+  try {
+    const r = (await fetch(`/api/lens/library?home=${encodeURIComponent(home)}`).then((x) =>
+      x.json(),
+    )) as { shared?: Array<{ owner?: unknown; scene?: unknown }> }
+    const rows = Array.isArray(r?.shared) ? r.shared : []
+    return rows
+      .map((x) => ({ owner: String(x?.owner ?? ""), scene: x?.scene as Scene }))
+      .filter((x): x is SharedScene => !!x.scene && typeof x.scene === "object" && !!x.scene.id)
+  } catch {
+    return []
   }
 }

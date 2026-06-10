@@ -1,8 +1,15 @@
 "use client"
 
 import { useEffect, useMemo, useRef, useState } from "react"
-import { Check, ChevronRight, Layers, Pencil, Plus, Save, Trash2, X } from "@/lib/icons"
+import { Check, ChevronRight, Download, Globe, Layers, Pencil, Plus, Save, Trash2, X } from "@/lib/icons"
 import { cn } from "@/lib/utils"
+import {
+  fetchSharedScenes,
+  forkScene,
+  setSceneVisibility,
+  type SharedScene,
+} from "@/lib/desktop/scenes"
+import { getHomeId } from "@/lib/desktop/server-sync"
 import type { Scene } from "@/lib/desktop/types"
 
 interface SceneActions {
@@ -125,10 +132,71 @@ export function SceneTray({
             ) : null}
           </div>
 
-          {/* Library */}
+          {/* Your saved desktops */}
           <SceneList {...actions} emptyHint="No saved Scenes yet." onAfterAction={() => setOpen(false)} />
+
+          {/* Scenes other homes have shared — fork to grab a copy */}
+          <SharedSceneLibrary />
         </div>
       ) : null}
+    </div>
+  )
+}
+
+// ── Scene Library — scenes other homes have shared ───────────────────
+
+function SharedSceneLibrary() {
+  const [shared, setShared] = useState<SharedScene[]>([])
+  const [loading, setLoading] = useState(true)
+  const [forked, setForked] = useState<Set<string>>(new Set())
+
+  useEffect(() => {
+    let cancelled = false
+    void fetchSharedScenes(getHomeId()).then((s) => {
+      if (cancelled) return
+      setShared(s)
+      setLoading(false)
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  if (loading || shared.length === 0) return null
+
+  return (
+    <div className="border-t border-chrome-border/60">
+      <div className="flex items-center gap-1 px-2.5 pb-1 pt-2 text-[9px] uppercase tracking-wider text-chrome-text/45">
+        <Globe className="h-3 w-3" /> Shared by other homes
+      </div>
+      <div className="max-h-[30vh] overflow-auto pb-1">
+        {shared.map(({ owner, scene }) => (
+          <div
+            key={scene.id}
+            className="group mx-1 flex items-center gap-1.5 rounded px-1.5 py-1 text-[11px] hover:bg-foreground/[0.06]"
+          >
+            <Globe className="h-3 w-3 shrink-0 text-rvbbit-accent/70" />
+            <div className="min-w-0 flex-1">
+              <div className="truncate text-foreground">{scene.name}</div>
+              <div className="truncate text-[9px] text-chrome-text/45">
+                {owner} · {scene.windowCount} {scene.windowCount === 1 ? "window" : "windows"}
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => {
+                forkScene(scene)
+                setForked((f) => new Set(f).add(scene.id))
+              }}
+              disabled={forked.has(scene.id)}
+              title="Copy this scene into your home"
+              className="inline-flex shrink-0 items-center gap-1 rounded border border-chrome-border px-1.5 py-0.5 text-[10px] text-chrome-text/80 hover:border-rvbbit-accent/40 hover:text-foreground disabled:opacity-45"
+            >
+              <Download className="h-3 w-3" /> {forked.has(scene.id) ? "Forked" : "Fork"}
+            </button>
+          </div>
+        ))}
+      </div>
     </div>
   )
 }
@@ -240,6 +308,26 @@ function SceneRow({
           {isCurrent ? <span className="shrink-0 text-[10px] text-main">open</span> : null}
         </button>
       )}
+
+      {!renaming ? (
+        <button
+          type="button"
+          onClick={() => setSceneVisibility(scene.id, scene.visibility !== "shared")}
+          title={
+            scene.visibility === "shared"
+              ? "Shared — visible in other homes' Scene Library. Click to make private."
+              : "Private. Click to share with other homes."
+          }
+          className={cn(
+            "shrink-0 rounded p-0.5 transition-colors",
+            scene.visibility === "shared"
+              ? "text-rvbbit-accent hover:bg-rvbbit-accent/15"
+              : "text-chrome-text/35 opacity-0 hover:bg-foreground/10 hover:text-chrome-text group-hover:opacity-100",
+          )}
+        >
+          <Globe className="h-3 w-3" />
+        </button>
+      ) : null}
 
       {confirmDel ? (
         <div className="flex shrink-0 items-center gap-0.5">

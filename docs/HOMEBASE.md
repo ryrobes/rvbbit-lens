@@ -63,7 +63,12 @@ seam to swap SQLite for Postgres without touching the client.
      is **lossless** (your current home stays shadowed): *claim* an empty home
      (switch + seed from local, no reload) or *adopt* an existing one (pull
      state+scenes → reload, with a confirm). `?home=<slug>` deep-links auto-adopt.
-   - 2.2 (next) — the Scene Library (load/fork/share/visibility) + the present flag.
+   - **2.2a Scene Library (DONE)** — scenes carry a `visibility` (private|shared,
+     client-tracked + shadowed). The scene tray gets a per-scene share toggle (the
+     globe) and a "Shared by other homes" section that lists others' shared scenes
+     with a **Fork** (copies into your home). `GET /api/lens/library?home=` returns
+     shared scenes from all *other* homes.
+   - 2.2b (next) — the present flag (`readOnly` via toggle / `?present=1`).
 3. **Globalize connections** — move connections into `lens_connection`
    (server-authoritative, shared creds in the server secret store).
 

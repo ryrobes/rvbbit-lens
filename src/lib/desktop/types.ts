@@ -911,6 +911,9 @@ export interface Scene {
   /** Hash of `body` — drives the dirty dot on the open Scene. */
   contentHash: string
   windowCount: number
+  /** Sharing: 'shared' scenes appear in other homes' Scene Library. Client-
+   *  tracked and carried to the server shadow (default 'private'). */
+  visibility?: "private" | "shared"
   createdAt: string
   updatedAt: string
 }
