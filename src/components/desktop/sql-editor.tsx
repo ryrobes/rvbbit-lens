@@ -7,6 +7,16 @@ import type { CompletionSource } from "@codemirror/autocomplete"
 import { EditorView, keymap, tooltips } from "@codemirror/view"
 import { rvbbitLensCodeMirrorTheme } from "@/lib/desktop/codemirror-theme"
 import { blockReferenceExtensions, type BlockReferenceMap } from "@/lib/desktop/sql-block-refs"
+import { hasParamDragPayload } from "@/lib/desktop/param-drag"
+import { hasColumnDragPayload } from "@/lib/desktop/column-drag"
+import { hasBlockDragPayload } from "@/lib/desktop/block-drag"
+
+/** The app's internal chip drags (param / column / block) carry a text/plain
+ *  fallback that CodeMirror's default drop would paste into the SQL. The window's
+ *  own drop zone already handles these, so the editor must ignore them. */
+function isInternalChipDrag(dt: DataTransfer | null): boolean {
+  return hasParamDragPayload(dt) || hasColumnDragPayload(dt) || hasBlockDragPayload(dt)
+}
 
 interface SqlEditorProps {
   value: string
@@ -52,6 +62,20 @@ export function SqlEditor({
 
   const extensions: Extension[] = useMemo(() => {
     const exts: Extension[] = []
+    // Swallow internal chip drags so CodeMirror's default drop doesn't paste the
+    // chip's text/plain fallback (e.g. "param.<key>") into the SQL. Returning
+    // true preventDefaults + stops CM here; we deliberately do NOT stopPropagation,
+    // so the window's onDrop still fires and subscribes/merges.
+    exts.push(
+      EditorView.domEventHandlers({
+        dragover: (event) => isInternalChipDrag(event.dataTransfer),
+        drop: (event) => {
+          if (!isInternalChipDrag(event.dataTransfer)) return false
+          event.preventDefault()
+          return true
+        },
+      }),
+    )
     if (plain) {
       exts.push(EditorView.lineWrapping) // wrap long NL questions instead of scrolling
     } else {

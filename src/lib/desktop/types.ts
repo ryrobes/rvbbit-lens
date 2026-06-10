@@ -240,9 +240,25 @@ export interface DesktopParamValue {
   updatedAt: string
 }
 
+/** Where a param's predicate is applied to the subscribing block. */
+export type ParamTarget =
+  | { kind: "query" }
+  // Push the predicate into the block's single FROM-item, resolved at compile
+  // time — works for a base table OR a {ref} that has been inlined to a subquery
+  // (so a chart over `FROM {core}` filters on a column of `core`, not its output).
+  | { kind: "from-item" }
+  // Legacy (pre-"from-item"): a frozen base-table relation. Still honored by the
+  // compiler, which now ignores the relation and re-locates the live FROM-item.
+  | { kind: "table"; relation: string; alias?: string }
+
 export interface DesktopParamSubscription {
   key: string
   targetField: string
+  /** "query" (default) wraps the whole result in `SELECT * FROM (…) WHERE`;
+   *  "from-item"/"table" push the predicate INTO the block's single FROM-item
+   *  (surgical — filters before aggregation, so the field need not be in the
+   *  output; works through an inlined {ref} subquery). */
+  target?: ParamTarget
 }
 
 export interface DesktopBlockRef {

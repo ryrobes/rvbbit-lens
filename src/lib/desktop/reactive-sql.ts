@@ -5,7 +5,9 @@ import type {
   DesktopParamValue,
   DesktopWindowState,
   JsonbProjectionColumn,
+  ParamTarget,
 } from "./types"
+import type { SchemaSnapshot } from "@/lib/db/types"
 import { buildJsonbProjection, isSynthQuery } from "@/lib/sql/then-rewrite"
 import { parseAsOfComment, withAsOf } from "@/lib/rvbbit/time-travel"
 
@@ -348,21 +350,46 @@ function applyParamSubscriptions(
 ): { sql: string; missingParams: string[] } {
   if (subs.length === 0) return { sql: `${stripTrailingSqlTerminator(sql)};`, missingParams: [] }
   const missing: string[] = []
-  const predicates = subs.flatMap((s) => {
+  let rewritten = stripTrailingSqlTerminator(sql)
+
+  // Partition: surgical (FROM-item-targeted) predicates vs the rest, which wrap
+  // the whole result. A surgical predicate that can't be placed (no single
+  // FROM-item in the compiled SQL) falls back to wrap.
+  const fromItemPreds: string[] = []
+  const wrapPreds: string[] = []
+  for (const s of subs) {
     const p = paramMap.get(s.key.toLowerCase())
-    if (!p) { missing.push(s.key); return [] }
-    return predicateForParam(s.targetField, p)
-  })
-  if (predicates.length === 0) return { sql: `${stripTrailingSqlTerminator(sql)};`, missingParams: missing }
-  const stripped = stripTrailingSqlTerminator(sql)
-  if (!/^\s*(SELECT|WITH)\b/i.test(stripped)) return { sql: `${stripped};`, missingParams: missing }
+    if (!p) { missing.push(s.key); continue }
+    const pred = predicateForParam(s.targetField, p)
+    if (s.target && s.target.kind !== "query") fromItemPreds.push(pred)
+    else wrapPreds.push(pred)
+  }
+
+  // Surgical: wrap the single FROM-item in a filtered subquery — `FROM x` →
+  // `FROM (SELECT * FROM x WHERE <preds>) a`. Postgres flattens it and pushes
+  // the predicate to the base scan (before any aggregation). `x` is whatever the
+  // FROM-item is *now* (a base table, or a {ref} already inlined to a subquery),
+  // so a chart over `FROM {core}` filters on a column of `core`.
+  if (fromItemPreds.length > 0) {
+    const item = singleFromItem(rewritten)
+    const relText = item?.type === "table" ? item.relation : item?.type === "subquery" ? item.itemText : null
+    if (item && relText) {
+      const inner = `(SELECT * FROM ${relText} WHERE ${fromItemPreds.join(" AND ")}) ${item.alias}`
+      rewritten = rewritten.slice(0, item.start) + inner + rewritten.slice(item.end)
+    } else {
+      wrapPreds.push(...fromItemPreds) // couldn't place surgically → wrap instead
+    }
+  }
+
+  if (wrapPreds.length === 0) return { sql: `${rewritten};`, missingParams: missing }
+  if (!/^\s*(SELECT|WITH)\b/i.test(rewritten)) return { sql: `${rewritten};`, missingParams: missing }
   return {
     sql: [
       "SELECT *",
       "FROM (",
-      indentSql(stripped),
+      indentSql(rewritten),
       ") __desktop_param_source",
-      `WHERE ${predicates.join("\n  AND ")};`,
+      `WHERE ${wrapPreds.join("\n  AND ")};`,
     ].join("\n"),
     missingParams: missing,
   }
@@ -408,6 +435,20 @@ function dedupeRefs(refs: DesktopBlockRef[]): DesktopBlockRef[] {
   return out
 }
 
+/**
+ * If `sql[i]` opens a Postgres dollar-quoted string (`$$` or `$tag$`), return
+ * the tag (`""` for `$$`); otherwise null. A tag is an unquoted identifier, so
+ * positional params like `$1` are correctly rejected.
+ */
+function dollarQuoteTag(sql: string, i: number): string | null {
+  let j = i + 1
+  if (sql[j] === "$") return "" // $$
+  if (!/[A-Za-z_]/.test(sql[j] ?? "")) return null // $1, bare $, etc.
+  j += 1
+  while (j < sql.length && /[A-Za-z0-9_]/.test(sql[j]!)) j += 1
+  return sql[j] === "$" ? sql.slice(i + 1, j) : null
+}
+
 function maskSql(sql: string): string {
   // Replace string/comment content with spaces so regex matches don't fire
   // inside literals. Preserves indices 1:1 with the source.
@@ -415,6 +456,7 @@ function maskSql(sql: string): string {
   let quote: "'" | "\"" | null = null
   let lineComment = false
   let blockComment = false
+  let dollarTag: string | null = null // open dollar-quote body (e.g. "" for $$)
   for (let i = 0; i < chars.length; i += 1) {
     const c = chars[i]
     const n = chars[i + 1]
@@ -422,6 +464,15 @@ function maskSql(sql: string): string {
     if (blockComment) {
       chars[i] = " "
       if (c === "*" && n === "/") { chars[i + 1] = " "; blockComment = false; i += 1 }
+      continue
+    }
+    if (dollarTag !== null) {
+      const close = `$${dollarTag}$`
+      if (c === "$" && sql.startsWith(close, i)) {
+        for (let j = 0; j < close.length; j += 1) chars[i + j] = " "
+        i += close.length - 1
+        dollarTag = null
+      } else chars[i] = " "
       continue
     }
     if (quote) {
@@ -433,7 +484,16 @@ function maskSql(sql: string): string {
     }
     if (c === "-" && n === "-") { chars[i] = " "; chars[i + 1] = " "; lineComment = true; i += 1; continue }
     if (c === "/" && n === "*") { chars[i] = " "; chars[i + 1] = " "; blockComment = true; i += 1; continue }
-    if (c === "'" || c === "\"") { chars[i] = " "; quote = c }
+    if (c === "'" || c === "\"") { chars[i] = " "; quote = c; continue }
+    if (c === "$") {
+      const tag = dollarQuoteTag(sql, i)
+      if (tag !== null) {
+        const len = tag.length + 2
+        for (let j = 0; j < len; j += 1) chars[i + j] = " "
+        i += len - 1
+        dollarTag = tag
+      }
+    }
   }
   return chars.join("")
 }
@@ -455,6 +515,283 @@ function replaceMasked(
   }
   out.push(source.slice(cursor))
   return out.join("")
+}
+
+// ── surgical param targeting (push a predicate into a base-table reference) ────
+
+const SQL_IDENT = `(?:"[^"]*"|[A-Za-z_][A-Za-z0-9_$]*)`
+const FROM_CLAUSE_KW = "WHERE|GROUP|ORDER|HAVING|LIMIT|OFFSET|WINDOW|UNION|INTERSECT|EXCEPT|FETCH|FOR|RETURNING"
+const FROM_JOIN_KW = "JOIN|INNER|LEFT|RIGHT|FULL|CROSS|NATURAL|LATERAL|ON|USING"
+
+export interface SqlTableRef {
+  relation: string
+  alias: string
+  start: number
+  end: number
+}
+
+/**
+ * Best-effort: if `sql` is a single-base-table SELECT (no CTE, no JOIN, no
+ * comma, no subquery in FROM, unquoted identifiers), return that table ref +
+ * its source span. Returns null for anything more complex — the caller then
+ * falls back to wrapping the whole result. Uses {@link maskSql} so matches
+ * never fire inside string/comment literals (quoted identifiers are blanked,
+ * so they safely yield null and fall back). Phase 3 swaps this for a real PG
+ * AST parser to cover joins/CTEs.
+ */
+export function singleTableRef(sql: string): SqlTableRef | null {
+  const masked = maskSql(sql)
+  if (/^\s*WITH\b/i.test(masked)) return null // CTE: ambiguous main FROM
+  // top-level FROM (paren depth 0).
+  let depth = 0
+  let fromEnd = -1
+  const scan = /\(|\)|\bFROM\b/gi
+  let m: RegExpExecArray | null
+  while ((m = scan.exec(masked))) {
+    if (m[0] === "(") depth += 1
+    else if (m[0] === ")") depth -= 1
+    else if (depth === 0) { fromEnd = m.index + m[0].length; break }
+  }
+  if (fromEnd < 0) return null
+  const sub = masked.slice(fromEnd)
+  // `FROM ONLY t` (table-inheritance): `ONLY` would mis-parse as the relation.
+  // Rare — bail rather than carry the prefix through the rewrite.
+  if (/^\s*ONLY\b/i.test(sub)) return null
+  const refRe = new RegExp(
+    `^(\\s*)(${SQL_IDENT}(?:\\.${SQL_IDENT})?)` +
+      `(?:\\s+(?:AS\\s+)?(?!(?:${FROM_CLAUSE_KW}|${FROM_JOIN_KW}|AS)\\b)(${SQL_IDENT}))?`,
+    "i",
+  )
+  const mm = refRe.exec(sub)
+  if (!mm) return null
+  // what follows the table ref must be a clause keyword, a closing paren, an
+  // optional trailing terminator, or the end — NOT a join / comma / subquery
+  // (those are multi-relation → bail). Tolerate a trailing `;` so the raw,
+  // un-stripped payload SQL resolves the same as the compiled form.
+  const rest = sub.slice(mm[0].length).trimStart().replace(/;\s*$/, "")
+  if (rest !== "" && !new RegExp(`^(?:${FROM_CLAUSE_KW})\\b`, "i").test(rest) && !rest.startsWith(")")) {
+    return null
+  }
+  const relation = mm[2] // unquoted region: masked === source here
+  const explicitAlias = mm[3]
+  // Schema-qualified relation with no explicit alias: the outer query may
+  // reference columns via the qualified path (`public.t.col`), which a bare
+  // subquery alias can't satisfy. Bail to wrap. (With an explicit alias the
+  // outer query must use it, so the rewrite is safe.)
+  if (!explicitAlias && relation.includes(".")) return null
+  // A quoted alias (`FROM t "My Alias"`) is blanked by maskSql, so it escapes
+  // the alias capture above and would be left dangling after the rewrite. If
+  // the source text after the matched ref begins with a quote, bail to wrap.
+  if (/^\s*"/.test(sql.slice(fromEnd + mm[0].length))) return null
+  const alias = explicitAlias || relation.split(".").pop() || relation
+  return { relation, alias, start: fromEnd + mm[1].length, end: fromEnd + mm[0].length }
+}
+
+/**
+ * Decide where a param should be applied to a block. If the block is a simple
+ * single-table SELECT and that table actually has the field (per the loaded
+ * schema), target the table (surgical); otherwise target the whole query (wrap).
+ */
+export function resolveParamTableTarget(
+  sql: string,
+  field: string,
+  schema: SchemaSnapshot | null,
+): ParamTarget {
+  const ref = singleTableRef(sql)
+  if (!ref || !schema) return { kind: "query" }
+  const rel = ref.relation.toLowerCase()
+  const qualified = rel.includes(".")
+  // A bare relation that names tables in more than one schema is ambiguous —
+  // we'd guess columns off the wrong same-named table. Require exactly one match.
+  const matches = schema.tables.filter((t) => {
+    const fq = `${t.schema}.${t.name}`.toLowerCase()
+    return fq === rel || (!qualified && t.name.toLowerCase() === rel)
+  })
+  if (matches.length !== 1) return { kind: "query" }
+  const table = matches[0]
+  if (!table.columns.some((c) => c.name.toLowerCase() === field.toLowerCase())) {
+    return { kind: "query" }
+  }
+  return { kind: "table", relation: ref.relation, alias: ref.alias }
+}
+
+// ── single FROM-item (generalizes singleTableRef) ──────────────────────────────
+// A block's FROM can be a base table, a {ref} (block reference), or — after the
+// compiler inlines a {ref} — a parenthesized subquery with an alias. Surgical
+// targeting wraps whichever it is: `FROM x` → `FROM (SELECT * FROM x WHERE …) a`.
+
+export type SqlFromItem =
+  | { type: "table"; relation: string; alias: string; start: number; end: number }
+  | { type: "ref"; refName: string; alias: string; start: number; end: number }
+  | { type: "subquery"; itemText: string; alias: string; start: number; end: number }
+
+const REF_HEAD_RE = /^(\s*)\{([A-Za-z_][A-Za-z0-9_]*)\}/
+// optional `AS`/bare alias, excluding clause/join keywords; read from SOURCE
+// (maskSql blanks a quoted alias, so the masked text can't carry it).
+const FROM_ITEM_ALIAS_RE = new RegExp(
+  `^\\s*(?:AS\\s+)?(?!(?:${FROM_CLAUSE_KW}|${FROM_JOIN_KW}|AS)\\b)(${SQL_IDENT})`,
+  "i",
+)
+
+/** Find the top-level `FROM` (paren depth 0); returns the index just past it. */
+function topLevelFromEnd(masked: string): number {
+  if (/^\s*WITH\b/i.test(masked)) return -1 // CTE: ambiguous main FROM
+  let depth = 0
+  const scan = /\(|\)|\bFROM\b/gi
+  let m: RegExpExecArray | null
+  while ((m = scan.exec(masked))) {
+    if (m[0] === "(") depth += 1
+    else if (m[0] === ")") depth -= 1
+    else if (depth === 0) return m.index + m[0].length
+  }
+  return -1
+}
+
+/** What follows a FROM-item must be a clause keyword / closing paren / terminator
+ *  / end — anything else (JOIN, comma, …) means multiple relations → bail. */
+function fromItemTailOk(maskedTail: string): boolean {
+  const rest = maskedTail.trimStart().replace(/;\s*$/, "")
+  return rest === "" || new RegExp(`^(?:${FROM_CLAUSE_KW})\\b`, "i").test(rest) || rest.startsWith(")")
+}
+
+export function singleFromItem(sql: string): SqlFromItem | null {
+  const masked = maskSql(sql)
+  const fromEnd = topLevelFromEnd(masked)
+  if (fromEnd < 0) return null
+  const sub = masked.slice(fromEnd)
+  const lead = (/^\s*/.exec(sub)?.[0].length) ?? 0
+  const head = sub[lead]
+
+  // Leading subquery: `( … ) [AS] alias`
+  if (head === "(") {
+    let depth = 0
+    let close = -1
+    for (let i = fromEnd + lead; i < masked.length; i += 1) {
+      if (masked[i] === "(") depth += 1
+      else if (masked[i] === ")") { depth -= 1; if (depth === 0) { close = i; break } }
+    }
+    if (close < 0) return null
+    const aliasM = FROM_ITEM_ALIAS_RE.exec(sql.slice(close + 1))
+    if (!aliasM) return null // a subquery in FROM must be aliased
+    const start = fromEnd + lead
+    const end = close + 1 + aliasM[0].length
+    if (!fromItemTailOk(masked.slice(end))) return null
+    return { type: "subquery", itemText: sql.slice(start, end), alias: aliasM[1], start, end }
+  }
+
+  // Leading block reference: `{name} [alias]`
+  if (head === "{") {
+    const refM = REF_HEAD_RE.exec(sub)
+    if (!refM) return null
+    let end = fromEnd + refM[0].length
+    let alias = refM[2]
+    const aliasM = FROM_ITEM_ALIAS_RE.exec(sql.slice(end))
+    if (aliasM) { alias = aliasM[1]; end += aliasM[0].length }
+    if (!fromItemTailOk(masked.slice(end))) return null
+    return { type: "ref", refName: refM[2], alias, start: fromEnd + refM[1].length, end }
+  }
+
+  // Plain base table (keeps all of singleTableRef's safety bails).
+  const t = singleTableRef(sql)
+  return t ? { type: "table", relation: t.relation, alias: t.alias, start: t.start, end: t.end } : null
+}
+
+/**
+ * Permissive single-table relation name for COLUMN LOOKUP (not rewrite). Unlike
+ * {@link singleTableRef} it does NOT bail on a schema-qualified / no-alias table
+ * (those bails guard the surgical *rewrite*; here we only want the relation's
+ * columns). Still bails on joins / commas / subqueries (the tail check).
+ */
+function singleFromRelation(sql: string): string | null {
+  const masked = maskSql(sql)
+  const fromEnd = topLevelFromEnd(masked)
+  if (fromEnd < 0) return null
+  const sub = masked.slice(fromEnd)
+  if (/^\s*ONLY\b/i.test(sub)) return null
+  const refRe = new RegExp(
+    `^(\\s*)(${SQL_IDENT}(?:\\.${SQL_IDENT})?)` +
+      `(?:\\s+(?:AS\\s+)?(?!(?:${FROM_CLAUSE_KW}|${FROM_JOIN_KW}|AS)\\b)(${SQL_IDENT}))?`,
+    "i",
+  )
+  const mm = refRe.exec(sub)
+  if (!mm) return null
+  const rest = sub.slice(mm[0].length).trimStart().replace(/;\s*$/, "")
+  if (rest !== "" && !new RegExp(`^(?:${FROM_CLAUSE_KW})\\b`, "i").test(rest) && !rest.startsWith(")")) return null
+  return mm[2]
+}
+
+/** Lowercased column-name set of a relation, or null if not found / ambiguous. */
+function tableColumnSet(schema: SchemaSnapshot | null, relation: string): Set<string> | null {
+  if (!schema) return null
+  const rel = relation.toLowerCase()
+  const qualified = rel.includes(".")
+  const matches = schema.tables.filter((t) => {
+    const fq = `${t.schema}.${t.name}`.toLowerCase()
+    return fq === rel || (!qualified && t.name.toLowerCase() === rel)
+  })
+  if (matches.length !== 1) return null
+  return new Set(matches[0].columns.map((c) => c.name.toLowerCase()))
+}
+
+/** True when the SELECT projects `*` (a pass-through preview), so its output
+ *  columns equal its FROM-item's columns — the only case we can resolve a
+ *  referenced block's output without running it. */
+function selectsStar(sql: string): boolean {
+  return /^\s*SELECT\s+(?:ALL\s+|DISTINCT\s+)?\*\s+FROM\b/i.test(maskSql(sql).trimStart())
+}
+
+/** Lowercased output-column set of a block's single FROM-item, following
+ *  pass-through {ref}s down to base tables. null = unknown (subquery / explicit
+ *  projection / missing schema) — callers stay permissive on null. */
+function fromItemColumnSet(
+  sql: string,
+  schema: SchemaSnapshot | null,
+  blockSource: ((name: string) => string | null) | undefined,
+  visited: Set<string>,
+): Set<string> | null {
+  const item = singleFromItem(sql)
+  if (item?.type === "subquery") return null // opaque projection
+  if (item?.type === "ref") {
+    // resolve the referenced block, but only equate its output with its own
+    // FROM-item columns when it's a `SELECT *` pass-through.
+    const name = item.refName.toLowerCase()
+    if (!blockSource || visited.has(name)) return null
+    const src = blockSource(item.refName)
+    if (!src || !selectsStar(src)) return null
+    return fromItemColumnSet(src, schema, blockSource, new Set([...visited, name]))
+  }
+  // Base table — resolve permissively (singleFromItem may have bailed on a
+  // qualified/no-alias table whose columns we can still look up).
+  const rel = singleFromRelation(sql)
+  return rel ? tableColumnSet(schema, rel) : null
+}
+
+/**
+ * Decide how a param dropped on a block should be placed:
+ *  - "from-item": the field is a column of the single FROM-item (possibly via a
+ *    pass-through {ref}) → push the predicate INTO it (surgical).
+ *  - "query": the field is in the block's own output → wrap the whole result.
+ *  - "none": provably neither → the drop can't produce valid SQL, refuse it.
+ * Unknown cases stay permissive (never "none") to avoid false refusals.
+ */
+export function resolveParamPlacement(
+  sql: string,
+  field: string,
+  schema: SchemaSnapshot | null,
+  opts: { ownColumns?: readonly string[] | null; blockSource?: (name: string) => string | null } = {},
+): "from-item" | "query" | "none" {
+  const f = field.toLowerCase()
+  // `item` is what the COMPILER can actually push into (strict — bails on the
+  // qualified/no-alias and quoted-alias shapes that break the rewrite). It must
+  // be non-null for a from-item push; `fromCols` (permissive, follows {ref}s) is
+  // only the column knowledge that tells us whether the field lives there.
+  const pushable = singleFromItem(sql) !== null
+  const fromCols = fromItemColumnSet(sql, schema, opts.blockSource, new Set())
+  if (pushable && fromCols && fromCols.has(f)) return "from-item"
+  const own = opts.ownColumns
+  if (own && own.some((c) => c.toLowerCase() === f)) return "query"
+  if (fromCols && own) return "none" // both sets known, field in neither → certainly absent
+  return pushable ? "from-item" : "query" // unknown → best-effort, never refuse
 }
 
 export function sameParamValue(a: unknown, b: unknown): boolean {

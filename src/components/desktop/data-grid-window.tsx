@@ -37,6 +37,7 @@ import type {
   DesktopParamOperator,
   DesktopParamValue,
   DesktopWindowState,
+  ParamTarget,
   RollupGrain,
   RollupSpec,
 } from "@/lib/desktop/types"
@@ -64,6 +65,7 @@ import {
   buildDesktopRuntimeGraph,
   paramKey,
   quoteSqlIdent,
+  resolveParamPlacement,
   shortParamValue,
   slugifyBlockName,
   sourceSqlForPayload,
@@ -101,7 +103,7 @@ interface DataGridWindowProps {
     dataTypeId?: number
     type?: string
   }) => void
-  onSubscribeParam: (key: string, targetField?: string) => void
+  onSubscribeParam: (key: string, targetField?: string, target?: ParamTarget) => void
   /**
    * Apply a pure transform to this window's rollup spec (shelf edits).
    * Rebuilds SQL/title at the host so the window chrome stays in sync.
@@ -217,6 +219,10 @@ export function DataGridWindow({
   const [activeTab, setActiveTab] = useState<NonNullable<DataPayload["view"]>["activeTab"]>(view.activeTab ?? (isSemanticProjection ? "explain" : payload.origin === "table" ? "rows" : "sql"))
   const [sqlRailOpen, setSqlRailOpen] = useState<boolean>(view.sqlRailOpen ?? (payload.origin !== "table"))
   const [paramDropHot, setParamDropHot] = useState(false)
+  // Transient note shown when a param drop is refused (field this block can't
+  // produce). Auto-dismisses; the timer is cleared on re-set / unmount.
+  const [paramNotice, setParamNotice] = useState<string | null>(null)
+  const paramNoticeTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   // Pipeline-cascade run state: when the last run was a `… then op(…)` pipeline,
   // the Steps inspector reads rvbbit.flow_steps to show each stage's rowset.
   const [isPipelineRun, setIsPipelineRun] = useState(false)
@@ -846,15 +852,50 @@ export function DataGridWindow({
 
   function handleParamDragLeave() { setParamDropHot(false) }
 
+  function showParamNotice(msg: string) {
+    setParamNotice(msg)
+    if (paramNoticeTimer.current) clearTimeout(paramNoticeTimer.current)
+    paramNoticeTimer.current = setTimeout(() => setParamNotice(null), 4500)
+  }
+
+  // Resolve a {ref} block name → its source SQL, so param-placement can follow a
+  // chart's `FROM {core}` up to the column set of `core` (all blocks rooted on
+  // the same table).
+  function resolveBlockSource(name: string): string | null {
+    const target = name.toLowerCase()
+    for (const win of allWindows) {
+      if (win.kind !== "data") continue
+      const pl = win.payload as DataPayload | undefined
+      if (!pl) continue
+      const bn = (pl.reactive?.blockName || slugifyBlockName(pl.title || win.title || win.id)).toLowerCase()
+      if (bn === target) return sourceSqlForPayload(pl)
+    }
+    return null
+  }
+
   function handleParamDrop(e: React.DragEvent<HTMLElement>) {
     setParamDropHot(false)
-    const payload = readParamDragPayload(e.dataTransfer)
-    if (!payload) return
+    const drag = readParamDragPayload(e.dataTransfer)
+    if (!drag) return
     e.preventDefault()
-    const param = params.find((p) => p.key === payload.key)
+    const param = params.find((p) => p.key === drag.key)
     if (!param) return
-    onSubscribeParam(payload.key, param.field)
+    // Where can this field be applied? "from-item" pushes into the (possibly
+    // {ref}-inlined) FROM-item; "query" wraps the output; "none" = the field
+    // exists in neither → refuse instead of emitting `WHERE <missing> = …`.
+    const placement = resolveParamPlacement(sourceSqlForPayload(payload), param.field, schema, {
+      ownColumns: result?.columns?.map((c) => c.name) ?? null,
+      blockSource: resolveBlockSource,
+    })
+    if (placement === "none") {
+      showParamNotice(`Can't filter by “${param.field}” here — it isn't in this block's output or its upstream data.`)
+      return
+    }
+    const target: ParamTarget = placement === "from-item" ? { kind: "from-item" } : { kind: "query" }
+    onSubscribeParam(drag.key, param.field, target)
   }
+  useEffect(() => () => { if (paramNoticeTimer.current) clearTimeout(paramNoticeTimer.current) }, [])
+
   const onReset = useCallback(() => {
     if (queryMode === "ask") setAskDraft(view.askDraft ?? "")
     else setDraftSql(payload.sql || "")
@@ -965,6 +1006,13 @@ export function DataGridWindow({
       {paramDropHot ? (
         <div className="pointer-events-none absolute inset-0 z-30 m-2 grid place-items-center rounded-md border-2 border-dashed border-main/70 bg-main/10 text-[12px] font-medium text-main">
           Drop to subscribe this window to the param
+        </div>
+      ) : null}
+      {paramNotice ? (
+        <div className="pointer-events-none absolute inset-x-0 top-0 z-40 flex justify-center p-2">
+          <div className="pointer-events-auto max-w-[92%] rounded-md border border-danger/40 bg-chrome-bg/95 px-3 py-1.5 text-[11px] text-danger shadow-lg">
+            {paramNotice}
+          </div>
         </div>
       ) : null}
       {sqlRailOpen ? (

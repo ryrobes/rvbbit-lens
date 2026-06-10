@@ -137,6 +137,7 @@ import type {
   DesktopParamValue,
   DesktopViewportState,
   DesktopWindowState,
+  ParamTarget,
   ExtensionsPayload,
   FinderPayload,
   NotificationsPayload,
@@ -225,7 +226,7 @@ import {
 } from "@/lib/desktop/sql-builder"
 import { invalidateSemanticOps, loadSemanticOps } from "@/lib/desktop/semantic-ops"
 import { fetchKgEvidenceBySource, fetchPrimaryKeyColumn } from "@/lib/rvbbit/kg"
-import { buildDesktopRuntimeGraph, paramKey, sameParamValue, sourceSqlForPayload, uniqueBlockName } from "@/lib/desktop/reactive-sql"
+import { buildDesktopRuntimeGraph, paramKey, resolveParamTableTarget, sameParamValue, sourceSqlForPayload, uniqueBlockName } from "@/lib/desktop/reactive-sql"
 import {
   hasColumnDragPayload,
   readColumnDragPayload,
@@ -520,27 +521,32 @@ export function DesktopShell() {
   const skipNextSnapshotRef = useRef(false)
   const [undoTick, setUndoTick] = useState(0)
 
+  // Push the previous settled state onto the undo stack. Normally fired by the
+  // 400ms debounce, but undo() also calls it synchronously so an undo issued
+  // within that window still has the pre-change state to restore.
+  const commitSnapshotNow = useCallback(() => {
+    const current: DesktopSnapshot = { windows, params: desktopParams, zSeed }
+    const sig = snapshotSignature(current)
+    if (sig === lastSnapshotSigRef.current) return
+    if (skipNextSnapshotRef.current) {
+      skipNextSnapshotRef.current = false
+      lastSnapshotSigRef.current = sig
+      return
+    }
+    if (lastSnapshotSigRef.current !== null) {
+      undoStackRef.current.push(JSON.parse(lastSnapshotSigRef.current) as DesktopSnapshot)
+      if (undoStackRef.current.length > UNDO_DEPTH) undoStackRef.current.shift()
+      redoStackRef.current = []
+    }
+    lastSnapshotSigRef.current = sig
+    setUndoTick((t) => t + 1)
+  }, [windows, desktopParams, zSeed])
+
   useEffect(() => {
     if (!stateLoadedRef.current) return
-    const handle = setTimeout(() => {
-      const current: DesktopSnapshot = { windows, params: desktopParams, zSeed }
-      const sig = snapshotSignature(current)
-      if (sig === lastSnapshotSigRef.current) return
-      if (skipNextSnapshotRef.current) {
-        skipNextSnapshotRef.current = false
-        lastSnapshotSigRef.current = sig
-        return
-      }
-      if (lastSnapshotSigRef.current !== null) {
-        undoStackRef.current.push(JSON.parse(lastSnapshotSigRef.current) as DesktopSnapshot)
-        if (undoStackRef.current.length > UNDO_DEPTH) undoStackRef.current.shift()
-        redoStackRef.current = []
-      }
-      lastSnapshotSigRef.current = sig
-      setUndoTick((t) => t + 1)
-    }, 400)
+    const handle = setTimeout(commitSnapshotNow, 400)
     return () => clearTimeout(handle)
-  }, [windows, desktopParams, zSeed])
+  }, [commitSnapshotNow])
 
   const applySnapshot = useCallback((snap: DesktopSnapshot) => {
     // Don't let the debounce push this restoration onto undoStack.
@@ -550,15 +556,40 @@ export function DesktopShell() {
     setZSeed(snap.zSeed)
   }, [])
 
+  // After a restore, re-run any data window whose param subscriptions changed
+  // (e.g. an undo that removes a just-dropped subscription) so a stale error
+  // from the now-reverted SQL clears. Scoped so unrelated windows don't re-run.
+  const rerunResubscribedWindows = useCallback(
+    (before: DesktopWindowState[], after: DesktopWindowState[]) => {
+      const subsSig = (w?: DesktopWindowState) =>
+        w && w.kind === "data"
+          ? JSON.stringify((w.payload as DataPayload | undefined)?.reactive?.paramSubscriptions ?? [])
+          : ""
+      const beforeById = new Map(before.map((w) => [w.id, w]))
+      setRunSignals((s) => {
+        let next: Record<string, number> | null = null
+        for (const w of after) {
+          if (w.kind !== "data" || subsSig(beforeById.get(w.id)) === subsSig(w)) continue
+          next = next ?? { ...s }
+          next[w.id] = (next[w.id] ?? 0) + 1
+        }
+        return next ?? s
+      })
+    },
+    [],
+  )
+
   const undo = useCallback(() => {
+    commitSnapshotNow() // flush a pending debounced snapshot so an immediate undo isn't a no-op
     const past = undoStackRef.current
     if (past.length === 0) return
     const current: DesktopSnapshot = { windows, params: desktopParams, zSeed }
     redoStackRef.current.push(cloneSnapshot(current))
     const prev = past.pop()!
     applySnapshot(prev)
+    rerunResubscribedWindows(current.windows, prev.windows)
     setUndoTick((t) => t + 1)
-  }, [applySnapshot, desktopParams, windows, zSeed])
+  }, [applySnapshot, commitSnapshotNow, rerunResubscribedWindows, desktopParams, windows, zSeed])
 
   const redo = useCallback(() => {
     const future = redoStackRef.current
@@ -567,8 +598,9 @@ export function DesktopShell() {
     undoStackRef.current.push(cloneSnapshot(current))
     const next = future.pop()!
     applySnapshot(next)
+    rerunResubscribedWindows(current.windows, next.windows)
     setUndoTick((t) => t + 1)
-  }, [applySnapshot, desktopParams, windows, zSeed])
+  }, [applySnapshot, rerunResubscribedWindows, desktopParams, windows, zSeed])
 
   const canUndo = undoStackRef.current.length > 0
   const canRedo = redoStackRef.current.length > 0
@@ -1292,7 +1324,7 @@ export function DesktopShell() {
     })
   }, [])
 
-  const subscribeParam = useCallback((targetWindowId: string, key: string, targetField?: string) => {
+  const subscribeParam = useCallback((targetWindowId: string, key: string, targetField?: string, target?: ParamTarget) => {
     const param = liveParams().find((p) => p.key === key)
     if (!param) return
     setWindows((prev) =>
@@ -1307,7 +1339,12 @@ export function DesktopShell() {
           version: 1,
         }
         const subs = reactive.paramSubscriptions ?? []
-        const next = { key, targetField: targetField ?? param.field }
+        const tf = targetField ?? param.field
+        // The drop site (data-grid-window) resolves placement with full context
+        // (output columns + {ref} upstreams), so prefer the target it passes.
+        // Fall back to the single-table heuristic for any other caller.
+        const resolved = target ?? resolveParamTableTarget(sourceSqlForPayload(payload), tf, schema)
+        const next = { key, targetField: tf, target: resolved }
         return {
           ...w,
           payload: {
@@ -1322,7 +1359,7 @@ export function DesktopShell() {
       }),
     )
     setRunSignals((s) => ({ ...s, [targetWindowId]: (s[targetWindowId] ?? 0) + 1 }))
-  }, [liveParams])
+  }, [liveParams, schema])
 
   // ── Helpers to open specific window kinds ───────────────────────────
 
@@ -3835,7 +3872,7 @@ interface WindowContext {
     dataTypeId?: number
     type?: string
   }) => void
-  subscribeParam: (targetWindowId: string, key: string, targetField?: string) => void
+  subscribeParam: (targetWindowId: string, key: string, targetField?: string, target?: ParamTarget) => void
   editRollupSpec: (targetWindowId: string, transform: (s: RollupSpec) => RollupSpec) => void
   repivotWindow: (targetWindowId: string, grain: RollupGrain) => void
   probeColumnValues: (targetWindowId: string, column: DesktopColumnRef, search?: string) => Promise<{ values: (string | number | null)[]; truncated: boolean }>
@@ -3985,7 +4022,7 @@ function renderWindowContent(
           onChangePayload={(mut) => ctx.updatePayload(w.id, (p) => mut(p as DataPayload))}
           onSaveAsViewApp={(sql) => ctx.openViewAppBuilder({ initialSql: sql })}
           onEmitParam={ctx.emitParam}
-          onSubscribeParam={(key, field) => ctx.subscribeParam(w.id, key, field)}
+          onSubscribeParam={(key, field, target) => ctx.subscribeParam(w.id, key, field, target)}
           onEditRollup={(transform) => ctx.editRollupSpec(w.id, transform)}
           onRepivot={(grain) => ctx.repivotWindow(w.id, grain)}
           onProbeValues={(column, search) => ctx.probeColumnValues(w.id, column, search)}
