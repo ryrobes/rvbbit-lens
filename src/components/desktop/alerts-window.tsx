@@ -1050,7 +1050,7 @@ export function AlertsWindow({ payload, activeConnectionId, hasRvbbit, onChangeP
 
   if (!hasRvbbit) {
     return (
-      <div className="grid h-full place-items-center bg-block-bg p-6 text-center text-[12px] text-chrome-text/60">
+      <div className="grid h-full place-items-center p-6 text-center text-[12px] text-chrome-text/60">
         No pg_rvbbit on this connection.
       </div>
     )
@@ -1060,7 +1060,7 @@ export function AlertsWindow({ payload, activeConnectionId, hasRvbbit, onChangeP
   const isScored = rule != null && rule.conditionSpec.threshold != null
 
   return (
-    <div className="flex h-full flex-col bg-block-bg text-foreground">
+    <div className="flex h-full flex-col text-foreground">
       <style>{`
         @keyframes alerts-sweep-flash {
           0% { background-color: color-mix(in oklch, var(--color-amber-400, #fbbf24) 45%, transparent); }
