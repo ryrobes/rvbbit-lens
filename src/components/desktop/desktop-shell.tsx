@@ -1155,7 +1155,8 @@ export function DesktopShell() {
     field: string
     value: unknown
     operator?: DesktopParamOperator
-    multiValueAction?: "add" | "remove" | "toggle"
+    multiValueAction?: "add" | "remove" | "toggle" | "set" | "replace"
+    cascade?: boolean
     dataTypeId?: number
     type?: string
   }) => {
@@ -1167,15 +1168,36 @@ export function DesktopShell() {
       if (operator === "eq" && existing && existing.operator !== "in" && sameParamValue(existing.value, input.value)) {
         return prev.filter((p) => p.key !== key)
       }
+      // gte/lte threshold (slider / datepicker): a null value clears it; a real
+      // value replaces the single scalar threshold.
+      if ((operator === "gte" || operator === "lte") && (input.value === null || input.value === undefined)) {
+        return prev.filter((p) => p.key !== key)
+      }
       let value = input.value
       if (operator === "in") {
-        const cur = existing?.operator === "in" && Array.isArray(existing.value) ? existing.value : []
+        // One param per (block, field): a new emit replaces the existing one.
+        // The flavor guard only controls VALUE carry-over — a flavor switch
+        // (pick↔cascade) starts a fresh value set instead of absorbing the other
+        // mode's accumulated values. (Switching flavor still replaces the prior
+        // param; we keep one param per column by design.)
+        const sameFlavor = (existing?.cascade !== false) === (input.cascade ?? true)
+        const cur =
+          existing?.operator === "in" && Array.isArray(existing.value) && sameFlavor
+            ? existing.value
+            : []
         const action = input.multiValueAction ?? "toggle"
         const present = cur.some((v) => sameParamValue(v, input.value))
         const next = action === "add"
           ? present ? cur : [...cur, input.value]
           : action === "remove"
             ? cur.filter((v) => !sameParamValue(v, input.value))
+          : action === "replace"
+            // mirror a whole value set (chart selection): value IS the array.
+            ? Array.isArray(input.value) ? input.value : input.value == null ? [] : [input.value]
+          : action === "set"
+            // single-select replace: exactly one value (null → IS NULL). Clear
+            // is a separate "remove" of the selected value (empties → deleted).
+            ? [input.value]
             : present ? cur.filter((v) => !sameParamValue(v, input.value)) : [...cur, input.value]
         if (next.length === 0) return prev.filter((p) => p.key !== key)
         value = next
@@ -1187,6 +1209,7 @@ export function DesktopShell() {
         sourceTitle: input.sourceTitle,
         field: input.field,
         operator,
+        cascade: input.cascade ?? true,
         value,
         dataTypeId: input.dataTypeId,
         type: input.type,
@@ -3718,6 +3741,8 @@ interface WindowContext {
     field: string
     value: unknown
     operator?: DesktopParamOperator
+    multiValueAction?: "add" | "remove" | "toggle" | "set" | "replace"
+    cascade?: boolean
     dataTypeId?: number
     type?: string
   }) => void

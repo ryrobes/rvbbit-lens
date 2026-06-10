@@ -100,7 +100,10 @@ function pointSelectionParams(field: string): Record<string, unknown>[] {
   return [
     {
       name: "click",
-      select: { type: "point", fields: [field], toggle: false },
+      // toggle: "true" (the STRING vega expression, NOT boolean true which only
+      // toggles on shift-click) → EVERY plain click adds/removes a mark, so
+      // re-clicking a selected mark de-selects it (and clears its param).
+      select: { type: "point", fields: [field], toggle: "true" },
     },
   ]
 }

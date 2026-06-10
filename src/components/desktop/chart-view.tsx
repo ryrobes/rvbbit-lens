@@ -25,6 +25,7 @@ import { BarChart3, ClipboardCopy, ClipboardPaste, FileCode2, RotateCcw, Sigma }
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
 import type { QueryResult } from "@/lib/db/types"
+import type { DesktopParamValue } from "@/lib/desktop/types"
 import { inferChartSpec, schemaComment, type InferResult } from "@/lib/desktop/chart-infer"
 import { themeFingerprint, vegaConfigFromTheme } from "@/lib/desktop/chart-theme"
 import { rvbbitLensCodeMirrorTheme } from "@/lib/desktop/codemirror-theme"
@@ -40,13 +41,17 @@ export interface ChartViewProps {
    * precedence over column-type inference but yields to a user spec.
    */
   seedSpec?: Record<string, unknown> | null
-  /** Forwarded to the desktop param-emit flow when a mark is clicked. */
+  /** Mirror of the chart's point selection. `value` is the ARRAY of currently
+   *  selected values for `field` (empty array clears the param). */
   onEmitParam: (field: string, value: unknown, dataTypeId: number) => void
+  /** This block's active params — used to clear the chart's highlight when the
+   *  matching param is removed from the shelf. */
+  activeParams?: DesktopParamValue[]
 }
 
 type EditorMode = "shelf" | "yaml"
 
-export function ChartView({ result, userSpec, onChangeUserSpec, seedSpec, onEmitParam }: ChartViewProps) {
+export function ChartView({ result, userSpec, onChangeUserSpec, seedSpec, onEmitParam, activeParams }: ChartViewProps) {
   const [mode, setMode] = useState<EditorMode>("shelf")
   const [themeStamp, setThemeStamp] = useState(0)
 
@@ -201,10 +206,38 @@ export function ChartView({ result, userSpec, onChangeUserSpec, seedSpec, onEmit
 
   // Track current Result so we can detach listeners on re-embed.
   const viewRef = useRef<VegaEmbedResult | null>(null)
+  // The field the point selection is keyed on — remembered so we can clear the
+  // param when the selection empties (the empty signal carries no field).
+  const selectionFieldRef = useRef<string | null>(null)
+  useEffect(() => {
+    if (inferred?.xField) selectionFieldRef.current = inferred.xField
+  }, [inferred?.xField])
   const onEmitParamRef = useRef(onEmitParam)
   useEffect(() => {
     onEmitParamRef.current = onEmitParam
   }, [onEmitParam])
+
+  // When this chart's param is removed from the shelf (selection cleared
+  // externally), clear the Vega point-selection store so the highlight follows.
+  // (After an in-chart re-click the store is already empty, so this is a no-op.)
+  const selectedCount = useMemo(() => {
+    const f = inferred?.xField
+    if (!f) return 0
+    const p = activeParams?.find((x) => x.field === f && x.cascade === false)
+    const vals = p ? (Array.isArray(p.value) ? p.value : [p.value]) : []
+    return vals.length
+  }, [activeParams, inferred?.xField])
+  useEffect(() => {
+    if (selectedCount > 0) return
+    const res = viewRef.current
+    if (!res) return
+    try {
+      const store = res.view.data("click_store")
+      if (Array.isArray(store) && store.length > 0) void res.view.data("click_store", []).runAsync()
+    } catch {
+      // No selection store for this spec — nothing to clear.
+    }
+  }, [selectedCount])
 
   // Re-fit Vega on container resize. Even with `width: "container"`
   // and `autosize.resize: true`, vega-embed's built-in container
@@ -280,16 +313,28 @@ export function ChartView({ result, userSpec, onChangeUserSpec, seedSpec, onEmit
       // old view on re-render but be belt-and-suspenders).
       const view = res.view
       const handler = (_name: string, value: unknown) => {
-        if (!value || typeof value !== "object") return
-        const entries = Object.entries(value as Record<string, unknown>).filter(
-          ([k]) => k !== "_vgsid_" && k !== "vlPoint",
-        )
-        if (entries.length === 0) return
-        const [field, rawValues] = entries[0] as [string, unknown]
-        const arr = Array.isArray(rawValues) ? rawValues : [rawValues]
-        if (arr.length === 0 || arr[0] === undefined || arr[0] === null) return
+        // Mirror the FULL point selection into our param (operator "in"):
+        // re-clicking a mark toggles it out, so the param set always matches the
+        // highlighted marks. An empty selection clears the param (keyed on the
+        // remembered field, since the empty signal carries no field).
+        let field = selectionFieldRef.current
+        let values: unknown[] = []
+        if (value && typeof value === "object") {
+          const entries = Object.entries(value as Record<string, unknown>).filter(
+            ([k]) => k !== "_vgsid_" && k !== "vlPoint",
+          )
+          if (entries.length > 0) {
+            const [f, rawValues] = entries[0] as [string, unknown]
+            field = f
+            selectionFieldRef.current = f
+            values = (Array.isArray(rawValues) ? rawValues : [rawValues]).filter(
+              (v) => v !== undefined && v !== null,
+            )
+          }
+        }
+        if (!field) return
         const dtid = dataTypeMap.get(field) ?? 25 // default text
-        onEmitParamRef.current(field, arr[0], dtid)
+        onEmitParamRef.current(field, values, dtid)
       }
       try {
         view.addSignalListener("click", handler)

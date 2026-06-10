@@ -4,7 +4,7 @@ import { useMemo, useRef, useState } from "react"
 import { useVirtualizer } from "@tanstack/react-virtual"
 import { GripVertical } from "@/lib/icons"
 import type { QueryResultColumn } from "@/lib/db/types"
-import type { DesktopColumnDragPayload, DesktopColumnRef } from "@/lib/desktop/types"
+import type { DesktopColumnDragPayload, DesktopColumnRef, DesktopParamValue } from "@/lib/desktop/types"
 import { cn } from "@/lib/utils"
 import { formatCellValue } from "@/lib/sql/format"
 import { setActiveColumnDragSource, writeColumnDragPayload } from "@/lib/desktop/column-drag"
@@ -25,8 +25,19 @@ interface ResultGridProps {
   className?: string
   /** When provided, headers become draggable and emit a column-drag payload. */
   columnDragSource?: ColumnDragSource | null
-  /** When provided, clicking a cell emits a cascading-filter param. */
-  onEmitCellParam?: (field: string, value: unknown, dataTypeId: number, operator?: "eq" | "in") => void
+  /** When provided, clicking a cell emits a param. cascade=true (plain/⌘) is a
+   *  cascading filter; cascade=false (⌥) is a "pick" — published but not
+   *  self-filtering. */
+  onEmitCellParam?: (
+    field: string,
+    value: unknown,
+    dataTypeId: number,
+    operator?: "eq" | "in",
+    cascade?: boolean,
+  ) => void
+  /** Params sourced from THIS block — used to highlight the cells that are the
+   *  live filter (cascade) or a published pick value. */
+  activeParams?: DesktopParamValue[]
 }
 
 const ROW_HEIGHT = 24
@@ -39,10 +50,28 @@ export function ResultGrid({
   className,
   columnDragSource,
   onEmitCellParam,
+  activeParams,
 }: ResultGridProps) {
   const parentRef = useRef<HTMLDivElement>(null)
   const [colWidths, setColWidths] = useState<Record<string, number>>({})
   const [selectedHeaders, setSelectedHeaders] = useState<Set<string>>(new Set())
+
+  // Per-column lookup of values that are an active param for this block, so the
+  // matching cells can be highlighted (cascade = the live filter; otherwise a
+  // published "pick"). One param per column, so a single entry per field.
+  const paramHighlights = useMemo(() => {
+    const map = new Map<string, { values: Set<string>; cascade: boolean }>()
+    for (const p of activeParams ?? []) {
+      const isPick = p.cascade === false
+      // An eq cascade already narrows the grid to its single value, so
+      // highlighting it is redundant noise — only highlight picks (which don't
+      // narrow) and multi-value IN filters.
+      if (!isPick && p.operator !== "in") continue
+      const vals = (Array.isArray(p.value) ? p.value : [p.value]).map((v) => String(v))
+      map.set(p.field, { values: new Set(vals), cascade: !isPick })
+    }
+    return map
+  }, [activeParams])
 
   function onHeaderDragStart(e: React.DragEvent<HTMLDivElement>, name: string) {
     if (!columnDragSource) return
@@ -198,29 +227,37 @@ export function ResultGrid({
               {columns.map((c, ci) => {
                 const value = row?.[c.name]
                 const isNumeric = isNumericType(c)
+                const hl = paramHighlights.get(c.name)
+                const picked = hl ? hl.values.has(String(value)) : false
                 return (
                   <div
                     key={c.name}
                     onClick={(e) => {
-                      // Plain click on a cell → emit/toggle a cascading-filter
-                      // param keyed on (this window's block).(column name).
-                      // Cmd/Ctrl-click → "in" operator (multi-value accumulate).
+                      // Left-click → "pick": toggle this value into a multi-select
+                      // IN set. It highlights + publishes to the shelf but does
+                      // NOT filter this grid — drag the chip onto a target to bind.
+                      // ⌘/Ctrl-click → cascade filter: narrows this grid (and any
+                      // {block} children) — the classic drill-down.
                       if (!onEmitCellParam) return
                       e.preventDefault()
                       e.stopPropagation()
-                      const operator = e.metaKey || e.ctrlKey ? "in" : "eq"
-                      onEmitCellParam(c.name, value, c.dataTypeId, operator)
+                      const cascade = e.metaKey || e.ctrlKey
+                      onEmitCellParam(c.name, value, c.dataTypeId, "in", cascade)
                     }}
                     className={cn(
                       "truncate border-r border-chrome-border/30 px-2 py-0.5 text-[12px]",
                       isNumeric ? "text-right tabular-nums" : "text-left",
                       value == null ? "text-chrome-text/40 italic" : "text-foreground",
                       onEmitCellParam && "cursor-pointer hover:bg-main/10",
+                      picked &&
+                        (hl!.cascade
+                          ? "bg-main/25 text-foreground"
+                          : "bg-main/15 text-foreground ring-1 ring-inset ring-main/55"),
                     )}
                     style={{ width: columnWidths[ci] }}
                     title={
                       onEmitCellParam
-                        ? `${value == null ? "null" : String(formatCellValue(value))} — click to filter · ⌘-click to add`
+                        ? `${value == null ? "null" : String(formatCellValue(value))} — click to select · ⌘ filter`
                         : value == null ? "null" : String(formatCellValue(value))
                     }
                   >

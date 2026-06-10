@@ -12,6 +12,11 @@ interface DesktopParamsSurfaceProps {
   onClear: (key: string) => void
 }
 
+/** Short label for a param's comparison operator. */
+function opLabel(op: DesktopParamValue["operator"]): string {
+  return op === "in" ? "in" : op === "gte" ? "≥" : op === "lte" ? "≤" : "="
+}
+
 /**
  * Sticky bar that lists every active cascading-filter param. Each chip
  * is draggable — drop one onto a data window header to make that window
@@ -32,17 +37,27 @@ export function DesktopParamsSurface({ params, onClear }: DesktopParamsSurfacePr
             attachDragGhost(e.dataTransfer, {
               variant: "param",
               label: `${p.sourceBlockName}.${p.field}`,
-              sublabel: `${p.operator === "in" ? "in" : "="} ${shortParamValue(p.value)}`,
+              sublabel: `${opLabel(p.operator)} ${shortParamValue(p.value)}`,
             })
           }}
           className={cn(
-            "group inline-flex max-w-[260px] items-center gap-1 rounded-full border border-main/30 bg-secondary-background px-2 py-0.5 text-[11px] text-foreground transition-colors",
-            "hover:border-main/60 cursor-grab active:cursor-grabbing",
+            "group inline-flex max-w-[260px] items-center gap-1 rounded-full border bg-secondary-background px-2 py-0.5 text-[11px] text-foreground transition-colors",
+            "cursor-grab active:cursor-grabbing",
+            // A "pick" param doesn't filter its source — it's inert until dragged
+            // onto a target. Dashed + ringed so it reads differently from a live
+            // cascade filter (solid border).
+            p.cascade === false
+              ? "border-dashed border-main/55 ring-1 ring-inset ring-main/20 hover:border-main/80"
+              : "border-main/30 hover:border-main/60",
           )}
-          title={`Drag onto a window to subscribe · click X to clear`}
+          title={
+            p.cascade === false
+              ? `Pick — not filtering its source. Drag onto a window to bind · click X to clear`
+              : `Filter — drag onto a window to also subscribe · click X to clear`
+          }
         >
           <span className="truncate text-chrome-text">{p.sourceBlockName}.{p.field}</span>
-          <span className="text-chrome-text/60">{p.operator === "in" ? "in" : "="}</span>
+          <span className="text-chrome-text/60">{opLabel(p.operator)}</span>
           <span className="truncate text-foreground">{shortParamValue(p.value)}</span>
           <span
             onClick={(e) => { e.stopPropagation(); e.preventDefault(); onClear(p.key) }}

@@ -234,15 +234,20 @@ export function buildDesktopRuntimeGraph(
     // the *projection* (real columns) instead.
     const isJsonbBlock = !!(block.jsonbProjection && block.jsonbProjection.length > 0)
 
-    // Implicit self-subscriptions: any param whose sourceBlockName matches
-    // *this* block filters the block by (field=value). The intuition is
-    // "click on a cell → the window itself narrows to that value"; the
-    // narrowed result then cascades into anything that references the
-    // block via {X}.
+    // Implicit self-subscriptions: a param whose sourceBlockName matches *this*
+    // block filters the block by (field=value). The intuition is "click on a
+    // cell → the window itself narrows to that value"; the narrowed result then
+    // cascades into anything that references the block via {X}.
+    // EXCEPT "pick" params (cascade === false): they are published to the shelf
+    // for explicit binding but must NOT self-filter their source.
     const selfSubs: DesktopParamSubscription[] = isJsonbBlock
       ? []
       : params
-          .filter((p) => p.sourceBlockName.toLowerCase() === block.blockName.toLowerCase())
+          .filter(
+            (p) =>
+              p.sourceBlockName.toLowerCase() === block.blockName.toLowerCase() &&
+              p.cascade !== false,
+          )
           .map((p) => ({ key: p.key, targetField: p.field }))
 
     const sub = applyParamSubscriptions(
@@ -373,6 +378,12 @@ function quoteSqlLiteral(value: unknown): string {
 
 function predicateForParam(field: string, p: DesktopParamValue): string {
   const q = quoteSqlIdent(field)
+  // Range/threshold comparison (datepicker / slider). `col >= v` matches whole
+  // timestamps correctly (no exact-midnight problem of `col = date`).
+  if (p.operator === "gte" || p.operator === "lte") {
+    if (p.value === null || p.value === undefined) return "TRUE"
+    return `${q} ${p.operator === "gte" ? ">=" : "<="} ${quoteSqlLiteral(p.value)}`
+  }
   if (p.operator !== "in" && !Array.isArray(p.value)) {
     return `${q} = ${quoteSqlLiteral(p.value)}`
   }

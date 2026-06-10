@@ -56,7 +56,10 @@ function dimTitle(term: RollupGroupTerm): string {
 }
 
 function clickParams(field: string): Record<string, unknown>[] {
-  return [{ name: "click", select: { type: "point", fields: [field], toggle: false } }]
+  // toggle: "true" (the STRING vega expression — boolean true only toggles on
+  // shift-click) so every plain click adds/removes a mark and re-clicking a
+  // selected one de-selects it (clearing its param). Matches chart-infer.ts.
+  return [{ name: "click", select: { type: "point", fields: [field], toggle: "true" } }]
 }
 
 function selectionOpacity() {

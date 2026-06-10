@@ -22,6 +22,7 @@ import {
 } from "@/lib/icons"
 import { format as formatSql } from "sql-formatter"
 import { ChartView } from "./chart-view"
+import { ControlView } from "./control-view"
 import { ModelField } from "./operator-inspector"
 import { ResultGrid } from "./result-grid"
 import { SingleCellCallout } from "./single-cell-callout"
@@ -62,9 +63,11 @@ import type { JsonbProjectionColumn } from "@/lib/desktop/types"
 import {
   buildDesktopRuntimeGraph,
   paramKey,
+  quoteSqlIdent,
   shortParamValue,
   slugifyBlockName,
   sourceSqlForPayload,
+  stripTrailingSqlTerminator,
   uniqueBlockName,
 } from "@/lib/desktop/reactive-sql"
 import { setActiveBlockDragSource, writeBlockDragPayload } from "@/lib/desktop/block-drag"
@@ -93,6 +96,8 @@ interface DataGridWindowProps {
     field: string
     value: unknown
     operator?: DesktopParamOperator
+    multiValueAction?: "add" | "remove" | "toggle" | "set" | "replace"
+    cascade?: boolean
     dataTypeId?: number
     type?: string
   }) => void
@@ -248,6 +253,48 @@ export function DataGridWindow({
     return map
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [refSignature])
+
+  // This block's own active params — drives the in-grid highlight of the live
+  // filter / pick value(s).
+  const blockParams = useMemo(
+    () => params.filter((p) => p.sourceBlockName.toLowerCase() === blockName.toLowerCase()),
+    [params, blockName],
+  )
+
+  // The "View" tab renders a Vega chart (default) or an interactive control.
+  const viewKind = payload.viewKind ?? "chart"
+  const setViewKind = (k: NonNullable<DataPayload["viewKind"]>) =>
+    onChangePayload((p) => ({ ...p, viewKind: k }))
+
+  // Probe the column's true min/max over the block's full relation (datepicker /
+  // slider bounds) by wrapping the block's compiled SQL; null for pipeline/synth
+  // blocks (can't wrap) so the control falls back to the loaded result.
+  const probeBounds = useCallback(
+    async (field: string): Promise<{ min: unknown; max: unknown } | null> => {
+      if (!activeConnectionId) return null
+      const graph = buildDesktopRuntimeGraph(allWindows, params)
+      const compiled = graph.blocks.get(w.id)?.compiledSql
+      if (!compiled || hasTopLevelThen(compiled) || isSynthQuery(compiled)) return null
+      const c = quoteSqlIdent(field)
+      const sql = `SELECT min(${c}) AS lo, max(${c}) AS hi\nFROM (\n${stripTrailingSqlTerminator(compiled)}\n) __bounds`
+      try {
+        const res = await fetch("/api/db/query", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          // pipeline/synth are guarded out above, so this is always a plain
+          // SELECT — run it under the read-only transaction guard.
+          body: JSON.stringify({ connectionId: activeConnectionId, sql, rowLimit: 1, readOnly: true }),
+        })
+        const body = (await res.json()) as { ok?: boolean; rows?: Record<string, unknown>[] }
+        const row = body.ok && Array.isArray(body.rows) ? body.rows[0] : undefined
+        if (!row || (row.lo == null && row.hi == null)) return null
+        return { min: row.lo ?? null, max: row.hi ?? null }
+      } catch {
+        return null
+      }
+    },
+    [activeConnectionId, allWindows, params, w.id],
+  )
 
   // First time this window opens, persist its unique block name into
   // the payload so subsequent renders see the same name and other
@@ -986,7 +1033,7 @@ export function DataGridWindow({
             ) : null}
             <Tab label="Rows" icon={Table2} active={activeTab === "rows"} onClick={() => setActiveTab("rows")} />
             <Tab label="Profile" icon={Sigma} active={activeTab === "profile"} onClick={() => setActiveTab("profile")} />
-            <Tab label="Chart" icon={BarChart3} active={activeTab === "chart"} onClick={() => setActiveTab("chart")} />
+            <Tab label="View" icon={BarChart3} active={activeTab === "chart"} onClick={() => setActiveTab("chart")} />
             <Tab label="SQL" icon={FileCode2} active={activeTab === "sql"} onClick={() => setActiveTab("sql")} />
             <Tab label="Explain" icon={TreeStructure} active={activeTab === "explain"} onClick={() => setActiveTab("explain")} />
             {isPipelineRun ? (
@@ -1080,7 +1127,8 @@ export function DataGridWindow({
                 columns={result.columns}
                 rows={result.rows}
                 columnDragSource={columnDragSource}
-                onEmitCellParam={(field, value, dataTypeId, operator) => {
+                activeParams={blockParams}
+                onEmitCellParam={(field, value, dataTypeId, operator, cascade) => {
                   onEmitParam({
                     sourceWindowId: w.id,
                     sourceBlockName: blockName,
@@ -1088,6 +1136,7 @@ export function DataGridWindow({
                     field,
                     value,
                     operator: operator ?? "eq",
+                    cascade,
                     dataTypeId,
                   })
                 }}
@@ -1100,23 +1149,59 @@ export function DataGridWindow({
           {activeTab === "profile" && result ? <ProfileView result={result} /> : null}
           {activeTab === "profile" && !result ? <EmptyResult error={error} running={isRunning} progress={progress} onRun={onRun} /> : null}
           {activeTab === "chart" && result ? (
-            <ChartView
-              result={result}
-              userSpec={payload.chartSpec ?? null}
-              onChangeUserSpec={(spec) => onChangePayload((p) => ({ ...p, chartSpec: spec }))}
-              seedSpec={chartSeedSpec}
-              onEmitParam={(field, value, dataTypeId) => {
-                onEmitParam({
-                  sourceWindowId: w.id,
-                  sourceBlockName: blockName,
-                  sourceTitle: payload.title || w.title || blockName,
-                  field,
-                  value,
-                  operator: "eq",
-                  dataTypeId,
-                })
-              }}
-            />
+            <div className="flex h-full flex-col">
+              <ViewKindBar kind={viewKind} onChange={setViewKind} />
+              <div className="min-h-0 flex-1">
+                {viewKind === "chart" ? (
+                  <ChartView
+                    result={result}
+                    userSpec={payload.chartSpec ?? null}
+                    onChangeUserSpec={(spec) => onChangePayload((p) => ({ ...p, chartSpec: spec }))}
+                    seedSpec={chartSeedSpec}
+                    activeParams={blockParams}
+                    onEmitParam={(field, value, dataTypeId) => {
+                      // The chart mirrors its full point selection: `value` is the
+                      // ARRAY of selected values. "replace" sets the param to
+                      // exactly that set (empty clears it), cascade:false so it
+                      // never self-filters — drag the chip onto a target.
+                      onEmitParam({
+                        sourceWindowId: w.id,
+                        sourceBlockName: blockName,
+                        sourceTitle: payload.title || w.title || blockName,
+                        field,
+                        value,
+                        operator: "in",
+                        multiValueAction: "replace",
+                        cascade: false,
+                        dataTypeId,
+                      })
+                    }}
+                  />
+                ) : (
+                  <ControlView
+                    result={result}
+                    field={payload.controlField ?? null}
+                    kind={viewKind}
+                    activeParams={blockParams}
+                    onChangeField={(f) => onChangePayload((p) => ({ ...p, controlField: f }))}
+                    onProbeBounds={probeBounds}
+                    onEmit={(field, value, dataTypeId, spec) =>
+                      onEmitParam({
+                        sourceWindowId: w.id,
+                        sourceBlockName: blockName,
+                        sourceTitle: payload.title || w.title || blockName,
+                        field,
+                        value,
+                        operator: spec.operator,
+                        multiValueAction: spec.action,
+                        cascade: false,
+                        dataTypeId,
+                      })
+                    }
+                  />
+                )}
+              </div>
+            </div>
           ) : null}
           {activeTab === "chart" && !result ? (
             <EmptyResult error={error} running={isRunning} progress={progress} onRun={onRun} />
@@ -1472,6 +1557,44 @@ function Tab({
       <Icon className="h-3 w-3" />
       {label}
     </button>
+  )
+}
+
+/** Segmented switcher for the "View" tab: render the result as a chart or as an
+ *  interactive control (dropdown / multiselect) that publishes a pick param. */
+function ViewKindBar({
+  kind,
+  onChange,
+}: {
+  kind: NonNullable<DataPayload["viewKind"]>
+  onChange: (k: NonNullable<DataPayload["viewKind"]>) => void
+}) {
+  const items: { id: NonNullable<DataPayload["viewKind"]>; label: string }[] = [
+    { id: "chart", label: "Chart" },
+    { id: "dropdown", label: "Dropdown" },
+    { id: "multiselect", label: "Multi-select" },
+    { id: "datepicker", label: "Date" },
+    { id: "slider", label: "Slider" },
+  ]
+  return (
+    <div className="flex shrink-0 items-center gap-1 border-b border-chrome-border bg-chrome-bg/30 px-2 py-1">
+      <span className="mr-1 text-[9px] uppercase tracking-wider text-chrome-text/50">view</span>
+      {items.map((it) => (
+        <button
+          key={it.id}
+          type="button"
+          onClick={() => onChange(it.id)}
+          className={cn(
+            "rounded px-2 py-0.5 text-[10px] transition-colors",
+            kind === it.id
+              ? "bg-main/20 text-foreground"
+              : "text-chrome-text/65 hover:bg-foreground/[0.06] hover:text-foreground",
+          )}
+        >
+          {it.label}
+        </button>
+      ))}
+    </div>
   )
 }
 

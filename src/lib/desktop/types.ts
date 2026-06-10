@@ -178,6 +178,13 @@ export interface DataPayload {
    */
   chartSpec?: Record<string, unknown> | null
   /**
+   * How the "View" tab renders this block: a Vega chart (default) or an
+   * interactive control that publishes a pick param. `controlField` is the
+   * column the control reads its values from.
+   */
+  viewKind?: "chart" | "dropdown" | "multiselect" | "datepicker" | "slider"
+  controlField?: string
+  /**
    * For a rvbbit.synth() block whose single jsonb column the grid expands
    * client-side, the run-inferred shape of that jsonb — column names + inferred
    * types. The reactive graph uses this to wrap a reference to this block in a
@@ -213,7 +220,7 @@ export interface ReactiveBlockState {
   version?: number
 }
 
-export type DesktopParamOperator = "eq" | "in"
+export type DesktopParamOperator = "eq" | "in" | "gte" | "lte"
 
 export interface DesktopParamValue {
   key: string
@@ -222,6 +229,11 @@ export interface DesktopParamValue {
   sourceTitle: string
   field: string
   operator?: DesktopParamOperator
+  /** false ⇒ a "pick" param: published to the shelf, but the compiler does NOT
+   *  synthesize a self-subscription, so the source block is NOT narrowed and
+   *  nothing cascades — the user binds it explicitly by dragging it onto a
+   *  target. Defaults to true (the click-to-filter cascade). */
+  cascade?: boolean
   value: unknown
   dataTypeId?: number
   type?: string

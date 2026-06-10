@@ -34,9 +34,11 @@ interface Link {
  *
  * Two link types, visually distinguished:
  *
- *   - Block reference (`{X}` substitution) → solid teal curve with
- *     a small arrowhead on the downstream end.
- *   - Param subscription → dotted rvbbit-accent curve.
+ *   - Block reference (`{X}` substitution) → dashed teal (rvbbit-accent)
+ *     curve with an arrowhead on the downstream end. Data lineage.
+ *   - Param subscription → a finer `--main` curve with an animated dot
+ *     flow toward the subscriber (matches the param UI — shelf chips +
+ *     pick highlights are all `--main`). Shows "this control affects that".
  *
  * Both use a quadratic Bezier with a perpendicular control-point
  * bend so parallel links between the same pair of windows don't
@@ -92,6 +94,18 @@ export function LineageOverlay({ windows, params }: LineageOverlayProps) {
         >
           <path d="M0,0 L10,5 L0,10 Z" fill="var(--rvbbit-accent)" />
         </marker>
+        <marker
+          id="rvbbit-param-arrow"
+          viewBox="0 0 10 10"
+          refX="9"
+          refY="5"
+          markerWidth="6"
+          markerHeight="6"
+          orient="auto-start-reverse"
+          markerUnits="strokeWidth"
+        >
+          <path d="M0,0 L10,5 L0,10 Z" fill="var(--main)" />
+        </marker>
       </defs>
       {segments.map((s, i) => {
         // Quadratic Bezier with a perpendicular bow so parallel arrows
@@ -114,12 +128,23 @@ export function LineageOverlay({ windows, params }: LineageOverlayProps) {
             key={`${s.fromId}->${s.toId}:${s.kind}:${i}`}
             d={d}
             fill="none"
-            stroke="var(--rvbbit-accent)"
-            strokeOpacity={isParam ? 0.5 : 0.75}
-            strokeWidth={isParam ? 1.25 : 1.5}
-            strokeDasharray={isParam ? "2 4" : "6 4"}
-            markerEnd="url(#rvbbit-lineage-arrow)"
-          />
+            stroke={isParam ? "var(--main)" : "var(--rvbbit-accent)"}
+            strokeOpacity={isParam ? 0.7 : 0.75}
+            strokeWidth={1.5}
+            strokeLinecap="round"
+            strokeDasharray={isParam ? "2 5" : "6 4"}
+            markerEnd={isParam ? "url(#rvbbit-param-arrow)" : "url(#rvbbit-lineage-arrow)"}
+          >
+            {isParam ? (
+              // animated dot-flow from the param source toward the subscriber.
+              <animate
+                attributeName="stroke-dashoffset"
+                values="0;-7"
+                dur="0.7s"
+                repeatCount="indefinite"
+              />
+            ) : null}
+          </path>
         )
       })}
     </svg>
