@@ -4411,7 +4411,9 @@ function renderWindowContent(
         />
       )
     case "sync-mirror":
-      return <SyncMirrorWindow activeConnectionId={ctx.activeConnectionId} />
+      // Key on the connection so a switch remounts (clears stale jobs/overview +
+      // discards any in-flight overview fetch for the previous connection).
+      return <SyncMirrorWindow key={ctx.activeConnectionId ?? "none"} activeConnectionId={ctx.activeConnectionId} />
     case "duck":
       return (
         <DuckWindow
