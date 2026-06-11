@@ -25,7 +25,7 @@ function sslOption(mode: SslMode | undefined): PoolConfig["ssl"] {
 /**
  * Base connection config shared by the pool and one-off clients. Used by the
  * CSV importer to spin up a *dedicated* `Client` (statement_timeout disabled
- * for a long COPY) so a big import never ties up one of the pool's 5 slots.
+ * for a long COPY) so a big import never ties up one of the pool's slots.
  */
 /** Default statement_timeout (ms) for interactive queries. Configurable via
  *  RVBBIT_QUERY_TIMEOUT_MS; 0 disables it entirely. Semantic queries that warm
@@ -33,6 +33,23 @@ function sslOption(mode: SslMode | undefined): PoolConfig["ssl"] {
 export const DEFAULT_STATEMENT_TIMEOUT_MS = (() => {
   const raw = Number(process.env.RVBBIT_QUERY_TIMEOUT_MS)
   return Number.isFinite(raw) && raw >= 0 ? raw : 1_800_000
+})()
+
+/** Pool size. Configurable via RVBBIT_POOL_MAX (default 10, was 5). */
+const POOL_MAX = (() => {
+  const raw = Number(process.env.RVBBIT_POOL_MAX)
+  return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : 10
+})()
+
+/** Connection-acquire timeout (ms). CRITICAL: without it, pool.connect() parks
+ *  FOREVER when all slots are busy — so a slow spell (e.g. a running sync) silently
+ *  queues every UI poll, then flushes them in a burst when pressure drops ("freeze
+ *  then flood"). A bounded timeout makes a starved request error fast, so the UI
+ *  degrades gracefully (stale/retry) instead of freezing. Configurable via
+ *  RVBBIT_POOL_ACQUIRE_TIMEOUT_MS (default 8s; 0 = wait forever, the old behavior). */
+const POOL_ACQUIRE_TIMEOUT_MS = (() => {
+  const raw = Number(process.env.RVBBIT_POOL_ACQUIRE_TIMEOUT_MS)
+  return Number.isFinite(raw) && raw >= 0 ? Math.floor(raw) : 8_000
 })()
 
 export function buildClientConfig(
@@ -52,7 +69,12 @@ export function buildClientConfig(
 }
 
 function buildPoolConfig(c: ConnectionRecord): PoolConfig {
-  return { ...buildClientConfig(c), max: 5, idleTimeoutMillis: 30_000 }
+  return {
+    ...buildClientConfig(c),
+    max: POOL_MAX,
+    idleTimeoutMillis: 30_000,
+    connectionTimeoutMillis: POOL_ACQUIRE_TIMEOUT_MS,
+  }
 }
 
 function signatureOf(c: ConnectionRecord): string {

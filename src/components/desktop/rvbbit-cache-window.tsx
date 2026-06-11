@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react"
 import { useWorkspaceActive } from "./workspace-active-context"
+import { usePolling } from "@/lib/desktop/use-polling"
 import {
   Activity,
   AlertTriangle,
@@ -154,11 +155,10 @@ export function RvbbitCacheWindow({
     }
   }, [reload])
 
-  useEffect(() => {
-    if (!activeConnectionId || paused || !workspaceActive) return
-    const id = setInterval(() => void reload(), intervalMs)
-    return () => clearInterval(id)
-  }, [activeConnectionId, paused, intervalMs, reload, workspaceActive])
+  usePolling(reload, intervalMs, {
+    enabled: !!activeConnectionId && !paused && workspaceActive,
+    resetKey: activeConnectionId,
+  })
 
   return (
     <div className="flex h-full flex-col text-[12px] text-chrome-text">

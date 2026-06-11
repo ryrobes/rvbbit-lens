@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react"
 import { useWorkspaceActive } from "./workspace-active-context"
+import { usePolling } from "@/lib/desktop/use-polling"
 import {
   AlertTriangle,
   CheckCircle2,
@@ -83,11 +84,10 @@ export function OperatorsWindow({
     return () => window.removeEventListener("rvbbit-lens:operators-changed", h)
   }, [reload])
 
-  useEffect(() => {
-    if (!activeConnectionId || !hasRvbbit || paused || !workspaceActive) return
-    const id = setInterval(() => void reload(), intervalMs)
-    return () => clearInterval(id)
-  }, [activeConnectionId, hasRvbbit, paused, intervalMs, reload, workspaceActive])
+  usePolling(reload, intervalMs, {
+    enabled: !!activeConnectionId && hasRvbbit && !paused && workspaceActive,
+    resetKey: activeConnectionId,
+  })
 
   // ── derive ──
   const trafficByName = useMemo(() => {

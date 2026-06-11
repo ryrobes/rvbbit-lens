@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react"
 import { useWorkspaceActive } from "./workspace-active-context"
+import { usePolling } from "@/lib/desktop/use-polling"
 import {
   Activity,
   AlertTriangle,
@@ -161,11 +162,10 @@ export function SystemObjectsWindow({ payload, activeConnectionId }: SystemObjec
   // Live polling. Activity/Locks/Stats are the views where the data
   // actually shifts under the user; the rest still poll but you'll
   // mostly see the same rows.
-  useEffect(() => {
-    if (!activeConnectionId || paused || !workspaceActive) return
-    const id = setInterval(() => void run(), intervalMs)
-    return () => clearInterval(id)
-  }, [activeConnectionId, paused, intervalMs, run, workspaceActive])
+  usePolling(run, intervalMs, {
+    enabled: !!activeConnectionId && !paused && workspaceActive,
+    resetKey: activeConnectionId,
+  })
 
   const summary = useMemo(
     () => deriveCategorySummary(active, result?.rows ?? []),

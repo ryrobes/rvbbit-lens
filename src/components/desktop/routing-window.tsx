@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react"
 import { useWorkspaceActive } from "./workspace-active-context"
+import { usePolling } from "@/lib/desktop/use-polling"
 import {
   Activity,
   AlertTriangle,
@@ -131,11 +132,10 @@ export function RoutingWindow({ activeConnectionId, hasRvbbit }: RoutingWindowPr
     }
   }, [activeConnectionId, hasRvbbit, loadProfile, pollFlow])
 
-  useEffect(() => {
-    if (!activeConnectionId || !hasRvbbit || paused || !workspaceActive) return
-    const id = setInterval(() => void pollFlow(), intervalMs)
-    return () => clearInterval(id)
-  }, [activeConnectionId, hasRvbbit, paused, intervalMs, pollFlow, workspaceActive])
+  usePolling(pollFlow, intervalMs, {
+    enabled: !!activeConnectionId && hasRvbbit && !paused && workspaceActive,
+    resetKey: activeConnectionId,
+  })
 
   if (!hasRvbbit) {
     return (

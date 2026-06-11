@@ -58,6 +58,7 @@ import {
   type McpTool,
 } from "@/lib/rvbbit/mcp"
 import type { McpServerDetailPayload } from "@/lib/desktop/types"
+import { usePolling } from "@/lib/desktop/use-polling"
 
 interface McpServerDetailWindowProps {
   payload: McpServerDetailPayload
@@ -146,11 +147,10 @@ export function McpServerDetailWindow({
     }
   }, [activeConnectionId, hasRvbbit, reloadStatic, pollInvocations])
 
-  useEffect(() => {
-    if (!activeConnectionId || !hasRvbbit || paused) return
-    const id = setInterval(() => void pollInvocations(), intervalMs)
-    return () => clearInterval(id)
-  }, [activeConnectionId, hasRvbbit, paused, intervalMs, pollInvocations])
+  usePolling(pollInvocations, intervalMs, {
+    enabled: !!activeConnectionId && hasRvbbit && !paused,
+    resetKey: activeConnectionId,
+  })
 
   const onProbe = useCallback(async () => {
     if (!activeConnectionId || gateway?.ready !== true) return

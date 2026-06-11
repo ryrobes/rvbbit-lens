@@ -54,6 +54,7 @@ import {
   percentile,
 } from "./instruments"
 import type { CapabilityDetailPayload } from "@/lib/desktop/types"
+import { usePolling } from "@/lib/desktop/use-polling"
 import { CodePreview, type CodeLang } from "./code-preview"
 import { CapabilityInstallGraph } from "./capability-install-graph"
 import { WarrenDeployPanel } from "./warren-deploy-panel"
@@ -181,37 +182,21 @@ export function CapabilityDetailWindow({
     setUpdatedAt(Date.now())
   }, [activeConnectionId, hasRvbbit, catalog])
 
-  useEffect(() => {
-    let cancelled = false
-    const run = async () => {
-      if (cancelled) return
-      await pollInstalled()
-    }
-    void run()
-    if (!activeConnectionId || !hasRvbbit) return () => { cancelled = true }
-    const id = setInterval(() => void pollInstalled(), 5000)
-    return () => {
-      cancelled = true
-      clearInterval(id)
-    }
-  }, [activeConnectionId, hasRvbbit, pollInstalled])
+  usePolling(pollInstalled, 5000, {
+    enabled: !!activeConnectionId && hasRvbbit,
+    resetKey: activeConnectionId,
+  })
 
   // ── poll warren availability so the Install tab can default-route ──
-  useEffect(() => {
-    if (!activeConnectionId || !hasRvbbit) return
-    let cancelled = false
-    const probe = async () => {
-      const r = await fetchWarrenAvailability(activeConnectionId)
-      if (cancelled) return
-      setWarrenAvail(r)
-    }
-    void probe()
-    const id = setInterval(() => void probe(), 10_000)
-    return () => {
-      cancelled = true
-      clearInterval(id)
-    }
-  }, [activeConnectionId, hasRvbbit])
+  const probeWarren = useCallback(async () => {
+    if (!activeConnectionId) return
+    const r = await fetchWarrenAvailability(activeConnectionId)
+    setWarrenAvail(r)
+  }, [activeConnectionId])
+  usePolling(probeWarren, 10_000, {
+    enabled: !!activeConnectionId && hasRvbbit,
+    resetKey: activeConnectionId,
+  })
 
   /** Effective install mode — explicit user choice wins, else availability decides. */
   const effectiveInstallMode: "warren" | "local" =

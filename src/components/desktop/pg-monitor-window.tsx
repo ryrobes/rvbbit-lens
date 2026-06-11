@@ -1,6 +1,7 @@
 "use client"
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import { usePolling } from "@/lib/desktop/use-polling"
 import {
   Activity,
   Brain,
@@ -88,14 +89,12 @@ export function PgMonitorWindow({
     }
   }, [activeConnectionId])
 
-  useEffect(() => {
-    if (!activeConnectionId || paused || !workspaceActive) return
-    let cancelled = false
-    const run = async () => { if (!cancelled) await poll() }
-    void run() // immediate first tick
-    const id = setInterval(() => { void run() }, intervalMs)
-    return () => { cancelled = true; clearInterval(id) }
-  }, [activeConnectionId, intervalMs, paused, workspaceActive, poll])
+  // In-flight-guarded poll: a slow spell (e.g. a running sync) can't queue a backlog
+  // of pg-stats requests that flush in a burst when pressure drops.
+  usePolling(poll, intervalMs, {
+    enabled: !!activeConnectionId && !paused && workspaceActive,
+    resetKey: activeConnectionId,
+  })
 
   // Re-render every ~500ms so "age" displays (query runtime, last
   // vacuum, etc.) tick smoothly without re-fetching.

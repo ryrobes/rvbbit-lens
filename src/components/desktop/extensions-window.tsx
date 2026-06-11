@@ -1,6 +1,7 @@
 "use client"
 
 import { useCallback, useEffect, useState } from "react"
+import { usePolling } from "@/lib/desktop/use-polling"
 import {
   AlertTriangle,
   Pause,
@@ -73,11 +74,10 @@ export function ExtensionsWindow({
     }
   }, [reload])
 
-  useEffect(() => {
-    if (!activeConnectionId || paused) return
-    const id = setInterval(() => void reload(), intervalMs)
-    return () => clearInterval(id)
-  }, [activeConnectionId, paused, intervalMs, reload])
+  usePolling(reload, intervalMs, {
+    enabled: !!activeConnectionId && !paused,
+    resetKey: activeConnectionId,
+  })
 
   const rvbbit = extensions.find((e) => isRvbbitExtension(e.name))
   const others = extensions.filter((e) => !isRvbbitExtension(e.name))

@@ -1,6 +1,7 @@
 "use client"
 
 import { useCallback, useEffect, useMemo, useState } from "react"
+import { usePolling } from "@/lib/desktop/use-polling"
 import { useWorkspaceActive } from "./workspace-active-context"
 
 /** 1s-tick clock while `active` — used for live "elapsed" cells. */
@@ -155,21 +156,18 @@ export function WarrenWindow({
     [activeConnectionId, onOpenJob, reload],
   )
 
+  // Immediate fetch on mount / connection change, regardless of pause or
+  // workspace-active state (so a freshly-opened or reconnected window paints).
   useEffect(() => {
-    let cancelled = false
-    const run = async () => {
-      if (cancelled) return
-      await reload()
-    }
-    void run()
-    if (!activeConnectionId || !hasRvbbit) return () => { cancelled = true }
-    if (paused || !workspaceActive) return () => { cancelled = true }
-    const id = setInterval(() => void reload(), intervalMs)
-    return () => {
-      cancelled = true
-      clearInterval(id)
-    }
-  }, [activeConnectionId, hasRvbbit, paused, intervalMs, reload, workspaceActive])
+    void reload()
+  }, [reload])
+
+  // Polls both inventory + jobs surfaces on the configured interval; pause or
+  // an inactive workspace freezes it.
+  usePolling(reload, intervalMs, {
+    enabled: !!activeConnectionId && hasRvbbit && !paused && workspaceActive,
+    resetKey: activeConnectionId,
+  })
 
   // ── derived counts ──
   const nodeCounts = useMemo(() => {

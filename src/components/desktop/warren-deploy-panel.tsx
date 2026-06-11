@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react"
 import { useWorkspaceActive } from "./workspace-active-context"
+import { usePolling } from "@/lib/desktop/use-polling"
 import {
   AlertTriangle,
   CheckCircle2,
@@ -129,36 +130,22 @@ export function WarrenDeployPanel({
     setObservations(obs.observations)
   }, [activeConnectionId])
 
-  useEffect(() => {
-    let cancelled = false
-    const run = async () => {
-      if (cancelled) return
-      await reload()
-    }
-    void run()
-    if (!activeConnectionId || !workspaceActive) return () => { cancelled = true }
-    const id = setInterval(() => void reload(), 5000)
-    return () => {
-      cancelled = true
-      clearInterval(id)
-    }
-  }, [activeConnectionId, reload, workspaceActive])
+  usePolling(reload, 5000, {
+    enabled: !!activeConnectionId && workspaceActive,
+    resetKey: activeConnectionId,
+  })
 
-  useEffect(() => {
-    if (!activeConnectionId || !lastEnqueued || !workspaceActive) return
-    let cancelled = false
-    const poll = async () => {
-      const r = await fetchWarrenJob(activeConnectionId, lastEnqueued.jobId)
-      if (cancelled) return
-      setLastJobStatus(r.job?.status ?? null)
-    }
-    void poll()
-    const id = setInterval(() => void poll(), 2000)
-    return () => {
-      cancelled = true
-      clearInterval(id)
-    }
-  }, [activeConnectionId, lastEnqueued, workspaceActive])
+  // ── poll the last-enqueued job's status ──
+  const pollLastJob = useCallback(async () => {
+    if (!activeConnectionId || !lastEnqueued) return
+    const r = await fetchWarrenJob(activeConnectionId, lastEnqueued.jobId)
+    setLastJobStatus(r.job?.status ?? null)
+  }, [activeConnectionId, lastEnqueued])
+
+  usePolling(pollLastJob, 2000, {
+    enabled: !!activeConnectionId && !!lastEnqueued && workspaceActive,
+    resetKey: lastEnqueued,
+  })
 
   // ── derive nodes + match preview ──
   const nodes = useMemo(() => uniqueNodesFromInventory(inventory), [inventory])

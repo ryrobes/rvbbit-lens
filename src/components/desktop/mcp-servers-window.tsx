@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react"
 import { useWorkspaceActive } from "./workspace-active-context"
+import { usePolling } from "@/lib/desktop/use-polling"
 import { McpInstallPanel } from "./mcp-install-panel"
 import {
   Activity,
@@ -112,11 +113,10 @@ export function McpServersWindow({
     }
   }, [activeConnectionId, hasRvbbit, reload])
 
-  useEffect(() => {
-    if (!activeConnectionId || !hasRvbbit || paused || !workspaceActive) return
-    const id = setInterval(() => void reload(), intervalMs)
-    return () => clearInterval(id)
-  }, [activeConnectionId, hasRvbbit, paused, intervalMs, reload, workspaceActive])
+  usePolling(reload, intervalMs, {
+    enabled: !!activeConnectionId && hasRvbbit && !paused && workspaceActive,
+    resetKey: activeConnectionId,
+  })
 
   const { gMin, gMax, colorOf } = useMemo(() => {
     let gMin = Infinity

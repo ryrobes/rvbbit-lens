@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react"
 import { useWorkspaceActive } from "./workspace-active-context"
+import { usePolling } from "@/lib/desktop/use-polling"
 import {
   Activity,
   AlertTriangle,
@@ -191,11 +192,10 @@ export function SpecialistDetailWindow({
     }
   }, [activeConnectionId, hasRvbbit, loadStatic, pollCalls])
 
-  useEffect(() => {
-    if (!activeConnectionId || !hasRvbbit || paused || !workspaceActive) return
-    const id = setInterval(() => void pollCalls(), intervalMs)
-    return () => clearInterval(id)
-  }, [activeConnectionId, hasRvbbit, paused, intervalMs, pollCalls, workspaceActive])
+  usePolling(pollCalls, intervalMs, {
+    enabled: !!activeConnectionId && hasRvbbit && !paused && workspaceActive,
+    resetKey: activeConnectionId,
+  })
 
   const runTest = useCallback(async () => {
     if (!activeConnectionId) return

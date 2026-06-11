@@ -13,6 +13,7 @@ import {
   RefreshCw,
   X,
 } from "@/lib/icons"
+import { usePolling } from "@/lib/desktop/use-polling"
 import { cn } from "@/lib/utils"
 import {
   fetchDuckCapability,
@@ -142,14 +143,10 @@ export function DuckWindow({ activeConnectionId, hasRvbbit, workspaceActive = tr
     setUpdatedAt(Date.now())
   }, [activeConnectionId, cap])
 
-  useEffect(() => {
-    if (!activeConnectionId || !cap?.available || paused || !workspaceActive) return
-    let cancelled = false
-    const run = async () => { if (!cancelled) await poll() }
-    void run()
-    const id = setInterval(() => void run(), intervalMs)
-    return () => { cancelled = true; clearInterval(id) }
-  }, [activeConnectionId, cap, paused, workspaceActive, intervalMs, poll])
+  usePolling(poll, intervalMs, {
+    enabled: !!activeConnectionId && !!cap?.available && !paused && workspaceActive,
+    resetKey: activeConnectionId,
+  })
 
   if (!hasRvbbit) {
     return <Centered icon={Boxes}>This connection has no <span className="font-mono">pg_rvbbit</span> extension.</Centered>

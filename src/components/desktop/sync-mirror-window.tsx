@@ -4,6 +4,7 @@ import { Fragment, useCallback, useEffect, useMemo, useState } from "react"
 import { useWorkspaceActive } from "./workspace-active-context"
 import { Activity, AlertTriangle, Check, ChevronRight, ClipboardCopy, Database, Plus, RefreshCw, Trash2, TrendingUp, X, Zap } from "@/lib/icons"
 import { cn } from "@/lib/utils"
+import { usePolling } from "@/lib/desktop/use-polling"
 import { SqlEditor } from "./sql-editor"
 import {
   buildUpsertSyncSql,
@@ -101,12 +102,9 @@ export function SyncMirrorWindow({ activeConnectionId }: { activeConnectionId: s
   }, [refreshRuns])
 
   // Poll while a run is in flight — sync_runs commits per table, so progress
-  // shows up live even while the CALL is still pending.
-  useEffect(() => {
-    if (!running || !workspaceActive) return
-    const h = setInterval(() => void refreshRuns(), 1500)
-    return () => clearInterval(h)
-  }, [running, refreshRuns, workspaceActive])
+  // shows up live even while the CALL is still pending. In-flight-guarded so a
+  // slow refresh can't queue a backlog that floods when the run finishes.
+  usePolling(refreshRuns, 1500, { enabled: running && workspaceActive })
 
   const selectedJob = useMemo(() => jobs.find((j) => j.jobName === selected) ?? null, [jobs, selected])
 
@@ -551,20 +549,18 @@ function SyncOverview({
     setLoading(false)
   }, [activeConnectionId])
 
+  // Reset to the loading state when the connection changes; usePolling owns the
+  // actual fetch (immediate + interval), so there's no double-load on mount.
   useEffect(() => {
-    setOv(null) // drop any prior data before the first fetch of this connection
+    setOv(null)
     setLoading(true)
-    void load()
-  }, [load])
+  }, [activeConnectionId])
 
   // Poll faster while a sweep is in flight (sync_runs commits per table, so
-  // progress is visible live); back off when idle.
+  // progress is visible live); back off when idle. In-flight-guarded so a slow
+  // overview fetch can't queue a backlog that floods when the sweep finishes.
   const running = ov?.status.running ?? false
-  useEffect(() => {
-    if (!workspaceActive) return
-    const h = setInterval(() => void load(), running ? 2000 : 6000)
-    return () => clearInterval(h)
-  }, [load, workspaceActive, running])
+  usePolling(load, running ? 2000 : 6000, { enabled: workspaceActive, resetKey: activeConnectionId })
 
   if (loading && !ov) {
     return <div className="flex flex-1 items-center justify-center text-[11px] text-chrome-text/50">Loading overview…</div>

@@ -1,7 +1,8 @@
 "use client"
 
-import { useCallback, useEffect, useState } from "react"
+import { useCallback, useState } from "react"
 import { useWorkspaceActive } from "./workspace-active-context"
+import { usePolling } from "@/lib/desktop/use-polling"
 import {
   AlertTriangle,
   Brain,
@@ -65,23 +66,10 @@ export function WarrenJobDetailWindow({
   }, [activeConnectionId, payload.jobId])
 
   // initial + polling-while-non-terminal
-  useEffect(() => {
-    let cancelled = false
-    const run = async () => {
-      if (cancelled) return
-      await poll()
-    }
-    void run()
-    if (!activeConnectionId || !workspaceActive) return () => { cancelled = true }
-    const id = setInterval(() => {
-      if (terminal) return
-      void poll()
-    }, 2000)
-    return () => {
-      cancelled = true
-      clearInterval(id)
-    }
-  }, [activeConnectionId, terminal, poll, workspaceActive])
+  usePolling(poll, 2000, {
+    enabled: !!activeConnectionId && workspaceActive && !terminal,
+    resetKey: activeConnectionId,
+  })
 
   if (!hasRvbbit) {
     return (

@@ -57,6 +57,7 @@ import {
   CapabilityTypeWash,
   capabilityTypeStyle,
 } from "./capability-type-visuals"
+import { usePolling } from "@/lib/desktop/use-polling"
 
 interface CapabilitiesWindowProps {
   activeConnectionId: string | null
@@ -174,38 +175,30 @@ export function CapabilitiesWindow({
     }
   }, [activeConnectionId, hasRvbbit, pollInstalled])
 
-  useEffect(() => {
-    if (!activeConnectionId || !hasRvbbit || paused) return
-    const id = setInterval(() => void pollInstalled(), intervalMs)
-    return () => clearInterval(id)
-  }, [activeConnectionId, hasRvbbit, paused, intervalMs, pollInstalled])
+  usePolling(pollInstalled, intervalMs, {
+    enabled: !!activeConnectionId && !!hasRvbbit && !paused,
+    resetKey: activeConnectionId,
+  })
 
   // ── warren availability (light probe, longer interval) ──
-  useEffect(() => {
-    if (!activeConnectionId || !hasRvbbit) return
-    let cancelled = false
-    const probe = async () => {
-      const [r, inv] = await Promise.all([
-        fetchWarrenAvailability(activeConnectionId),
-        fetchWarrenInventory(activeConnectionId),
-      ])
-      if (cancelled) return
-      setWarrenAvail(r)
-      setWarrenInventory(inv.rows)
-    }
-    void probe()
-    const id = setInterval(() => void probe(), 15_000)
-    return () => {
-      cancelled = true
-      clearInterval(id)
-    }
-  }, [activeConnectionId, hasRvbbit])
+  const probeWarren = useCallback(async () => {
+    if (!activeConnectionId) return
+    const [r, inv] = await Promise.all([
+      fetchWarrenAvailability(activeConnectionId),
+      fetchWarrenInventory(activeConnectionId),
+    ])
+    setWarrenAvail(r)
+    setWarrenInventory(inv.rows)
+  }, [activeConnectionId])
+  usePolling(probeWarren, 15_000, {
+    enabled: !!activeConnectionId && !!hasRvbbit,
+    resetKey: activeConnectionId,
+  })
 
-  useEffect(() => {
-    if (!activeConnectionId || !hasRvbbit || paused) return
-    const id = setInterval(() => void pollWarrenInventory(), intervalMs)
-    return () => clearInterval(id)
-  }, [activeConnectionId, hasRvbbit, paused, intervalMs, pollWarrenInventory])
+  usePolling(pollWarrenInventory, intervalMs, {
+    enabled: !!activeConnectionId && !!hasRvbbit && !paused,
+    resetKey: activeConnectionId,
+  })
 
   // ── semantic re-rank: debounced embed-and-rank for the current query ──
   useEffect(() => {

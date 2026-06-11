@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react"
 import { useWorkspaceActive } from "./workspace-active-context"
+import { usePolling } from "@/lib/desktop/use-polling"
 import { Activity, AlertTriangle, Boxes, Brain, FileCode2, Pause, Play, RefreshCw } from "@/lib/icons"
 import { cn } from "@/lib/utils"
 import { fetchSpecialists, type RvbbitSpecialist } from "@/lib/rvbbit/operators"
@@ -136,11 +137,10 @@ export function SpecialistsWindow({
     }
   }, [activeConnectionId, hasRvbbit, loadStatic, pollCalls])
 
-  useEffect(() => {
-    if (!activeConnectionId || !hasRvbbit || paused || !workspaceActive) return
-    const id = setInterval(() => void pollCalls(), intervalMs)
-    return () => clearInterval(id)
-  }, [activeConnectionId, hasRvbbit, paused, intervalMs, pollCalls, workspaceActive])
+  usePolling(pollCalls, intervalMs, {
+    enabled: !!activeConnectionId && hasRvbbit && !paused && workspaceActive,
+    resetKey: activeConnectionId,
+  })
 
   const model = (s: RvbbitSpecialist): string =>
     health.get(s.name)?.reported_model ??

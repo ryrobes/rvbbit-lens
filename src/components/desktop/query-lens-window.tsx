@@ -41,6 +41,7 @@ import {
 } from "@/lib/rvbbit/lens"
 import { QueryLensOverview } from "./query-lens-overview"
 import { X } from "@/lib/icons"
+import { usePolling } from "@/lib/desktop/use-polling"
 import type { KgEntitySource, KgSourceContext, QueryLensPayload } from "@/lib/desktop/types"
 
 interface QueryLensWindowProps {
@@ -145,20 +146,18 @@ export function QueryLensWindow({
 
   // Poll recent list (the trace is historical, so it only refreshes
   // when the user picks a different query or hits reload).
-  useEffect(() => {
-    if (!activeConnectionId || !hasRvbbit || paused || !workspaceActive) return
-    const id = setInterval(() => void loadRecent(), intervalMs)
-    return () => clearInterval(id)
-  }, [activeConnectionId, hasRvbbit, paused, intervalMs, loadRecent, workspaceActive])
+  usePolling(loadRecent, intervalMs, {
+    enabled: !!activeConnectionId && hasRvbbit && !paused && workspaceActive,
+    resetKey: activeConnectionId,
+  })
 
   // Poll overview on a longer cadence — it aggregates a 24h window, so
   // a tight refresh would mostly redraw the same chart. 15s keeps the
   // dashboard feeling alive without thrashing.
-  useEffect(() => {
-    if (!activeConnectionId || !hasRvbbit || paused || !workspaceActive) return
-    const id = setInterval(() => void loadOverview(), 15_000)
-    return () => clearInterval(id)
-  }, [activeConnectionId, hasRvbbit, paused, loadOverview, workspaceActive])
+  usePolling(loadOverview, 15_000, {
+    enabled: !!activeConnectionId && hasRvbbit && !paused && workspaceActive,
+    resetKey: activeConnectionId,
+  })
 
   const selectQuery = (qid: string) => {
     // Clicking the already-selected row toggles back to the overview

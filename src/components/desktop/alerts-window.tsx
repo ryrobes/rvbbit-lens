@@ -37,6 +37,7 @@ import {
   type PreviewRow,
 } from "@/lib/rvbbit/alerts"
 import type { AlertsPayload } from "@/lib/desktop/types"
+import { usePolling } from "@/lib/desktop/use-polling"
 
 interface AlertsWindowProps {
   payload: AlertsPayload
@@ -1514,22 +1515,17 @@ export function AlertsWindow({ payload, activeConnectionId, hasRvbbit, onChangeP
   }, [activeConnectionId, selected])
 
   // initial + polled load
-  useEffect(() => {
-    if (!wsActive || !activeConnectionId || !hasRvbbit) return
-    let cancelled = false
-    const tick = async () => {
-      if (cancelled) return
-      setNow(Date.now())
-      await loadRules()
-      await loadDetail()
-    }
-    void tick()
-    const id = setInterval(() => void tick(), 4000)
-    return () => {
-      cancelled = true
-      clearInterval(id)
-    }
-  }, [wsActive, activeConnectionId, hasRvbbit, loadRules, loadDetail])
+  const tick = useCallback(async () => {
+    setNow(Date.now())
+    await loadRules()
+    await loadDetail()
+  }, [loadRules, loadDetail])
+  usePolling(tick, 4000, {
+    enabled: wsActive && !!activeConnectionId && hasRvbbit,
+    // include `selected` so picking a rule refetches its detail immediately (the old
+    // effect re-armed on loadDetail's identity, which changes with `selected`).
+    resetKey: `${activeConnectionId ?? ""}::${selected ?? ""}`,
+  })
 
   const act = useCallback(
     async (fn: () => Promise<string | null>) => {
