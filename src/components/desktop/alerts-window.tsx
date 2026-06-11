@@ -425,13 +425,27 @@ function SweepHeartbeat({ sweeps }: { sweeps: AlertSweepRun[] }) {
 
 // ── event log ─────────────────────────────────────────────────────────────────
 
-function EventLog({ events }: { events: AlertEvent[] }) {
+function EventLog({
+  events,
+  showRule = false,
+  title = "Firing log",
+  maxHClass = "max-h-44",
+  onPickRule,
+}: {
+  events: AlertEvent[]
+  /** Render the originating rule name (for the global cross-rule log). */
+  showRule?: boolean
+  title?: string
+  maxHClass?: string
+  onPickRule?: (rule: string) => void
+}) {
   return (
     <div className="rounded-md border border-chrome-border bg-doc-bg/40">
-      <div className="border-b border-chrome-border/60 px-3 py-1.5 text-[11px] font-medium text-foreground">
-        Firing log
+      <div className="flex items-center border-b border-chrome-border/60 px-3 py-1.5 text-[11px] font-medium text-foreground">
+        {title}
+        <span className="ml-auto text-[10px] font-normal text-chrome-text/45">{events.length}</span>
       </div>
-      <div className="max-h-44 overflow-auto">
+      <div className={cn(maxHClass, "overflow-auto")}>
         {events.length === 0 ? (
           <div className="px-3 py-4 text-center text-[11px] text-chrome-text/45">no fires yet</div>
         ) : (
@@ -442,6 +456,19 @@ function EventLog({ events }: { events: AlertEvent[] }) {
                   className="h-2 w-2 shrink-0 rounded-full"
                   style={{ background: e.status === "fired" ? statusColor("fail") : "var(--danger)" }}
                 />
+                {showRule ? (
+                  <button
+                    type="button"
+                    onClick={onPickRule ? () => onPickRule(e.ruleName) : undefined}
+                    className={cn(
+                      "w-28 shrink-0 truncate text-left font-medium text-foreground",
+                      onPickRule && "hover:text-rvbbit-accent",
+                    )}
+                    title={e.ruleName}
+                  >
+                    {e.ruleName}
+                  </button>
+                ) : null}
                 <span className="w-20 shrink-0 truncate font-mono text-chrome-text/80">{e.entityKey || "·"}</span>
                 <span className="shrink-0 text-chrome-text/55">{e.transition}</span>
                 <span
@@ -1253,6 +1280,194 @@ function RuleEditor({
   )
 }
 
+// ── operational overview (shown when no rule is selected) ──────────────────────
+
+function StatTile({
+  label,
+  value,
+  tone,
+  sub,
+}: {
+  label: string
+  value: React.ReactNode
+  tone?: "danger" | "warning" | "accent"
+  sub?: string
+}) {
+  const color =
+    tone === "danger" ? "var(--danger)" : tone === "warning" ? "var(--warning)" : tone === "accent" ? "var(--rvbbit-accent)" : "var(--foreground)"
+  return (
+    <div className="rounded-md border border-chrome-border bg-doc-bg/40 px-3 py-2">
+      <div className="text-[9px] uppercase tracking-wider text-chrome-text/50">{label}</div>
+      <div className="mt-0.5 text-[18px] font-semibold tabular-nums leading-none" style={{ color }}>
+        {value}
+      </div>
+      {sub ? <div className="mt-0.5 text-[10px] text-chrome-text/45">{sub}</div> : null}
+    </div>
+  )
+}
+
+/**
+ * The default landing for the Alerts cockpit: an at-a-glance read of the
+ * alert *system's* operational health (kill-switch, sweep cadence per tier,
+ * action-queue depth, recent fires/errors) plus a cross-rule firing log that
+ * doubles as a jump-off into any rule.
+ */
+function AlertsOverview({
+  rules,
+  enabled,
+  events,
+  sweeps,
+  now,
+  onPickRule,
+}: {
+  rules: AlertRule[]
+  enabled: boolean
+  events: AlertEvent[]
+  sweeps: AlertSweepRun[]
+  now: number
+  onPickRule: (rule: string) => void
+}) {
+  const [filter, setFilter] = useState("")
+
+  const agg = useMemo(() => {
+    const enabledCount = rules.filter((r) => r.enabled).length
+    const mutedCount = rules.filter((r) => r.muted).length
+    const breachingEntities = rules.reduce((s, r) => s + r.breaching, 0)
+    const rulesBreaching = rules.filter((r) => r.breaching > 0).length
+    const pendingActions = rules.reduce((s, r) => s + r.pending, 0)
+    const lastFireMs = rules.reduce<number>((m, r) => Math.max(m, r.lastFiredMs ?? 0), 0) || null
+    const recentErrors = events.filter((e) => e.error || e.status !== "fired").length
+    const recentFires = events.filter((e) => e.status === "fired").length
+    return { enabledCount, mutedCount, breachingEntities, rulesBreaching, pendingActions, lastFireMs, recentErrors, recentFires }
+  }, [rules, events])
+
+  // Per-tier sweep cadence: derive a "typical interval" from the gaps between
+  // consecutive ticks and flag a tier whose last tick is overdue — a stalled
+  // cron worker shows up here even though everything else looks fine.
+  const tiers = useMemo(() => {
+    const byTier = new Map<string, AlertSweepRun[]>()
+    for (const s of sweeps) {
+      const t = s.tier || "?"
+      const list = byTier.get(t) ?? []
+      list.push(s)
+      byTier.set(t, list)
+    }
+    return [...byTier.entries()]
+      .map(([tier, runs]) => {
+        const sorted = runs.filter((r) => r.startedMs != null).sort((a, b) => b.startedMs! - a.startedMs!)
+        const lastMs = sorted[0]?.startedMs ?? null
+        const gaps: number[] = []
+        for (let i = 0; i < sorted.length - 1; i++) gaps.push(sorted[i].startedMs! - sorted[i + 1].startedMs!)
+        gaps.sort((a, b) => a - b)
+        const typical = gaps.length ? gaps[Math.floor(gaps.length / 2)] : null
+        const ageMs = lastMs != null ? now - lastMs : null
+        // Only flag overdue when we know the tier's typical cadence; without a
+        // baseline, a generous 5-min floor avoids false alarms on slow tiers.
+        const stalled = ageMs != null && (typical != null ? ageMs > typical * 2.5 + 5000 : ageMs > 300_000)
+        return { tier, lastMs, ageMs, typical, stalled, ticks: runs.length }
+      })
+      .sort((a, b) => a.tier.localeCompare(b.tier))
+  }, [sweeps, now])
+
+  const filtered = useMemo(() => {
+    const q = filter.trim().toLowerCase()
+    if (!q) return events
+    return events.filter(
+      (e) =>
+        e.ruleName.toLowerCase().includes(q) ||
+        e.entityKey.toLowerCase().includes(q) ||
+        e.status.toLowerCase().includes(q) ||
+        (e.error ?? "").toLowerCase().includes(q),
+    )
+  }, [events, filter])
+
+  return (
+    <div className="flex flex-col gap-3">
+      {/* system stat strip */}
+      <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-5">
+        <StatTile
+          label="System"
+          value={enabled ? "Armed" : "Paused"}
+          tone={enabled ? undefined : "danger"}
+          sub={`${rules.length} rules · ${agg.enabledCount} on · ${agg.mutedCount} muted`}
+        />
+        <StatTile
+          label="Breaching"
+          value={agg.breachingEntities}
+          tone={agg.breachingEntities > 0 ? "danger" : undefined}
+          sub={`across ${agg.rulesBreaching} rule${agg.rulesBreaching === 1 ? "" : "s"}`}
+        />
+        <StatTile
+          label="Queue depth"
+          value={agg.pendingActions}
+          tone={agg.pendingActions > 0 ? "warning" : undefined}
+          sub="pending actions"
+        />
+        <StatTile
+          label="Recent fires"
+          value={agg.recentFires}
+          tone={agg.recentErrors > 0 ? "warning" : "accent"}
+          sub={agg.recentErrors > 0 ? `${agg.recentErrors} errored` : "last 50 events"}
+        />
+        <StatTile label="Last fire" value={agg.lastFireMs ? fmtAgo(agg.lastFireMs) : "—"} />
+      </div>
+
+      {/* sweep cadence per tier */}
+      <div className="rounded-md border border-chrome-border bg-doc-bg/40 p-3">
+        <div className="mb-2 flex items-center gap-1.5 text-[11px] font-medium text-foreground">
+          <Activity className="h-3.5 w-3.5 text-rvbbit-accent" /> Sweep cadence
+          <span className="ml-auto text-[10px] font-normal text-chrome-text/45">last tick per tier</span>
+        </div>
+        {tiers.length === 0 ? (
+          <div className="py-2 text-center text-[11px] text-chrome-text/40">no sweeps recorded yet</div>
+        ) : (
+          <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+            {tiers.map((t) => (
+              <div
+                key={t.tier}
+                className="flex items-center gap-2 rounded border px-2 py-1.5"
+                style={{ borderColor: t.stalled ? "color-mix(in oklch, var(--danger) 50%, transparent)" : "var(--chrome-border)" }}
+                title={t.typical != null ? `typical interval ≈ ${fmtDur(t.typical)} · ${t.ticks} ticks` : `${t.ticks} ticks`}
+              >
+                <span
+                  className="h-2 w-2 shrink-0 rounded-full"
+                  style={{ background: t.stalled ? "var(--danger)" : "var(--success)" }}
+                />
+                <span className="text-[11px] font-medium uppercase tracking-wide text-foreground">{t.tier}</span>
+                <span className="ml-auto text-[10px] tabular-nums text-chrome-text/55">
+                  {t.ageMs != null ? fmtAgo(t.lastMs) : "—"}
+                  {t.stalled ? <span className="ml-1 text-danger">stalled?</span> : null}
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <SweepHeartbeat sweeps={sweeps} />
+
+      {/* cross-rule firing log with a filter */}
+      <div className="flex items-center gap-2">
+        <span className="text-[11px] font-medium text-foreground">Activity log</span>
+        <input
+          value={filter}
+          onChange={(e) => setFilter(e.target.value)}
+          placeholder="filter by rule, entity, status, error…"
+          className="ml-auto h-6 w-64 rounded border border-chrome-border bg-doc-bg/40 px-2 text-[11px] text-foreground outline-none focus:border-rvbbit-accent/50"
+        />
+      </div>
+      <EventLog events={filtered} showRule title="All rules" maxHClass="max-h-[40vh]" onPickRule={onPickRule} />
+    </div>
+  )
+}
+
+function fmtDur(ms: number): string {
+  const s = Math.round(ms / 1000)
+  if (s < 90) return `${s}s`
+  if (s < 5400) return `${Math.round(s / 60)}m`
+  return `${Math.round(s / 3600)}h`
+}
+
 // ── main cockpit ──────────────────────────────────────────────────────────────
 
 export function AlertsWindow({ payload, activeConnectionId, hasRvbbit, onChangePayload, onOpenSqlData }: AlertsWindowProps) {
@@ -1281,20 +1496,17 @@ export function AlertsWindow({ payload, activeConnectionId, hasRvbbit, onChangeP
     setRules(r.rules)
     setEnabled(r.enabled)
     setError(r.error)
-    // auto-select the most-active rule (most breaching) so the cockpit opens on
-    // something happening — falling back to the first rule.
-    if (!selected && r.rules.length > 0) {
-      const pick = [...r.rules].sort((a, b) => b.breaching - a.breaching)[0]
-      onChangePayload((p) => ({ ...p, rule: pick.name }))
-    }
-  }, [activeConnectionId, selected, onChangePayload])
+    // No auto-select: a fresh window lands on the operational Overview so you
+    // see the system's health first. Click a rule (or a log row) to drill in.
+  }, [activeConnectionId])
 
   const loadDetail = useCallback(async () => {
     if (!activeConnectionId) return
     const [st, ev, sw] = await Promise.all([
       selected ? fetchAlertState(activeConnectionId, selected) : Promise.resolve({ entities: [], error: null }),
-      fetchAlertEvents(activeConnectionId, selected, 50),
-      fetchAlertSweepRuns(activeConnectionId, 40),
+      // Overview pulls a deeper cross-rule log; per-rule view stays lean.
+      fetchAlertEvents(activeConnectionId, selected, selected ? 50 : 200),
+      fetchAlertSweepRuns(activeConnectionId, selected ? 40 : 150),
     ])
     setEntities(st.entities)
     setEvents(ev.events)
@@ -1410,9 +1622,9 @@ export function AlertsWindow({ payload, activeConnectionId, hasRvbbit, onChangeP
           ) : null}
           <button
             type="button"
-            disabled={busy || !rule}
+            disabled={busy}
             onClick={() => void doSweep(tier)}
-            title={`Run a ${tier}-tier sweep now`}
+            title={rule ? `Run a ${tier}-tier sweep now` : "Run a normal-tier sweep now"}
             className="inline-flex items-center gap-1 rounded border border-chrome-border px-2 py-0.5 text-[11px] text-chrome-text/80 hover:bg-foreground/[0.06] disabled:opacity-40"
           >
             <Play className="h-3 w-3" /> Sweep
@@ -1441,6 +1653,22 @@ export function AlertsWindow({ payload, activeConnectionId, hasRvbbit, onChangeP
           <button
             type="button"
             onClick={() => {
+              setEditing(false)
+              setEditTarget(null)
+              onChangePayload((p) => ({ ...p, rule: undefined }))
+            }}
+            title="System overview — sweep cadence, queue depth & the cross-rule activity log"
+            className={cn(
+              "flex w-full items-center gap-1.5 border-b border-chrome-border/40 px-2.5 py-1.5 text-left text-[11px] font-medium transition-colors",
+              !editing && !selected ? "bg-rvbbit-accent/15 text-rvbbit-accent" : "text-chrome-text/70 hover:bg-foreground/[0.04]",
+            )}
+          >
+            <Activity className="h-3.5 w-3.5" />
+            Overview
+          </button>
+          <button
+            type="button"
+            onClick={() => {
               setEditTarget(null)
               setEditing(true)
             }}
@@ -1460,7 +1688,8 @@ export function AlertsWindow({ payload, activeConnectionId, hasRvbbit, onChangeP
                 type="button"
                 onClick={() => {
                   setEditing(false)
-                  onChangePayload((p) => ({ ...p, rule: r.name }))
+                  // Re-clicking the selected rule toggles back to the Overview.
+                  onChangePayload((p) => ({ ...p, rule: sel ? undefined : r.name }))
                 }}
                 className={cn(
                   "flex w-full flex-col gap-0.5 border-b border-chrome-border/30 px-2.5 py-1.5 text-left transition-colors",
@@ -1520,7 +1749,14 @@ export function AlertsWindow({ payload, activeConnectionId, hasRvbbit, onChangeP
               }}
             />
           ) : !rule ? (
-            <div className="grid h-full place-items-center text-[12px] text-chrome-text/45">Select an alert.</div>
+            <AlertsOverview
+              rules={rules}
+              enabled={enabled}
+              events={events}
+              sweeps={sweeps}
+              now={now}
+              onPickRule={(name) => onChangePayload((p) => ({ ...p, rule: name }))}
+            />
           ) : (
             <div className="flex flex-col gap-3">
               {/* anatomy */}
