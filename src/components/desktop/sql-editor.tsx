@@ -25,6 +25,9 @@ interface SqlEditorProps {
   onRun?: () => void
   height?: string | number
   readOnly?: boolean
+  /** Focus the editor on mount. Default true; pass false for inline read-only
+   *  previews that must not steal focus from (or scroll away) the host form. */
+  autoFocus?: boolean
   fontSize?: number
   /** "plain" drops SQL syntax highlighting + autocomplete + line numbers — for
    *  the natural-language "Ask" mode where the content is a question, not SQL.
@@ -54,6 +57,7 @@ export function SqlEditor({
   onRun,
   height = "100%",
   readOnly,
+  autoFocus = true,
   fontSize = 13,
   language = "sql",
   wrap = false,
@@ -121,12 +125,12 @@ export function SqlEditor({
     return exts
   }, [onRun, plain, isJson, wrap, schema, defaultSchema, completionSources, blockReferences])
 
-  // Auto-focus on first mount.
+  // Auto-focus on first mount (skipped for read-only previews).
   useEffect(() => {
-    if (ref.current?.view) {
+    if (autoFocus && ref.current?.view) {
       ref.current.view.focus()
     }
-  }, [])
+  }, [autoFocus])
 
   return (
     <div className="h-full w-full overflow-hidden" style={{ fontSize }}>

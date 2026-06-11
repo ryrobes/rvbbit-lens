@@ -106,17 +106,25 @@ export async function listSyncJobs(connectionId: string): Promise<{ jobs: SyncJo
   }
 }
 
+/** The exact DDL that creates/updates a sync job — the single source of truth
+ *  shared by upsertSyncJob() and the editor's copy-pasteable SQL preview, so the
+ *  shown SQL is always what actually runs. `pretty` formats the spec JSON over
+ *  multiple lines for the human-readable preview (functionally identical jsonb). */
+export function buildUpsertSyncSql(jobName: string, spec: SyncSpec, enabled = true, pretty = false): string {
+  const json = pretty ? JSON.stringify(spec, null, 2) : JSON.stringify(spec)
+  return `INSERT INTO rvbbit.sync_jobs (job_name, enabled, spec)
+VALUES (${q(jobName)}, ${enabled}, ${q(json)}::jsonb)
+ON CONFLICT (job_name) DO UPDATE
+  SET enabled = EXCLUDED.enabled, spec = EXCLUDED.spec, updated_at = now();`
+}
+
 export async function upsertSyncJob(
   connectionId: string,
   jobName: string,
   spec: SyncSpec,
   enabled = true,
 ): Promise<{ ok: boolean; error: string | null }> {
-  const sql = `INSERT INTO rvbbit.sync_jobs (job_name, enabled, spec)
-    VALUES (${q(jobName)}, ${enabled}, ${q(JSON.stringify(spec))}::jsonb)
-    ON CONFLICT (job_name) DO UPDATE
-      SET enabled = EXCLUDED.enabled, spec = EXCLUDED.spec, updated_at = now()`
-  const r = await run(connectionId, sql)
+  const r = await run(connectionId, buildUpsertSyncSql(jobName, spec, enabled))
   return r.ok ? { ok: true, error: null } : { ok: false, error: r.error }
 }
 

@@ -2,9 +2,11 @@
 
 import { Fragment, useCallback, useEffect, useMemo, useState } from "react"
 import { useWorkspaceActive } from "./workspace-active-context"
-import { Check, ChevronRight, Database, Plus, RefreshCw, Trash2, X } from "@/lib/icons"
+import { Check, ChevronRight, ClipboardCopy, Database, Plus, RefreshCw, Trash2, X } from "@/lib/icons"
 import { cn } from "@/lib/utils"
+import { SqlEditor } from "./sql-editor"
 import {
+  buildUpsertSyncSql,
   deleteSyncJob,
   emptySpec,
   listSyncJobs,
@@ -360,6 +362,7 @@ function JobForm({
   const [name, setName] = useState(initialName)
   const [spec, setSpec] = useState<SyncSpec>(initialSpec)
   const [tablesText, setTablesText] = useState(initialSpec.tables.join(", "))
+  const [copied, setCopied] = useState(false)
 
   const setSrv = (k: keyof SyncSpec["server"], v: string | number) =>
     setSpec((s) => ({ ...s, server: { ...s.server, [k]: v } }))
@@ -367,10 +370,31 @@ function JobForm({
   const fieldCls = "w-full rounded border border-chrome-border bg-background/70 px-1.5 py-1 text-[11px] text-foreground focus:border-rvbbit-accent/60 focus:outline-none"
   const labelCls = "block text-[10px] uppercase tracking-wide text-chrome-text/50"
 
+  // The spec exactly as Save would persist it (tablesText parsed identically).
+  const previewSpec = useMemo<SyncSpec>(
+    () => ({ ...spec, tables: tablesText.split(",").map((t) => t.trim()).filter(Boolean) }),
+    [spec, tablesText],
+  )
+  // Derive the preview from the SAME builder upsertSyncJob() runs, so the shown
+  // DDL can never drift from what Save actually executes.
+  const ddl = useMemo(
+    () => buildUpsertSyncSql(name.trim() || "job_name", previewSpec, true, true),
+    [name, previewSpec],
+  )
+
   const submit = () => {
-    const tables = tablesText.split(",").map((t) => t.trim()).filter(Boolean)
-    onSave(name, { ...spec, tables })
+    onSave(name, previewSpec)
   }
+
+  const copyDdl = useCallback(() => {
+    void navigator.clipboard
+      ?.writeText(ddl)
+      .then(() => {
+        setCopied(true)
+        window.setTimeout(() => setCopied(false), 1200)
+      })
+      .catch(() => {})
+  }, [ddl])
 
   return (
     <div className="min-h-0 flex-1 overflow-auto p-3">
@@ -402,6 +426,26 @@ function JobForm({
         <button type="button" onClick={onCancel} className="inline-flex items-center gap-1 rounded px-2 py-1 text-[11px] text-chrome-text hover:bg-foreground/10 hover:text-foreground">
           <ChevronRight className="h-3 w-3 rotate-180" /> Cancel
         </button>
+      </div>
+
+      {/* Reveal the SQL behind the form: the exact upsert DDL, built from the same
+          helper Save runs (so it can't drift). Copy it, then tweak job_name /
+          dest_schema / tables per schema to bulk-create many mirrors without a
+          bespoke import UI. Editing fields above updates this live. */}
+      <div className="mt-3 border-t border-chrome-border/60 pt-2">
+        <div className="mb-1 flex items-center justify-between">
+          <span className={labelCls}>SQL DDL — copy &amp; paste to bulk-create</span>
+          <button
+            type="button"
+            onClick={copyDdl}
+            className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-chrome-text hover:bg-foreground/10 hover:text-foreground"
+          >
+            {copied ? <><Check className="h-3 w-3 text-rvbbit-accent" /> copied</> : <><ClipboardCopy className="h-3 w-3" /> copy</>}
+          </button>
+        </div>
+        <div className="overflow-hidden rounded border border-chrome-border bg-background/40">
+          <SqlEditor value={ddl} onChange={() => {}} readOnly autoFocus={false} wrap compact language="sql" height={180} fontSize={11} />
+        </div>
       </div>
     </div>
   )
