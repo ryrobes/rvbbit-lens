@@ -206,8 +206,9 @@ export interface SyncSweep {
   jobs: number
   tables: number
   errors: number
+  imports: number    // # jobs that re-imported (action='import') this sweep
+  importMs: number   // total IMPORT FOREIGN SCHEMA time across those jobs
   rowsLoaded: number
-  workMs: number
 }
 export interface SyncJobStat {
   jobName: string
@@ -216,10 +217,11 @@ export interface SyncJobStat {
   tablesSynced: number | null
   errors: number | null
   rowsLoaded: number | null
-  lastDurMs: number | null    // table-span: first table start → last table end (EXCLUDES provision/IMPORT, which run_sync logs no row for)
-  lastWorkMs: number | null   // sum of per-table elapsed in that pass
-  overheadMs: number | null   // table-span − table work = inter-table commit/heartbeat gaps; NOT provision/IMPORT time (that phase has no row, so it can't be measured here)
-  trend: number[]             // recent table-span durations (ms), oldest→newest
+  reImported: boolean         // did the last sweep re-import (vs skip on unchanged schema)
+  importMs: number | null     // IMPORT FOREIGN SCHEMA time in that sweep (0/null = skipped)
+  provisionError: boolean     // last sweep failed in provisioning (fdw setup/import) — NOT a skip
+  lastDurMs: number | null    // wall span of the last sweep pass (includes the import row when re-imported)
+  trend: number[]             // recent sweep-span durations (ms), oldest→newest
 }
 export interface SyncLiveJob { jobName: string; tablesDone: number; tablesTotal: number | null; pct: number | null }
 export interface SyncSlowTable { jobName: string; sourceTable: string | null; rowsLoaded: number | null; elapsedMs: number | null; startedAt: number | null }
@@ -255,29 +257,31 @@ SELECT run_id::text AS run_id,
        extract(epoch FROM min(started_at))*1000 AS started_ms,
        extract(epoch FROM (max(started_at + make_interval(secs => coalesce(elapsed_ms,0)/1000.0)) - min(started_at)))*1000 AS wall_ms,
        count(DISTINCT job_name) AS jobs,
-       count(*) FILTER (WHERE action IS DISTINCT FROM 'error') AS tables,
+       count(*) FILTER (WHERE action NOT IN ('error','import')) AS tables,
        count(*) FILTER (WHERE action = 'error') AS errors,
-       coalesce(sum(rows_loaded),0) AS rows_loaded,
-       coalesce(sum(elapsed_ms),0) AS work_ms
+       count(*) FILTER (WHERE action = 'import') AS imports,
+       coalesce(sum(elapsed_ms) FILTER (WHERE action = 'import'),0) AS import_ms,
+       coalesce(sum(rows_loaded) FILTER (WHERE action NOT IN ('import')),0) AS rows_loaded
 FROM rvbbit.sync_runs GROUP BY run_id ORDER BY min(started_at) DESC LIMIT 20`
 
 const JOBSTATS_SQL = `
 WITH per_job_sweep AS (
   SELECT job_name, run_id, min(started_at) AS job_start,
          max(started_at + make_interval(secs => coalesce(elapsed_ms,0)/1000.0)) AS job_end,
-         count(*) FILTER (WHERE action IS DISTINCT FROM 'error') AS tables_synced,
+         count(*) FILTER (WHERE action NOT IN ('error','import')) AS tables_synced,
          count(*) FILTER (WHERE action = 'error') AS errors,
-         coalesce(sum(rows_loaded),0) AS rows_loaded,
-         coalesce(sum(elapsed_ms),0) AS work_ms
+         bool_or(action = 'import') AS reimported,
+         coalesce(sum(elapsed_ms) FILTER (WHERE action = 'import'),0) AS import_ms,
+         coalesce(sum(rows_loaded) FILTER (WHERE action NOT IN ('import')),0) AS rows_loaded,
+         bool_or(action = 'error' AND source_table IS NULL) AS provision_error
   FROM rvbbit.sync_runs GROUP BY job_name, run_id
 ), ranked AS (
   SELECT *, row_number() OVER (PARTITION BY job_name ORDER BY job_start DESC) AS rn FROM per_job_sweep
 )
 SELECT j.job_name, j.enabled,
        extract(epoch FROM j.last_run_at)*1000 AS last_run_ms,
-       r.tables_synced, r.errors, r.rows_loaded,
+       r.tables_synced, r.errors, r.rows_loaded, r.reimported, r.import_ms, r.provision_error,
        extract(epoch FROM (r.job_end - r.job_start))*1000 AS last_dur_ms,
-       r.work_ms AS last_work_ms,
        coalesce((SELECT jsonb_agg(round(extract(epoch FROM (job_end-job_start))*1000) ORDER BY job_start)
                  FROM ranked rr WHERE rr.job_name=j.job_name AND rr.rn<=12), '[]'::jsonb) AS trend
 FROM rvbbit.sync_jobs j
@@ -303,7 +307,7 @@ active_run AS (
   ORDER BY sr.started_at DESC LIMIT 1
 )
 SELECT j.job_name,
-       count(sr.*) FILTER (WHERE sr.action IS DISTINCT FROM 'error') AS tables_done,
+       count(sr.*) FILTER (WHERE sr.action NOT IN ('error','import')) AS tables_done,
        CASE WHEN jsonb_array_length(coalesce(j.spec->'tables','[]'::jsonb)) > 0
             THEN jsonb_array_length(j.spec->'tables')
             ELSE (SELECT count(*) FROM pg_foreign_table ft JOIN pg_class c ON c.oid=ft.ftrelid
@@ -314,7 +318,7 @@ JOIN rvbbit.sync_jobs j ON j.job_name=sr.job_name GROUP BY j.job_name, j.spec OR
 
 const SLOW_SQL = `
 SELECT job_name, source_table, rows_loaded, elapsed_ms, extract(epoch FROM started_at)*1000 AS started_ms
-FROM rvbbit.sync_runs WHERE action IS DISTINCT FROM 'error' AND elapsed_ms IS NOT NULL
+FROM rvbbit.sync_runs WHERE action NOT IN ('error','import') AND elapsed_ms IS NOT NULL
 ORDER BY elapsed_ms DESC NULLS LAST LIMIT 8`
 
 const ERRORS_SQL = `
@@ -358,25 +362,23 @@ export async function fetchSyncOverview(
       jobs: Number(r.jobs) || 0,
       tables: Number(r.tables) || 0,
       errors: Number(r.errors) || 0,
+      imports: Number(r.imports) || 0,
+      importMs: Number(r.import_ms) || 0,
       rowsLoaded: Number(r.rows_loaded) || 0,
-      workMs: Number(r.work_ms) || 0,
     })),
-    jobStats: (js as Ok).rows.map((r) => {
-      const dur = num(r.last_dur_ms)
-      const work = num(r.last_work_ms)
-      return {
-        jobName: String(r.job_name),
-        enabled: bool(r.enabled),
-        lastRunAt: num(r.last_run_ms),
-        tablesSynced: num(r.tables_synced),
-        errors: num(r.errors),
-        rowsLoaded: num(r.rows_loaded),
-        lastDurMs: dur,
-        lastWorkMs: work,
-        overheadMs: dur != null && work != null ? Math.max(0, dur - work) : null,
-        trend: numArr(r.trend),
-      }
-    }),
+    jobStats: (js as Ok).rows.map((r) => ({
+      jobName: String(r.job_name),
+      enabled: bool(r.enabled),
+      lastRunAt: num(r.last_run_ms),
+      tablesSynced: num(r.tables_synced),
+      errors: num(r.errors),
+      rowsLoaded: num(r.rows_loaded),
+      reImported: bool(r.reimported),
+      importMs: num(r.import_ms),
+      provisionError: bool(r.provision_error),
+      lastDurMs: num(r.last_dur_ms),
+      trend: numArr(r.trend),
+    })),
     liveJobs: (lj as Ok).rows.map((r) => {
       const done = Number(r.tables_done) || 0
       const total = num(r.tables_total)

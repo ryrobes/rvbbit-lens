@@ -44,6 +44,7 @@ interface RunGroup {
   startedAt: number | null
   rows: SyncRun[]
   errors: number
+  tables: number   // table syncs only (excludes 'error' + 'import' rows)
 }
 
 /** Group the per-table rows (already DESC by started_at) into their runs. A run
@@ -54,12 +55,13 @@ function groupByRun(runs: SyncRun[]): RunGroup[] {
     const key = r.runId ?? "?"
     const last = out[out.length - 1]
     if (last && last.runId === key) last.rows.push(r)
-    else out.push({ runId: key, startedAt: r.startedAt, rows: [r], errors: 0 })
+    else out.push({ runId: key, startedAt: r.startedAt, rows: [r], errors: 0, tables: 0 })
   }
   for (const g of out) {
     const times = g.rows.map((x) => x.startedAt).filter((t): t is number => t != null)
     g.startedAt = times.length ? Math.min(...times) : g.startedAt
     g.errors = g.rows.filter((x) => x.action === "error").length
+    g.tables = g.rows.filter((x) => x.action !== "error" && x.action !== "import").length
   }
   return out
 }
@@ -250,6 +252,7 @@ export function SyncMirrorWindow({ activeConnectionId }: { activeConnectionId: s
 function actionColor(a: string | null): string {
   switch (a) {
     case "snapshot": return "text-success bg-success/12"
+    case "import": return "text-rvbbit-accent bg-rvbbit-accent/12"
     case "empty": return "text-chrome-text/70 bg-foreground/[0.06]"
     case "error": return "text-danger bg-danger/12"
     default: return "text-chrome-text/70 bg-foreground/[0.06]"
@@ -337,7 +340,7 @@ function JobDetail({
                       <span className="font-medium text-foreground/85">{runTime(g.startedAt)}</span>
                       <span className="text-chrome-text/45">
                         {" · "}
-                        {g.rows.length} {g.rows.length === 1 ? "table" : "tables"}
+                        {g.tables} {g.tables === 1 ? "table" : "tables"}
                         {g.errors > 0 ? ` · ${g.errors} error${g.errors === 1 ? "" : "s"}` : ""}
                       </span>
                     </td>
@@ -475,11 +478,12 @@ function JobForm({
 
 // ── Overview dashboard ──────────────────────────────────────────────────
 // A single observability surface for "why is the sync slow?": live sweep status,
-// per-job timings (table-span + inter-table gaps), recent sweeps, and the slowest
-// tables + recent errors across all jobs. Derived entirely from
-// sync_runs/sync_jobs/sync_lock — see fetchSyncOverview. NOTE: run_sync logs no row
-// for the per-job fdw_setup + IMPORT FOREIGN SCHEMA phase, so that time is not in
-// any table-derived metric here (the live banner flags it as "importing…" instead).
+// per-job timings, re-import vs skip, recent sweeps, and the slowest tables + recent
+// errors across all jobs. Derived entirely from sync_runs/sync_jobs/sync_lock — see
+// fetchSyncOverview. run_sync now logs an action='import' row for the IMPORT FOREIGN
+// SCHEMA phase when it re-imports (shown in the "import" column + the recent-sweeps ↻
+// glyph; excluded from per-table counts/rows/slowest). Only fdw_setup_server and
+// skipped imports stay row-less; an in-progress import still shows as "importing…".
 
 function fmtDur(ms: number | null): string {
   if (ms == null) return "—"
@@ -647,8 +651,8 @@ function SyncOverview({
               <th className="py-1 text-right font-medium">last run</th>
               <th className="py-1 text-right font-medium">tables</th>
               <th className="py-1 text-right font-medium">rows</th>
-              <th className="py-1 text-right font-medium" title="table-span: first table start → last table end (excludes provision/IMPORT)">dur</th>
-              <th className="py-1 text-right font-medium" title="inter-table commit gap (table-span − summed table time). Does NOT include provisioning / IMPORT FOREIGN SCHEMA — run_sync logs no row for that phase.">gap</th>
+              <th className="py-1 text-right font-medium" title="wall span of the last sweep pass (now includes IMPORT FOREIGN SCHEMA when re-imported)">dur</th>
+              <th className="py-1 text-right font-medium" title="IMPORT FOREIGN SCHEMA time when the remote schema changed; 'skip' = schema unchanged so the re-import (a catalog-DDL storm) was avoided">import</th>
               <th className="py-1 text-right font-medium">err</th>
               <th className="py-1 pl-2 text-right font-medium">trend</th>
             </tr>
@@ -673,8 +677,11 @@ function SyncOverview({
                 <td className="py-1 text-right tabular-nums text-chrome-text/80">{j.tablesSynced ?? "—"}</td>
                 <td className="py-1 text-right tabular-nums text-chrome-text/80">{fmtCount(j.rowsLoaded)}</td>
                 <td className="py-1 text-right tabular-nums text-foreground/85">{fmtDur(j.lastDurMs)}</td>
-                <td className={cn("py-1 text-right tabular-nums", (j.overheadMs ?? 0) > 2000 ? "text-warning/90" : "text-chrome-text/40")}>
-                  {j.overheadMs != null && j.overheadMs > 500 ? fmtDur(j.overheadMs) : "—"}
+                <td
+                  className={cn("py-1 text-right tabular-nums", j.reImported ? "text-rvbbit-accent" : j.provisionError ? "text-danger/70" : "text-chrome-text/35")}
+                  title={j.reImported ? "re-imported the foreign schema (remote shape changed)" : j.provisionError ? "provisioning failed this run — see errors (not a skip)" : "schema unchanged — re-import skipped"}
+                >
+                  {j.reImported ? fmtDur(j.importMs) : j.provisionError ? "—" : "skip"}
                 </td>
                 <td className={cn("py-1 text-right tabular-nums", (j.errors ?? 0) > 0 ? "font-medium text-danger" : "text-chrome-text/35")}>{j.errors ?? 0}</td>
                 <td className="py-1 pl-2 text-right"><Sparkline values={j.trend} /></td>
@@ -697,7 +704,12 @@ function SyncOverview({
                 <tr key={s.runId} className="border-b border-chrome-border/25">
                   <td className="py-1 text-left text-chrome-text/70">{ago(s.startedAt)}</td>
                   <td className="py-1 text-right tabular-nums text-foreground/85">{fmtDur(s.wallMs)}</td>
-                  <td className="py-1 text-right tabular-nums text-chrome-text/60">{s.jobs}j · {s.tables}t</td>
+                  <td
+                    className="py-1 text-right tabular-nums text-chrome-text/60"
+                    title={s.imports > 0 ? `${s.imports} re-import${s.imports === 1 ? "" : "s"} · ${fmtDur(s.importMs)}` : "no re-imports (all schemas unchanged)"}
+                  >
+                    {s.jobs}j · {s.tables}t{s.imports > 0 ? <span className="text-rvbbit-accent"> · {s.imports}↻</span> : null}
+                  </td>
                   <td className="py-1 text-right tabular-nums text-chrome-text/60">{fmtCount(s.rowsLoaded)}</td>
                   <td className={cn("py-1 text-right tabular-nums", s.errors > 0 ? "text-danger" : "text-chrome-text/30")}>{s.errors > 0 ? `${s.errors}✕` : "ok"}</td>
                 </tr>
