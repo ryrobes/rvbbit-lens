@@ -42,6 +42,18 @@ export interface ExecuteOpts {
   readOnly?: boolean
   /** Run against a different database on the same server (e.g. pg_cron's home db). */
   database?: string
+  /**
+   * Per-query statement_timeout (ms) overriding the connection default (the
+   * pool's 30m DEFAULT_STATEMENT_TIMEOUT_MS). 0 disables the timeout entirely.
+   * Postgres arms statement_timeout once, when a query message arrives, from the
+   * session GUC at that instant — nothing inside the called function (set_config,
+   * a function SET clause, or COMMIT in a procedure) can move it afterward. So a
+   * long server-side job like rvbbit.catalog_crawl() must have the timeout set on
+   * the connection BEFORE the call, as its own statement. We do that here via a
+   * separate `SET` message, then RESET so the pooled connection's default is
+   * restored for the next borrower.
+   */
+  statementTimeout?: number
 }
 
 export async function executeQuery(
@@ -53,7 +65,15 @@ export async function executeQuery(
   const limit = opts.rowLimit ?? DEFAULT_ROW_LIMIT
   const client = await pool.connect()
   const start = Date.now()
+  // Override the connection's default statement_timeout for this one query, as a
+  // separate message so Postgres re-arms the timer from the new value (see
+  // ExecuteOpts.statementTimeout). RESET in `finally` keeps the pooled connection
+  // clean for the next borrower.
+  const overrideTimeout = Number.isFinite(opts.statementTimeout) && opts.statementTimeout! >= 0
   try {
+    if (overrideTimeout) {
+      await client.query(`SET statement_timeout = ${Math.floor(opts.statementTimeout!)}`)
+    }
     if (opts.readOnly) {
       await client.query("BEGIN READ ONLY")
     }
@@ -97,6 +117,9 @@ export async function executeQuery(
     }
     throw err
   } finally {
+    if (overrideTimeout) {
+      try { await client.query("RESET statement_timeout") } catch { /* ignore */ }
+    }
     client.release()
   }
 }

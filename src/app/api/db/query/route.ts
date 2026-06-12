@@ -10,6 +10,9 @@ interface Body {
   readOnly?: boolean
   /** Sibling-database override (same server, different db) — e.g. pg_cron's home db. */
   database?: string
+  /** Per-query statement_timeout (ms); 0 disables it. For long server-side jobs
+   *  like rvbbit.catalog_crawl() that must outlive the pool's 30m default. */
+  statementTimeout?: number
 }
 
 export async function POST(req: Request) {
@@ -22,6 +25,7 @@ export async function POST(req: Request) {
       rowLimit: body.rowLimit,
       readOnly: body.readOnly,
       database: body.database,
+      statementTimeout: body.statementTimeout,
     })
     return NextResponse.json({ ok: true, ...result })
   } catch (err) {

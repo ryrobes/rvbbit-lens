@@ -67,12 +67,17 @@ interface QueryErr {
   error: string
 }
 
-async function runQuery(connectionId: string, sql: string, rowLimit = 2000): Promise<QueryOk | QueryErr> {
+async function runQuery(
+  connectionId: string,
+  sql: string,
+  rowLimit = 2000,
+  opts: { statementTimeout?: number } = {},
+): Promise<QueryOk | QueryErr> {
   try {
     const res = await fetch("/api/db/query", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ connectionId, sql, rowLimit }),
+      body: JSON.stringify({ connectionId, sql, rowLimit, statementTimeout: opts.statementTimeout }),
     })
     return (await res.json()) as QueryOk | QueryErr
   } catch (e) {
@@ -248,6 +253,11 @@ export async function crawlCatalog(
   connectionId: string,
   opts: { schemas?: string[] | null; doEmbed?: boolean } = {},
 ): Promise<{ result?: CatalogCrawlResult; error?: string }> {
+  // The crawl fingerprints every table (count/distinct/quantiles per column +
+  // embeddings) and can run for many minutes over a large schema — well past the
+  // pool's 30m default statement_timeout. Disable the timeout for this call so it
+  // always runs to completion; a single pathological inner query can still be
+  // interrupted by the user (or the server) without that capping the whole crawl.
   const res = await runQuery(
     connectionId,
     `SELECT rvbbit.catalog_crawl(
@@ -256,6 +266,7 @@ export async function crawlCatalog(
        do_embed => ${opts.doEmbed === false ? "false" : "true"}
      ) AS result`,
     1,
+    { statementTimeout: 0 },
   )
   if (!res.ok) return { error: res.error }
   const raw = (res.rows[0]?.result ?? {}) as Record<string, unknown>
