@@ -33,6 +33,7 @@ import {
   isSyncJob,
   listCronJobs,
   listCronRuns,
+  runDetached,
   scheduleSql,
   setActiveSql,
   unscheduleSql,
@@ -163,22 +164,28 @@ export function SchedulerTray({ activeConnectionId, hasRvbbit, onOpenSql, onOpen
     [activeConnectionId, busy, reload, state?.cronDb],
   )
 
-  // Run a job's command immediately (ad-hoc). pg_cron has no "trigger now", so we
-  // just execute the SQL — note this does NOT create a cron.job_run_details entry
-  // (only scheduled runs do). Target the job's OWN database (its schedule_in_database
-  // target, where rvbbit lives), not the home db, since the command needs that schema.
+  // Run a job's command immediately (ad-hoc). pg_cron 1.6 has no "trigger now",
+  // so we launch the command ourselves — on a dedicated, statement_timeout-disabled
+  // connection, fire-and-forget, so long jobs (e.g. CALL catalog_crawl_run()) run
+  // for hours without the pool's 30-min timeout killing the parent CALL, and
+  // without tying up a pool slot. It runs in the background; watch progress
+  // out-of-band (e.g. rvbbit.catalog_crawl_progress). Closing Lens cancels it
+  // (durable per-table commits keep partial progress; the scheduled run is the
+  // unattended path). Not recorded in cron.job_run_details (only scheduled runs
+  // are). Target the job's OWN database (its schedule_in_database target, where
+  // rvbbit lives), not the home db, since the command needs that schema.
   const runNow = useCallback(
     async (job: CronJob) => {
       if (!activeConnectionId || running != null) return
       setRunning(job.jobid)
       setRunResult(null)
-      const started = Date.now()
-      const r = await exec(activeConnectionId, job.command, job.database || undefined)
-      const secs = ((Date.now() - started) / 1000).toFixed(1)
+      const r = await runDetached(activeConnectionId, job.command, job.database || undefined)
       setRunResult({
         jobid: job.jobid,
         ok: r.ok,
-        msg: r.ok ? `ran ✓ ${secs}s` : (r.error ?? "failed").slice(0, 120),
+        msg: r.ok
+          ? "started in background ✓ — runs with no timeout; watch progress"
+          : (r.error ?? "failed to start").slice(0, 120),
       })
       setRunning(null)
     },
@@ -639,7 +646,7 @@ function JobRow({
               <RefreshCw className="h-3.5 w-3.5 animate-spin" />
             </span>
           ) : (
-            <IconBtn icon={Zap} title="Run now (executes the command immediately; not recorded in cron history)" disabled={busy} onClick={onRunNow} />
+            <IconBtn icon={Zap} title="Run now (launches in the background with no timeout; watch progress; not recorded in cron history)" disabled={busy} onClick={onRunNow} />
           )}
           <IconBtn icon={job.active ? Pause : Play} title={job.active ? "Pause" : "Resume"} disabled={busy} onClick={() => onSetActive(!job.active)} active={job.active} />
           <IconBtn icon={Pencil} title="Edit" disabled={busy} onClick={onEdit} />

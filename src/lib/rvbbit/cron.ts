@@ -197,6 +197,28 @@ export async function exec(
   return r.ok ? { ok: true, error: null } : { ok: false, error: r.error }
 }
 
+/** Start a command on a dedicated, statement_timeout-disabled connection and
+ *  return as soon as it has launched (fire-and-forget) — for long jobs that must
+ *  run for hours without the pool's 30-min timeout killing them or tying up a
+ *  pool slot. Watch progress out-of-band (e.g. rvbbit.catalog_crawl_progress). */
+export async function runDetached(
+  connectionId: string,
+  sql: string,
+  database?: string,
+): Promise<{ ok: boolean; error: string | null }> {
+  try {
+    const res = await fetch("/api/db/run-detached", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ connectionId, sql, database }),
+    })
+    const j = (await res.json()) as { ok: boolean; error?: string }
+    return j.ok ? { ok: true, error: null } : { ok: false, error: j.error ?? "failed to start" }
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) }
+  }
+}
+
 /** Schedule a job in pg_cron's home db that RUNS in `targetDb` (where rvbbit lives).
  *  Uses cron.schedule_in_database so the home db ('postgres') need not have rvbbit. */
 export function scheduleSql(name: string, schedule: string, command: string, targetDb: string): string {
