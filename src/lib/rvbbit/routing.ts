@@ -674,6 +674,7 @@ export const ACCEL_STRATEGIES: AccelStrategy[] = [
 
 export interface AccelFreshnessRow {
   tableName: string
+  schema: string
   dirty: boolean
   authoritative: boolean
   opRunning: boolean
@@ -726,14 +727,16 @@ export interface AccelTickPlanRow {
 }
 
 const ACCEL_FRESHNESS_SQL =
-  "SELECT f.table_name, f.shadow_heap_dirty, f.parquet_authoritative, f.op_running, " +
+  "SELECT f.table_name, n.nspname AS schema, f.shadow_heap_dirty, f.parquet_authoritative, f.op_running, " +
   "f.lance_accelerated, f.seconds_dirty, f.seconds_since_refresh, f.last_refresh_at, " +
   "f.parquet_rows, f.row_groups, f.drift_rows, f.drift_ratio, f.heap_seq_scans, " +
   "f.last_rebuild_ms, f.last_rebuild_rows, e.strategy, e.freshness_target_secs, " +
   "e.min_interval_secs, e.explicit, e.active, e.denied_engines, e.denied_layouts " +
   "FROM rvbbit.accel_freshness f " +
   "JOIN rvbbit.accel_policy_effective e ON e.table_oid = f.table_oid " +
-  "ORDER BY (f.drift_rows * (1 + f.heap_seq_scans)) DESC, f.table_name"
+  "LEFT JOIN pg_class c ON c.oid = f.table_oid " +
+  "LEFT JOIN pg_namespace n ON n.oid = c.relnamespace " +
+  "ORDER BY n.nspname, (f.drift_rows * (1 + f.heap_seq_scans)) DESC, f.table_name"
 
 export async function fetchAccelFreshness(
   connectionId: string,
@@ -743,6 +746,7 @@ export async function fetchAccelFreshness(
   return {
     rows: res.rows.map((r) => ({
       tableName: String(r.table_name ?? ""),
+      schema: String(r.schema ?? ""),
       dirty: bool(r.shadow_heap_dirty),
       authoritative: bool(r.parquet_authoritative),
       opRunning: bool(r.op_running),

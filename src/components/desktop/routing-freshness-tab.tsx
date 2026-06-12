@@ -1,15 +1,17 @@
 "use client"
 
-import { useCallback, useEffect, useMemo, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import {
   Activity,
   AlertTriangle,
   Boxes,
   Check,
+  ChevronRight,
   Clock,
   Database,
   Hammer,
   RefreshCw,
+  Search,
   Sparkles,
   TrendingUp,
   Wrench,
@@ -112,6 +114,55 @@ export function RoutingFreshnessTab({ activeConnectionId }: Props) {
     return { total: rows.length, dirty, wouldAct, automated }
   }, [rows, plan])
 
+  // ── Schema grouping + search (navigate schemas with 100s–1000s of tables) ──
+  const [search, setSearch] = useState("")
+  const [collapsed, setCollapsed] = useState<Set<string>>(new Set())
+  const initRef = useRef(false)
+
+  const groups = useMemo(() => {
+    const q = search.trim().toLowerCase()
+    const filtered = q
+      ? rows.filter((r) => r.tableName.toLowerCase().includes(q) || r.schema.toLowerCase().includes(q))
+      : rows
+    const bySchema = new Map<string, AccelFreshnessRow[]>()
+    for (const r of filtered) {
+      const s = r.schema || "(none)"
+      const arr = bySchema.get(s)
+      if (arr) arr.push(r)
+      else bySchema.set(s, [r])
+    }
+    return [...bySchema.entries()].map(([schema, list]) => ({
+      schema,
+      list,
+      count: list.length,
+      dirty: list.filter((r) => r.dirty).length,
+      automated: list.filter((r) => r.explicit && r.strategy !== "manual" && r.active).length,
+      running: list.filter((r) => r.opRunning).length,
+      totalRows: list.reduce((n, r) => n + (r.parquetRows || 0), 0),
+    }))
+  }, [rows, search])
+
+  const filteredCount = useMemo(() => groups.reduce((n, g) => n + g.count, 0), [groups])
+
+  // Default-collapse all schemas on first load when there are many tables, so the
+  // landing view is the schema list (a navigable overview) rather than a huge scroll.
+  useEffect(() => {
+    if (!loaded || initRef.current || rows.length === 0) return
+    initRef.current = true
+    if (rows.length > 40) setCollapsed(new Set(rows.map((r) => r.schema || "(none)")))
+  }, [loaded, rows])
+
+  const toggleSchema = useCallback((schema: string) => {
+    setCollapsed((prev) => {
+      const next = new Set(prev)
+      if (next.has(schema)) next.delete(schema)
+      else next.add(schema)
+      return next
+    })
+  }, [])
+  const collapseAll = useCallback(() => setCollapsed(new Set(rows.map((r) => r.schema || "(none)"))), [rows])
+  const expandAll = useCallback(() => setCollapsed(new Set()), [])
+
   if (!loaded) {
     return (
       <div className="grid h-full place-items-center text-[12px] text-chrome-text/60">
@@ -172,6 +223,26 @@ export function RoutingFreshnessTab({ activeConnectionId }: Props) {
         </div>
       </div>
 
+      {/* schema search + collapse controls */}
+      <div className="flex items-center gap-2 border-b border-chrome-border/60 bg-chrome-bg/15 px-3 py-1 text-[11px]">
+        <div className="relative">
+          <Search className="pointer-events-none absolute left-1.5 top-1/2 h-3 w-3 -translate-y-1/2 text-chrome-text/40" />
+          <input
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="filter tables…"
+            className="w-48 rounded border border-chrome-border bg-background/70 py-0.5 pl-6 pr-2 text-[11px] text-foreground placeholder:text-chrome-text/40 focus:border-rvbbit-accent/60 focus:outline-none"
+          />
+        </div>
+        {search.trim() ? (
+          <span className="tabular-nums text-[10px] text-chrome-text/50">{filteredCount} of {rows.length}</span>
+        ) : null}
+        <div className="ml-auto flex items-center gap-1 text-[10px]">
+          <button type="button" onClick={expandAll} className="rounded px-1.5 py-0.5 text-chrome-text/65 hover:bg-foreground/[0.08] hover:text-foreground">expand all</button>
+          <button type="button" onClick={collapseAll} className="rounded px-1.5 py-0.5 text-chrome-text/65 hover:bg-foreground/[0.08] hover:text-foreground">collapse all</button>
+        </div>
+      </div>
+
       {toast ? (
         <div
           className={cn(
@@ -190,38 +261,78 @@ export function RoutingFreshnessTab({ activeConnectionId }: Props) {
         </div>
       ) : null}
 
-      <div className="min-h-0 flex-1 space-y-2 overflow-auto p-2.5">
-        {rows.map((r) => (
-          <FreshnessLane
-            key={r.tableName}
-            row={r}
-            plan={plan.get(r.tableName) ?? null}
-            busy={busyTable === r.tableName}
-            onRefresh={(kind) =>
-              void act(
-                r.tableName,
-                kind === "full" ? accelRebuildSql(r.tableName) : accelRefreshSql(r.tableName),
-                kind === "full" ? "full rebuild" : "delta refresh",
+      <div className="min-h-0 flex-1 overflow-auto p-2.5">
+        {groups.length === 0 ? (
+          <div className="grid h-24 place-items-center text-center text-[11px] text-chrome-text/45">
+            No tables match “{search.trim()}”.
+          </div>
+        ) : (
+          <div className="space-y-2">
+            {groups.map((g) => {
+              const expanded = search.trim() !== "" || !collapsed.has(g.schema)
+              return (
+                <div key={g.schema} className="overflow-hidden rounded-md border border-chrome-border/60">
+                  <button
+                    type="button"
+                    onClick={() => toggleSchema(g.schema)}
+                    className="flex w-full items-center gap-2 bg-secondary-background/60 px-2.5 py-1.5 text-left hover:bg-foreground/[0.05]"
+                  >
+                    <ChevronRight className={cn("h-3.5 w-3.5 shrink-0 text-chrome-text/50 transition-transform", expanded && "rotate-90")} />
+                    <Database className="h-3.5 w-3.5 shrink-0 text-rvbbit-accent/80" />
+                    <span className="font-mono text-[12px] font-medium text-foreground">{g.schema}</span>
+                    <span className="text-[10px] text-chrome-text/45">{g.count} table{g.count === 1 ? "" : "s"}</span>
+                    <span className="ml-auto flex items-center gap-2.5 text-[10px] tabular-nums">
+                      {g.dirty > 0 ? <span className="text-warning">{g.dirty} dirty</span> : null}
+                      {g.running > 0 ? (
+                        <span className="inline-flex items-center gap-0.5 text-rvbbit-accent">
+                          <RefreshCw className="h-2.5 w-2.5 animate-spin" />
+                          {g.running}
+                        </span>
+                      ) : null}
+                      {g.automated > 0 ? <span className="text-chrome-text/55">{g.automated} auto</span> : null}
+                      <span className="text-chrome-text/45">{fmtCount(g.totalRows)} rows</span>
+                    </span>
+                  </button>
+                  {expanded ? (
+                    <div className="space-y-2 p-2">
+                      {g.list.map((r) => (
+                        <FreshnessLane
+                          key={r.tableName}
+                          row={r}
+                          plan={plan.get(r.tableName) ?? null}
+                          busy={busyTable === r.tableName}
+                          onRefresh={(kind) =>
+                            void act(
+                              r.tableName,
+                              kind === "full" ? accelRebuildSql(r.tableName) : accelRefreshSql(r.tableName),
+                              kind === "full" ? "full rebuild" : "delta refresh",
+                            )
+                          }
+                          onSetPolicy={(strategy, target) =>
+                            void act(
+                              r.tableName,
+                              strategy === "manual"
+                                ? clearAccelPolicySql(r.tableName)
+                                : setAccelPolicySql(r.tableName, strategy, target),
+                              `policy → ${strategy}`,
+                            )
+                          }
+                          onToggleEngine={(target, enabled) =>
+                            void act(
+                              r.tableName,
+                              setTableEngineSql(r.tableName, target, enabled),
+                              `${target} ${enabled ? "on" : "off"}`,
+                            )
+                          }
+                        />
+                      ))}
+                    </div>
+                  ) : null}
+                </div>
               )
-            }
-            onSetPolicy={(strategy, target) =>
-              void act(
-                r.tableName,
-                strategy === "manual"
-                  ? clearAccelPolicySql(r.tableName)
-                  : setAccelPolicySql(r.tableName, strategy, target),
-                `policy → ${strategy}`,
-              )
-            }
-            onToggleEngine={(target, enabled) =>
-              void act(
-                r.tableName,
-                setTableEngineSql(r.tableName, target, enabled),
-                `${target} ${enabled ? "on" : "off"}`,
-              )
-            }
-          />
-        ))}
+            })}
+          </div>
+        )}
       </div>
     </div>
   )
@@ -248,12 +359,17 @@ function FreshnessLane({
   const recDiffers = rec.strategy !== row.strategy
   const driftPct = row.driftRatio == null ? null : Math.round(row.driftRatio * 100)
   const state = row.opRunning ? "building" : row.dirty ? "dirty" : "fresh"
+  // shown under a schema group header, so drop the redundant "schema." prefix
+  const displayName =
+    row.schema && row.tableName.startsWith(`${row.schema}.`)
+      ? row.tableName.slice(row.schema.length + 1)
+      : row.tableName
 
   return (
     <div className="rounded-md border border-chrome-border/60 bg-secondary-background/40 p-2.5">
       <div className="flex flex-wrap items-center gap-2">
         <StateChip state={state} secondsDirty={row.secondsDirty} />
-        <span className="font-mono text-[12px] text-foreground">{row.tableName}</span>
+        <span className="font-mono text-[12px] text-foreground" title={row.tableName}>{displayName}</span>
         {row.lance ? (
           <span
             title="Lance vector dataset — refresh is a full overwrite (expensive)"
