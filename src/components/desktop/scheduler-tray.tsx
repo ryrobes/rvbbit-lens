@@ -65,7 +65,10 @@ interface EditState {
   command: string
 }
 
-const CRAWL_COMMAND = "SELECT rvbbit.catalog_crawl();"
+// Durable crawler: CALLs the procedure form (COMMITs per table + progress log)
+// so a long scheduled crawl survives interruption with partial results, rather
+// than the all-or-nothing SELECT rvbbit.catalog_crawl() function.
+const CRAWL_COMMAND = "CALL rvbbit.catalog_crawl_run();"
 // The accelerator freshness heartbeat. Runs every minute; the policy-aware
 // rvbbit.accel_tick() decides which dirty, high-value tables to refresh.
 const ACCEL_TICK_COMMAND = "SELECT rvbbit.accel_tick(4);"

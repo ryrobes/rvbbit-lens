@@ -254,28 +254,42 @@ export async function crawlCatalog(
   opts: { schemas?: string[] | null; doEmbed?: boolean } = {},
 ): Promise<{ result?: CatalogCrawlResult; error?: string }> {
   // The crawl fingerprints every table (count/distinct/quantiles per column +
-  // embeddings) and can run for many minutes over a large schema — well past the
-  // pool's 30m default statement_timeout. Disable the timeout for this call so it
-  // always runs to completion; a single pathological inner query can still be
-  // interrupted by the user (or the server) without that capping the whole crawl.
+  // embeddings) and can run for many minutes over a large schema. We CALL the
+  // durable PROCEDURE form (rvbbit.catalog_crawl_run): it COMMITs after each
+  // table and logs progress to rvbbit.catalog_crawl_progress, so the work
+  // survives interruption with partial results and can be watched table-by-table
+  // (vs. the all-or-nothing SELECT rvbbit.catalog_crawl() function, where a
+  // cancel/error at minute 30 rolls back everything). statement_timeout is also
+  // disabled so it runs to completion; a single bad table is logged and skipped
+  // rather than capping the whole crawl.
   const res = await runQuery(
     connectionId,
-    `SELECT rvbbit.catalog_crawl(
+    `CALL rvbbit.catalog_crawl_run(
        schemas  => ${sqlTextArray(opts.schemas)},
        graph    => ${sqlStr(CATALOG_GRAPH)},
        do_embed => ${opts.doEmbed === false ? "false" : "true"}
-     ) AS result`,
+     )`,
     1,
     { statementTimeout: 0 },
   )
   if (!res.ok) return { error: res.error }
-  const raw = (res.rows[0]?.result ?? {}) as Record<string, unknown>
+  // The procedure returns no rows; read its summary back from catalog_runs.
+  const sum = await runQuery(
+    connectionId,
+    `SELECT run_id, tables_seen, columns_seen, edges_made, docs_embedded
+       FROM rvbbit.catalog_runs
+      WHERE graph_id = ${sqlStr(CATALOG_GRAPH)}
+      ORDER BY run_id DESC
+      LIMIT 1`,
+    1,
+  )
+  const raw = (sum.ok ? sum.rows[0] : undefined) ?? ({} as Record<string, unknown>)
   return {
     result: {
       runId: numOrNull(raw.run_id),
-      tables: num(raw.tables),
-      columns: num(raw.columns),
-      edges: num(raw.edges),
+      tables: num(raw.tables_seen),
+      columns: num(raw.columns_seen),
+      edges: num(raw.edges_made),
       docsEmbedded: num(raw.docs_embedded),
     },
   }
