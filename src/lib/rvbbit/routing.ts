@@ -265,6 +265,10 @@ export interface RouteExplain {
   reason: string
   routeSource: string
   chosenCandidate: string
+  /** Physical storage actually read: heap | parquet | vortex | hive | mem | mixed.
+   *  Splits the native family (heap SeqScan vs parquet/vortex custom scan) that
+   *  the engine label alone collapses to "native". "" when not reported. */
+  physicalPath: string
   confidence: number | null
   safeSelect: boolean
   candidates: RouteExplainCandidate[]
@@ -598,6 +602,7 @@ export async function routeExplain(
       reason: String(r.reason ?? ""),
       routeSource: String(r.route_source ?? ""),
       chosenCandidate: normalizeCandidate(String(r.chosen_candidate ?? "")),
+      physicalPath: String(r.physical_path ?? ""),
       confidence: numOrNull(r.confidence),
       safeSelect: bool(r.safe_select),
       candidates: cands.map((c) => ({

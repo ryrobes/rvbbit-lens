@@ -167,6 +167,18 @@ function VerdictPanel({ explain }: { explain: RouteExplain }) {
           <span className="h-2.5 w-2.5 rounded-full" style={{ background: m.color }} />
           {m.label}
         </span>
+        {explain.physicalPath ? (
+          <span
+            className="rounded px-1.5 py-0.5 font-mono text-[10px]"
+            style={{
+              background: `color-mix(in oklch, ${m.color} 16%, var(--secondary-background))`,
+              color: m.color,
+            }}
+            title="Physical storage actually read for this route (heap = unaccelerated SeqScan; parquet/vortex = native columnar scan)"
+          >
+            {explain.physicalPath}
+          </span>
+        ) : null}
         <span className="rounded bg-foreground/10 px-1.5 py-0.5 font-mono text-[10px] text-chrome-text/80">
           via {explain.routeSource || "—"}
         </span>
