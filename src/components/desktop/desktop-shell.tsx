@@ -9,6 +9,7 @@ import {
   LineChart,
   Calculator,
   Database,
+  LayoutDashboard,
   DollarSign,
   Eye,
   FileCode2,
@@ -67,6 +68,7 @@ import { NotificationCenterWindow } from "./notification-center-window"
 import { OperatorsWindow } from "./operators-window"
 import { CostsWindow } from "./costs-window"
 import { SyncMirrorWindow } from "./sync-mirror-window"
+import { DashboardsWindow } from "./dashboards-window"
 import { DuckWindow } from "./duck-window"
 import { OperatorFlowWindow } from "./operator-flow-window"
 import { SpecialistsWindow } from "./specialists-window"
@@ -124,6 +126,7 @@ import type {
   CsvImportPayload,
   ArtifactPayload,
   DataPayload,
+  DashboardsPayload,
   DataSearchPayload,
   DriftPayload,
   FolderPayload,
@@ -1767,6 +1770,18 @@ export function DesktopShell() {
     })
   }, [focus, openWindow, liveWindows])
 
+  const openDashboards = useCallback(() => {
+    const existing = liveWindows().find((w) => w.kind === "dashboards")
+    if (existing) return focus(existing.id)
+    openWindow({
+      id: randomUUID(),
+      kind: "dashboards",
+      title: "Dashboards",
+      x: 140, y: 76, width: 1060, height: 680,
+      payload: { kind: "dashboards" } satisfies DashboardsPayload,
+    })
+  }, [focus, openWindow, liveWindows])
+
   const openDuck = useCallback(() => {
     const existing = liveWindows().find((w) => w.kind === "duck")
     if (existing) return focus(existing.id)
@@ -3346,6 +3361,7 @@ export function DesktopShell() {
     { id: "metric-creator", label: "Metric Creator", icon: Calculator, color: "oklch(78% 0.13 95)", description: "Author & version metrics", activate: () => openMetricCreator(), folder: "metrics", rvbbit: true },
     { id: "metric-inspector", label: "Metric Inspector", icon: LineChart, color: "oklch(78% 0.13 95)", description: "Run metrics across def-time & data-time", activate: () => openMetricInspector(), folder: "metrics", rvbbit: true },
     { id: "metric-board", label: "KPI Board", icon: Table2, color: "oklch(78% 0.13 95)", description: "Matrix of metric values & KPI verdicts over time", activate: () => openMetricBoard(), folder: "metrics", rvbbit: true },
+    { id: "dashboards", label: "Dashboards", icon: LayoutDashboard, color: "oklch(78% 0.13 95)", description: "Claude-built dashboards — live, inspectable, shareable", activate: () => openDashboards(), folder: "metrics", rvbbit: true },
     { id: "alerts", label: "Alerts", icon: Bell, color: "oklch(68% 0.19 25)", description: "Observable alert rules — thresholds, episodes & firing", activate: () => openAlerts(), rvbbit: true },
     // Knowledge
     { id: "kg", label: "Knowledge Graph", icon: TreeStructure, color: "var(--brand-kg)", description: "Browse the extracted graph", activate: () => openKgBrowser(), folder: "knowledge", rvbbit: true },
@@ -3358,7 +3374,7 @@ export function DesktopShell() {
     openSystemObjects, openExtensions, openPgMonitor, openCache, openRvbbitCache,
     openCosts, openSyncMirror, openOperators, openSpecialists, openRouting,
     openMcpServers, openCapabilities, openHfDeploy, openWarren, openModelStudio,
-    openDuck, openMetricCatalog, openMetricCreator, openMetricInspector, openMetricBoard, openAlerts,
+    openDuck, openMetricCatalog, openMetricCreator, openMetricInspector, openMetricBoard, openDashboards, openAlerts,
     openKgBrowser, openKgExplorer, openQueryLens, openDrift,
   ])
 
@@ -4414,6 +4430,15 @@ function renderWindowContent(
       // Key on the connection so a switch remounts (clears stale jobs/overview +
       // discards any in-flight overview fetch for the previous connection).
       return <SyncMirrorWindow key={ctx.activeConnectionId ?? "none"} activeConnectionId={ctx.activeConnectionId} />
+    case "dashboards":
+      return (
+        <DashboardsWindow
+          key={ctx.activeConnectionId ?? "none"}
+          activeConnectionId={ctx.activeConnectionId}
+          hasRvbbit={ctx.hasRvbbit}
+          onOpenSqlData={ctx.openSqlData}
+        />
+      )
     case "duck":
       return (
         <DuckWindow
@@ -4542,6 +4567,7 @@ function iconForKind(kind: DesktopWindowState["kind"]) {
       return Rocket
     case "costs": return DollarSign
     case "sync-mirror": return Database
+    case "dashboards": return LayoutDashboard
     case "duck": return Boxes
     default: return Table2
   }

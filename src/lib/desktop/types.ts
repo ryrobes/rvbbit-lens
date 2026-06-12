@@ -4,6 +4,7 @@ import type { DataSearchHit } from "@/lib/rvbbit/data-search"
 export type DesktopWindowKind =
   | "finder"
   | "data"
+  | "dashboards"
   | "csv-import"
   | "query-document"
   | "artifact"
@@ -77,6 +78,7 @@ export interface DesktopWindowState {
 export type WindowPayload =
   | FinderPayload
   | DataPayload
+  | DashboardsPayload
   | CsvImportPayload
   | QueryDocumentPayload
   | ArtifactPayload
@@ -580,6 +582,11 @@ export interface CachePayload {
 
 export interface SyncMirrorPayload {
   kind?: "sync-mirror"
+}
+
+export interface DashboardsPayload {
+  kind?: "dashboards"
+  selectedSlug?: string | null
 }
 
 export interface CostsPayload {

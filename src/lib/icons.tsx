@@ -63,6 +63,7 @@ export {
   Cube as Box,
   CurrencyDollar as DollarSign,
   Database,
+  SquaresFour as LayoutDashboard,
   Download,
   Envelope as Mail,
   Eye,
