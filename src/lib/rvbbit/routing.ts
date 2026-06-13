@@ -78,6 +78,25 @@ export const ENGINES: EngineMeta[] = [
 ]
 
 export function engineMeta(id: string): EngineMeta {
+  // Virtual "native·<path>" ids split the native family by the physical storage
+  // actually read (heap/parquet/vortex/mixed) for the sankey + log chips. Same
+  // native colour, tinted by path: heap dimmed (unaccelerated), vortex brighter.
+  if (id.startsWith(NATIVE_PATH_PREFIX)) {
+    const path = id.slice(NATIVE_PATH_PREFIX.length)
+    const native = ENGINES.find((e) => e.id === "rvbbit_native")
+    const base = native?.color ?? "var(--viz-engine-native)"
+    return {
+      id: id as EngineId,
+      label: `native·${path}`,
+      color:
+        path === "heap"
+          ? `color-mix(in oklch, ${base} 50%, var(--chrome-border))`
+          : path === "vortex"
+            ? `color-mix(in oklch, ${base} 75%, var(--foreground))`
+            : base,
+      blurb: native?.blurb ?? "",
+    }
+  }
   return (
     ENGINES.find((e) => e.id === id) ?? {
       id: id as EngineId,
@@ -86,6 +105,36 @@ export function engineMeta(id: string): EngineMeta {
       blurb: "",
     }
   )
+}
+
+const NATIVE_PATH_PREFIX = "native::"
+const PHYS_PATH_ORDER = ["heap", "parquet", "vortex", "mixed", "hive", "mem"]
+
+/** The native engine family (heap SeqScan, parquet/vortex custom scan) all log
+ *  candidate "rvbbit_native" / "rvbbit_native_vortex"; physical_path tells them
+ *  apart. Non-native engines' storage is implied by the engine itself. */
+function isNativeFamily(candidate: string): boolean {
+  return candidate === "rvbbit_native" || candidate === "rvbbit_native_vortex"
+}
+
+/** Sankey/chip target id: split the native family into native·heap/parquet/vortex
+ *  by physical_path; everything else stays its candidate id. */
+export function engineFlowTarget(candidate: string, physicalPath: string): string {
+  return isNativeFamily(candidate) && physicalPath
+    ? `${NATIVE_PATH_PREFIX}${physicalPath}`
+    : candidate
+}
+
+/** Stable ordering for sankey target nodes: by base-engine order, native
+ *  sub-paths grouped together in physical-path order. */
+export function engineFlowOrder(id: string): [number, number] {
+  if (id.startsWith(NATIVE_PATH_PREFIX)) {
+    const nativeIdx = ENGINES.findIndex((e) => e.id === "rvbbit_native")
+    const p = PHYS_PATH_ORDER.indexOf(id.slice(NATIVE_PATH_PREFIX.length))
+    return [nativeIdx < 0 ? 999 : nativeIdx, p < 0 ? 99 : p + 1]
+  }
+  const idx = ENGINES.findIndex((e) => e.id === id)
+  return [idx < 0 ? 999 : idx, 0]
 }
 
 /**
@@ -150,6 +199,9 @@ function engineObservationsFromRow(r: Record<string, unknown>): Record<EngineId,
 export interface RouteExecution {
   executedAt: number
   candidate: string
+  /** Physical storage actually read (heap|parquet|vortex|hive|mem|mixed) — splits
+   *  the native family that `candidate` collapses to "native". "" if unreported. */
+  physicalPath: string
   routeSource: string
   elapsedMs: number
   rowsReturned: number
@@ -161,6 +213,8 @@ export interface RouteExecution {
 
 export interface DecisionSummaryRow {
   candidate: string
+  /** Physical storage read (heap|parquet|vortex|…); splits native in the sankey. */
+  physicalPath: string
   routeSource: string
   decisions: number
   cacheHits: number
@@ -349,7 +403,8 @@ export async function fetchRouteExecutions(
 ): Promise<{ rows: RouteExecution[]; error?: string }> {
   const res = await runQuery(
     connectionId,
-    "SELECT executed_at, candidate, route_source, elapsed_ms, rows_returned, " +
+    "SELECT executed_at, candidate, route_doc->>'physical_path' AS physical_path, " +
+      "route_source, elapsed_ms, rows_returned, " +
       "cache_hit, status, shape_family, reason FROM rvbbit.route_executions " +
       "WHERE " + windowClause("executed_at", windowHours) +
       " ORDER BY executed_at DESC LIMIT 500",
@@ -359,6 +414,7 @@ export async function fetchRouteExecutions(
     rows: res.rows.map((r) => ({
       executedAt: epoch(r.executed_at),
       candidate: normalizeCandidate(String(r.candidate ?? "")),
+      physicalPath: String(r.physical_path ?? ""),
       routeSource: String(r.route_source ?? ""),
       elapsedMs: num(r.elapsed_ms),
       rowsReturned: num(r.rows_returned),
@@ -378,15 +434,17 @@ export async function fetchDecisionSummary(
 ): Promise<DecisionSummaryRow[]> {
   const res = await runQuery(
     connectionId,
-    "SELECT candidate, route_source, count(*) AS decisions, " +
+    "SELECT candidate, route_doc->>'physical_path' AS physical_path, route_source, " +
+      "count(*) AS decisions, " +
       "count(*) FILTER (WHERE cache_hit) AS cache_hits, " +
       "count(*) FILTER (WHERE rewritten) AS rewritten " +
       "FROM rvbbit.route_decisions WHERE " + windowClause("decided_at", windowHours) +
-      " GROUP BY candidate, route_source",
+      " GROUP BY candidate, route_doc->>'physical_path', route_source",
   )
   if (!res.ok) return []
   return res.rows.map((r) => ({
     candidate: normalizeCandidate(String(r.candidate ?? "")),
+    physicalPath: String(r.physical_path ?? ""),
     routeSource: String(r.route_source ?? "unknown"),
     decisions: num(r.decisions),
     cacheHits: num(r.cache_hits),

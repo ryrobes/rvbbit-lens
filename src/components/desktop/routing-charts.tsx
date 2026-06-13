@@ -5,6 +5,7 @@ import { cn } from "@/lib/utils"
 import { useElementWidth } from "./instruments"
 import {
   ENGINES,
+  engineFlowOrder,
   engineMeta,
   prettyToken,
   shapeHighlights,
@@ -173,9 +174,18 @@ export function FlowDiagram({
 
     const tgtTotals = new Map<string, number>()
     for (const l of links) tgtTotals.set(l.target, (tgtTotals.get(l.target) ?? 0) + l.value)
-    // Only engines that actually received routing in this window. Idle ones
-    // are omitted entirely — they reappear the moment they get a decision.
-    const activeEngines = ENGINES.filter((e) => (tgtTotals.get(e.id) ?? 0) > 0)
+    // Target nodes are derived from the links themselves (not the fixed ENGINES
+    // list) so the virtual native·heap/parquet/vortex split nodes appear too.
+    // Only targets with traffic this window; ordered by engineFlowOrder (native
+    // sub-paths grouped where native sits). Resolved to EngineMeta via engineMeta.
+    const activeEngines = [...tgtTotals.entries()]
+      .filter(([, total]) => total > 0)
+      .sort((a, b) => {
+        const ka = engineFlowOrder(a[0])
+        const kb = engineFlowOrder(b[0])
+        return ka[0] - kb[0] || ka[1] - kb[1]
+      })
+      .map(([id]) => engineMeta(id))
 
     const availLeft = height - (sources.length - 1) * gap
     const availRight = height - Math.max(0, activeEngines.length - 1) * gap
@@ -218,7 +228,7 @@ export function FlowDiagram({
       value: number
     }[] = []
     for (const sn of srcNodes) {
-      for (const e of ENGINES) {
+      for (const e of activeEngines) {
         const l = links.find((x) => x.source === sn.name && x.target === e.id)
         const tn = tgtById.get(e.id)
         if (l && l.value > 0 && tn) ordered.push({ sn, tn, value: l.value })

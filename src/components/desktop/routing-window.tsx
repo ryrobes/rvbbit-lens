@@ -24,6 +24,7 @@ import {
 import { EngineDot, EnginePill, FlowDiagram, type FlowLink } from "./routing-charts"
 import {
   ENGINES,
+  engineFlowTarget,
   fetchColumnarTables,
   fetchDecisionSummary,
   fetchEngineRuntime,
@@ -343,13 +344,21 @@ function FlowTab({
     })
   }, [flow, profileData])
 
-  const flowLinks = useMemo<FlowLink[]>(
-    () =>
-      (flow?.decisionSummary ?? [])
-        .filter((d) => d.decisions > 0)
-        .map((d) => ({ source: d.routeSource, target: d.candidate, value: d.decisions })),
-    [flow],
-  )
+  const flowLinks = useMemo<FlowLink[]>(() => {
+    // Split the native family by physical_path (native·heap/parquet/vortex) and
+    // aggregate by (source, target) in case two candidates collapse to the same
+    // target node.
+    const agg = new Map<string, FlowLink>()
+    for (const d of flow?.decisionSummary ?? []) {
+      if (d.decisions <= 0) continue
+      const target = engineFlowTarget(d.candidate, d.physicalPath)
+      const key = `${d.routeSource} ${target}`
+      const ex = agg.get(key)
+      if (ex) ex.value += d.decisions
+      else agg.set(key, { source: d.routeSource, target, value: d.decisions })
+    }
+    return [...agg.values()]
+  }, [flow])
 
   const slowestMedian = Math.max(1, ...engineStats.map((e) => e.median))
 
@@ -495,7 +504,7 @@ function RecentExecutions({
                   {new Date(r.executedAt).toLocaleTimeString([], { hour12: false })}
                 </td>
                 <td className="py-0.5 pr-2">
-                  <EnginePill id={r.candidate} />
+                  <EnginePill id={engineFlowTarget(r.candidate, r.physicalPath)} />
                 </td>
                 <td className="py-0.5 pr-2 text-right font-mono tabular-nums text-foreground">
                   {fmtMs(r.elapsedMs)}
