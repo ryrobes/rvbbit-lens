@@ -268,6 +268,53 @@ export async function cubeHealth(
 }
 
 // ─────────────────────────────────────────────────────────────────────────
+// Versioning — cube_defs is append-versioned; show history + revert
+// ─────────────────────────────────────────────────────────────────────────
+
+export interface CubeVersion {
+  version: number
+  sql: string
+  grain: string | null
+  description: string | null
+  category: string | null
+  createdAt: string | null
+}
+
+export async function cubeVersions(
+  connectionId: string,
+  name: string,
+): Promise<{ versions: CubeVersion[]; error: string | null }> {
+  const r = await run(
+    connectionId,
+    `SELECT version, sql, grain, description, category, created_at::text AS created_at
+     FROM rvbbit.cube_versions(${q(name)})`,
+  )
+  if (!r.ok) return { versions: [], error: r.error }
+  return {
+    error: null,
+    versions: r.rows.map((row) => ({
+      version: Number(row.version),
+      sql: String(row.sql ?? ""),
+      grain: str(row.grain),
+      description: str(row.description),
+      category: str(row.category),
+      createdAt: str(row.created_at),
+    })),
+  }
+}
+
+/** Roll a cube back to a prior version (appends a new version restoring it). */
+export async function revertCube(
+  connectionId: string,
+  name: string,
+  version: number,
+): Promise<{ newVersion: number | null; error: string | null }> {
+  const r = await run(connectionId, `SELECT rvbbit.revert_cube(${q(name)}, ${version}) AS v`)
+  if (!r.ok) return { newVersion: null, error: r.error }
+  return { newVersion: num(r.rows[0]?.v), error: null }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
 // Preview (Creator live dry-run — cubes have no params, so a LIMIT-5 of the body)
 // ─────────────────────────────────────────────────────────────────────────
 

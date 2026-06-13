@@ -6,15 +6,18 @@
 // Refresh (snapshot reload), Enrich (LLM column docs), Promote to Metric, Edit (→ Creator).
 
 import { useCallback, useEffect, useMemo, useState } from "react"
-import { Boxes, RefreshCw, Sparkles, Pencil, Loader2, TrendingUp, GitBranch } from "@/lib/icons"
+import { Boxes, RefreshCw, Sparkles, Pencil, Loader2, TrendingUp, GitBranch, Layers, ChevronRight } from "@/lib/icons"
 import {
+  cubeVersions,
   describeCube,
   enrichCube,
   listCubes,
   promoteCubeToMetric,
   refreshCube,
+  revertCube,
   type CubeDetail,
   type CubeSummary,
+  type CubeVersion,
 } from "@/lib/rvbbit/cubes"
 import type { CubeInspectorPayload } from "@/lib/desktop/types"
 import {
@@ -38,8 +41,8 @@ interface Props {
   onOpenMetricInspector?: (name: string) => void
 }
 
-type Tab = "overview" | "columns" | "health" | "lineage"
-const TAB_LABEL: Record<Tab, string> = { overview: "Overview", columns: "Columns", health: "Health", lineage: "Lineage" }
+type Tab = "overview" | "columns" | "health" | "lineage" | "versions"
+const TAB_LABEL: Record<Tab, string> = { overview: "Overview", columns: "Columns", health: "Health", lineage: "Lineage", versions: "Versions" }
 
 export function CubeInspectorWindow({
   payload,
@@ -291,8 +294,10 @@ function CubeDetailPane({
           <ColumnsTab connectionId={connectionId} cube={name} detail={detail} onSaved={reload} />
         ) : tab === "health" ? (
           <HealthTab health={health} />
-        ) : (
+        ) : tab === "lineage" ? (
           <LineageTab tables={detail.sourceTables} />
+        ) : (
+          <VersionsTab connectionId={connectionId} cube={name} currentVersion={detail.version} onReverted={reload} />
         )}
       </div>
     </div>
@@ -479,6 +484,122 @@ function LineageTab({ tables }: { tables: string[] }) {
           {t}
         </div>
       ))}
+    </div>
+  )
+}
+
+// ── Versions: the cube's def history + revert-to ────────────────────────────
+function VersionsTab({
+  connectionId,
+  cube,
+  currentVersion,
+  onReverted,
+}: {
+  connectionId: string
+  cube: string
+  currentVersion: number | null
+  onReverted: () => void
+}) {
+  const [versions, setVersions] = useState<CubeVersion[] | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [busy, setBusy] = useState<number | null>(null)
+  const [msg, setMsg] = useState<string | null>(null)
+  const [expanded, setExpanded] = useState<number | null>(null)
+  const [reloadKey, setReloadKey] = useState(0)
+
+  useEffect(() => {
+    let cancelled = false
+    const id = setTimeout(() => {
+      void (async () => {
+        const { versions: rows, error: err } = await cubeVersions(connectionId, cube)
+        if (cancelled) return
+        setVersions(rows)
+        setError(err)
+      })()
+    }, 0)
+    return () => {
+      cancelled = true
+      clearTimeout(id)
+    }
+  }, [connectionId, cube, reloadKey])
+
+  // the live/current version is the highest (cube_versions returns newest first)
+  const latest = versions && versions.length ? versions[0].version : currentVersion
+
+  async function revert(v: number) {
+    setBusy(v)
+    setMsg(null)
+    const { newVersion, error: err } = await revertCube(connectionId, cube, v)
+    setBusy(null)
+    if (err) {
+      setMsg(`Revert failed: ${err}`)
+      return
+    }
+    setMsg(`Reverted to v${v} → now live as v${newVersion}.`)
+    setReloadKey((k) => k + 1)
+    onReverted()
+  }
+
+  if (versions == null) return <StatusNote state="loading" message="Loading versions…" />
+  if (error) return <StatusNote state="error" message={error} />
+  if (versions.length === 0) return <StatusNote state="empty" message="No version history." />
+
+  return (
+    <div className="p-3">
+      {msg ? <div className="mb-2 text-[11px] text-chrome-text/70">{msg}</div> : null}
+      <div className="space-y-1.5">
+        {versions.map((v) => {
+          const isCurrent = v.version === latest
+          const open = expanded === v.version
+          return (
+            <div key={v.version} className="rounded-[3px] border border-chrome-border/40 bg-foreground/[0.02]">
+              <div className="flex items-center gap-2 px-2.5 py-1.5">
+                <button
+                  type="button"
+                  onClick={() => setExpanded(open ? null : v.version)}
+                  className="flex min-w-0 flex-1 items-center gap-1.5 text-left"
+                  title="Show this version's SQL"
+                >
+                  <ChevronRight className={`h-3 w-3 shrink-0 text-chrome-text/40 transition-transform ${open ? "rotate-90" : ""}`} />
+                  <span className="font-mono text-[12px] text-foreground">v{v.version}</span>
+                  {isCurrent ? (
+                    <span className="rounded-full border border-emerald-500/40 bg-emerald-500/15 px-1.5 py-px text-[9px] font-medium uppercase tracking-wide text-emerald-500">
+                      current
+                    </span>
+                  ) : null}
+                  <span className="truncate text-[10px] text-chrome-text/45">
+                    {v.grain ?? ""}
+                    {v.category ? ` · ${v.category}` : ""}
+                  </span>
+                  <div className="flex-1" />
+                  <span className="shrink-0 text-[10px] tabular-nums text-chrome-text/40">
+                    {v.createdAt ? fmtTime(Date.parse(v.createdAt)) : ""}
+                  </span>
+                </button>
+                {!isCurrent ? (
+                  <button
+                    type="button"
+                    onClick={() => void revert(v.version)}
+                    disabled={busy != null}
+                    title={`Restore this definition (appends a new version)`}
+                    className="inline-flex h-6 shrink-0 items-center gap-1 rounded-[3px] border border-chrome-border/60 px-2 text-[10px] text-chrome-text/70 hover:bg-foreground/[0.06] hover:text-foreground disabled:opacity-50"
+                  >
+                    {busy === v.version ? <Loader2 className="h-3 w-3 animate-spin" /> : <RefreshCw className="h-3 w-3" />} Revert to v{v.version}
+                  </button>
+                ) : null}
+              </div>
+              {open ? (
+                <pre className="max-h-56 overflow-auto border-t border-chrome-border/30 px-2.5 py-1.5 font-mono text-[10px] leading-snug text-foreground/80">
+                  {formatSqlSafe(v.sql)}
+                </pre>
+              ) : null}
+            </div>
+          )
+        })}
+      </div>
+      <div className="mt-2 flex items-center gap-1.5 text-[10px] text-chrome-text/40">
+        <Layers className="h-3 w-3" /> Reverting appends a new version restoring the old definition — nothing is lost.
+      </div>
     </div>
   )
 }
