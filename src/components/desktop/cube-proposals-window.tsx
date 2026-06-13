@@ -375,6 +375,8 @@ function ProposalDetail({
   const [sql, setSql] = useState(proposal.sql)
   const [grain, setGrain] = useState(proposal.grain ?? "")
   const [description, setDescription] = useState(proposal.description ?? "")
+  const [category, setCategory] = useState(proposal.category ?? "")
+  const [subcategory, setSubcategory] = useState(proposal.subcategory ?? "")
   const [note, setNote] = useState("")
   const [busy, setBusy] = useState<string | null>(null)
   const [msg, setMsg] = useState<string | null>(null)
@@ -425,6 +427,8 @@ function ProposalDetail({
       sql,
       grain: grain.trim() || null,
       description: description.trim() || null,
+      category: category.trim() || null,
+      subcategory: subcategory.trim() || null,
     })
     setBusy(null)
     setMsg(ok ? "Edits saved to the draft." : `Save failed: ${error}`)
@@ -496,6 +500,14 @@ function ProposalDetail({
           <div className="flex gap-2">
             <Field label="Grain">
               <input className={inputCls} value={grain} disabled={!isPending} onChange={(e) => setGrain(e.target.value)} placeholder="one row per …" />
+            </Field>
+          </div>
+          <div className="flex gap-2">
+            <Field label="Category">
+              <input className={inputCls} value={category} disabled={!isPending} onChange={(e) => setCategory(e.target.value)} placeholder="e.g. Sales" />
+            </Field>
+            <Field label="Subcategory">
+              <input className={inputCls} value={subcategory} disabled={!isPending} onChange={(e) => setSubcategory(e.target.value)} placeholder="e.g. Pipeline" />
             </Field>
           </div>
           <Field label="Description">

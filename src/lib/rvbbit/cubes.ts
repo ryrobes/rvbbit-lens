@@ -567,6 +567,8 @@ export interface CubeProposal {
   /** metric proposals only: default {param} values + an optional KPI assertion. */
   params: Record<string, unknown>
   checkSql: string | null
+  category: string | null
+  subcategory: string | null
   proposedBy: string | null
   proposedVia: string | null
   resultName: string | null
@@ -583,8 +585,9 @@ export async function listProposals(
   const r = await run(
     connectionId,
     `SELECT proposal_id, kind, status, name, subject, sql, grain, description, source_tables,
-            join_rationale, confidence, params, check_sql, proposed_by, proposed_via, result_name,
-            notes, created_at::text AS created_at, reviewed_at::text AS reviewed_at
+            join_rationale, confidence, params, check_sql, category, subcategory, proposed_by,
+            proposed_via, result_name, notes,
+            created_at::text AS created_at, reviewed_at::text AS reviewed_at
      FROM rvbbit.proposals(${status ? q(status) : "NULL"}, ${kind ? q(kind) : "NULL"})`,
   )
   if (!r.ok) return { proposals: [], error: r.error }
@@ -604,6 +607,8 @@ export async function listProposals(
       confidence: num(row.confidence),
       params: asObject(row.params),
       checkSql: str(row.check_sql),
+      category: str(row.category),
+      subcategory: str(row.subcategory),
       proposedBy: str(row.proposed_by),
       proposedVia: str(row.proposed_via),
       resultName: str(row.result_name),
@@ -647,7 +652,16 @@ export async function rejectProposal(
 export async function refineProposal(
   connectionId: string,
   id: number,
-  edits: { name?: string | null; sql?: string | null; grain?: string | null; description?: string | null; checkSql?: string | null; confidence?: number | null },
+  edits: {
+    name?: string | null
+    sql?: string | null
+    grain?: string | null
+    description?: string | null
+    checkSql?: string | null
+    confidence?: number | null
+    category?: string | null
+    subcategory?: string | null
+  },
 ): Promise<{ ok: boolean; error: string | null }> {
   const r = await run(
     connectionId,
@@ -660,7 +674,9 @@ export async function refineProposal(
         NULL,
         ${edits.checkSql ? q(edits.checkSql) : "NULL"},
         NULL,
-        ${edits.confidence != null ? edits.confidence : "NULL"})`,
+        ${edits.confidence != null ? edits.confidence : "NULL"},
+        ${edits.category ? q(edits.category) : "NULL"},
+        ${edits.subcategory ? q(edits.subcategory) : "NULL"})`,
   )
   return r.ok ? { ok: true, error: null } : { ok: false, error: r.error }
 }
