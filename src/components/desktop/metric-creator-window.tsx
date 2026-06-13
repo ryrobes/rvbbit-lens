@@ -7,15 +7,18 @@
 // is the debuggable surface — it shows raw preview errors verbatim.
 
 import { useCallback, useEffect, useMemo, useState } from "react"
-import { Plus, RefreshCw, Save } from "@/lib/icons"
+import { Plus, RefreshCw, Save, Sparkles, Wand2, Loader2, Play } from "@/lib/icons"
 import {
   defineMetric,
   listMetrics,
   previewCheckSql,
   previewMetricSql,
+  proposeMetric,
+  type MetricProposeResult,
   type MetricSummary,
   type MetricVerdict,
 } from "@/lib/rvbbit/metrics"
+import { listBaseTables, listCubes } from "@/lib/rvbbit/cubes"
 import { categoriesFrom, fetchCategoryOptions, setCategory, subcategoriesFor, type CategoryPair } from "@/lib/rvbbit/categories"
 import type { MetricCreatorPayload } from "@/lib/desktop/types"
 import { SqlEditor } from "./sql-editor"
@@ -37,6 +40,8 @@ interface MetricCreatorWindowProps {
   activeConnectionId: string | null
   hasRvbbit: boolean
   onOpenInspector: (name: string) => void
+  /** pop the resolved SQL out into a native SQL window for testing */
+  onOpenSql?: (sql: string, title: string) => void
 }
 
 interface FormState {
@@ -83,6 +88,7 @@ export function MetricCreatorWindow({
   activeConnectionId,
   hasRvbbit,
   onOpenInspector,
+  onOpenSql,
 }: MetricCreatorWindowProps) {
   const [metrics, setMetrics] = useState<MetricSummary[]>([])
   const [listError, setListError] = useState<string | null>(null)
@@ -334,6 +340,23 @@ export function MetricCreatorWindow({
             )}
           </div>
 
+          {!isExisting ? (
+            <MetricProposePanel
+              connectionId={activeConnectionId}
+              onDraft={(d) =>
+                setForm((f) => ({
+                  ...f,
+                  name: d.name,
+                  sql: formatMetricBody(d.sql),
+                  grain: d.grain ?? "",
+                  description: d.description ?? "",
+                  params: d.params ?? {},
+                  check: d.checkSql ?? "",
+                }))
+              }
+            />
+          ) : null}
+
           <Section title="Definition">
             <Field label="name">
               {isExisting ? (
@@ -462,7 +485,19 @@ export function MetricCreatorWindow({
           <Section
             title="Resolved SQL — live preview"
             right={
-              previewing ? <span className="text-[10px] text-chrome-text/45">resolving…</span> : null
+              <div className="flex items-center gap-2">
+                {previewing ? <span className="text-[10px] text-chrome-text/45">resolving…</span> : null}
+                {onOpenSql && (preview || form.sql.trim()) ? (
+                  <button
+                    type="button"
+                    onClick={() => onOpenSql((preview && preview.trim()) || form.sql, `metric: ${form.name || "draft"}`)}
+                    title="Open the resolved SQL in a native SQL window to run & inspect"
+                    className="inline-flex items-center gap-1 rounded-[3px] border border-chrome-border/60 px-1.5 py-0.5 text-[10px] text-chrome-text/70 hover:bg-foreground/[0.06] hover:text-foreground"
+                  >
+                    <Play className="h-2.5 w-2.5" /> Open in SQL
+                  </button>
+                ) : null}
+              </div>
             }
           >
             <div className="h-40 overflow-hidden rounded-[3px] border border-chrome-border/60">
@@ -502,6 +537,123 @@ export function MetricCreatorWindow({
           <div className="h-3" />
         </div>
       </div>
+    </div>
+  )
+}
+
+// ── Draft-with-AI panel: subject → propose_metric → fills the form ──────────
+function MetricProposePanel({
+  connectionId,
+  onDraft,
+}: {
+  connectionId: string
+  onDraft: (d: MetricProposeResult) => void
+}) {
+  const [open, setOpen] = useState(false)
+  const [subject, setSubject] = useState("")
+  const [schema, setSchema] = useState("")
+  const [seeds, setSeeds] = useState<string[]>([])
+  const [sources, setSources] = useState<string[]>([])
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  // load candidate sources (cubes first, then base tables) when the panel opens
+  useEffect(() => {
+    if (!open) return
+    let cancelled = false
+    void (async () => {
+      const [{ cubes }, { tables }] = await Promise.all([listCubes(connectionId), listBaseTables(connectionId)])
+      if (cancelled) return
+      setSources([...cubes.map((c) => `cubes.${c.name}`), ...tables])
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [open, connectionId])
+
+  const schemas = useMemo(() => Array.from(new Set(sources.map((s) => s.split(".")[0]))).sort(), [sources])
+  const seedChoices = useMemo(() => (schema ? sources.filter((s) => s.startsWith(`${schema}.`)) : sources), [sources, schema])
+
+  async function go() {
+    if (!subject.trim()) {
+      setError("Describe what to measure first.")
+      return
+    }
+    setBusy(true)
+    setError(null)
+    const { draft, error: err } = await proposeMetric(connectionId, subject.trim(), seeds.length ? seeds : null, schema || null)
+    setBusy(false)
+    if (err || !draft) {
+      setError(err ?? "No draft produced.")
+      return
+    }
+    onDraft(draft)
+    setOpen(false)
+  }
+
+  if (!open) {
+    return (
+      <div className="px-3 pt-1.5">
+        <button
+          type="button"
+          onClick={() => setOpen(true)}
+          className="inline-flex items-center gap-1.5 rounded-[3px] border border-sky-500/40 bg-sky-500/10 px-2 py-1 text-[11px] text-sky-500 hover:bg-sky-500/20"
+        >
+          <Sparkles className="h-3 w-3" /> Draft with AI
+        </button>
+      </div>
+    )
+  }
+
+  return (
+    <div className="mx-3 mt-1.5 space-y-2 rounded-[3px] border border-sky-500/30 bg-sky-500/[0.04] p-2">
+      <div className="flex items-center gap-1.5 text-[10px] uppercase tracking-wider text-sky-500/80">
+        <Sparkles className="h-3 w-3" /> Draft a metric with AI
+        <div className="flex-1" />
+        <button type="button" onClick={() => setOpen(false)} className="text-chrome-text/45 hover:text-foreground">✕</button>
+      </div>
+      <textarea
+        className={`${areaCls} h-14`}
+        value={subject}
+        onChange={(e) => setSubject(e.target.value)}
+        placeholder="e.g. total won opportunity amount by month, from the opportunities cube"
+      />
+      <div className="flex items-end gap-2">
+        <label className="block flex-1">
+          <span className="mb-0.5 block text-[10px] uppercase tracking-wider text-chrome-text/55">Scope to schema (optional)</span>
+          <select className={inputCls} value={schema} onChange={(e) => { setSchema(e.target.value); setSeeds([]) }}>
+            <option value="">— any (cubes preferred) —</option>
+            {schemas.map((s) => (
+              <option key={s} value={s}>{s}</option>
+            ))}
+          </select>
+        </label>
+        <button
+          type="button"
+          onClick={() => void go()}
+          disabled={busy}
+          className="inline-flex h-7 items-center gap-1.5 rounded-[3px] border border-main/40 bg-main/15 px-3 text-[11px] text-main hover:bg-main/25 disabled:opacity-50"
+        >
+          {busy ? <Loader2 className="h-3 w-3 animate-spin" /> : <Wand2 className="h-3 w-3" />} Draft
+        </button>
+      </div>
+      {seedChoices.length ? (
+        <div className="max-h-28 overflow-auto rounded-[3px] border border-chrome-border/40 p-1">
+          {seedChoices.map((s) => (
+            <label key={s} className="flex cursor-pointer items-center gap-1.5 rounded px-1 py-0.5 text-[11px] hover:bg-foreground/[0.04]">
+              <input
+                type="checkbox"
+                checked={seeds.includes(s)}
+                onChange={() => setSeeds((cur) => (cur.includes(s) ? cur.filter((x) => x !== s) : [...cur, s]))}
+                className="h-3 w-3"
+              />
+              <span className="font-mono text-chrome-text/75">{s}</span>
+            </label>
+          ))}
+        </div>
+      ) : null}
+      {error ? <div className="whitespace-pre-wrap text-[11px] text-danger">{error}</div> : null}
+      <div className="text-[10px] text-chrome-text/40">Prefers cubes as the source. The draft fills the form below — review &amp; Save to create.</div>
     </div>
   )
 }

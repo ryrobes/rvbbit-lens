@@ -598,3 +598,69 @@ export function rowsToParams(rows: ParamRow[]): Record<string, unknown> {
   }
   return out
 }
+
+// ─────────────────────────────────────────────────────────────────────────
+// Propose (agent-drafted metric → human-blessed) — mirrors cubes' proposeCube
+// ─────────────────────────────────────────────────────────────────────────
+
+export interface MetricProposeResult {
+  name: string
+  sql: string
+  grain: string | null
+  description: string | null
+  params: Record<string, unknown>
+  checkSql: string | null
+  source: string | null
+  confidence: number | null
+  candidateSources: string[]
+  error: string | null
+}
+
+function arrLit(values?: string[] | null): string {
+  if (!values || values.length === 0) return "NULL::text[]"
+  return `ARRAY[${values.map((v) => q(v)).join(",")}]::text[]`
+}
+function asArr(v: unknown): unknown[] {
+  if (Array.isArray(v)) return v
+  if (typeof v === "string") {
+    try {
+      const p = JSON.parse(v)
+      return Array.isArray(p) ? p : []
+    } catch {
+      return []
+    }
+  }
+  return []
+}
+
+/** Draft a metric from a subject (prefers cubes as the source). Returns a draft only — the
+ *  human reviews + saves via defineMetric. */
+export async function proposeMetric(
+  connectionId: string,
+  subject: string,
+  seedSources?: string[] | null,
+  schema?: string | null,
+): Promise<{ draft: MetricProposeResult | null; error: string | null }> {
+  const r = await run(
+    connectionId,
+    `SELECT rvbbit.propose_metric(${q(subject)}, ${arrLit(seedSources)}, ${schema ? q(schema) : "NULL"}) AS d`,
+  )
+  if (!r.ok) return { draft: null, error: r.error }
+  const d = asObject(r.rows[0]?.d)
+  if (Object.keys(d).length === 0) return { draft: null, error: "no draft" }
+  return {
+    error: null,
+    draft: {
+      name: String(d.name ?? ""),
+      sql: String(d.sql ?? ""),
+      grain: str(d.grain),
+      description: str(d.description),
+      params: asObject(d.params),
+      checkSql: str(d.check_sql),
+      source: str(d.source),
+      confidence: num(d.confidence),
+      candidateSources: asArr(d.candidate_sources).map((s) => String(s)),
+      error: str(d.error),
+    },
+  }
+}

@@ -4398,6 +4398,7 @@ function renderWindowContent(
           activeConnectionId={ctx.activeConnectionId}
           hasRvbbit={ctx.hasRvbbit}
           onOpenInspector={ctx.openMetricInspector}
+          onOpenSql={ctx.openSqlData}
         />
       )
     case "metric-inspector":
@@ -4444,6 +4445,7 @@ function renderWindowContent(
           hasRvbbit={ctx.hasRvbbit}
           onOpenInspector={ctx.openCubeInspector}
           onOpenMetricInspector={ctx.openMetricInspector}
+          onOpenSql={ctx.openSqlData}
         />
       )
     case "metric-board":

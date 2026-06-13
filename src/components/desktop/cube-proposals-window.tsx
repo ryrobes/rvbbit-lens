@@ -6,13 +6,14 @@
 // Accept & Enrich (+ LLM column docs), or Reject. Generic over kind so metric proposals slot in.
 
 import { useCallback, useEffect, useMemo, useState } from "react"
-import { RefreshCw, Loader2, Check, X, Sparkles, GitBranch, Package } from "@/lib/icons"
+import { RefreshCw, Loader2, Check, X, Sparkles, GitBranch, Package, Play } from "@/lib/icons"
 import {
   acceptProposal,
   listProposals,
   rejectProposal,
   type CubeProposal,
 } from "@/lib/rvbbit/cubes"
+import { previewMetricSql } from "@/lib/rvbbit/metrics"
 import { SqlEditor } from "./sql-editor"
 import { areaCls, Field, fmtTime, inputCls, Section, StatusNote } from "./cube-shared"
 
@@ -23,6 +24,8 @@ interface Props {
   onOpenInspector?: (name: string) => void
   /** open the created METRIC after accepting a metric proposal */
   onOpenMetricInspector?: (name: string) => void
+  /** pop the proposal's SQL out into a native SQL window for testing */
+  onOpenSql?: (sql: string, title: string) => void
 }
 
 type Filter = "pending" | "accepted" | "rejected" | "all"
@@ -53,7 +56,7 @@ function KindChip({ kind }: { kind: string }) {
   )
 }
 
-export function CubeProposalsWindow({ activeConnectionId, hasRvbbit, onOpenInspector, onOpenMetricInspector }: Props) {
+export function CubeProposalsWindow({ activeConnectionId, hasRvbbit, onOpenInspector, onOpenMetricInspector, onOpenSql }: Props) {
   const [proposals, setProposals] = useState<CubeProposal[] | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [filter, setFilter] = useState<Filter>("pending")
@@ -179,6 +182,7 @@ export function CubeProposalsWindow({ activeConnectionId, hasRvbbit, onOpenInspe
               onReload={reload}
               onOpenInspector={onOpenInspector}
               onOpenMetricInspector={onOpenMetricInspector}
+              onOpenSql={onOpenSql}
             />
           ) : (
             <div className="flex flex-1 items-center justify-center">
@@ -197,15 +201,29 @@ function ProposalDetail({
   onReload,
   onOpenInspector,
   onOpenMetricInspector,
+  onOpenSql,
 }: {
   connectionId: string
   proposal: CubeProposal
   onReload: () => void
   onOpenInspector?: (name: string) => void
   onOpenMetricInspector?: (name: string) => void
+  onOpenSql?: (sql: string, title: string) => void
 }) {
   const isPending = proposal.status === "pending"
   const isMetric = proposal.kind === "metric"
+
+  // Pop the proposal's SQL into a native SQL window to run + inspect. Metrics carry {param}
+  // tokens, so resolve them with the draft's default params first (falls back to raw on error).
+  async function openInSql() {
+    const title = `${proposal.kind}: ${name || proposal.name || "draft"}`
+    if (isMetric) {
+      const { sql: resolved } = await previewMetricSql(connectionId, sql, proposal.params ?? {})
+      onOpenSql?.(resolved && resolved.trim() ? resolved : sql, title)
+    } else {
+      onOpenSql?.(sql, title)
+    }
+  }
   const [name, setName] = useState(proposal.name ?? "")
   const [sql, setSql] = useState(proposal.sql)
   const [grain, setGrain] = useState(proposal.grain ?? "")
@@ -314,6 +332,16 @@ function ProposalDetail({
             <div className="h-56 overflow-hidden rounded-[3px] border border-chrome-border/40">
               <SqlEditor value={sql} onChange={setSql} readOnly={!isPending} wrap height="100%" />
             </div>
+            {onOpenSql ? (
+              <button
+                type="button"
+                onClick={() => void openInSql()}
+                title="Run & inspect this SQL in a native SQL window"
+                className="mt-1 inline-flex items-center gap-1 rounded-[3px] border border-chrome-border/60 px-2 py-0.5 text-[10px] text-chrome-text/70 hover:bg-foreground/[0.06] hover:text-foreground"
+              >
+                <Play className="h-2.5 w-2.5" /> Open in SQL{isMetric ? " (params resolved)" : ""}
+              </button>
+            ) : null}
           </Field>
           {isMetric && Object.keys(proposal.params).length > 0 ? (
             <Field label="Default params">
