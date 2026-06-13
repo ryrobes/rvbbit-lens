@@ -22,13 +22,17 @@ interface Props {
 // bridge to the parent (lens runs it read-only via /api/db/query). The stored artifact
 // HTML follows the same contract it was published against, so it renders unchanged.
 function buildSrcdoc(html: string): string {
+  // Provide BOTH clients (rvbbitQuery + a cowork.callMcpTool shim) over the same
+  // postMessage bridge, so a Cowork-built artifact and a hosted-built one both render here.
   const shim =
     "<script>window.rvbbitQuery=function(sql,opts){return new Promise(function(res,rej){" +
     "var id='q'+Math.random().toString(36).slice(2);" +
     "function h(e){var d=e.data||{};if(d.__rvbbitQ===id){window.removeEventListener('message',h);" +
     "d.error?rej(new Error(d.error)):res(d.result);}}" +
     "window.addEventListener('message',h);parent.postMessage({__rvbbitQ:id,sql:String(sql),opts:opts||{}},'*');" +
-    "});};</script>"
+    "});};" +
+    "window.cowork=window.cowork||{};window.cowork.callMcpTool=async function(tool,args){" +
+    "var d=await window.rvbbitQuery((args&&args.sql)||'');return{structuredContent:{rows:(d&&d.rows)||[]}};};</script>"
   return (
     "<!doctype html><meta charset=utf-8>" +
     "<style>html,body{margin:0;padding:14px;font-family:system-ui,-apple-system,sans-serif;" +
