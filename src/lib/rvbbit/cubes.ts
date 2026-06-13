@@ -554,7 +554,7 @@ export async function defineCubeFromPack(
 
 export interface CubeProposal {
   proposalId: number
-  kind: string
+  kind: string // 'cube' | 'metric'
   status: string // pending | accepted | rejected | superseded
   name: string | null
   subject: string | null
@@ -564,6 +564,9 @@ export interface CubeProposal {
   sourceTables: string[]
   joinRationale: string | null
   confidence: number | null
+  /** metric proposals only: default {param} values + an optional KPI assertion. */
+  params: Record<string, unknown>
+  checkSql: string | null
   proposedBy: string | null
   proposedVia: string | null
   resultName: string | null
@@ -580,8 +583,8 @@ export async function listProposals(
   const r = await run(
     connectionId,
     `SELECT proposal_id, kind, status, name, subject, sql, grain, description, source_tables,
-            join_rationale, confidence, proposed_by, proposed_via, result_name, notes,
-            created_at::text AS created_at, reviewed_at::text AS reviewed_at
+            join_rationale, confidence, params, check_sql, proposed_by, proposed_via, result_name,
+            notes, created_at::text AS created_at, reviewed_at::text AS reviewed_at
      FROM rvbbit.proposals(${status ? q(status) : "NULL"}, ${kind ? q(kind) : "NULL"})`,
   )
   if (!r.ok) return { proposals: [], error: r.error }
@@ -599,6 +602,8 @@ export async function listProposals(
       sourceTables: asArray(row.source_tables).map((t) => String(t)),
       joinRationale: str(row.join_rationale),
       confidence: num(row.confidence),
+      params: asObject(row.params),
+      checkSql: str(row.check_sql),
       proposedBy: str(row.proposed_by),
       proposedVia: str(row.proposed_via),
       resultName: str(row.result_name),
@@ -613,7 +618,7 @@ export async function acceptProposal(
   connectionId: string,
   id: number,
   opts: { name?: string | null; sql?: string | null; grain?: string | null; description?: string | null; enrich?: boolean } = {},
-): Promise<{ cube: string | null; version: number | null; error: string | null }> {
+): Promise<{ name: string | null; kind: string | null; version: number | null; error: string | null }> {
   const r = await run(
     connectionId,
     `SELECT rvbbit.accept_proposal(
@@ -624,9 +629,9 @@ export async function acceptProposal(
         ${opts.description ? q(opts.description) : "NULL"},
         ${opts.enrich ? "true" : "false"}) AS r`,
   )
-  if (!r.ok) return { cube: null, version: null, error: r.error }
+  if (!r.ok) return { name: null, kind: null, version: null, error: r.error }
   const o = asObject(r.rows[0]?.r)
-  return { cube: str(o.cube), version: num(o.version), error: null }
+  return { name: str(o.name), kind: str(o.kind), version: num(o.version), error: null }
 }
 
 export async function rejectProposal(

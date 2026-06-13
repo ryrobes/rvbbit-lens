@@ -19,7 +19,10 @@ import { areaCls, Field, fmtTime, inputCls, Section, StatusNote } from "./cube-s
 interface Props {
   activeConnectionId: string | null
   hasRvbbit: boolean
+  /** open the created CUBE after accepting a cube proposal */
   onOpenInspector?: (name: string) => void
+  /** open the created METRIC after accepting a metric proposal */
+  onOpenMetricInspector?: (name: string) => void
 }
 
 type Filter = "pending" | "accepted" | "rejected" | "all"
@@ -37,7 +40,20 @@ function StatusDot({ status }: { status: string }) {
   return <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${tone}`} title={status} />
 }
 
-export function CubeProposalsWindow({ activeConnectionId, hasRvbbit, onOpenInspector }: Props) {
+function KindChip({ kind }: { kind: string }) {
+  const isMetric = kind === "metric"
+  return (
+    <span
+      className={`shrink-0 rounded-full border px-1.5 py-px text-[9px] font-medium uppercase tracking-wide ${
+        isMetric ? "border-sky-500/40 bg-sky-500/10 text-sky-500" : "border-main/40 bg-main/10 text-main"
+      }`}
+    >
+      {kind}
+    </span>
+  )
+}
+
+export function CubeProposalsWindow({ activeConnectionId, hasRvbbit, onOpenInspector, onOpenMetricInspector }: Props) {
   const [proposals, setProposals] = useState<CubeProposal[] | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [filter, setFilter] = useState<Filter>("pending")
@@ -139,6 +155,7 @@ export function CubeProposalsWindow({ activeConnectionId, hasRvbbit, onOpenInspe
                       {p.name ?? `#${p.proposalId}`}
                     </span>
                     <div className="flex-1" />
+                    <KindChip kind={p.kind} />
                     {p.confidence != null ? (
                       <span className="shrink-0 tabular-nums text-[10px] text-chrome-text/45">{p.confidence.toFixed(2)}</span>
                     ) : null}
@@ -161,6 +178,7 @@ export function CubeProposalsWindow({ activeConnectionId, hasRvbbit, onOpenInspe
               proposal={selected}
               onReload={reload}
               onOpenInspector={onOpenInspector}
+              onOpenMetricInspector={onOpenMetricInspector}
             />
           ) : (
             <div className="flex flex-1 items-center justify-center">
@@ -178,13 +196,16 @@ function ProposalDetail({
   proposal,
   onReload,
   onOpenInspector,
+  onOpenMetricInspector,
 }: {
   connectionId: string
   proposal: CubeProposal
   onReload: () => void
   onOpenInspector?: (name: string) => void
+  onOpenMetricInspector?: (name: string) => void
 }) {
   const isPending = proposal.status === "pending"
+  const isMetric = proposal.kind === "metric"
   const [name, setName] = useState(proposal.name ?? "")
   const [sql, setSql] = useState(proposal.sql)
   const [grain, setGrain] = useState(proposal.grain ?? "")
@@ -195,12 +216,12 @@ function ProposalDetail({
 
   async function accept(enrich: boolean) {
     if (!name.trim()) {
-      setMsg("A cube name is required.")
+      setMsg(`A ${proposal.kind} name is required.`)
       return
     }
     setBusy(enrich ? "enrich" : "accept")
     setMsg(null)
-    const { cube, error } = await acceptProposal(connectionId, proposal.proposalId, {
+    const { name: created, kind, error } = await acceptProposal(connectionId, proposal.proposalId, {
       name: name.trim(),
       sql,
       grain: grain.trim() || null,
@@ -213,7 +234,10 @@ function ProposalDetail({
       return
     }
     onReload()
-    if (cube) onOpenInspector?.(cube)
+    if (created) {
+      if (kind === "metric") onOpenMetricInspector?.(created)
+      else onOpenInspector?.(created)
+    }
   }
 
   async function reject() {
@@ -233,6 +257,7 @@ function ProposalDetail({
       <div className="flex items-center gap-2 border-b border-chrome-border/50 px-3 py-2">
         <StatusDot status={proposal.status} />
         <span className="text-[12px] uppercase tracking-wide text-chrome-text/70">{proposal.status}</span>
+        <KindChip kind={proposal.kind} />
         <span className="text-[10px] text-chrome-text/40">
           {proposal.proposedBy ?? "—"}
           {proposal.proposedVia ? ` · ${proposal.proposedVia}` : ""} · {fmtTime(proposal.createdAt ? Date.parse(proposal.createdAt) : null)}
@@ -274,8 +299,8 @@ function ProposalDetail({
         ) : null}
 
         <Section title={isPending ? "Review & edit before blessing" : "Definition"}>
-          <Field label="Cube name">
-            <input className={inputCls} value={name} disabled={!isPending} onChange={(e) => setName(e.target.value)} placeholder="cube_name" />
+          <Field label={isMetric ? "Metric name" : "Cube name"}>
+            <input className={inputCls} value={name} disabled={!isPending} onChange={(e) => setName(e.target.value)} placeholder={isMetric ? "metric_name" : "cube_name"} />
           </Field>
           <div className="flex gap-2">
             <Field label="Grain">
@@ -290,6 +315,20 @@ function ProposalDetail({
               <SqlEditor value={sql} onChange={setSql} readOnly={!isPending} wrap height="100%" />
             </div>
           </Field>
+          {isMetric && Object.keys(proposal.params).length > 0 ? (
+            <Field label="Default params">
+              <pre className="overflow-auto rounded-[3px] border border-chrome-border/40 bg-foreground/[0.02] p-2 font-mono text-[10px] text-chrome-text/75">
+                {JSON.stringify(proposal.params, null, 2)}
+              </pre>
+            </Field>
+          ) : null}
+          {isMetric && proposal.checkSql ? (
+            <Field label="KPI check">
+              <pre className="overflow-auto rounded-[3px] border border-emerald-500/20 bg-emerald-500/[0.04] p-2 font-mono text-[10px] text-chrome-text/80">
+                {proposal.checkSql}
+              </pre>
+            </Field>
+          ) : null}
         </Section>
 
         {proposal.notes ? (
@@ -313,14 +352,16 @@ function ProposalDetail({
           >
             {busy === "accept" ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Check className="h-3.5 w-3.5" />} Accept
           </button>
-          <button
-            type="button"
-            onClick={() => void accept(true)}
-            disabled={busy != null}
-            className="inline-flex h-8 items-center gap-1.5 rounded-[3px] border border-chrome-border/60 px-3 text-[12px] text-chrome-text/75 hover:bg-foreground/[0.05] hover:text-foreground disabled:opacity-50"
-          >
-            {busy === "enrich" ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5" />} Accept & Enrich
-          </button>
+          {!isMetric ? (
+            <button
+              type="button"
+              onClick={() => void accept(true)}
+              disabled={busy != null}
+              className="inline-flex h-8 items-center gap-1.5 rounded-[3px] border border-chrome-border/60 px-3 text-[12px] text-chrome-text/75 hover:bg-foreground/[0.05] hover:text-foreground disabled:opacity-50"
+            >
+              {busy === "enrich" ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5" />} Accept & Enrich
+            </button>
+          ) : null}
           <div className="flex-1" />
           <input
             value={note}
