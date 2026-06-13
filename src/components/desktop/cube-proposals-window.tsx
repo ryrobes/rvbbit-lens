@@ -9,11 +9,16 @@ import { useCallback, useEffect, useMemo, useState } from "react"
 import { RefreshCw, Loader2, Check, X, Sparkles, GitBranch, Package, Play, Save, Trash2 } from "@/lib/icons"
 import {
   acceptProposal,
+  discoveryCandidates,
   listProposals,
+  proposalQuality,
+  proposeDiscovery,
   refineProposal,
   rejectProposal,
   withdrawProposal,
   type CubeProposal,
+  type DiscoveryCandidate,
+  type ProposalQualityRow,
 } from "@/lib/rvbbit/cubes"
 import { previewMetricSql } from "@/lib/rvbbit/metrics"
 import { SqlEditor } from "./sql-editor"
@@ -30,8 +35,8 @@ interface Props {
   onOpenSql?: (sql: string, title: string) => void
 }
 
-type Filter = "pending" | "accepted" | "rejected" | "all"
-const FILTERS: Filter[] = ["pending", "accepted", "rejected", "all"]
+type Filter = "pending" | "accepted" | "rejected" | "all" | "recommend"
+const FILTERS: Filter[] = ["pending", "accepted", "rejected", "all", "recommend"]
 
 function StatusDot({ status }: { status: string }) {
   const tone =
@@ -60,6 +65,7 @@ function KindChip({ kind }: { kind: string }) {
 
 export function CubeProposalsWindow({ activeConnectionId, hasRvbbit, onOpenInspector, onOpenMetricInspector, onOpenSql }: Props) {
   const [proposals, setProposals] = useState<CubeProposal[] | null>(null)
+  const [quality, setQuality] = useState<ProposalQualityRow[]>([])
   const [error, setError] = useState<string | null>(null)
   const [filter, setFilter] = useState<Filter>("pending")
   const [selectedId, setSelectedId] = useState<number | null>(null)
@@ -72,9 +78,13 @@ export function CubeProposalsWindow({ activeConnectionId, hasRvbbit, onOpenInspe
     let cancelled = false
     const id = setTimeout(() => {
       void (async () => {
-        const { proposals: rows, error: err } = await listProposals(activeConnectionId)
+        const [{ proposals: rows, error: err }, { rows: q }] = await Promise.all([
+          listProposals(activeConnectionId),
+          proposalQuality(activeConnectionId),
+        ])
         if (cancelled) return
         setProposals(rows)
+        setQuality(q)
         setError(err)
         setSelectedId((cur) => cur ?? rows.find((p) => p.status === "pending")?.proposalId ?? rows[0]?.proposalId ?? null)
       })()
@@ -87,10 +97,19 @@ export function CubeProposalsWindow({ activeConnectionId, hasRvbbit, onOpenInspe
 
   const filtered = useMemo(() => {
     const all = proposals ?? []
-    return filter === "all" ? all : all.filter((p) => p.status === filter)
+    if (filter === "all" || filter === "recommend") return all
+    return all.filter((p) => p.status === filter)
   }, [proposals, filter])
 
   const pendingCount = useMemo(() => (proposals ?? []).filter((p) => p.status === "pending").length, [proposals])
+  const acceptSummary = useMemo(
+    () =>
+      quality
+        .filter((r) => r.acceptRate != null)
+        .map((r) => `${r.proposedBy} ${Math.round((r.acceptRate ?? 0) * 100)}%`)
+        .join(" · "),
+    [quality],
+  )
   const selected = useMemo(() => (proposals ?? []).find((p) => p.proposalId === selectedId) ?? null, [proposals, selectedId])
 
   if (!activeConnectionId || !hasRvbbit) {
@@ -107,6 +126,11 @@ export function CubeProposalsWindow({ activeConnectionId, hasRvbbit, onOpenInspe
         {pendingCount > 0 ? (
           <span className="rounded-full border border-amber-500/40 bg-amber-500/15 px-1.5 py-px text-[10px] font-medium text-amber-500">
             {pendingCount} pending
+          </span>
+        ) : null}
+        {acceptSummary ? (
+          <span className="text-[10px] text-chrome-text/45" title="accept rate by proposer (accepted ÷ decided)">
+            accept {acceptSummary}
           </span>
         ) : null}
         <div className="ml-2 flex items-center gap-1">
@@ -136,6 +160,15 @@ export function CubeProposalsWindow({ activeConnectionId, hasRvbbit, onOpenInspe
 
       {error ? <StatusNote state="error" message={error} className="border-b border-danger/30" /> : null}
 
+      {filter === "recommend" ? (
+        <RecommendationsView
+          connectionId={activeConnectionId}
+          onProposed={() => {
+            setFilter("pending")
+            reload()
+          }}
+        />
+      ) : (
       <div className="flex min-h-0 flex-1">
         {/* LEFT — list */}
         <div className="w-60 shrink-0 overflow-y-auto border-r border-chrome-border/50">
@@ -193,6 +226,118 @@ export function CubeProposalsWindow({ activeConnectionId, hasRvbbit, onOpenInspe
           )}
         </div>
       </div>
+      )}
+    </div>
+  )
+}
+
+// ── Recommendations: activity-mined recurring table-sets you could cube ──────
+function RecommendationsView({
+  connectionId,
+  onProposed,
+}: {
+  connectionId: string
+  onProposed: () => void
+}) {
+  const [cands, setCands] = useState<DiscoveryCandidate[] | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [busy, setBusy] = useState<string | null>(null)
+  const [msg, setMsg] = useState<string | null>(null)
+  const [reloadKey, setReloadKey] = useState(0)
+
+  useEffect(() => {
+    let cancelled = false
+    const id = setTimeout(() => {
+      void (async () => {
+        const { candidates, error: err } = await discoveryCandidates(connectionId, { days: 30, minQueries: 2, limit: 30 })
+        if (cancelled) return
+        setCands(candidates)
+        setError(err)
+      })()
+    }, 0)
+    return () => {
+      cancelled = true
+      clearTimeout(id)
+    }
+  }, [connectionId, reloadKey])
+
+  async function propose(tables: string[]) {
+    const key = tables.join("+")
+    setBusy(key)
+    setMsg(null)
+    const { name, error: err } = await proposeDiscovery(connectionId, tables)
+    setBusy(null)
+    if (err) {
+      setMsg(`Propose failed: ${err}`)
+      return
+    }
+    setMsg(`Proposed ${name} — review it under "pending".`)
+    onProposed()
+  }
+
+  return (
+    <div className="min-h-0 flex-1 overflow-auto p-3">
+      <div className="mb-2 flex items-center gap-2">
+        <span className="text-[11px] text-chrome-text/70">
+          Table-sets employees query together but have no cube — mined from activity.
+        </span>
+        <div className="flex-1" />
+        <button
+          type="button"
+          onClick={() => setReloadKey((k) => k + 1)}
+          className="inline-flex h-6 items-center gap-1 rounded-[3px] border border-chrome-border/60 px-2 text-[10px] text-chrome-text/70 hover:bg-foreground/[0.05] hover:text-foreground"
+        >
+          <RefreshCw className="h-3 w-3" /> Refresh
+        </button>
+      </div>
+      {msg ? <div className="mb-2 text-[11px] text-chrome-text/70">{msg}</div> : null}
+      {cands == null ? (
+        <StatusNote state="loading" />
+      ) : error ? (
+        <StatusNote state="error" message={error} />
+      ) : cands.length === 0 ? (
+        <StatusNote state="empty" message="No recurring multi-table query patterns yet — they appear as employees use the warehouse." />
+      ) : (
+        <div className="space-y-1.5">
+          {cands.map((c) => {
+            const key = c.tables.join("+")
+            const done = c.covered || c.alreadyProposed
+            return (
+              <div
+                key={key}
+                className="flex items-center gap-2 rounded-[3px] border border-chrome-border/40 bg-foreground/[0.02] px-2.5 py-1.5"
+              >
+                <div className="min-w-0 flex-1">
+                  <div className="flex flex-wrap items-center gap-1">
+                    {c.tables.map((t) => (
+                      <span key={t} className="rounded-[3px] border border-chrome-border/40 bg-foreground/[0.03] px-1.5 py-px font-mono text-[11px] text-chrome-text/80">
+                        {t}
+                      </span>
+                    ))}
+                  </div>
+                  <div className="mt-0.5 text-[10px] text-chrome-text/45">
+                    {c.queryCount} quer{c.queryCount === 1 ? "y" : "ies"} · {c.users} user{c.users === 1 ? "" : "s"}
+                  </div>
+                </div>
+                {c.covered ? (
+                  <span className="shrink-0 text-[10px] uppercase tracking-wide text-emerald-500/70">has a cube</span>
+                ) : c.alreadyProposed ? (
+                  <span className="shrink-0 text-[10px] uppercase tracking-wide text-amber-500/70">proposed</span>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => void propose(c.tables)}
+                    disabled={busy != null || done}
+                    className="inline-flex h-7 shrink-0 items-center gap-1 rounded-[3px] border border-main/40 bg-main/15 px-2 text-[11px] text-main hover:bg-main/25 disabled:opacity-50"
+                  >
+                    {busy === key ? <Loader2 className="h-3 w-3 animate-spin" /> : <Sparkles className="h-3 w-3" />} Propose cube
+                  </button>
+                )}
+              </div>
+            )
+          })}
+        </div>
+      )}
     </div>
   )
 }

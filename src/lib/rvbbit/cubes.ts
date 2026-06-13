@@ -676,6 +676,88 @@ export async function withdrawProposal(
 }
 
 // ─────────────────────────────────────────────────────────────────────────
+// Warehouse Recommendations — activity-mined candidates + proposal quality
+// ─────────────────────────────────────────────────────────────────────────
+
+/** A recurring table-set employees query that has no cube yet (rvbbit.discovery_candidates). */
+export interface DiscoveryCandidate {
+  tables: string[]
+  queryCount: number
+  users: number
+  covered: boolean
+  alreadyProposed: boolean
+}
+
+export async function discoveryCandidates(
+  connectionId: string,
+  opts: { days?: number; minQueries?: number; limit?: number } = {},
+): Promise<{ candidates: DiscoveryCandidate[]; error: string | null }> {
+  const days = opts.days ?? 14
+  const minQ = opts.minQueries ?? 3
+  const limit = opts.limit ?? 20
+  const r = await run(
+    connectionId,
+    `SELECT tables, query_count, users, covered, already_proposed
+     FROM rvbbit.discovery_candidates(${days}, ${minQ}, ${limit})`,
+  )
+  if (!r.ok) return { candidates: [], error: r.error }
+  return {
+    error: null,
+    candidates: r.rows.map((row) => ({
+      tables: asArray(row.tables).map((t) => String(t)),
+      queryCount: num(row.query_count) ?? 0,
+      users: num(row.users) ?? 0,
+      covered: row.covered === true || row.covered === "t",
+      alreadyProposed: row.already_proposed === true || row.already_proposed === "t",
+    })),
+  }
+}
+
+/** Propose a cube for one mined table-set on demand → returns the new proposal. */
+export async function proposeDiscovery(
+  connectionId: string,
+  tables: string[],
+): Promise<{ name: string | null; proposalId: number | null; error: string | null }> {
+  const r = await run(connectionId, `SELECT rvbbit.propose_discovery(${arr(tables)}, 'lens') AS d`)
+  if (!r.ok) return { name: null, proposalId: null, error: r.error }
+  const d = asObject(r.rows[0]?.d)
+  return { name: str(d.name), proposalId: num(d.proposal_id), error: null }
+}
+
+export interface ProposalQualityRow {
+  kind: string
+  proposedBy: string
+  total: number
+  accepted: number
+  rejected: number
+  pending: number
+  acceptRate: number | null
+}
+
+export async function proposalQuality(
+  connectionId: string,
+): Promise<{ rows: ProposalQualityRow[]; error: string | null }> {
+  const r = await run(
+    connectionId,
+    `SELECT kind, proposed_by, total, accepted, rejected, pending, accept_rate
+     FROM rvbbit.proposal_quality ORDER BY total DESC`,
+  )
+  if (!r.ok) return { rows: [], error: r.error }
+  return {
+    error: null,
+    rows: r.rows.map((row) => ({
+      kind: String(row.kind),
+      proposedBy: String(row.proposed_by ?? "?"),
+      total: num(row.total) ?? 0,
+      accepted: num(row.accepted) ?? 0,
+      rejected: num(row.rejected) ?? 0,
+      pending: num(row.pending) ?? 0,
+      acceptRate: num(row.accept_rate),
+    })),
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
 // Discovery helper — list base tables (for the Creator's seed-table picker)
 // ─────────────────────────────────────────────────────────────────────────
 
