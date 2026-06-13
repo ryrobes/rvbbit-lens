@@ -96,6 +96,7 @@ import { MetricInspectorWindow } from "./metric-inspector-window"
 import { CubeCatalogWindow } from "./cube-catalog-window"
 import { CubeCreatorWindow } from "./cube-creator-window"
 import { CubeInspectorWindow } from "./cube-inspector-window"
+import { CubeProposalsWindow } from "./cube-proposals-window"
 import { MetricBoardWindow } from "./metric-board-window"
 import { AlertsWindow } from "./alerts-window"
 import { CapabilitiesWindow } from "./capabilities-window"
@@ -192,6 +193,7 @@ import type {
   CubeCatalogPayload,
   CubeCreatorPayload,
   CubeInspectorPayload,
+  CubeProposalsPayload,
   MetricBoardPayload,
   AlertsPayload,
 } from "@/lib/desktop/types"
@@ -2237,6 +2239,18 @@ export function DesktopShell() {
     })
   }, [focus, openWindow, liveWindows, updatePayload])
 
+  const openCubeProposals = useCallback(() => {
+    const existing = liveWindows().find((w) => w.kind === "cube-proposals")
+    if (existing) return focus(existing.id)
+    openWindow({
+      id: randomUUID(),
+      kind: "cube-proposals",
+      title: "Cube Proposals",
+      x: 170, y: 88, width: 1000, height: 660,
+      payload: { kind: "cube-proposals" } satisfies CubeProposalsPayload,
+    })
+  }, [focus, openWindow, liveWindows])
+
   const openAlerts = useCallback(() => {
     const existing = liveWindows().find((w) => w.kind === "alerts")
     if (existing) return focus(existing.id)
@@ -3418,6 +3432,7 @@ export function DesktopShell() {
     { id: "cube-catalog", label: "Cube Catalog", icon: Boxes, color: "oklch(76% 0.15 100)", description: "Browse curated subject-area cubes", activate: () => openCubeCatalog(), folder: "cubes", rvbbit: true },
     { id: "cube-creator", label: "Cube Creator", icon: Calculator, color: "oklch(76% 0.15 100)", description: "Author cubes — manual, AI-propose, or from a pack", activate: () => openCubeCreator(), folder: "cubes", rvbbit: true },
     { id: "cube-inspector", label: "Cube Inspector", icon: Eye, color: "oklch(76% 0.15 100)", description: "Ground a cube — columns, health, lineage", activate: () => openCubeInspector(), folder: "cubes", rvbbit: true },
+    { id: "cube-proposals", label: "Cube Proposals", icon: Package, color: "oklch(76% 0.15 100)", description: "Review & bless agent-drafted cube proposals", activate: () => openCubeProposals(), folder: "cubes", rvbbit: true },
     { id: "alerts", label: "Alerts", icon: Bell, color: "oklch(68% 0.19 25)", description: "Observable alert rules — thresholds, episodes & firing", activate: () => openAlerts(), rvbbit: true },
     // Knowledge
     { id: "kg", label: "Knowledge Graph", icon: TreeStructure, color: "var(--brand-kg)", description: "Browse the extracted graph", activate: () => openKgBrowser(), folder: "knowledge", rvbbit: true },
@@ -3431,7 +3446,7 @@ export function DesktopShell() {
     openCosts, openSyncMirror, openOperators, openSpecialists, openRouting,
     openMcpServers, openCapabilities, openHfDeploy, openWarren, openModelStudio,
     openDuck, openMetricCatalog, openMetricCreator, openMetricInspector, openMetricBoard, openDashboards, openAlerts,
-    openCubeCatalog, openCubeCreator, openCubeInspector,
+    openCubeCatalog, openCubeCreator, openCubeInspector, openCubeProposals,
     openKgBrowser, openKgExplorer, openQueryLens, openDrift,
   ])
 
@@ -4422,6 +4437,14 @@ function renderWindowContent(
           onOpenMetricInspector={ctx.openMetricInspector}
         />
       )
+    case "cube-proposals":
+      return (
+        <CubeProposalsWindow
+          activeConnectionId={ctx.activeConnectionId}
+          hasRvbbit={ctx.hasRvbbit}
+          onOpenInspector={ctx.openCubeInspector}
+        />
+      )
     case "metric-board":
       return (
         <MetricBoardWindow
@@ -4653,6 +4676,8 @@ function iconForKind(kind: DesktopWindowState["kind"]) {
       return Calculator
     case "cube-inspector":
       return Eye
+    case "cube-proposals":
+      return Package
     case "capabilities":
     case "capability-detail":
       return Package

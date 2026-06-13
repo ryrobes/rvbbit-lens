@@ -51,6 +51,7 @@ export type DesktopWindowKind =
   | "cube-catalog"
   | "cube-creator"
   | "cube-inspector"
+  | "cube-proposals"
   | "metric-board"
   | "alerts"
 
@@ -128,6 +129,7 @@ export type WindowPayload =
   | CubeCatalogPayload
   | CubeCreatorPayload
   | CubeInspectorPayload
+  | CubeProposalsPayload
   | MetricBoardPayload
   | AlertsPayload
 
@@ -680,6 +682,10 @@ export interface CubeInspectorPayload {
   kind?: "cube-inspector"
   /** Optional cube to select on open. */
   cubeName?: string | null
+}
+/** Cube Proposals — the review inbox for agent-drafted cubes (rvbbit.proposals). */
+export interface CubeProposalsPayload {
+  kind?: "cube-proposals"
 }
 export interface MetricBoardPayload {
   kind?: "metric-board"

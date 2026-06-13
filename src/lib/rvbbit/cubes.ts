@@ -549,6 +549,96 @@ export async function defineCubeFromPack(
 }
 
 // ─────────────────────────────────────────────────────────────────────────
+// Proposals (agent-drafted cubes awaiting human review/promotion)
+// ─────────────────────────────────────────────────────────────────────────
+
+export interface CubeProposal {
+  proposalId: number
+  kind: string
+  status: string // pending | accepted | rejected | superseded
+  name: string | null
+  subject: string | null
+  sql: string
+  grain: string | null
+  description: string | null
+  sourceTables: string[]
+  joinRationale: string | null
+  confidence: number | null
+  proposedBy: string | null
+  proposedVia: string | null
+  resultName: string | null
+  notes: string | null
+  createdAt: string | null
+  reviewedAt: string | null
+}
+
+export async function listProposals(
+  connectionId: string,
+  status?: string | null,
+  kind?: string | null,
+): Promise<{ proposals: CubeProposal[]; error: string | null }> {
+  const r = await run(
+    connectionId,
+    `SELECT proposal_id, kind, status, name, subject, sql, grain, description, source_tables,
+            join_rationale, confidence, proposed_by, proposed_via, result_name, notes,
+            created_at::text AS created_at, reviewed_at::text AS reviewed_at
+     FROM rvbbit.proposals(${status ? q(status) : "NULL"}, ${kind ? q(kind) : "NULL"})`,
+  )
+  if (!r.ok) return { proposals: [], error: r.error }
+  return {
+    error: null,
+    proposals: r.rows.map((row) => ({
+      proposalId: Number(row.proposal_id),
+      kind: String(row.kind ?? "cube"),
+      status: String(row.status ?? "pending"),
+      name: str(row.name),
+      subject: str(row.subject),
+      sql: String(row.sql ?? ""),
+      grain: str(row.grain),
+      description: str(row.description),
+      sourceTables: asArray(row.source_tables).map((t) => String(t)),
+      joinRationale: str(row.join_rationale),
+      confidence: num(row.confidence),
+      proposedBy: str(row.proposed_by),
+      proposedVia: str(row.proposed_via),
+      resultName: str(row.result_name),
+      notes: str(row.notes),
+      createdAt: str(row.created_at),
+      reviewedAt: str(row.reviewed_at),
+    })),
+  }
+}
+
+export async function acceptProposal(
+  connectionId: string,
+  id: number,
+  opts: { name?: string | null; sql?: string | null; grain?: string | null; description?: string | null; enrich?: boolean } = {},
+): Promise<{ cube: string | null; version: number | null; error: string | null }> {
+  const r = await run(
+    connectionId,
+    `SELECT rvbbit.accept_proposal(
+        ${id},
+        ${opts.name ? q(opts.name) : "NULL"},
+        ${opts.sql ? q(opts.sql) : "NULL"},
+        ${opts.grain ? q(opts.grain) : "NULL"},
+        ${opts.description ? q(opts.description) : "NULL"},
+        ${opts.enrich ? "true" : "false"}) AS r`,
+  )
+  if (!r.ok) return { cube: null, version: null, error: r.error }
+  const o = asObject(r.rows[0]?.r)
+  return { cube: str(o.cube), version: num(o.version), error: null }
+}
+
+export async function rejectProposal(
+  connectionId: string,
+  id: number,
+  note?: string | null,
+): Promise<{ ok: boolean; error: string | null }> {
+  const r = await run(connectionId, `SELECT rvbbit.reject_proposal(${id}, ${note ? q(note) : "NULL"})`)
+  return r.ok ? { ok: true, error: null } : { ok: false, error: r.error }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
 // Discovery helper — list base tables (for the Creator's seed-table picker)
 // ─────────────────────────────────────────────────────────────────────────
 
