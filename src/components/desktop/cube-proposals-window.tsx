@@ -6,11 +6,13 @@
 // Accept & Enrich (+ LLM column docs), or Reject. Generic over kind so metric proposals slot in.
 
 import { useCallback, useEffect, useMemo, useState } from "react"
-import { RefreshCw, Loader2, Check, X, Sparkles, GitBranch, Package, Play } from "@/lib/icons"
+import { RefreshCw, Loader2, Check, X, Sparkles, GitBranch, Package, Play, Save, Trash2 } from "@/lib/icons"
 import {
   acceptProposal,
   listProposals,
+  refineProposal,
   rejectProposal,
+  withdrawProposal,
   type CubeProposal,
 } from "@/lib/rvbbit/cubes"
 import { previewMetricSql } from "@/lib/rvbbit/metrics"
@@ -270,6 +272,32 @@ function ProposalDetail({
     onReload()
   }
 
+  async function saveEdits() {
+    setBusy("save")
+    setMsg(null)
+    const { ok, error } = await refineProposal(connectionId, proposal.proposalId, {
+      name: name.trim() || null,
+      sql,
+      grain: grain.trim() || null,
+      description: description.trim() || null,
+    })
+    setBusy(null)
+    setMsg(ok ? "Edits saved to the draft." : `Save failed: ${error}`)
+    if (ok) onReload()
+  }
+
+  async function withdraw() {
+    setBusy("withdraw")
+    setMsg(null)
+    const { ok, error } = await withdrawProposal(connectionId, proposal.proposalId, note.trim() || null)
+    setBusy(null)
+    if (!ok) {
+      setMsg(`Withdraw failed: ${error}`)
+      return
+    }
+    onReload()
+  }
+
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <div className="flex items-center gap-2 border-b border-chrome-border/50 px-3 py-2">
@@ -390,7 +418,25 @@ function ProposalDetail({
               {busy === "enrich" ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5" />} Accept & Enrich
             </button>
           ) : null}
+          <button
+            type="button"
+            onClick={() => void saveEdits()}
+            disabled={busy != null}
+            title="Save your edits to the draft without accepting"
+            className="inline-flex h-8 items-center gap-1.5 rounded-[3px] border border-chrome-border/60 px-3 text-[12px] text-chrome-text/75 hover:bg-foreground/[0.05] hover:text-foreground disabled:opacity-50"
+          >
+            {busy === "save" ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" />} Save edits
+          </button>
           <div className="flex-1" />
+          <button
+            type="button"
+            onClick={() => void withdraw()}
+            disabled={busy != null}
+            title="Retract this draft (status → withdrawn)"
+            className="inline-flex h-8 items-center gap-1.5 rounded-[3px] border border-chrome-border/60 px-3 text-[12px] text-chrome-text/60 hover:bg-foreground/[0.05] hover:text-foreground disabled:opacity-50"
+          >
+            {busy === "withdraw" ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Trash2 className="h-3.5 w-3.5" />} Withdraw
+          </button>
           <input
             value={note}
             onChange={(e) => setNote(e.target.value)}

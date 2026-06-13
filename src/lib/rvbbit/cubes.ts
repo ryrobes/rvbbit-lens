@@ -643,6 +643,38 @@ export async function rejectProposal(
   return r.ok ? { ok: true, error: null } : { ok: false, error: r.error }
 }
 
+/** Persist edits to a PENDING proposal in place (without accepting). */
+export async function refineProposal(
+  connectionId: string,
+  id: number,
+  edits: { name?: string | null; sql?: string | null; grain?: string | null; description?: string | null; checkSql?: string | null; confidence?: number | null },
+): Promise<{ ok: boolean; error: string | null }> {
+  const r = await run(
+    connectionId,
+    `SELECT rvbbit.refine_proposal(
+        ${id},
+        ${edits.name ? q(edits.name) : "NULL"},
+        ${edits.sql ? q(edits.sql) : "NULL"},
+        ${edits.grain ? q(edits.grain) : "NULL"},
+        ${edits.description ? q(edits.description) : "NULL"},
+        NULL,
+        ${edits.checkSql ? q(edits.checkSql) : "NULL"},
+        NULL,
+        ${edits.confidence != null ? edits.confidence : "NULL"})`,
+  )
+  return r.ok ? { ok: true, error: null } : { ok: false, error: r.error }
+}
+
+/** Retract a PENDING proposal (status → withdrawn). */
+export async function withdrawProposal(
+  connectionId: string,
+  id: number,
+  reason?: string | null,
+): Promise<{ ok: boolean; error: string | null }> {
+  const r = await run(connectionId, `SELECT rvbbit.withdraw_proposal(${id}, ${reason ? q(reason) : "NULL"})`)
+  return r.ok ? { ok: true, error: null } : { ok: false, error: r.error }
+}
+
 // ─────────────────────────────────────────────────────────────────────────
 // Discovery helper — list base tables (for the Creator's seed-table picker)
 // ─────────────────────────────────────────────────────────────────────────
