@@ -93,6 +93,9 @@ import { ModelStudioWindow } from "./model-studio-window"
 import { MetricCatalogWindow } from "./metric-catalog-window"
 import { MetricCreatorWindow } from "./metric-creator-window"
 import { MetricInspectorWindow } from "./metric-inspector-window"
+import { CubeCatalogWindow } from "./cube-catalog-window"
+import { CubeCreatorWindow } from "./cube-creator-window"
+import { CubeInspectorWindow } from "./cube-inspector-window"
 import { MetricBoardWindow } from "./metric-board-window"
 import { AlertsWindow } from "./alerts-window"
 import { CapabilitiesWindow } from "./capabilities-window"
@@ -186,6 +189,9 @@ import type {
   MetricCatalogPayload,
   MetricCreatorPayload,
   MetricInspectorPayload,
+  CubeCatalogPayload,
+  CubeCreatorPayload,
+  CubeInspectorPayload,
   MetricBoardPayload,
   AlertsPayload,
 } from "@/lib/desktop/types"
@@ -2185,6 +2191,52 @@ export function DesktopShell() {
     })
   }, [focus, openWindow, liveWindows])
 
+  const openCubeCatalog = useCallback(() => {
+    const existing = liveWindows().find((w) => w.kind === "cube-catalog")
+    if (existing) return focus(existing.id)
+    openWindow({
+      id: randomUUID(),
+      kind: "cube-catalog",
+      title: "Cube Catalog",
+      x: 140, y: 76, width: 900, height: 560,
+      payload: { kind: "cube-catalog" } satisfies CubeCatalogPayload,
+    })
+  }, [focus, openWindow, liveWindows])
+
+  const openCubeCreator = useCallback((cubeName?: string) => {
+    const existing = liveWindows().find((w) => w.kind === "cube-creator")
+    if (existing) {
+      if (cubeName != null) {
+        updatePayload(existing.id, (p) => ({ ...(p as CubeCreatorPayload), cubeName }))
+      }
+      return focus(existing.id)
+    }
+    openWindow({
+      id: randomUUID(),
+      kind: "cube-creator",
+      title: "Cube Creator",
+      x: 160, y: 84, width: 1040, height: 680,
+      payload: { kind: "cube-creator", cubeName: cubeName ?? null } satisfies CubeCreatorPayload,
+    })
+  }, [focus, openWindow, liveWindows, updatePayload])
+
+  const openCubeInspector = useCallback((cubeName?: string) => {
+    const existing = liveWindows().find((w) => w.kind === "cube-inspector")
+    if (existing) {
+      if (cubeName != null) {
+        updatePayload(existing.id, (p) => ({ ...(p as CubeInspectorPayload), cubeName }))
+      }
+      return focus(existing.id)
+    }
+    openWindow({
+      id: randomUUID(),
+      kind: "cube-inspector",
+      title: "Cube Inspector",
+      x: 180, y: 92, width: 1020, height: 700,
+      payload: { kind: "cube-inspector", cubeName: cubeName ?? null } satisfies CubeInspectorPayload,
+    })
+  }, [focus, openWindow, liveWindows, updatePayload])
+
   const openAlerts = useCallback(() => {
     const existing = liveWindows().find((w) => w.kind === "alerts")
     if (existing) return focus(existing.id)
@@ -3362,6 +3414,10 @@ export function DesktopShell() {
     { id: "metric-inspector", label: "Metric Inspector", icon: LineChart, color: "oklch(78% 0.13 95)", description: "Run metrics across def-time & data-time", activate: () => openMetricInspector(), folder: "metrics", rvbbit: true },
     { id: "metric-board", label: "KPI Board", icon: Table2, color: "oklch(78% 0.13 95)", description: "Matrix of metric values & KPI verdicts over time", activate: () => openMetricBoard(), folder: "metrics", rvbbit: true },
     { id: "dashboards", label: "Dashboards", icon: LayoutDashboard, color: "oklch(78% 0.13 95)", description: "Claude-built dashboards — live, inspectable, shareable", activate: () => openDashboards(), folder: "metrics", rvbbit: true },
+    // Cubes — the curated subject-area mart layer (metrics → cubes → raw)
+    { id: "cube-catalog", label: "Cube Catalog", icon: Boxes, color: "oklch(76% 0.15 100)", description: "Browse curated subject-area cubes", activate: () => openCubeCatalog(), folder: "cubes", rvbbit: true },
+    { id: "cube-creator", label: "Cube Creator", icon: Calculator, color: "oklch(76% 0.15 100)", description: "Author cubes — manual, AI-propose, or from a pack", activate: () => openCubeCreator(), folder: "cubes", rvbbit: true },
+    { id: "cube-inspector", label: "Cube Inspector", icon: Eye, color: "oklch(76% 0.15 100)", description: "Ground a cube — columns, health, lineage", activate: () => openCubeInspector(), folder: "cubes", rvbbit: true },
     { id: "alerts", label: "Alerts", icon: Bell, color: "oklch(68% 0.19 25)", description: "Observable alert rules — thresholds, episodes & firing", activate: () => openAlerts(), rvbbit: true },
     // Knowledge
     { id: "kg", label: "Knowledge Graph", icon: TreeStructure, color: "var(--brand-kg)", description: "Browse the extracted graph", activate: () => openKgBrowser(), folder: "knowledge", rvbbit: true },
@@ -3375,6 +3431,7 @@ export function DesktopShell() {
     openCosts, openSyncMirror, openOperators, openSpecialists, openRouting,
     openMcpServers, openCapabilities, openHfDeploy, openWarren, openModelStudio,
     openDuck, openMetricCatalog, openMetricCreator, openMetricInspector, openMetricBoard, openDashboards, openAlerts,
+    openCubeCatalog, openCubeCreator, openCubeInspector,
     openKgBrowser, openKgExplorer, openQueryLens, openDrift,
   ])
 
@@ -3441,6 +3498,8 @@ export function DesktopShell() {
       openMetricCatalog,
       openMetricCreator,
       openMetricInspector,
+      openCubeCreator,
+      openCubeInspector,
       openCosts,
       openDuck,
       openCapabilities,
@@ -3461,7 +3520,7 @@ export function DesktopShell() {
       openMcpServerDetail, openRouting, openQueryLens, openKgBrowser, openKgEntity,
       openSourceRow, openKgForSource, openKgExtractionRuns, openKgMergeReview, openKgExplorer,
       openDataSearch, openDrift, openModelStudio, openMetricCatalog, openMetricCreator,
-      openMetricInspector, openCosts, openDuck, openCapabilities, openCapabilityDetail,
+      openMetricInspector, openCubeCreator, openCubeInspector, openCosts, openDuck, openCapabilities, openCapabilityDetail,
       openHfDeploy, openWarren, openWarrenJob,
     ],
   )
@@ -3875,6 +3934,8 @@ interface WindowContext {
   openMetricCatalog: () => void
   openMetricCreator: (metricName?: string) => void
   openMetricInspector: (metricName?: string) => void
+  openCubeCreator: (cubeName?: string) => void
+  openCubeInspector: (cubeName?: string) => void
   openCosts: (initialFilter?: CostsPayload["initialFilter"]) => void
   openDuck: () => void
   openCapabilities: (tagFilter?: string | null) => void
@@ -4333,6 +4394,34 @@ function renderWindowContent(
           onOpenCreator={ctx.openMetricCreator}
         />
       )
+    case "cube-catalog":
+      return (
+        <CubeCatalogWindow
+          activeConnectionId={ctx.activeConnectionId}
+          hasRvbbit={ctx.hasRvbbit}
+          onOpenInspector={ctx.openCubeInspector}
+          onOpenCreator={ctx.openCubeCreator}
+        />
+      )
+    case "cube-creator":
+      return (
+        <CubeCreatorWindow
+          payload={w.payload as CubeCreatorPayload}
+          activeConnectionId={ctx.activeConnectionId}
+          hasRvbbit={ctx.hasRvbbit}
+          onOpenInspector={ctx.openCubeInspector}
+        />
+      )
+    case "cube-inspector":
+      return (
+        <CubeInspectorWindow
+          payload={w.payload as CubeInspectorPayload}
+          activeConnectionId={ctx.activeConnectionId}
+          hasRvbbit={ctx.hasRvbbit}
+          onOpenCreator={ctx.openCubeCreator}
+          onOpenMetricInspector={ctx.openMetricInspector}
+        />
+      )
     case "metric-board":
       return (
         <MetricBoardWindow
@@ -4503,6 +4592,7 @@ const FOLDERS: { id: string; label: string; color: string }[] = [
   { id: "semantic", label: "Semantic", color: "var(--brand-operators)" },
   { id: "knowledge", label: "Knowledge", color: "var(--brand-kg)" },
   { id: "metrics", label: "Metrics", color: "oklch(78% 0.13 95)" },
+  { id: "cubes", label: "Cubes", color: "oklch(76% 0.15 100)" },
 ]
 
 function iconForKind(kind: DesktopWindowState["kind"]) {
@@ -4557,6 +4647,12 @@ function iconForKind(kind: DesktopWindowState["kind"]) {
       return LineChart
     case "metric-board":
       return Table2
+    case "cube-catalog":
+      return Boxes
+    case "cube-creator":
+      return Calculator
+    case "cube-inspector":
+      return Eye
     case "capabilities":
     case "capability-detail":
       return Package

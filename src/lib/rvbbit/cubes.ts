@@ -1,0 +1,570 @@
+"use client"
+
+// Data layer for the Cube Studio apps (Catalog, Creator, Inspector). All queries run through
+// /api/db/query against the active (rvbbit) connection. Mirrors lib/rvbbit/metrics.ts.
+//
+// A cube is a wide, reasoned-about, documented join MATERIALIZED as an accelerated rvbbit table
+// (cubes.<name>) — the curated middle of a metrics → cubes → raw discovery gradient. Backend
+// surface: cubes() / describe_cube / define_cube / refresh_cube / enrich_cube / set_cube_column_doc
+// / cube_health / propose_cube / promote_cube_to_metric / cube_packs_latest / fuzzy_suggest_bindings
+// / apply_cube_pack / define_cube_from_pack / drop_cube. See docs/CUBES_PLAN.md.
+
+export interface CubeSummary {
+  name: string
+  grain: string | null
+  description: string | null
+  category: string | null
+  version: number
+  refreshedAt: string | null // timestamptz text
+  rows: number | null
+}
+
+export interface CubeColumn {
+  name: string
+  type: string | null
+  doc: string | null
+  semantics: string | null
+  sourceRef: string | null
+  confidence: number | null
+  /** NULL = LLM-drafted; 'pack' = curated pack doc; else a human editor. */
+  editedBy: string | null
+}
+
+export interface CubeHealth {
+  status: string // fresh | dirty | stale | error | missing | unknown
+  secondsSinceRefresh: number | null
+  rowDelta: number | null
+  driftRatio: number | null
+  driftRecommendation: string | null
+  lastRefreshRows: number | null
+  currentRows: number | null
+  lastError: string | null
+  raw: Record<string, unknown>
+}
+
+export interface CubeDetail {
+  name: string
+  grain: string | null
+  description: string | null
+  humanDescription: string | null
+  autoDescription: string | null
+  category: string | null
+  version: number | null
+  sql: string
+  refreshCron: string | null
+  refreshedAt: string | null
+  rows: number | null
+  enrichedAt: string | null
+  sourceTables: string[]
+  columns: CubeColumn[]
+  sample: Array<Record<string, unknown>>
+  health: CubeHealth | null
+}
+
+export interface CubePack {
+  packKey: string
+  provider: string
+  canonicalObject: string
+  cubeNameSuggest: string | null
+  description: string | null
+  grain: string | null
+  version: number
+}
+
+/** One canonical field a pack needs bound to a real column. */
+export interface PackField {
+  name: string
+  canonicalNames: string[]
+  types: string[]
+}
+
+/** A single binding suggestion (fuzzy_suggest_bindings output, per field). */
+export interface BindingSuggestion {
+  field: string
+  bestTable: string | null
+  bestColumn: string | null
+  confidence: number
+  candidates: Array<{ table: string; column: string; score: number }>
+}
+
+/** A propose_cube draft (never persisted; the human blesses it). */
+export interface ProposeResult {
+  name: string
+  sql: string
+  grain: string | null
+  description: string | null
+  sourceTables: string[]
+  joinRationale: string | null
+  confidence: number | null
+  candidateTables: string[]
+  fkEdges: Array<Record<string, unknown>>
+  error: string | null
+}
+
+interface Ok {
+  ok: true
+  rows: Array<Record<string, unknown>>
+  columns?: Array<{ name: string }>
+}
+interface Err {
+  ok: false
+  error: string
+}
+
+async function run(connectionId: string, sql: string, rowLimit = 5000): Promise<Ok | Err> {
+  try {
+    const res = await fetch("/api/db/query", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ connectionId, sql, rowLimit }),
+    })
+    return (await res.json()) as Ok | Err
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) }
+  }
+}
+
+/** Postgres single-quoted literal (the query API has no bind params). */
+function q(s: string): string {
+  return `'${String(s).replace(/'/g, "''")}'`
+}
+/** A jsonb literal from a JS object/value. */
+function jb(value: unknown): string {
+  return `${q(JSON.stringify(value ?? {}))}::jsonb`
+}
+/** A text[] literal (or NULL) from a JS string array. */
+function arr(values: string[] | null | undefined): string {
+  if (!values || values.length === 0) return "NULL::text[]"
+  return `ARRAY[${values.map((v) => q(v)).join(",")}]::text[]`
+}
+function num(v: unknown): number | null {
+  return v == null ? null : Number(v)
+}
+function str(v: unknown): string | null {
+  return v == null ? null : String(v)
+}
+function asObject(v: unknown): Record<string, unknown> {
+  if (v == null) return {}
+  if (typeof v === "string") {
+    try {
+      return JSON.parse(v) as Record<string, unknown>
+    } catch {
+      return {}
+    }
+  }
+  return typeof v === "object" ? (v as Record<string, unknown>) : {}
+}
+function asArray(v: unknown): unknown[] {
+  if (Array.isArray(v)) return v
+  if (typeof v === "string") {
+    try {
+      const p = JSON.parse(v)
+      return Array.isArray(p) ? p : []
+    } catch {
+      return []
+    }
+  }
+  return []
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Catalog
+// ─────────────────────────────────────────────────────────────────────────
+
+export async function listCubes(
+  connectionId: string,
+): Promise<{ cubes: CubeSummary[]; error: string | null }> {
+  const r = await run(
+    connectionId,
+    `SELECT name, grain, description, category, version, refreshed_at::text AS refreshed_at, rows
+     FROM rvbbit.cubes() ORDER BY name`,
+  )
+  if (!r.ok) return { cubes: [], error: r.error }
+  return {
+    error: null,
+    cubes: r.rows.map((row) => ({
+      name: String(row.name),
+      grain: str(row.grain),
+      description: str(row.description),
+      category: str(row.category),
+      version: Number(row.version ?? 1),
+      refreshedAt: str(row.refreshed_at),
+      rows: num(row.rows),
+    })),
+  }
+}
+
+function asHealth(v: unknown): CubeHealth | null {
+  const h = asObject(v)
+  if (Object.keys(h).length === 0) return null
+  const fr = asObject(h.freshness)
+  const dr = asObject(h.drift)
+  return {
+    status: String(fr.status ?? h.status ?? "unknown"),
+    secondsSinceRefresh: num(fr.seconds_since_refresh),
+    rowDelta: num(fr.row_delta),
+    driftRatio: num(dr.drift_ratio),
+    driftRecommendation: str(dr.recommendation),
+    lastRefreshRows: num(fr.last_refresh_rows),
+    currentRows: num(fr.current_parquet_rows),
+    lastError: str(h.last_error),
+    raw: h,
+  }
+}
+
+function asColumns(v: unknown): CubeColumn[] {
+  return asArray(v).map((c) => {
+    const o = asObject(c)
+    return {
+      name: String(o.name ?? ""),
+      type: str(o.type),
+      doc: str(o.doc),
+      semantics: str(o.semantics),
+      sourceRef: str(o.source_ref),
+      confidence: num(o.confidence),
+      editedBy: str(o.edited_by),
+    }
+  })
+}
+
+export async function describeCube(
+  connectionId: string,
+  name: string,
+): Promise<{ cube: CubeDetail | null; error: string | null }> {
+  const r = await run(connectionId, `SELECT rvbbit.describe_cube(${q(name)}) AS d`)
+  if (!r.ok) return { cube: null, error: r.error }
+  const d = asObject(r.rows[0]?.d)
+  if (Object.keys(d).length === 0) return { cube: null, error: null }
+  return {
+    error: null,
+    cube: {
+      name: String(d.name ?? name),
+      grain: str(d.grain),
+      description: str(d.description),
+      humanDescription: str(d.human_description),
+      autoDescription: str(d.auto_description),
+      category: str(d.category),
+      version: num(d.version),
+      sql: String(d.sql ?? ""),
+      refreshCron: str(d.refresh_cron),
+      refreshedAt: str(d.refreshed_at),
+      rows: num(d.rows),
+      enrichedAt: str(d.enriched_at),
+      sourceTables: asArray(d.source_tables).map((t) => String(t)),
+      columns: asColumns(d.columns),
+      sample: asArray(d.sample).map((s) => asObject(s)),
+      health: asHealth(d.health),
+    },
+  }
+}
+
+export async function cubeHealth(
+  connectionId: string,
+  name: string,
+): Promise<{ health: CubeHealth | null; error: string | null }> {
+  const r = await run(connectionId, `SELECT rvbbit.cube_health(${q(name)}) AS h`)
+  if (!r.ok) return { health: null, error: r.error }
+  return { health: asHealth(r.rows[0]?.h), error: null }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Preview (Creator live dry-run — cubes have no params, so a LIMIT-5 of the body)
+// ─────────────────────────────────────────────────────────────────────────
+
+export async function previewCubeSql(
+  connectionId: string,
+  draftSql: string,
+  limit = 5,
+): Promise<{ columns: string[]; rows: Array<Record<string, unknown>>; error: string | null }> {
+  const body = draftSql.trim().replace(/;\s*$/, "")
+  if (!body) return { columns: [], rows: [], error: null }
+  const r = await run(connectionId, `SELECT * FROM (${body}) AS _preview LIMIT ${Math.max(1, limit)}`, limit)
+  if (!r.ok) return { columns: [], rows: [], error: r.error }
+  const cols = r.columns?.map((c) => c.name) ?? (r.rows[0] ? Object.keys(r.rows[0]) : [])
+  return { columns: cols, rows: r.rows, error: null }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Write — define / refresh / enrich / column docs / promote / delete
+// ─────────────────────────────────────────────────────────────────────────
+
+export interface DefineCubeInput {
+  name: string
+  sql: string
+  grain?: string | null
+  description?: string | null
+  owner?: string | null
+  refreshCron?: string | null
+  category?: string | null
+  labels?: Record<string, unknown>
+}
+
+export async function defineCube(
+  connectionId: string,
+  input: DefineCubeInput,
+): Promise<{ version: number | null; error: string | null }> {
+  const sql = `SELECT rvbbit.define_cube(
+      ${q(input.name)},
+      ${q(input.sql)},
+      ${input.grain ? q(input.grain) : "NULL"},
+      ${input.description ? q(input.description) : "NULL"},
+      ${input.owner ? q(input.owner) : "NULL"},
+      ${input.refreshCron ? q(input.refreshCron) : "NULL"},
+      ${input.category ? q(input.category) : "NULL"},
+      ${jb(input.labels ?? {})}
+    ) AS version`
+  const r = await run(connectionId, sql)
+  if (!r.ok) return { version: null, error: r.error }
+  return { version: num(r.rows[0]?.version), error: null }
+}
+
+export async function refreshCube(
+  connectionId: string,
+  name: string,
+): Promise<{ rows: number | null; error: string | null }> {
+  const r = await run(connectionId, `SELECT rvbbit.refresh_cube(${q(name)}) AS rows`)
+  if (!r.ok) return { rows: null, error: r.error }
+  return { rows: num(r.rows[0]?.rows), error: null }
+}
+
+export async function enrichCube(
+  connectionId: string,
+  name: string,
+  sampleRows = 12,
+  overwriteEdited = false,
+): Promise<{ result: Record<string, unknown> | null; error: string | null }> {
+  const r = await run(
+    connectionId,
+    `SELECT rvbbit.enrich_cube(${q(name)}, ${Math.max(1, sampleRows)}, ${overwriteEdited}) AS r`,
+  )
+  if (!r.ok) return { result: null, error: r.error }
+  return { result: asObject(r.rows[0]?.r), error: null }
+}
+
+export async function setCubeColumnDoc(
+  connectionId: string,
+  cube: string,
+  column: string,
+  opts: { doc?: string | null; semantics?: string | null; sourceRef?: string | null; editor?: string },
+): Promise<{ ok: boolean; error: string | null }> {
+  const r = await run(
+    connectionId,
+    `SELECT rvbbit.set_cube_column_doc(
+        ${q(cube)}, ${q(column)},
+        ${opts.doc != null ? q(opts.doc) : "NULL"},
+        ${opts.semantics != null ? q(opts.semantics) : "NULL"},
+        ${opts.sourceRef != null ? q(opts.sourceRef) : "NULL"},
+        ${q(opts.editor ?? "human")})`,
+  )
+  return r.ok ? { ok: true, error: null } : { ok: false, error: r.error }
+}
+
+export async function promoteCubeToMetric(
+  connectionId: string,
+  cube: string,
+  metric: string,
+  opts: { description?: string | null; owner?: string | null; grain?: string | null } = {},
+): Promise<{ version: number | null; error: string | null }> {
+  const r = await run(
+    connectionId,
+    `SELECT rvbbit.promote_cube_to_metric(
+        ${q(cube)}, ${q(metric)},
+        ${opts.description ? q(opts.description) : "NULL"},
+        ${opts.owner ? q(opts.owner) : "NULL"},
+        ${opts.grain ? q(opts.grain) : "NULL"}) AS version`,
+  )
+  if (!r.ok) return { version: null, error: r.error }
+  return { version: num(r.rows[0]?.version), error: null }
+}
+
+export async function deleteCube(
+  connectionId: string,
+  name: string,
+): Promise<{ ok: boolean; error: string | null }> {
+  const r = await run(connectionId, `SELECT rvbbit.drop_cube(${q(name)})`)
+  return r.ok ? { ok: true, error: null } : { ok: false, error: r.error }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Propose (agent-drafted → human-blessed)
+// ─────────────────────────────────────────────────────────────────────────
+
+export async function proposeCube(
+  connectionId: string,
+  subject: string,
+  seedTables?: string[] | null,
+  schema?: string | null,
+): Promise<{ draft: ProposeResult | null; error: string | null }> {
+  const r = await run(
+    connectionId,
+    `SELECT rvbbit.propose_cube(${q(subject)}, ${arr(seedTables)}, ${schema ? q(schema) : "NULL"}) AS d`,
+  )
+  if (!r.ok) return { draft: null, error: r.error }
+  const d = asObject(r.rows[0]?.d)
+  if (Object.keys(d).length === 0) return { draft: null, error: "no draft" }
+  return {
+    error: null,
+    draft: {
+      name: String(d.name ?? ""),
+      sql: String(d.sql ?? ""),
+      grain: str(d.grain),
+      description: str(d.description),
+      sourceTables: asArray(d.source_tables).map((t) => String(t)),
+      joinRationale: str(d.join_rationale),
+      confidence: num(d.confidence),
+      candidateTables: asArray(d.candidate_tables).map((t) => String(t)),
+      fkEdges: asArray(d.fk_edges).map((e) => asObject(e)),
+      error: str(d.error),
+    },
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Cube packs (parameterized templates for known SaaS schemas)
+// ─────────────────────────────────────────────────────────────────────────
+
+export async function listCubePacks(
+  connectionId: string,
+): Promise<{ packs: CubePack[]; error: string | null }> {
+  const r = await run(
+    connectionId,
+    `SELECT pack_key, saas_provider, canonical_object, cube_name_suggest, description, grain, version
+     FROM rvbbit.cube_packs_latest ORDER BY pack_key`,
+  )
+  if (!r.ok) return { packs: [], error: r.error }
+  return {
+    error: null,
+    packs: r.rows.map((row) => ({
+      packKey: String(row.pack_key),
+      provider: String(row.saas_provider),
+      canonicalObject: String(row.canonical_object),
+      cubeNameSuggest: str(row.cube_name_suggest),
+      description: str(row.description),
+      grain: str(row.grain),
+      version: Number(row.version ?? 1),
+    })),
+  }
+}
+
+export interface PackDetail {
+  fields: PackField[]
+  template: string
+  /** every {{ placeholder }} the template needs bound, in first-seen order. */
+  placeholders: string[]
+}
+
+/** The template + the fields/placeholders a pack needs bound (Creator's From-Pack mode). */
+export async function fetchPackDetail(
+  connectionId: string,
+  packKey: string,
+): Promise<{ detail: PackDetail | null; error: string | null }> {
+  const r = await run(
+    connectionId,
+    `SELECT canonical_fields, canonical_sql_template
+     FROM rvbbit.cube_packs_latest WHERE pack_key = ${q(packKey)}`,
+  )
+  if (!r.ok) return { detail: null, error: r.error }
+  const row = r.rows[0]
+  if (!row) return { detail: null, error: null }
+  const template = String(row.canonical_sql_template ?? "")
+  const placeholders = Array.from(
+    new Set([...template.matchAll(/\{\{\s*([a-zA-Z0-9_]+)\s*\}\}/g)].map((m) => m[1])),
+  )
+  return {
+    error: null,
+    detail: {
+      template,
+      placeholders,
+      fields: asArray(row.canonical_fields).map((f) => {
+        const o = asObject(f)
+        return {
+          name: String(o.name ?? ""),
+          canonicalNames: asArray(o.canonical_names).map((x) => String(x)),
+          types: asArray(o.types).map((x) => String(x)),
+        }
+      }),
+    },
+  }
+}
+
+export async function suggestBindings(
+  connectionId: string,
+  packKey: string,
+  schema?: string | null,
+): Promise<{ suggestions: BindingSuggestion[]; error: string | null }> {
+  const r = await run(
+    connectionId,
+    `SELECT rvbbit.fuzzy_suggest_bindings(${q(packKey)}, ${schema ? q(schema) : "NULL"}) AS s`,
+  )
+  if (!r.ok) return { suggestions: [], error: r.error }
+  const s = asObject(r.rows[0]?.s)
+  const out: BindingSuggestion[] = Object.entries(s).map(([field, v]) => {
+    const o = asObject(v)
+    const best = asObject(o.best_match)
+    return {
+      field,
+      bestTable: str(best.table),
+      bestColumn: str(best.column),
+      confidence: num(o.confidence) ?? 0,
+      candidates: asArray(o.candidates).map((c) => {
+        const co = asObject(c)
+        return { table: String(co.table ?? ""), column: String(co.column ?? ""), score: num(co.score) ?? 0 }
+      }),
+    }
+  })
+  return { suggestions: out, error: null }
+}
+
+export async function applyCubePack(
+  connectionId: string,
+  packKey: string,
+  bindings: Record<string, string>,
+): Promise<{ status: string; resolvedSql: string | null; error: string | null }> {
+  const r = await run(connectionId, `SELECT rvbbit.apply_cube_pack(${q(packKey)}, ${jb(bindings)}) AS r`)
+  if (!r.ok) return { status: "error", resolvedSql: null, error: r.error }
+  const o = asObject(r.rows[0]?.r)
+  return {
+    status: String(o.status ?? "error"),
+    resolvedSql: str(o.resolved_sql),
+    error: o.status === "ok" ? null : str(o.error),
+  }
+}
+
+export async function defineCubeFromPack(
+  connectionId: string,
+  packKey: string,
+  bindings: Record<string, string>,
+  cubeName: string,
+  opts: { grain?: string | null; description?: string | null } = {},
+): Promise<{ version: number | null; error: string | null }> {
+  const r = await run(
+    connectionId,
+    `SELECT rvbbit.define_cube_from_pack(
+        ${q(packKey)}, ${jb(bindings)}, ${q(cubeName)},
+        ${opts.grain ? q(opts.grain) : "NULL"},
+        ${opts.description ? q(opts.description) : "NULL"}) AS version`,
+  )
+  if (!r.ok) return { version: null, error: r.error }
+  return { version: num(r.rows[0]?.version), error: null }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Discovery helper — list base tables (for the Creator's seed-table picker)
+// ─────────────────────────────────────────────────────────────────────────
+
+export async function listBaseTables(
+  connectionId: string,
+  schema?: string | null,
+): Promise<{ tables: string[]; error: string | null }> {
+  const r = await run(
+    connectionId,
+    `SELECT table_schema || '.' || table_name AS t
+     FROM information_schema.tables
+     WHERE table_type = 'BASE TABLE'
+       AND table_schema NOT IN ('pg_catalog','information_schema','rvbbit','cubes')
+       ${schema ? `AND table_schema = ${q(schema)}` : ""}
+     ORDER BY table_schema, table_name`,
+  )
+  if (!r.ok) return { tables: [], error: r.error }
+  return { tables: r.rows.map((row) => String(row.t)), error: null }
+}

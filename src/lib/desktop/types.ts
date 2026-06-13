@@ -48,6 +48,9 @@ export type DesktopWindowKind =
   | "metric-catalog"
   | "metric-creator"
   | "metric-inspector"
+  | "cube-catalog"
+  | "cube-creator"
+  | "cube-inspector"
   | "metric-board"
   | "alerts"
 
@@ -122,6 +125,9 @@ export type WindowPayload =
   | MetricCatalogPayload
   | MetricCreatorPayload
   | MetricInspectorPayload
+  | CubeCatalogPayload
+  | CubeCreatorPayload
+  | CubeInspectorPayload
   | MetricBoardPayload
   | AlertsPayload
 
@@ -658,6 +664,22 @@ export interface MetricInspectorPayload {
   kind?: "metric-inspector"
   /** Optional metric to select on open. */
   metricName?: string | null
+}
+/** Cube Studio — the curated subject-area tables (metrics→cubes→raw). Catalog
+ *  browses them, Creator authors them (Manual/Propose/From-Pack), Inspector
+ *  grounds one (columns/health/lineage). */
+export interface CubeCatalogPayload {
+  kind?: "cube-catalog"
+}
+export interface CubeCreatorPayload {
+  kind?: "cube-creator"
+  /** Optional cube to load for editing on open. */
+  cubeName?: string | null
+}
+export interface CubeInspectorPayload {
+  kind?: "cube-inspector"
+  /** Optional cube to select on open. */
+  cubeName?: string | null
 }
 export interface MetricBoardPayload {
   kind?: "metric-board"
