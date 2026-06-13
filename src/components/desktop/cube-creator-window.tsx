@@ -151,7 +151,7 @@ export function CubeCreatorWindow({ payload, activeConnectionId, hasRvbbit, onOp
       </div>
 
       {/* RIGHT PANE */}
-      <div className="flex min-h-0 flex-1 flex-col">
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col">
         {/* mode toggle (hidden when editing an existing cube — Manual only) */}
         {!isExisting ? (
           <div className="flex items-center gap-1 border-b border-chrome-border/40 px-3 py-1.5">
@@ -304,8 +304,8 @@ function ManualPane({
   }
 
   return (
-    <div className="flex min-h-0 flex-1">
-      <div className="min-h-0 w-1/2 overflow-y-auto border-r border-chrome-border/40">
+    <div className="flex min-h-0 min-w-0 flex-1">
+      <div className="min-h-0 w-1/2 min-w-0 overflow-y-auto border-r border-chrome-border/40">
         <Section title="Cube">
           <Field label="Name" hint={isExisting ? "fixed (new version)" : "lowercase identifier"}>
             <input
@@ -333,7 +333,7 @@ function ManualPane({
         </Section>
         <Section title="SQL">
           <div className="h-64 overflow-hidden rounded-[3px] border border-chrome-border/40">
-            <SqlEditor value={form.sql} onChange={(v) => update({ sql: v })} />
+            <SqlEditor value={form.sql} onChange={(v) => update({ sql: v })} wrap height="100%" />
           </div>
           {saveError ? <div className="mt-1 whitespace-pre-wrap text-[11px] text-danger">{saveError}</div> : null}
           <button
@@ -349,7 +349,7 @@ function ManualPane({
       </div>
 
       {/* live preview */}
-      <div className="min-h-0 w-1/2 overflow-auto">
+      <div className="min-h-0 w-1/2 min-w-0 overflow-auto">
         <div className="flex items-center gap-1.5 border-b border-chrome-border/40 px-3 py-1.5 text-[10px] uppercase tracking-wider text-chrome-text/50">
           Live preview {previewing ? <Loader2 className="h-3 w-3 animate-spin" /> : null}
         </div>
