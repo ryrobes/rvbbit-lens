@@ -223,6 +223,19 @@ export function isRuntimeManifest(m: Manifest): boolean {
   return m.kind === "runtime_sidecar"
 }
 
+/** Remote/API-only backend pack: register SQL only, no local Docker sidecar. */
+export function isExternalBackendManifest(m: Manifest): boolean {
+  const mode = String(m.runtime?.mode ?? "").toLowerCase()
+  if (mode === "external" || mode === "remote") return true
+  const endpoint = String(m.backend?.endpoint ?? "").trim()
+  return (
+    !!m.backend &&
+    !m.runtime?.template &&
+    !m.runtime?.image &&
+    /^https?:\/\//i.test(endpoint)
+  )
+}
+
 // ── Install state ───────────────────────────────────────────────────
 
 /**
@@ -286,6 +299,12 @@ export interface InstalledBackend {
   first_call_at: number | null
   last_call_at: number | null
   created_at: number | null
+  /** The literal canonical backend row used by rvbbit.embed(...). */
+  is_default_embedder: boolean
+  /** Backend copied into the canonical `embed` row, if known. */
+  default_embedder_source: string | null
+  /** True for the installed capability backend currently backing `embed`. */
+  is_default_embedder_source: boolean
 }
 
 /** A registered execution runtime — e.g. rvbbit.python_runtimes or rvbbit.mcp_gateways. */
@@ -627,7 +646,15 @@ export async function fetchManifest(
 
 // ── Installed-backend query (CAPABILITIES.md § "Installed Backend Query") ──
 
-const BACKEND_HEALTH_BASE_SQL = `SELECT
+const BACKEND_HEALTH_BASE_SQL = `WITH embed_default AS (
+  SELECT coalesce(
+    (SELECT nullif(install_manifest #>> '{rvbbit_default_embedder,source_backend}', '')
+     FROM rvbbit.backend_health
+     WHERE name = 'embed'),
+    'embed'
+  ) AS source_backend
+)
+SELECT
   name,
   transport,
   endpoint_url,
@@ -654,11 +681,23 @@ const BACKEND_HEALTH_BASE_SQL = `SELECT
   NULL::text AS deployment_serving_status,
   NULL::boolean AS deployment_callable,
   NULL::text AS deployment_error,
-  NULL::timestamptz AS deployment_updated_at
+  NULL::timestamptz AS deployment_updated_at,
+  (name = 'embed') AS is_default_embedder,
+  embed_default.source_backend AS default_embedder_source,
+  (name = embed_default.source_backend) AS is_default_embedder_source
 FROM rvbbit.backend_health
+CROSS JOIN embed_default
 ORDER BY name`
 
-const BACKEND_HEALTH_WITH_WARREN_SQL = `SELECT
+const BACKEND_HEALTH_WITH_WARREN_SQL = `WITH embed_default AS (
+  SELECT coalesce(
+    (SELECT nullif(install_manifest #>> '{rvbbit_default_embedder,source_backend}', '')
+     FROM rvbbit.backend_health
+     WHERE name = 'embed'),
+    'embed'
+  ) AS source_backend
+)
+SELECT
   h.name,
   h.transport,
   h.endpoint_url,
@@ -685,8 +724,12 @@ const BACKEND_HEALTH_WITH_WARREN_SQL = `SELECT
   w.serving_status AS deployment_serving_status,
   w.callable AS deployment_callable,
   w.deployment_error,
-  w.deployment_updated_at
+  w.deployment_updated_at,
+  (h.name = 'embed') AS is_default_embedder,
+  embed_default.source_backend AS default_embedder_source,
+  (h.name = embed_default.source_backend) AS is_default_embedder_source
 FROM rvbbit.backend_health h
+CROSS JOIN embed_default
 LEFT JOIN rvbbit.warren_backend_status w
   ON w.name = h.name
 ORDER BY h.name`
@@ -726,6 +769,11 @@ function parseInstalled(r: Record<string, unknown>): InstalledBackend {
     first_call_at: epoch(r.first_call_at),
     last_call_at: epoch(r.last_call_at),
     created_at: epoch(r.created_at),
+    is_default_embedder: r.is_default_embedder === true || r.is_default_embedder === "t",
+    default_embedder_source:
+      r.default_embedder_source == null ? null : String(r.default_embedder_source),
+    is_default_embedder_source:
+      r.is_default_embedder_source === true || r.is_default_embedder_source === "t",
   }
 }
 
@@ -1149,6 +1197,29 @@ export async function applyInstallSql(
   }
 }
 
+export function renderSetDefaultEmbedderSql(
+  backendName: string,
+  purgeCache = true,
+): string {
+  return [
+    "-- Promote an installed embedding backend to the system default.",
+    "-- This overwrites the canonical `embed` backend row and purges stale `embed` cache entries.",
+    "SELECT rvbbit.set_default_embedder(",
+    `  backend_name => ${sqlLit(backendName)},`,
+    `  purge_cache  => ${purgeCache ? "true" : "false"}`,
+    ") AS default_embedder;",
+    "",
+  ].join("\n")
+}
+
+export async function setDefaultEmbedder(
+  connectionId: string,
+  backendName: string,
+  purgeCache = true,
+): Promise<SqlApplyResult> {
+  return applyInstallSql(connectionId, renderSetDefaultEmbedderSql(backendName, purgeCache))
+}
+
 export interface CatalogImportResult {
   ok: boolean
   imported?: number
@@ -1511,6 +1582,7 @@ export function applyVllmKnobsToArgs(base: string[], v: VllmKnobs): string[] {
  * it overrides values inside the render functions.
  */
 export interface InstallKnobs {
+  model: string
   device: string
   batchSize: number
   maxConcurrent: number
@@ -1527,7 +1599,9 @@ export interface InstallKnobs {
 export function defaultKnobs(manifest: Manifest): InstallKnobs {
   const backend: Partial<ManifestBackendBlock> = manifest.backend ?? {}
   const runtime = manifest.runtime ?? {}
+  const opts = backend.opts ?? {}
   return {
+    model: manifest.source?.model ?? String(opts.model ?? ""),
     device: runtime.device ?? "auto",
     batchSize: backend.batch_size ?? 32,
     maxConcurrent: backend.max_concurrent ?? 4,
@@ -1546,6 +1620,15 @@ export function defaultKnobs(manifest: Manifest): InstallKnobs {
 /** Apply knobs onto a manifest copy. Pure — never mutates the input. */
 function applyKnobs(manifest: Manifest, knobs: InstallKnobs): Manifest {
   const copy: Manifest = JSON.parse(JSON.stringify(manifest)) as Manifest
+  const model = knobs.model.trim()
+  const modelEditable =
+    isExternalBackendManifest(copy) || (copy.backend?.transport ?? "").toLowerCase() === "openai"
+  if (modelEditable && model.length > 0) {
+    copy.source = { ...(copy.source ?? {}), model }
+    if (copy.backend) {
+      copy.backend.opts = { ...(copy.backend.opts ?? {}), model }
+    }
+  }
   // Backend knobs only apply to model packs; runtime sidecars have no backend.
   if (copy.backend) {
     copy.backend.batch_size = knobs.batchSize
@@ -1814,6 +1897,11 @@ function renderSmokeSql(m: Manifest): string {
 }
 
 function renderCompose(m: Manifest, knobs: InstallKnobs): string {
+  if (isExternalBackendManifest(m)) {
+    return `# ${m.name} is an external/API-backed capability.
+# No Docker sidecar is generated; register.sql installs the backend endpoint directly.
+`
+  }
   const service = m.name.replace(/_/g, "-")
   const source = m.source ?? {}
   const runtime = m.runtime ?? {}
@@ -1901,6 +1989,10 @@ function renderRuntimeSource(runtime: ManifestRuntimeBlock): string {
 }
 
 function renderHostPortsCompose(m: Manifest, knobs: InstallKnobs): string {
+  if (isExternalBackendManifest(m)) {
+    return `# ${m.name} is external/API-backed; no host port overlay applies.
+`
+  }
   const service = m.name.replace(/_/g, "-")
   const containerPort = runtimeContainerPort(m)
   return `services:
@@ -1912,6 +2004,10 @@ function renderHostPortsCompose(m: Manifest, knobs: InstallKnobs): string {
 }
 
 function renderGpuCompose(m: Manifest): string {
+  if (isExternalBackendManifest(m)) {
+    return `# ${m.name} is external/API-backed; no GPU overlay applies.
+`
+  }
   const service = m.name.replace(/_/g, "-")
   // Request the GPU via deploy.resources (honoured across all Docker Compose
   // versions); the newer top-level `gpus: all` is silently ignored by older

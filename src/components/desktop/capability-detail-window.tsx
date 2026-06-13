@@ -22,12 +22,14 @@ import {
 import { cn } from "@/lib/utils"
 import { Button } from "@/components/ui/button"
 import {
+  classifyManifestCapabilityType,
   defaultKnobs,
   fetchCatalog,
   fetchInstalledBackends,
   fetchInstalledRuntimes,
   fetchManifest,
   flagsToStates,
+  isExternalBackendManifest,
   joinCatalogToInstalled,
   probeBackend,
   renderManifest,
@@ -105,6 +107,7 @@ export function CapabilityDetailWindow({
   const [loadError, setLoadError] = useState<string | null>(null)
   const [updatedAt, setUpdatedAt] = useState(0)
   const [warrenAvail, setWarrenAvail] = useState<WarrenAvailability | null>(null)
+  const [makeDefaultEmbedder, setMakeDefaultEmbedder] = useState(false)
   /**
    * When `null`, the install pathway is chosen by warren availability:
    *   readyNodes > 0 ⇒ "warren", else "local".
@@ -198,10 +201,12 @@ export function CapabilityDetailWindow({
     resetKey: activeConnectionId,
   })
 
+  const externalBackend = !!manifest && isExternalBackendManifest(manifest)
+
   /** Effective install mode — explicit user choice wins, else availability decides. */
   const effectiveInstallMode: "warren" | "local" =
     installMode ??
-    (warrenAvail?.available && warrenAvail.readyNodes > 0 ? "warren" : "local")
+    (!externalBackend && warrenAvail?.available && warrenAvail.readyNodes > 0 ? "warren" : "local")
 
   // ── live render (the Bret Victor lever) ──
   const rendered: RenderedArtifacts | null = useMemo(() => {
@@ -210,6 +215,12 @@ export function CapabilityDetailWindow({
     if (!manifest || !knobs || manifest.kind === "mcp") return null
     return renderManifest(manifest, knobs)
   }, [manifest, knobs])
+
+  const isEmbeddingCapability = useMemo(
+    () => !!manifest && classifyManifestCapabilityType(manifest) === "embedding",
+    [manifest],
+  )
+  const defaultEmbedderActive = installed?.is_default_embedder_source === true
 
   const join: JoinedCatalogEntry | null = useMemo(() => {
     if (!catalog) return null
@@ -390,6 +401,10 @@ export function CapabilityDetailWindow({
             manifest={manifest!}
             knobs={knobs!}
             rendered={rendered!}
+            isEmbeddingCapability={isEmbeddingCapability}
+            makeDefaultEmbedder={makeDefaultEmbedder && !defaultEmbedderActive}
+            defaultEmbedderActive={defaultEmbedderActive}
+            onMakeDefaultEmbedderChange={setMakeDefaultEmbedder}
             onInstalledChanged={() => void pollInstalled()}
             onOpenWarrenJob={onOpenWarrenJob}
             acceptance={catalog!.acceptance}
@@ -585,6 +600,10 @@ function OverviewTab({
 }) {
   const source = manifest.source ?? {}
   const runtime = manifest.runtime ?? {}
+  const externalInstall = isExternalBackendManifest(manifest)
+  const modelEditable =
+    externalInstall ||
+    (manifest.backend?.transport ?? "").toLowerCase() === "openai"
 
   const reset = () => onChangeKnobs(defaultKnobs(manifest))
   const knobsDirty =
@@ -798,13 +817,24 @@ function OverviewTab({
             />
           ) : null}
 
-          <Knob
-            label="Device"
-            value={knobs.device}
-            onChange={(v) => onChangeKnobs({ ...knobs, device: v })}
-            options={["auto", "cpu", "cuda"]}
-            help={`Manifest preference is ${runtime.device ?? "auto"}`}
-          />
+          {modelEditable ? (
+            <TextKnob
+              label="Model"
+              value={knobs.model}
+              onChange={(v) => onChangeKnobs({ ...knobs, model: v })}
+              help={`Manifest default: ${source.model ?? "(unset)"}`}
+            />
+          ) : null}
+
+          {!externalInstall ? (
+            <Knob
+              label="Device"
+              value={knobs.device}
+              onChange={(v) => onChangeKnobs({ ...knobs, device: v })}
+              options={["auto", "cpu", "cuda"]}
+              help={`Manifest preference is ${runtime.device ?? "auto"}`}
+            />
+          ) : null}
           <NumberKnob
             label="Batch size"
             value={knobs.batchSize}
@@ -832,53 +862,57 @@ function OverviewTab({
             step={1000}
             help={`Manifest default: ${manifest.backend?.timeout_ms ?? 60000}`}
           />
-          <label className="flex items-center gap-2 pt-1">
-            <input
-              type="checkbox"
-              checked={knobs.publishHostPort}
-              onChange={(e) =>
-                onChangeKnobs({ ...knobs, publishHostPort: e.target.checked })
-              }
-              className="h-3.5 w-3.5 accent-brand-capability"
-            />
-            <span className="text-[11px] text-foreground">
-              Publish host port overlay
-            </span>
-          </label>
-          <NumberKnob
-            label="Host port"
-            value={knobs.hostPort}
-            onChange={(v) => onChangeKnobs({ ...knobs, hostPort: v })}
-            min={0}
-            max={65535}
-            step={1}
-            help="Only used by compose.host-ports.yaml; 0 lets Docker choose a free host port"
-          />
-          <TextKnob
-            label="Docker network"
-            value={knobs.dockerNetwork}
-            onChange={(v) => onChangeKnobs({ ...knobs, dockerNetwork: v })}
-            help="Compose attaches the sidecar to this network so Postgres can reach it"
-          />
-          <TextKnob
-            label="Output directory"
-            value={knobs.outputDir}
-            onChange={(v) => onChangeKnobs({ ...knobs, outputDir: v })}
-            help="Where scaffold writes register.sql / operator.sql / compose.yaml / Dockerfile / main.py"
-          />
-          <label className="flex items-center gap-2 pt-1">
-            <input
-              type="checkbox"
-              checked={knobs.gpu}
-              onChange={(e) =>
-                onChangeKnobs({ ...knobs, gpu: e.target.checked })
-              }
-              className="h-3.5 w-3.5 accent-brand-capability"
-            />
-            <span className="text-[11px] text-foreground">
-              Force GPU overlay (auto can enable it)
-            </span>
-          </label>
+          {!externalInstall ? (
+            <>
+              <label className="flex items-center gap-2 pt-1">
+                <input
+                  type="checkbox"
+                  checked={knobs.publishHostPort}
+                  onChange={(e) =>
+                    onChangeKnobs({ ...knobs, publishHostPort: e.target.checked })
+                  }
+                  className="h-3.5 w-3.5 accent-brand-capability"
+                />
+                <span className="text-[11px] text-foreground">
+                  Publish host port overlay
+                </span>
+              </label>
+              <NumberKnob
+                label="Host port"
+                value={knobs.hostPort}
+                onChange={(v) => onChangeKnobs({ ...knobs, hostPort: v })}
+                min={0}
+                max={65535}
+                step={1}
+                help="Only used by compose.host-ports.yaml; 0 lets Docker choose a free host port"
+              />
+              <TextKnob
+                label="Docker network"
+                value={knobs.dockerNetwork}
+                onChange={(v) => onChangeKnobs({ ...knobs, dockerNetwork: v })}
+                help="Compose attaches the sidecar to this network so Postgres can reach it"
+              />
+              <TextKnob
+                label="Output directory"
+                value={knobs.outputDir}
+                onChange={(v) => onChangeKnobs({ ...knobs, outputDir: v })}
+                help="Where scaffold writes register.sql / operator.sql / compose.yaml / Dockerfile / main.py"
+              />
+              <label className="flex items-center gap-2 pt-1">
+                <input
+                  type="checkbox"
+                  checked={knobs.gpu}
+                  onChange={(e) =>
+                    onChangeKnobs({ ...knobs, gpu: e.target.checked })
+                  }
+                  className="h-3.5 w-3.5 accent-brand-capability"
+                />
+                <span className="text-[11px] text-foreground">
+                  Force GPU overlay (auto can enable it)
+                </span>
+              </label>
+            </>
+          ) : null}
         </div>
       </div>
     </div>
@@ -1726,6 +1760,10 @@ function InstallTabDispatcher({
   manifest,
   knobs,
   rendered,
+  isEmbeddingCapability,
+  makeDefaultEmbedder,
+  defaultEmbedderActive,
+  onMakeDefaultEmbedderChange,
   onInstalledChanged,
   onOpenWarrenJob,
   acceptance,
@@ -1739,13 +1777,17 @@ function InstallTabDispatcher({
   manifest: Manifest
   knobs: InstallKnobs
   rendered: RenderedArtifacts
+  isEmbeddingCapability: boolean
+  makeDefaultEmbedder: boolean
+  defaultEmbedderActive: boolean
+  onMakeDefaultEmbedderChange: (value: boolean) => void
   onInstalledChanged: () => void
   onOpenWarrenJob: (jobId: string, jobName: string | null) => void
   acceptance: CatalogEntry["acceptance"]
 }) {
   // No warren tables on this DB → never show the toggle; only local
   // install. Preserves the pre-Phase-3 UX exactly.
-  const warrenAvailable = warrenAvail?.available === true
+  const warrenAvailable = warrenAvail?.available === true && !isExternalBackendManifest(manifest)
   const readyCount = warrenAvail?.readyNodes ?? 0
   const showToggle = warrenAvailable
 
@@ -1797,6 +1839,10 @@ function InstallTabDispatcher({
             manifest={manifest}
             knobs={knobs}
             rendered={rendered}
+            isEmbeddingCapability={isEmbeddingCapability}
+            makeDefaultEmbedder={makeDefaultEmbedder}
+            defaultEmbedderActive={defaultEmbedderActive}
+            onMakeDefaultEmbedderChange={onMakeDefaultEmbedderChange}
             onInstalledChanged={onInstalledChanged}
           />
         )}

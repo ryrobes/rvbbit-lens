@@ -15,9 +15,12 @@ import { cn } from "@/lib/utils"
 import { Button } from "@/components/ui/button"
 import {
   applyInstallSql,
+  isExternalBackendManifest,
   isVllmManifest,
   probeBackend,
+  renderSetDefaultEmbedderSql,
   runScaffold,
+  setDefaultEmbedder,
   streamComposeUp,
   type ComposeFrame,
   type InstallKnobs,
@@ -38,6 +41,11 @@ interface CapabilityInstallGraphProps {
   manifest: Manifest
   knobs: InstallKnobs
   rendered: RenderedArtifacts
+  /** Embedding capabilities may promote their installed backend to canonical `embed`. */
+  isEmbeddingCapability?: boolean
+  makeDefaultEmbedder?: boolean
+  defaultEmbedderActive?: boolean
+  onMakeDefaultEmbedderChange?: (value: boolean) => void
   /** Fires after register/smoke so the parent can re-poll backend_health. */
   onInstalledChanged?: () => void
 }
@@ -49,7 +57,7 @@ function manifestGpuIntent(manifest: Manifest): boolean {
 
 // ── Step state model ────────────────────────────────────────────────
 
-type StepKey = "scaffold" | "build" | "register" | "operator" | "smoke"
+type StepKey = "scaffold" | "build" | "register" | "operator" | "smoke" | "default_embedder"
 type StepStatus = "pending" | "running" | "ok" | "failed"
 
 interface StepState {
@@ -110,9 +118,12 @@ interface ArtifactsMap {
   register: SqlArtifact | null
   operator: SqlArtifact | null
   smoke: SmokeArtifact | null
+  default_embedder: SqlArtifact | null
 }
 
-const STEP_ORDER: StepKey[] = ["scaffold", "build", "register", "operator", "smoke"]
+const BASE_STEP_ORDER: StepKey[] = ["scaffold", "build", "register", "operator", "smoke"]
+const DEFAULT_EMBEDDER_STEP: StepKey = "default_embedder"
+const ALL_STEPS: StepKey[] = [...BASE_STEP_ORDER, DEFAULT_EMBEDDER_STEP]
 
 const STEP_LABEL: Record<StepKey, string> = {
   scaffold: "Scaffold",
@@ -120,6 +131,7 @@ const STEP_LABEL: Record<StepKey, string> = {
   register: "Register",
   operator: "Operator",
   smoke: "Smoke",
+  default_embedder: "Default",
 }
 
 const STEP_HINT: Record<StepKey, string> = {
@@ -128,11 +140,12 @@ const STEP_HINT: Record<StepKey, string> = {
   register: "Apply register.sql → rvbbit.register_backend(…)",
   operator: "Apply operator.sql → rvbbit.create_operator(…)",
   smoke: "Apply smoke.sql, then wait for backend_probe readiness",
+  default_embedder: "Set this embedding backend as the system `embed` backend and purge stale cache",
 }
 
 function initSteps(): Record<StepKey, StepState> {
   return Object.fromEntries(
-    STEP_ORDER.map((k) => [k, { status: "pending" as StepStatus }]),
+    ALL_STEPS.map((k) => [k, { status: "pending" as StepStatus }]),
   ) as Record<StepKey, StepState>
 }
 
@@ -143,6 +156,7 @@ function initArtifacts(): ArtifactsMap {
     register: null,
     operator: null,
     smoke: null,
+    default_embedder: null,
   }
 }
 
@@ -187,6 +201,10 @@ export function CapabilityInstallGraph({
   manifest,
   knobs,
   rendered,
+  isEmbeddingCapability = false,
+  makeDefaultEmbedder = false,
+  defaultEmbedderActive = false,
+  onMakeDefaultEmbedderChange,
   onInstalledChanged,
 }: CapabilityInstallGraphProps) {
   const [steps, setSteps] = useState<Record<StepKey, StepState>>(initSteps)
@@ -196,6 +214,18 @@ export function CapabilityInstallGraph({
   const [pipelineError, setPipelineError] = useState<string | null>(null)
   const composeAbortRef = useRef<AbortController | null>(null)
   const gpuIntent = useMemo(() => manifestGpuIntent(manifest), [manifest])
+  const externalBackend = useMemo(() => isExternalBackendManifest(manifest), [manifest])
+  const stepOrder = useMemo(() => {
+    const base = externalBackend
+      ? BASE_STEP_ORDER.filter((k) => k !== "scaffold" && k !== "build")
+      : BASE_STEP_ORDER
+    return isEmbeddingCapability && makeDefaultEmbedder
+      ? [...base, DEFAULT_EMBEDDER_STEP]
+      : base
+  }, [externalBackend, isEmbeddingCapability, makeDefaultEmbedder])
+  const effectiveSelectedStep = stepOrder.includes(selectedStep)
+    ? selectedStep
+    : stepOrder[0] ?? "register"
   const devicePref = (knobs.device || "auto").trim().toLowerCase()
   const autoGpuEligible = !knobs.gpu && (devicePref === "cuda" || (devicePref === "auto" && gpuIntent))
 
@@ -449,17 +479,59 @@ export function CapabilityInstallGraph({
     return false
   }, [activeConnectionId, rendered.smokeSql, manifest, setStep, onInstalledChanged])
 
+  const runDefaultEmbedderStep = useCallback(async (): Promise<boolean> => {
+    if (!activeConnectionId) {
+      setStep("default_embedder", {
+        status: "failed",
+        endedAt: Date.now(),
+        error: "no active connection",
+      })
+      return false
+    }
+    if (!manifest.backend?.name) {
+      setStep("default_embedder", {
+        status: "failed",
+        endedAt: Date.now(),
+        error: "manifest has no backend",
+      })
+      return false
+    }
+    const sql = renderSetDefaultEmbedderSql(manifest.backend.name, true)
+    setStep("default_embedder", { status: "running", startedAt: Date.now(), error: undefined })
+    const result = await setDefaultEmbedder(activeConnectionId, manifest.backend.name, true)
+    setArtifacts((a) => ({
+      ...a,
+      default_embedder: {
+        sql,
+        latencyMs: result.latencyMs,
+        lastRow: result.lastRow ?? null,
+        error: result.error,
+      },
+    }))
+    if (!result.ok) {
+      setStep("default_embedder", {
+        status: "failed",
+        endedAt: Date.now(),
+        error: result.error ?? "default embedder failed",
+      })
+      return false
+    }
+    setStep("default_embedder", { status: "ok", endedAt: Date.now() })
+    onInstalledChanged?.()
+    return true
+  }, [activeConnectionId, manifest.backend, setStep, onInstalledChanged])
+
   // ── Pipeline orchestration ──
   const runFrom = useCallback(
     async (start: StepKey) => {
       setRunning(true)
       setPipelineError(null)
       // reset start + everything downstream
-      const startIdx = STEP_ORDER.indexOf(start)
+      const startIdx = Math.max(0, stepOrder.indexOf(start))
       setSteps((prev) => {
         const next = { ...prev }
-        for (let i = startIdx; i < STEP_ORDER.length; i++) {
-          next[STEP_ORDER[i]] = { status: "pending" }
+        for (let i = startIdx; i < stepOrder.length; i++) {
+          next[stepOrder[i]] = { status: "pending" }
         }
         return next
       })
@@ -470,10 +542,11 @@ export function CapabilityInstallGraph({
         register: () => runSqlStep("register", rendered.registerSql),
         operator: () => runSqlStep("operator", rendered.operatorSql),
         smoke: runSmokeStep,
+        default_embedder: runDefaultEmbedderStep,
       }
 
-      for (let i = startIdx; i < STEP_ORDER.length; i++) {
-        const k = STEP_ORDER[i]
+      for (let i = startIdx; i < stepOrder.length; i++) {
+        const k = stepOrder[i]
         setSelectedStep(k)
         const ok = await runners[k]()
         if (!ok) {
@@ -488,6 +561,8 @@ export function CapabilityInstallGraph({
       runBuildStep,
       runSqlStep,
       runSmokeStep,
+      runDefaultEmbedderStep,
+      stepOrder,
       rendered.registerSql,
       rendered.operatorSql,
     ],
@@ -501,15 +576,15 @@ export function CapabilityInstallGraph({
     setSteps(initSteps())
     setArtifacts(initArtifacts())
     setPipelineError(null)
-    setSelectedStep("scaffold")
-  }, [])
+    setSelectedStep(stepOrder[0] ?? "register")
+  }, [stepOrder])
 
   // ── Layout calc ──
   const dims = useMemo(() => {
-    const width = PAD_X * 2 + STEP_ORDER.length * NODE_W + (STEP_ORDER.length - 1) * COL_GAP
+    const width = PAD_X * 2 + stepOrder.length * NODE_W + (stepOrder.length - 1) * COL_GAP
     const height = PAD_Y * 2 + NODE_H
     return { width, height }
-  }, [])
+  }, [stepOrder])
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -520,8 +595,13 @@ export function CapabilityInstallGraph({
           Install pipeline
         </span>
         <span className="rounded bg-foreground/[0.05] px-1.5 py-0.5 font-mono text-[10px] text-chrome-text/60">
-          {knobs.outputDir}
+          {externalBackend ? "external backend" : knobs.outputDir}
         </span>
+        {defaultEmbedderActive ? (
+          <span className="rounded-full bg-success/15 px-1.5 py-0.5 text-[9px] uppercase tracking-wider text-success">
+            system embedder
+          </span>
+        ) : null}
         {knobs.gpu ? (
           <span className="rounded-full bg-warning/15 px-1.5 py-0.5 text-[9px] uppercase tracking-wider text-warning">
             gpu overlay
@@ -537,6 +617,21 @@ export function CapabilityInstallGraph({
           </span>
         ) : null}
         <div className="ml-auto flex items-center gap-1.5">
+          {isEmbeddingCapability ? (
+            <label
+              className="mr-1 inline-flex items-center gap-1.5 rounded border border-chrome-border/50 bg-secondary-background/40 px-2 py-1 text-[10px] text-chrome-text/75"
+              title="After install, copy this backend into the canonical `embed` backend and purge stale cache"
+            >
+              <input
+                type="checkbox"
+                checked={makeDefaultEmbedder}
+                onChange={(e) => onMakeDefaultEmbedderChange?.(e.target.checked)}
+                disabled={running || defaultEmbedderActive}
+                className="h-3 w-3 accent-brand-capability disabled:opacity-50"
+              />
+              <span>{defaultEmbedderActive ? "default active" : "use as system embedder"}</span>
+            </label>
+          ) : null}
           {running ? (
             <Button
               size="sm"
@@ -551,7 +646,7 @@ export function CapabilityInstallGraph({
           ) : (
             <Button
               size="sm"
-              onClick={() => void runFrom("scaffold")}
+              onClick={() => void runFrom(stepOrder[0] ?? "register")}
               className="h-6"
               disabled={!activeConnectionId}
             >
@@ -596,14 +691,14 @@ export function CapabilityInstallGraph({
                 <path d="M0,0 L8,4 L0,8 z" fill="var(--chrome-border)" />
               </marker>
             </defs>
-            {STEP_ORDER.slice(0, -1).map((k, i) => {
+            {stepOrder.slice(0, -1).map((k, i) => {
               const x1 = PAD_X + (i + 1) * NODE_W + i * COL_GAP - 2
               const x2 = PAD_X + (i + 1) * (NODE_W + COL_GAP) + 2
               const y = PAD_Y + NODE_H / 2
               const isActive =
                 steps[k].status === "ok" &&
-                (steps[STEP_ORDER[i + 1]].status === "running" ||
-                  steps[STEP_ORDER[i + 1]].status === "ok")
+                (steps[stepOrder[i + 1]].status === "running" ||
+                  steps[stepOrder[i + 1]].status === "ok")
               return (
                 <line
                   key={k}
@@ -620,7 +715,7 @@ export function CapabilityInstallGraph({
           </svg>
 
           {/* nodes */}
-          {STEP_ORDER.map((k, i) => {
+          {stepOrder.map((k, i) => {
             const left = PAD_X + i * (NODE_W + COL_GAP)
             return (
               <PipelineNode
@@ -631,7 +726,7 @@ export function CapabilityInstallGraph({
                 height={NODE_H}
                 stepKey={k}
                 state={steps[k]}
-                selected={selectedStep === k}
+                selected={effectiveSelectedStep === k}
                 onSelect={() => setSelectedStep(k)}
               />
             )
@@ -646,7 +741,7 @@ export function CapabilityInstallGraph({
           <span className="flex-1 break-words">{pipelineError}</span>
           <button
             type="button"
-            onClick={() => void runFrom(selectedStep)}
+            onClick={() => void runFrom(effectiveSelectedStep)}
             disabled={running}
             className="rounded border border-warning/50 bg-warning/15 px-1.5 py-0.5 text-[10px] uppercase tracking-wider text-warning hover:bg-warning/25 disabled:opacity-50"
           >
@@ -665,12 +760,12 @@ export function CapabilityInstallGraph({
       {/* artifact panel */}
       <div className="min-h-0 flex-1 overflow-hidden">
         <ArtifactPanel
-          stepKey={selectedStep}
-          state={steps[selectedStep]}
-          artifact={artifacts[selectedStep]}
+          stepKey={effectiveSelectedStep}
+          state={steps[effectiveSelectedStep]}
+          artifact={artifacts[effectiveSelectedStep]}
           running={running}
           canRun={!!activeConnectionId}
-          onRunFromHere={() => void runFrom(selectedStep)}
+          onRunFromHere={() => void runFrom(effectiveSelectedStep)}
         />
       </div>
     </div>
@@ -874,7 +969,7 @@ function ArtifactPanel({
         {stepKey === "build" ? (
           <BuildPanel artifact={artifact as BuildArtifact | null} state={state} />
         ) : null}
-        {stepKey === "register" || stepKey === "operator" ? (
+        {stepKey === "register" || stepKey === "operator" || stepKey === "default_embedder" ? (
           <SqlPanel artifact={artifact as SqlArtifact | null} state={state} />
         ) : null}
         {stepKey === "smoke" ? (
