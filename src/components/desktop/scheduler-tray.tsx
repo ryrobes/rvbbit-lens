@@ -3,7 +3,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import {
   AlertTriangle,
+  BarChart3,
   Bell,
+  Box,
   Check,
   ChevronDown,
   ChevronRight,
@@ -29,6 +31,8 @@ import {
   isAccelTickJob,
   isAlertJob,
   isCatalogJob,
+  isCubesJob,
+  isMetricsJob,
   isSemanticJob,
   isSyncJob,
   listCronJobs,
@@ -75,6 +79,10 @@ const CRAWL_COMMAND = "CALL rvbbit.catalog_crawl_run();"
 const ACCEL_TICK_COMMAND = "SELECT rvbbit.accel_tick(4);"
 // The temporal-mirror sync. CALL (it's a procedure that commits per table).
 const RUN_SYNC_COMMAND = "CALL rvbbit.run_sync();"
+// Snapshot every defined metric into metric_observations at one timestamp.
+const MATERIALIZE_ALL_COMMAND = "SELECT rvbbit.materialize_all_metrics();"
+// Reload every cube + rebuild its parquet/vortex acceleration files (per-cube COMMIT).
+const REFRESH_CUBES_COMMAND = "CALL rvbbit.refresh_all_cubes();"
 
 export function SchedulerTray({ activeConnectionId, hasRvbbit, onOpenSql, onOpenDrift }: SchedulerTrayProps) {
   const [open, setOpen] = useState(false)
@@ -214,6 +222,8 @@ export function SchedulerTray({ activeConnectionId, hasRvbbit, onOpenSql, onOpen
   const accelTickJob = jobs.find(isAccelTickJob)
   const syncJob = jobs.find(isSyncJob)
   const alertJobs = jobs.filter(isAlertJob)
+  const metricsJob = jobs.find(isMetricsJob)
+  const cubesJob = jobs.find(isCubesJob)
   // Where newly scheduled jobs RUN: the working db the user is connected to. The
   // job is registered in the home db (cron.database_name) but targets this db via
   // cron.schedule_in_database, so it need not equal the home db.
@@ -329,6 +339,32 @@ export function SchedulerTray({ activeConnectionId, hasRvbbit, onOpenSql, onOpen
                       busy={busy}
                       onSchedule={() =>
                         void mutate(scheduleSql("rvbbit_sync", "0 */3 * * *", RUN_SYNC_COMMAND, targetDb))
+                      }
+                    />
+                  </div>
+                ) : null}
+
+                {/* metrics: materialize all defined metrics (hourly snapshot) */}
+                {hasRvbbit ? (
+                  <div className="mt-1">
+                    <MetricsPreset
+                      job={metricsJob}
+                      busy={busy}
+                      onSchedule={() =>
+                        void mutate(scheduleSql("rvbbit_materialize_all", "0 * * * *", MATERIALIZE_ALL_COMMAND, targetDb))
+                      }
+                    />
+                  </div>
+                ) : null}
+
+                {/* cubes: refresh all cubes + rebuild acceleration (every 2h) */}
+                {hasRvbbit ? (
+                  <div className="mt-1">
+                    <CubesPreset
+                      job={cubesJob}
+                      busy={busy}
+                      onSchedule={() =>
+                        void mutate(scheduleSql("rvbbit_refresh_cubes", "0 */2 * * *", REFRESH_CUBES_COMMAND, targetDb))
                       }
                     />
                   </div>
@@ -510,6 +546,70 @@ function AccelTickPreset({ job, busy, onSchedule }: { job?: CronJob; busy: boole
         className="ml-auto rounded bg-rvbbit-accent/15 px-2 py-0.5 text-[11px] font-medium text-rvbbit-accent hover:bg-rvbbit-accent/25 disabled:opacity-40"
       >
         Schedule heartbeat
+      </button>
+    </div>
+  )
+}
+
+// ── Metrics materialize-all preset ──────────────────────────────────
+
+function MetricsPreset({ job, busy, onSchedule }: { job?: CronJob; busy: boolean; onSchedule: () => void }) {
+  if (job) {
+    return (
+      <div className="flex items-center gap-2 rounded-md border border-rvbbit-accent/30 bg-rvbbit-bg/30 px-2.5 py-1.5">
+        <BarChart3 className="h-3.5 w-3.5 shrink-0 text-rvbbit-accent" />
+        <span className="text-[11px] text-chrome-text/80">
+          Metrics snapshot — <span className="text-foreground">{describeCron(job.schedule)}</span>
+        </span>
+        <span className={cn("ml-auto h-1.5 w-1.5 rounded-full", job.active ? "bg-success" : "bg-chrome-text/40")} />
+      </div>
+    )
+  }
+  return (
+    <div className="flex items-center gap-2 rounded-md border border-chrome-border bg-secondary-background/40 px-2.5 py-1.5">
+      <BarChart3 className="h-3.5 w-3.5 shrink-0 text-chrome-text/60" />
+      <span className="text-[11px] text-chrome-text/70">
+        Materialize all metrics — one timestamped snapshot of every defined metric.
+      </span>
+      <button
+        type="button"
+        disabled={busy}
+        onClick={onSchedule}
+        className="ml-auto rounded bg-rvbbit-accent/15 px-2 py-0.5 text-[11px] font-medium text-rvbbit-accent hover:bg-rvbbit-accent/25 disabled:opacity-40"
+      >
+        Schedule hourly
+      </button>
+    </div>
+  )
+}
+
+// ── Cubes refresh-all preset ────────────────────────────────────────
+
+function CubesPreset({ job, busy, onSchedule }: { job?: CronJob; busy: boolean; onSchedule: () => void }) {
+  if (job) {
+    return (
+      <div className="flex items-center gap-2 rounded-md border border-rvbbit-accent/30 bg-rvbbit-bg/30 px-2.5 py-1.5">
+        <Box className="h-3.5 w-3.5 shrink-0 text-rvbbit-accent" />
+        <span className="text-[11px] text-chrome-text/80">
+          Cube refresh — <span className="text-foreground">{describeCron(job.schedule)}</span>
+        </span>
+        <span className={cn("ml-auto h-1.5 w-1.5 rounded-full", job.active ? "bg-success" : "bg-chrome-text/40")} />
+      </div>
+    )
+  }
+  return (
+    <div className="flex items-center gap-2 rounded-md border border-chrome-border bg-secondary-background/40 px-2.5 py-1.5">
+      <Box className="h-3.5 w-3.5 shrink-0 text-chrome-text/60" />
+      <span className="text-[11px] text-chrome-text/70">
+        Refresh all cubes — reload each + rebuild its parquet/vortex acceleration files.
+      </span>
+      <button
+        type="button"
+        disabled={busy}
+        onClick={onSchedule}
+        className="ml-auto rounded bg-rvbbit-accent/15 px-2 py-0.5 text-[11px] font-medium text-rvbbit-accent hover:bg-rvbbit-accent/25 disabled:opacity-40"
+      >
+        Schedule every 2h
       </button>
     </div>
   )

@@ -269,3 +269,11 @@ export function isSyncJob(j: CronJob): boolean {
 export function isAlertJob(j: CronJob): boolean {
   return /rvbbit\.(alert_sweep|alert_worker_tick)\b/i.test(j.command) || /^rvbbit_alert_/.test(j.jobname ?? "")
 }
+/** Does this job materialize all metrics (timestamped snapshot)? */
+export function isMetricsJob(j: CronJob): boolean {
+  return /materialize_all_metrics/i.test(j.command) || j.jobname === "rvbbit_materialize_all"
+}
+/** Does this job refresh all cubes (reload + acceleration rebuild)? */
+export function isCubesJob(j: CronJob): boolean {
+  return /refresh_all_cubes/i.test(j.command) || j.jobname === "rvbbit_refresh_cubes"
+}
