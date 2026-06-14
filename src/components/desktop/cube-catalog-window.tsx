@@ -29,6 +29,7 @@ export function CubeCatalogWindow({
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [search, setSearch] = useState("")
+  const [categoryFilter, setCategoryFilter] = useState<string | null>(null)
   const [sortField, setSortField] = useState<SortField>("name")
   const [sortDir, setSortDir] = useState<SortDir>("asc")
 
@@ -86,8 +87,26 @@ export function CubeCatalogWindow({
     )
   }, [cubes, search])
 
+  // category "folders" — the distinct categories, plus an uncategorized bucket
+  const categories = useMemo(() => {
+    const set = new Set<string>()
+    let hasUncat = false
+    for (const c of cubes) {
+      if (c.category) set.add(c.category)
+      else hasUncat = true
+    }
+    const list = Array.from(set).sort()
+    return hasUncat ? [...list, "(uncategorized)"] : list
+  }, [cubes])
+
+  const inFolder = useMemo(() => {
+    if (!categoryFilter) return filtered
+    if (categoryFilter === "(uncategorized)") return filtered.filter((c) => !c.category)
+    return filtered.filter((c) => c.category === categoryFilter)
+  }, [filtered, categoryFilter])
+
   const sorted = useMemo(() => {
-    const rows = filtered.slice()
+    const rows = inFolder.slice()
     const dir = sortDir === "asc" ? 1 : -1
     rows.sort((a, b) => {
       let cmp = 0
@@ -113,7 +132,7 @@ export function CubeCatalogWindow({
       return cmp * dir
     })
     return rows
-  }, [filtered, sortField, sortDir])
+  }, [inFolder, sortField, sortDir])
 
   if (!activeConnectionId || !hasRvbbit) {
     return <StatusNote state="empty" message="Connect to an rvbbit-enabled database." />
@@ -161,6 +180,32 @@ export function CubeCatalogWindow({
       </div>
 
       {error ? <StatusNote state="error" message={error} className="border-b border-danger/30" /> : null}
+
+      {categories.length > 0 ? (
+        <div className="flex flex-wrap items-center gap-1 border-b border-chrome-border/40 bg-chrome-bg/20 px-3 py-1">
+          <span className="mr-1 text-[9px] uppercase tracking-wider text-chrome-text/40">Folders</span>
+          <button
+            type="button"
+            onClick={() => setCategoryFilter(null)}
+            className={`rounded-full px-2 py-px text-[10px] ${categoryFilter == null ? "bg-main/15 text-main" : "text-chrome-text/55 hover:bg-foreground/[0.05] hover:text-foreground"}`}
+          >
+            All
+          </button>
+          {categories.map((cat) => (
+            <button
+              key={cat}
+              type="button"
+              onClick={() => setCategoryFilter((cur) => (cur === cat ? null : cat))}
+              className={`rounded-full px-2 py-px text-[10px] ${categoryFilter === cat ? "bg-main/15 text-main" : "text-chrome-text/55 hover:bg-foreground/[0.05] hover:text-foreground"}`}
+            >
+              {cat}
+              <span className="ml-1 tabular-nums opacity-50">
+                {cat === "(uncategorized)" ? cubes.filter((c) => !c.category).length : cubes.filter((c) => c.category === cat).length}
+              </span>
+            </button>
+          ))}
+        </div>
+      ) : null}
 
       <div className="min-h-0 flex-1 overflow-auto">
         {loading && cubes.length === 0 ? (
