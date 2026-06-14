@@ -34,6 +34,8 @@ interface DesktopMenuBarProps {
   onOpenConnections: () => void
   onOpenFinder: () => void
   onOpenSqlScratch: () => void
+  onRunSqlBlocksOnScreen: () => void
+  canRunSqlBlocksOnScreen: boolean
   onOpenSystemObjects: () => void
   onOpenPgMonitor: () => void
   onOpenNotifications: () => void
@@ -134,6 +136,8 @@ export function DesktopMenuBar({
   onOpenConnections,
   onOpenFinder,
   onOpenSqlScratch,
+  onRunSqlBlocksOnScreen,
+  canRunSqlBlocksOnScreen,
   onOpenSystemObjects,
   onOpenPgMonitor,
   onOpenNotifications,
@@ -216,6 +220,11 @@ export function DesktopMenuBar({
   // ── File menu ────────────────────────────────────────────────────
   const fileItems: MenuEntry[] = [
     { label: "New SQL window", onClick: onOpenSqlScratch, shortcut: "⌘N" },
+    {
+      label: "Run SQL blocks on screen",
+      onClick: onRunSqlBlocksOnScreen,
+      disabled: !canRunSqlBlocksOnScreen,
+    },
     { label: "Open Finder", onClick: onOpenFinder, shortcut: "⌘F" },
     { label: "View Apps", onClick: onOpenViewApps },
   ]

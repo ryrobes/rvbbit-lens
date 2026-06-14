@@ -1374,6 +1374,22 @@ export function DesktopShell() {
     setRunSignals((s) => ({ ...s, [targetWindowId]: (s[targetWindowId] ?? 0) + 1 }))
   }, [liveParams, schema])
 
+  const runSqlBlocksOnActiveScreen = useCallback(() => {
+    const canvas = workspacesRef.current[activeWorkspaceRef.current]
+    const graph = buildDesktopRuntimeGraph(canvas.windows, canvas.params)
+    const rootOrStandaloneIds = canvas.windows.flatMap((w) => {
+      if (w.kind !== "data") return []
+      const block = graph.blocks.get(w.id)
+      return !block || block.upstreamWindowIds.length === 0 ? [w.id] : []
+    })
+    if (rootOrStandaloneIds.length === 0) return
+    setRunSignals((s) => {
+      const next = { ...s }
+      for (const wid of rootOrStandaloneIds) next[wid] = (next[wid] ?? 0) + 1
+      return next
+    })
+  }, [])
+
   // ── Helpers to open specific window kinds ───────────────────────────
 
   const openFinder = useCallback(() => {
@@ -3540,6 +3556,8 @@ export function DesktopShell() {
     ],
   )
 
+  const canRunSqlBlocksOnScreen = windows.some((w) => w.kind === "data")
+
   return (
     <PhosphorIconProvider>
     <div
@@ -3606,6 +3624,8 @@ export function DesktopShell() {
         onOpenConnections={openConnections}
         onOpenFinder={openFinder}
         onOpenSqlScratch={openSqlScratch}
+        onRunSqlBlocksOnScreen={runSqlBlocksOnActiveScreen}
+        canRunSqlBlocksOnScreen={canRunSqlBlocksOnScreen}
         onOpenSystemObjects={() => openSystemObjects("tables")}
         onOpenPgMonitor={openPgMonitor}
         onOpenNotifications={openNotifications}

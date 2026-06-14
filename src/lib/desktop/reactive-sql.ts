@@ -35,6 +35,7 @@ interface RuntimeBlockInput {
   title: string
   blockName: string
   sourceSql: string
+  version: number
   subscriptions: DesktopParamSubscription[]
   /** Run-inferred jsonb shape for synth/flow blocks (see DataPayload). */
   jsonbProjection?: JsonbProjectionColumn[]
@@ -45,6 +46,7 @@ export interface DesktopCompiledBlock {
   title: string
   blockName: string
   sourceSql: string
+  version: number
   compiledSql: string
   /** For synth/flow blocks: a typed projection over compiledSql that exposes the
    * expanded jsonb columns as real columns. Used when this block is *referenced*
@@ -225,7 +227,8 @@ export function buildDesktopRuntimeGraph(
       const inner = stripTrailingLimitOffset(
         stripTrailingSqlTerminator(parseAsOfComment(upstreamSql).body),
       )
-      return `(\n${indentSql(inner)}\n) AS ${quoteSqlIdent(slugifyBlockName(upstream.blockName))}`
+      const stampedInner = `${blockVersionStamp(upstreamCompiled)}\n${inner}`
+      return `(\n${indentSql(stampedInner)}\n) AS ${quoteSqlIdent(slugifyBlockName(upstream.blockName))}`
     })
 
     rewritten = replaceMasked(rewritten, maskSql(rewritten), PARAM_REF_RE, (m) => {
@@ -291,6 +294,7 @@ export function buildDesktopRuntimeGraph(
       title: block.title,
       blockName: block.blockName,
       sourceSql: block.sourceSql,
+      version: block.version,
       compiledSql: withAsOf(cleanBody, effectiveAsOf),
       projectionSql,
       refs: dedupedRefs,
@@ -329,10 +333,16 @@ function dataWindowsToRuntimeInputs(windows: DesktopWindowState[]): RuntimeBlock
       title: payload.title || w.title,
       blockName: payload.reactive?.blockName || fallback,
       sourceSql: sourceSqlForPayload(payload),
+      version: payload.reactive?.version ?? 1,
       subscriptions: payload.reactive?.paramSubscriptions ?? [],
       jsonbProjection: payload.jsonbProjection,
     }]
   })
+}
+
+function blockVersionStamp(block: DesktopCompiledBlock): string {
+  const safeBlockName = block.blockName.replace(/\*\//g, "* /")
+  return `/* rvbbit:block=${safeBlockName}; version=${block.version} */`
 }
 
 function indentSql(sql: string) {

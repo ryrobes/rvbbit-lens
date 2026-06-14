@@ -1,6 +1,15 @@
 "use client"
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type PointerEvent as ReactPointerEvent,
+} from "react"
 import { useWorkspaceActive } from "./workspace-active-context"
 import {
   AlertTriangle,
@@ -151,6 +160,11 @@ const FLOW_STEPS_SQL =
 // The model "Ask" mode uses, persisted globally (one choice for all future
 // Asks). Empty = let rvbbit.synth_sql use the synth operator's default model.
 const ASK_MODEL_KEY = "rvbbit-lens:ask-model"
+const SQL_RAIL_DEFAULT_WIDTH = 380
+const SQL_RAIL_MIN_WIDTH = 280
+const SQL_RESULTS_MIN_WIDTH = 360
+const SQL_RAIL_MAX_FRACTION = 0.5
+
 function loadAskModel(): string {
   try { return (typeof window !== "undefined" && window.localStorage.getItem(ASK_MODEL_KEY)) || "" } catch { return "" }
 }
@@ -177,6 +191,8 @@ export function DataGridWindow({
   onOpenKgForSource,
 }: DataGridWindowProps) {
   const view = payload.view ?? {}
+  const rootRef = useRef<HTMLDivElement | null>(null)
+  const sqlRailRef = useRef<HTMLElement | null>(null)
   // Present mode = "content-only": no tab strip, SQL rail, header toolbar,
   // rollup shelf, view-kind switcher, or time-travel rail — just the saved
   // view's data, full-bleed. Editor-only tabs (sql/explain/steps) fall back to
@@ -224,6 +240,9 @@ export function DataGridWindow({
   const [explainBusy, setExplainBusy] = useState(false)
   const [activeTab, setActiveTab] = useState<NonNullable<DataPayload["view"]>["activeTab"]>(view.activeTab ?? (isSemanticProjection ? "explain" : payload.origin === "table" ? "rows" : "sql"))
   const [sqlRailOpen, setSqlRailOpen] = useState<boolean>(view.sqlRailOpen ?? (payload.origin !== "table"))
+  const [sqlRailWidthPx, setSqlRailWidthPx] = useState<number>(
+    Math.max(SQL_RAIL_MIN_WIDTH, view.sqlRailWidthPx ?? SQL_RAIL_DEFAULT_WIDTH),
+  )
   const [paramDropHot, setParamDropHot] = useState(false)
   // Transient note shown when a param drop is refused (field this block can't
   // produce). Auto-dismisses; the timer is cleared on re-set / unmount.
@@ -346,11 +365,64 @@ export function DataGridWindow({
     const handle = setTimeout(() => {
       onChangePayloadRef.current((p) => ({
         ...p,
-        view: { ...(p.view ?? {}), sqlDraft: draftSql, sqlRailOpen, activeTab, queryMode, askDraft },
+        view: { ...(p.view ?? {}), sqlDraft: draftSql, sqlRailOpen, sqlRailWidthPx, activeTab, queryMode, askDraft },
       }))
     }, 250)
     return () => clearTimeout(handle)
-  }, [draftSql, sqlRailOpen, activeTab, queryMode, askDraft])
+  }, [draftSql, sqlRailOpen, sqlRailWidthPx, activeTab, queryMode, askDraft])
+
+  const clampSqlRailWidth = useCallback((rawWidth: number) => {
+    const containerWidth = rootRef.current?.getBoundingClientRect().width ?? 0
+    if (containerWidth <= 0) {
+      return Math.max(SQL_RAIL_MIN_WIDTH, Math.round(rawWidth))
+    }
+    const maxByFraction = Math.floor(containerWidth * SQL_RAIL_MAX_FRACTION)
+    const maxByResults = Math.floor(containerWidth - SQL_RESULTS_MIN_WIDTH)
+    const maxWidth = Math.max(SQL_RAIL_MIN_WIDTH, Math.min(maxByFraction, maxByResults))
+    return Math.round(Math.min(Math.max(rawWidth, SQL_RAIL_MIN_WIDTH), maxWidth))
+  }, [])
+
+  const startSqlRailResize = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+    if (event.button !== 0) return
+    event.preventDefault()
+    event.stopPropagation()
+
+    const startX = event.clientX
+    const startWidth = sqlRailRef.current?.getBoundingClientRect().width ?? sqlRailWidthPx
+    const prevCursor = document.body.style.cursor
+    const prevUserSelect = document.body.style.userSelect
+    document.body.style.cursor = "col-resize"
+    document.body.style.userSelect = "none"
+
+    const onMove = (moveEvent: PointerEvent) => {
+      setSqlRailWidthPx(clampSqlRailWidth(startWidth + moveEvent.clientX - startX))
+    }
+    const onUp = () => {
+      document.body.style.cursor = prevCursor
+      document.body.style.userSelect = prevUserSelect
+      setSqlRailWidthPx((w) => clampSqlRailWidth(w))
+      window.removeEventListener("pointermove", onMove)
+      window.removeEventListener("pointerup", onUp)
+      window.removeEventListener("pointercancel", onUp)
+    }
+
+    window.addEventListener("pointermove", onMove)
+    window.addEventListener("pointerup", onUp)
+    window.addEventListener("pointercancel", onUp)
+  }, [clampSqlRailWidth, sqlRailWidthPx])
+
+  const nudgeSqlRailWidth = useCallback((event: ReactKeyboardEvent<HTMLDivElement>) => {
+    const step = event.shiftKey ? 48 : 16
+    let next: number | null = null
+    if (event.key === "ArrowLeft") next = sqlRailWidthPx - step
+    if (event.key === "ArrowRight") next = sqlRailWidthPx + step
+    if (event.key === "Home") next = SQL_RAIL_MIN_WIDTH
+    if (event.key === "End") next = Number.MAX_SAFE_INTEGER
+    if (next == null) return
+    event.preventDefault()
+    event.stopPropagation()
+    setSqlRailWidthPx(clampSqlRailWidth(next))
+  }, [clampSqlRailWidth, sqlRailWidthPx])
 
   // Lazily load the LLM model list the first time Ask mode is opened (drives the
   // model picker under the editor). Cheap; kept in state for the window's life.
@@ -794,7 +866,8 @@ export function DataGridWindow({
     return () => clearTimeout(handle)
   }, [activeTab, draftSql, compiledSql, runExplain])
 
-  // Re-run when an upstream cascading filter changes (runSignal bumps).
+  // Re-run when an upstream cascading filter changes or the desktop asks this
+  // block to refresh (runSignal bumps).
   useEffect(() => {
     // In Ask mode draftSql is empty (the editor holds the question), so this
     // would re-run stale payload.sql — skip it.
@@ -804,11 +877,15 @@ export function DataGridWindow({
   }, [runSignal])
 
   // Re-run whenever the *compiled* SQL changes — i.e. a referenced {X}
-  // upstream's SQL changed, a `param.X.Y` substitution flipped, or a self
-  // subscription resolved. Skips the initial mount (prev=null) and only
-  // fires after at least one run has already recorded the baseline.
+  // upstream's SQL/version changed, a `param.X.Y` substitution flipped, or a
+  // self subscription resolved. The first effect pass records the baseline
+  // without running, so a later upstream rerun can wake even a never-run
+  // downstream block.
   useEffect(() => {
-    if (prevCompiledRef.current === null || isSemanticProjection) return
+    if (prevCompiledRef.current === null || isSemanticProjection) {
+      prevCompiledRef.current = compiledSql
+      return
+    }
     if (prevCompiledRef.current === compiledSql) return
     prevCompiledRef.current = compiledSql
     void runSql(draftSql || payload.sql)
@@ -1011,6 +1088,7 @@ export function DataGridWindow({
 
   return (
     <div
+      ref={rootRef}
       className={cn("relative flex h-full")}
       onDragOver={handleParamDragOver}
       onDragLeave={handleParamDragLeave}
@@ -1029,9 +1107,15 @@ export function DataGridWindow({
         </div>
       ) : null}
       {sqlRailOpen && !present ? (
+        <>
         <aside
+          ref={sqlRailRef}
           className="flex flex-col border-r border-chrome-border bg-doc-bg/80"
-          style={{ width: view.sqlRailWidthPx ?? 380, minWidth: 280, maxWidth: 700 }}
+          style={{
+            width: sqlRailWidthPx,
+            minWidth: SQL_RAIL_MIN_WIDTH,
+            maxWidth: `${SQL_RAIL_MAX_FRACTION * 100}%`,
+          }}
         >
           <Toolbar
             isRunning={isRunning}
@@ -1064,9 +1148,24 @@ export function DataGridWindow({
           ) : null}
           <RunStatus runState={runState} progress={progress} />
         </aside>
+        <div
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="Resize SQL editor"
+          tabIndex={0}
+          className="group relative z-20 w-2 shrink-0 cursor-col-resize touch-none select-none bg-transparent"
+          style={{ WebkitAppRegion: "no-drag" } as CSSProperties}
+          onPointerDown={startSqlRailResize}
+          onKeyDown={nudgeSqlRailWidth}
+          title="Drag to resize SQL editor"
+        >
+          <div className="absolute inset-y-0 left-1/2 w-px -translate-x-1/2 bg-chrome-border/70 transition-colors group-hover:bg-main/70" />
+          <div className="absolute inset-y-0 left-1/2 w-2 -translate-x-1/2 transition-colors group-hover:bg-main/10" />
+        </div>
+        </>
       ) : null}
 
-      <section className="flex flex-1 flex-col overflow-hidden">
+      <section className="flex min-w-0 flex-1 flex-col overflow-hidden">
         {present ? null : (
         <div className="flex h-9 shrink-0 items-center border-b border-chrome-border bg-chrome-bg/30 pl-1 pr-2">
           {/* Left group scrolls horizontally when narrow rather than wrapping —
