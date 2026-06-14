@@ -18,6 +18,8 @@ interface BrainExplorerWindowProps {
   activeConnectionId: string | null
   hasRvbbit: boolean
   onChangePayload: (mut: (p: BrainPayload) => BrainPayload) => void
+  // a dropped .csv/.tsv routes to the existing CSV import dialog instead of doc-ingest
+  onOpenCsvImport?: (file: File) => void
 }
 
 interface FolderNode {
@@ -60,15 +62,23 @@ function fmtDate(s: string | null): string {
 
 // ── drag-drop ingest: read text files (recursing dropped folders) ─────────────
 const TEXT_EXT = [".md", ".markdown", ".mdx", ".txt", ".text", ".rst", ".org", ".log"]
+const CSV_EXT = [".csv", ".tsv"]
 function isTextFile(name: string): boolean {
   return TEXT_EXT.some((e) => name.toLowerCase().endsWith(e))
+}
+// A dropped .csv/.tsv is tabular data, not a doc — route it to the CSV import dialog.
+function isCsvLike(name: string): boolean {
+  return CSV_EXT.some((e) => name.toLowerCase().endsWith(e))
+}
+function isIngestable(name: string): boolean {
+  return isTextFile(name) || isCsvLike(name)
 }
 
 async function readEntry(entry: FileSystemEntry, prefix: string, out: { path: string; file: File }[]): Promise<void> {
   if (entry.isFile) {
     const fe = entry as FileSystemFileEntry
     const file = await new Promise<File>((res, rej) => fe.file(res, rej))
-    if (isTextFile(file.name)) out.push({ path: prefix + file.name, file })
+    if (isIngestable(file.name)) out.push({ path: prefix + file.name, file })
   } else if (entry.isDirectory) {
     const reader = (entry as FileSystemDirectoryEntry).createReader()
     const readBatch = () => new Promise<FileSystemEntry[]>((res, rej) => reader.readEntries(res, rej))
@@ -156,7 +166,7 @@ function FolderRow({
   )
 }
 
-export function BrainExplorerWindow({ payload, activeConnectionId, hasRvbbit, onChangePayload }: BrainExplorerWindowProps) {
+export function BrainExplorerWindow({ payload, activeConnectionId, hasRvbbit, onChangePayload, onOpenCsvImport }: BrainExplorerWindowProps) {
   const conn = activeConnectionId
   const [principals, setPrincipals] = useState<string[]>([])
   const [viewAs, setViewAs] = useState<string>(payload.viewAs ?? "")
@@ -241,17 +251,26 @@ export function BrainExplorerWindow({ payload, activeConnectionId, hasRvbbit, on
       if (entries.length) {
         for (const en of entries) await readEntry(en, "", collected)
       } else {
-        for (const f of files) if (isTextFile(f.name)) collected.push({ path: f.name, file: f })
+        for (const f of files) if (isIngestable(f.name)) collected.push({ path: f.name, file: f })
       }
+      // .csv/.tsv → the existing CSV import dialog (tabular data, not a doc)
+      const csvs = collected.filter((c) => isCsvLike(c.file.name))
+      const docFiles = collected.filter((c) => !isCsvLike(c.file.name))
+      if (csvs.length && onOpenCsvImport) csvs.forEach((c) => onOpenCsvImport(c.file))
       if (!collected.length) {
-        setDropMsg(`No text files found (supported: ${TEXT_EXT.join(", ")})`)
+        setDropMsg(`No importable files (docs: ${TEXT_EXT.join(", ")}; tables: ${CSV_EXT.join(", ")})`)
+        return
+      }
+      const csvMsg = csvs.length ? `${csvs.length} CSV → import dialog` : ""
+      if (!docFiles.length) {
+        setDropMsg(csvMsg || "Nothing to ingest")
         return
       }
       const roles = ingestRoles.split(",").map((r) => r.trim()).filter(Boolean)
       const base = (selectedFolder && selectedFolder !== "/" ? selectedFolder : "/" + (ingestSource || "dropped")).replace(/\/+$/, "")
       setLoading(true)
       let ok = 0
-      for (const c of collected) {
+      for (const c of docFiles) {
         const slash = c.path.lastIndexOf("/")
         const sub = slash >= 0 ? "/" + c.path.slice(0, slash) : ""
         const title = c.path.slice(slash + 1).replace(/\.[^.]+$/, "")
@@ -274,8 +293,12 @@ export function BrainExplorerWindow({ payload, activeConnectionId, hasRvbbit, on
       }
       setLoading(false)
       setDropMsg(
-        `Ingested ${ok}/${collected.length} doc${collected.length === 1 ? "" : "s"}` +
-          (roles.length ? "" : " — no roles set, so they're visible to no one until you grant one"),
+        [
+          `Ingested ${ok}/${docFiles.length} doc${docFiles.length === 1 ? "" : "s"}`,
+          csvMsg,
+        ]
+          .filter(Boolean)
+          .join(" · ") + (roles.length ? "" : " — no roles set, so they're visible to no one until you grant one"),
       )
       await reload()
     },

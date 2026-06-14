@@ -3501,6 +3501,7 @@ export function DesktopShell() {
       openArtifact,
       openQueryDocument,
       openSqlData,
+      openCsvImport,
       openExtensions,
       openRvbbitCache,
       openCache,
@@ -3557,7 +3558,7 @@ export function DesktopShell() {
     [
       activeConnectionId, hasRvbbit, launchers, schema, schemaLoading, busy, setBusy,
       openTableFromFinder, openField, openViewAppBuilder, openViewApp, openArtifact,
-      openQueryDocument, openSqlData, openExtensions, openRvbbitCache, openCache, openConnections,
+      openQueryDocument, openSqlData, openCsvImport, openExtensions, openRvbbitCache, openCache, openConnections,
       loadSchema, loadConnections, updatePayload, emitParam, subscribeParam,
       editRollupSpec, repivotWindow, probeColumnValues, activePalette, paletteOverrides,
       wallpaperUrl, onReExtractPalette, onReExtractWithRvbbit, setPaletteOverrides,
@@ -3952,6 +3953,7 @@ interface WindowContext {
   openArtifact: (artifactId: string) => void
   openQueryDocument: (payload: QueryDocumentPayload) => void
   openSqlData: (sql: string, title: string) => void
+  openCsvImport: (file: File) => void
   openExtensions: () => void
   openRvbbitCache: () => void
   openCache: () => void
@@ -4513,6 +4515,7 @@ function renderWindowContent(
           activeConnectionId={ctx.activeConnectionId}
           hasRvbbit={ctx.hasRvbbit}
           onChangePayload={(mut) => ctx.updatePayload(w.id, (p) => mut(p as BrainPayload))}
+          onOpenCsvImport={(file) => ctx.openCsvImport(file)}
         />
       )
     case "folder": {
