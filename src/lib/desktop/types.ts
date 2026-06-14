@@ -54,6 +54,7 @@ export type DesktopWindowKind =
   | "cube-proposals"
   | "metric-board"
   | "alerts"
+  | "brain"
 
 export interface DesktopWindowPosition {
   x: number
@@ -83,6 +84,7 @@ export type WindowPayload =
   | FinderPayload
   | DataPayload
   | DashboardsPayload
+  | BrainPayload
   | CsvImportPayload
   | QueryDocumentPayload
   | ArtifactPayload
@@ -595,6 +597,13 @@ export interface SyncMirrorPayload {
 export interface DashboardsPayload {
   kind?: "dashboards"
   selectedSlug?: string | null
+}
+
+export interface BrainPayload {
+  kind?: "brain"
+  viewAs?: string | null
+  selectedFolder?: string | null
+  selectedDocId?: number | null
 }
 
 export interface CostsPayload {

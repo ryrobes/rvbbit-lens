@@ -99,6 +99,7 @@ import { CubeInspectorWindow } from "./cube-inspector-window"
 import { CubeProposalsWindow } from "./cube-proposals-window"
 import { MetricBoardWindow } from "./metric-board-window"
 import { AlertsWindow } from "./alerts-window"
+import { BrainExplorerWindow } from "./brain-explorer-window"
 import { CapabilitiesWindow } from "./capabilities-window"
 import { CapabilityDetailWindow } from "./capability-detail-window"
 import { HfDeployWindow } from "./hf-deploy-window"
@@ -196,6 +197,7 @@ import type {
   CubeProposalsPayload,
   MetricBoardPayload,
   AlertsPayload,
+  BrainPayload,
 } from "@/lib/desktop/types"
 
 interface WorkspaceTransition {
@@ -2279,6 +2281,18 @@ export function DesktopShell() {
     })
   }, [focus, openWindow, liveWindows])
 
+  const openBrain = useCallback(() => {
+    const existing = liveWindows().find((w) => w.kind === "brain")
+    if (existing) return focus(existing.id)
+    openWindow({
+      id: randomUUID(),
+      kind: "brain",
+      title: "Document Brain",
+      x: 170, y: 90, width: 1040, height: 660,
+      payload: { kind: "brain" } satisfies BrainPayload,
+    })
+  }, [focus, openWindow, liveWindows])
+
   const openKgExtractionRuns = useCallback(
     (graphId?: string | null, runId?: number | null) => {
       const existing = liveWindows().find((w) => w.kind === "kg-extraction-runs")
@@ -3450,6 +3464,7 @@ export function DesktopShell() {
     { id: "cube-inspector", label: "Cube Inspector", icon: Eye, color: "oklch(76% 0.15 100)", description: "Ground a cube — columns, health, lineage", activate: () => openCubeInspector(), folder: "cubes", rvbbit: true },
     { id: "cube-proposals", label: "Proposals", icon: Package, color: "oklch(76% 0.15 100)", description: "Review & bless agent-drafted cube + metric proposals", activate: () => openCubeProposals(), folder: "cubes", rvbbit: true },
     { id: "alerts", label: "Alerts", icon: Bell, color: "oklch(68% 0.19 25)", description: "Observable alert rules — thresholds, episodes & firing", activate: () => openAlerts(), rvbbit: true },
+    { id: "brain", label: "Document Brain", icon: Brain, color: "oklch(70% 0.17 300)", description: "Role-gated docs — semantic search & file explorer", activate: () => openBrain(), rvbbit: true },
     // Knowledge
     { id: "kg", label: "Knowledge Graph", icon: TreeStructure, color: "var(--brand-kg)", description: "Browse the extracted graph", activate: () => openKgBrowser(), folder: "knowledge", rvbbit: true },
     { id: "kg-explorer", label: "Graph Explorer", icon: TreeStructure, color: "var(--brand-kg)", description: "Walk entities & relations", activate: () => openKgExplorer(), folder: "knowledge", rvbbit: true },
@@ -3461,7 +3476,7 @@ export function DesktopShell() {
     openSystemObjects, openExtensions, openPgMonitor, openCache, openRvbbitCache,
     openCosts, openSyncMirror, openOperators, openSpecialists, openRouting,
     openMcpServers, openCapabilities, openHfDeploy, openWarren, openModelStudio,
-    openDuck, openMetricCatalog, openMetricCreator, openMetricInspector, openMetricBoard, openDashboards, openAlerts,
+    openDuck, openMetricCatalog, openMetricCreator, openMetricInspector, openMetricBoard, openDashboards, openAlerts, openBrain,
     openCubeCatalog, openCubeCreator, openCubeInspector, openCubeProposals,
     openKgBrowser, openKgExplorer, openQueryLens, openDrift,
   ])
@@ -4489,6 +4504,15 @@ function renderWindowContent(
           hasRvbbit={ctx.hasRvbbit}
           onChangePayload={(mut) => ctx.updatePayload(w.id, (p) => mut(p as AlertsPayload))}
           onOpenSqlData={ctx.openSqlData}
+        />
+      )
+    case "brain":
+      return (
+        <BrainExplorerWindow
+          payload={w.payload as BrainPayload}
+          activeConnectionId={ctx.activeConnectionId}
+          hasRvbbit={ctx.hasRvbbit}
+          onChangePayload={(mut) => ctx.updatePayload(w.id, (p) => mut(p as BrainPayload))}
         />
       )
     case "folder": {
