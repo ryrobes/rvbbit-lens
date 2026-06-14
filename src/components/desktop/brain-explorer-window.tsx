@@ -6,6 +6,7 @@ import {
   fetchBrainTree,
   fetchBrainDoc,
   askBrain,
+  ingestDoc,
   type BrainDoc,
   type BrainHit,
   type BrainDocDetail,
@@ -55,6 +56,38 @@ function countDocs(n: FolderNode): number {
 function fmtDate(s: string | null): string {
   if (!s) return "—"
   return s.slice(0, 10)
+}
+
+// ── drag-drop ingest: read text files (recursing dropped folders) ─────────────
+const TEXT_EXT = [".md", ".markdown", ".mdx", ".txt", ".text", ".rst", ".org", ".log"]
+function isTextFile(name: string): boolean {
+  return TEXT_EXT.some((e) => name.toLowerCase().endsWith(e))
+}
+
+async function readEntry(entry: FileSystemEntry, prefix: string, out: { path: string; file: File }[]): Promise<void> {
+  if (entry.isFile) {
+    const fe = entry as FileSystemFileEntry
+    const file = await new Promise<File>((res, rej) => fe.file(res, rej))
+    if (isTextFile(file.name)) out.push({ path: prefix + file.name, file })
+  } else if (entry.isDirectory) {
+    const reader = (entry as FileSystemDirectoryEntry).createReader()
+    const readBatch = () => new Promise<FileSystemEntry[]>((res, rej) => reader.readEntries(res, rej))
+    let batch = await readBatch()
+    while (batch.length) {
+      for (const e of batch) await readEntry(e, prefix + entry.name + "/", out)
+      batch = await readBatch()
+    }
+  }
+}
+
+/** Capture entries SYNCHRONOUSLY from the drop (DataTransferItemList is consumed after the handler). */
+function captureEntries(dt: DataTransfer): { entries: FileSystemEntry[]; files: File[] } {
+  const entries: FileSystemEntry[] = []
+  for (const it of Array.from(dt.items)) {
+    const e = it.webkitGetAsEntry?.()
+    if (e) entries.push(e)
+  }
+  return { entries, files: Array.from(dt.files) }
 }
 
 // ── recursive folder tree (left pane) ─────────────────────────────────────────
@@ -135,6 +168,11 @@ export function BrainExplorerWindow({ payload, activeConnectionId, hasRvbbit, on
   const [hits, setHits] = useState<BrainHit[] | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  // drag-drop ingest
+  const [dragging, setDragging] = useState(false)
+  const [ingestSource, setIngestSource] = useState("dropped")
+  const [ingestRoles, setIngestRoles] = useState("")
+  const [dropMsg, setDropMsg] = useState<string | null>(null)
 
   // candidate identities
   useEffect(() => {
@@ -191,6 +229,58 @@ export function BrainExplorerWindow({ payload, activeConnectionId, hasRvbbit, on
     setError(error)
     setLoading(false)
   }, [conn, viewAs, query])
+
+  const handleDrop = useCallback(
+    async (e: React.DragEvent) => {
+      e.preventDefault()
+      setDragging(false)
+      setDropMsg(null)
+      if (!conn) return
+      const { entries, files } = captureEntries(e.dataTransfer) // must read synchronously
+      const collected: { path: string; file: File }[] = []
+      if (entries.length) {
+        for (const en of entries) await readEntry(en, "", collected)
+      } else {
+        for (const f of files) if (isTextFile(f.name)) collected.push({ path: f.name, file: f })
+      }
+      if (!collected.length) {
+        setDropMsg(`No text files found (supported: ${TEXT_EXT.join(", ")})`)
+        return
+      }
+      const roles = ingestRoles.split(",").map((r) => r.trim()).filter(Boolean)
+      const base = (selectedFolder && selectedFolder !== "/" ? selectedFolder : "/" + (ingestSource || "dropped")).replace(/\/+$/, "")
+      setLoading(true)
+      let ok = 0
+      for (const c of collected) {
+        const slash = c.path.lastIndexOf("/")
+        const sub = slash >= 0 ? "/" + c.path.slice(0, slash) : ""
+        const title = c.path.slice(slash + 1).replace(/\.[^.]+$/, "")
+        let body = ""
+        try {
+          body = await c.file.text()
+        } catch {
+          continue
+        }
+        const { error } = await ingestDoc(conn, {
+          source: ingestSource || "dropped",
+          title,
+          body,
+          roles,
+          folder: base + sub,
+          uri: `drop:${ingestSource || "dropped"}:${c.path}`,
+        })
+        if (error) setError(error)
+        else ok++
+      }
+      setLoading(false)
+      setDropMsg(
+        `Ingested ${ok}/${collected.length} doc${collected.length === 1 ? "" : "s"}` +
+          (roles.length ? "" : " — no roles set, so they're visible to no one until you grant one"),
+      )
+      await reload()
+    },
+    [conn, ingestRoles, ingestSource, selectedFolder, reload],
+  )
 
   if (!hasRvbbit) {
     return <div className="p-4 text-xs opacity-70">The rvbbit extension is not installed on this connection.</div>
@@ -255,13 +345,42 @@ export function BrainExplorerWindow({ payload, activeConnectionId, hasRvbbit, on
         )}
       </div>
 
+      {/* drop-target config: where dropped files land + who can see them */}
+      <div className="flex items-center gap-2 px-2 py-1 border-b text-[11px]" style={{ borderColor: "color-mix(in oklch, var(--chrome-text) 8%, transparent)" }}>
+        <span className="opacity-50">Drop docs/folders →</span>
+        <span className="opacity-50">source</span>
+        <input value={ingestSource} onChange={(e) => setIngestSource(e.target.value)}
+          className="px-1 py-0.5 rounded outline-none" style={{ background: "color-mix(in oklch, var(--chrome-text) 8%, transparent)", width: 110 }} />
+        <span className="opacity-50">roles</span>
+        <input value={ingestRoles} onChange={(e) => setIngestRoles(e.target.value)} placeholder="all_hands, hr"
+          className="px-1 py-0.5 rounded outline-none flex-1" style={{ background: "color-mix(in oklch, var(--chrome-text) 8%, transparent)", minWidth: 120 }} />
+        <span className="opacity-40">into {selectedFolder === "/" ? "/" + (ingestSource || "dropped") : selectedFolder}</span>
+        {dropMsg && <span className="ml-auto" style={{ color: "var(--success)" }}>{dropMsg}</span>}
+      </div>
+
       {error && (
         <div className="px-2 py-1 text-xs" style={{ color: "var(--danger)" }}>
           {error}
         </div>
       )}
 
-      <div className="flex flex-1 min-h-0">
+      <div
+        className="flex flex-1 min-h-0 relative"
+        onDragOver={(e) => {
+          e.preventDefault()
+          if (!dragging) setDragging(true)
+        }}
+        onDragLeave={(e) => {
+          if (e.currentTarget === e.target) setDragging(false)
+        }}
+        onDrop={(e) => void handleDrop(e)}
+      >
+        {dragging && (
+          <div className="absolute inset-0 z-10 flex items-center justify-center pointer-events-none"
+            style={{ background: "color-mix(in oklch, var(--chrome-text) 8%, transparent)", border: "2px dashed color-mix(in oklch, var(--chrome-text) 40%, transparent)" }}>
+            <div className="text-sm font-medium opacity-80">Drop files or folders to ingest</div>
+          </div>
+        )}
         {/* left: folder tree */}
         <div className="w-56 shrink-0 overflow-auto p-1 border-r" style={{ borderColor: "color-mix(in oklch, var(--chrome-text) 10%, transparent)" }}>
           {docs.length === 0 && !loading ? (

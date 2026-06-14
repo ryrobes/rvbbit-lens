@@ -138,6 +138,24 @@ export async function fetchBrainDoc(
   }
 }
 
+function arr(roles: string[] | null | undefined): string {
+  const rs = (roles ?? []).map((r) => r.trim()).filter(Boolean)
+  return rs.length ? `ARRAY[${rs.map(q).join(",")}]::text[]` : "NULL::text[]"
+}
+
+/** Ingest one document (drag-drop). Mirrors rvbbit.brain_ingest; idempotent on (source, uri). */
+export async function ingestDoc(
+  connectionId: string,
+  d: { source: string; title: string; body: string; roles?: string[]; folder?: string | null; uri?: string | null; author?: string | null },
+): Promise<{ docId: number | null; error: string | null }> {
+  const sql =
+    `SELECT rvbbit.brain_ingest(${q(d.source)}, ${q(d.title)}, ${q(d.body)}, ${arr(d.roles)}, ` +
+    `${d.folder ? q(d.folder) : "NULL"}, ${d.uri ? q(d.uri) : "NULL"}, ${d.author ? q(d.author) : "NULL"}) AS id`
+  const r = await run(connectionId, sql)
+  if (!r.ok) return { docId: null, error: r.error }
+  return { docId: r.rows[0]?.id == null ? null : Number(r.rows[0].id), error: null }
+}
+
 /** Semantic search over the identity's permitted docs (filter-before-vector-search). */
 export async function askBrain(
   connectionId: string,
