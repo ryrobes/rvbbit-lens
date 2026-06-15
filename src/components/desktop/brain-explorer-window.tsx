@@ -1,10 +1,16 @@
 import { useCallback, useEffect, useMemo, useState } from "react"
-import { Brain, Folder, FolderOpen, FileText, Eye, Lock, Search, RefreshCw, ChevronRight, ChevronDown, X } from "@/lib/icons"
+import { Brain, Folder, FolderOpen, FileText, Eye, Lock, Users, Search, RefreshCw, ChevronRight, ChevronDown, X } from "@/lib/icons"
 import { cn } from "@/lib/utils"
 import {
   fetchPrincipals,
   fetchBrainTree,
   fetchBrainDoc,
+  fetchAllDocs,
+  fetchDocAdmin,
+  setDocRoles,
+  fetchKnownRoles,
+  fetchRoleMembers,
+  grantMember,
   askBrain,
   ingestDoc,
   type BrainDoc,
@@ -183,6 +189,13 @@ export function BrainExplorerWindow({ payload, activeConnectionId, hasRvbbit, on
   const [ingestSource, setIngestSource] = useState("dropped")
   const [ingestRoles, setIngestRoles] = useState("")
   const [dropMsg, setDropMsg] = useState<string | null>(null)
+  // access management
+  const [adminMode, setAdminMode] = useState(false) // "All docs" (unfiltered triage) vs "View as"
+  const [knownRoles, setKnownRoles] = useState<string[]>([])
+  const [docMembers, setDocMembers] = useState<{ role: string; principal: string }[]>([])
+  const [addRole, setAddRole] = useState("")
+  const [grantEmail, setGrantEmail] = useState("")
+  const [grantRole, setGrantRole] = useState("")
 
   // candidate identities
   useEffect(() => {
@@ -194,21 +207,31 @@ export function BrainExplorerWindow({ payload, activeConnectionId, hasRvbbit, on
   }, [conn])
 
   const reload = useCallback(async () => {
-    if (!conn || !viewAs) {
+    if (!conn) {
       setDocs([])
       return
     }
     setLoading(true)
-    const { docs, error } = await fetchBrainTree(conn, viewAs)
-    setDocs(docs)
-    setError(error)
+    const res = adminMode
+      ? await fetchAllDocs(conn)
+      : viewAs
+        ? await fetchBrainTree(conn, viewAs)
+        : { docs: [] as BrainDoc[], error: null }
+    setDocs(res.docs)
+    setError(res.error)
     setLoading(false)
-  }, [conn, viewAs])
+  }, [conn, viewAs, adminMode])
 
   useEffect(() => {
     void reload()
     onChangePayload((p) => ({ ...p, viewAs }))
   }, [reload, viewAs]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // known roles for the pickers
+  useEffect(() => {
+    if (!conn) return
+    fetchKnownRoles(conn).then((rs) => setKnownRoles(rs.map((r) => r.role)))
+  }, [conn, docs.length])
 
   const tree = useMemo(() => buildTree(docs), [docs])
 
@@ -220,12 +243,48 @@ export function BrainExplorerWindow({ payload, activeConnectionId, hasRvbbit, on
 
   const openDoc = useCallback(
     async (docId: number) => {
-      if (!conn || !viewAs) return
+      if (!conn) return
       onChangePayload((p) => ({ ...p, selectedDocId: docId }))
-      const { doc } = await fetchBrainDoc(conn, viewAs, docId)
-      setDetail(doc)
+      const res = adminMode
+        ? await fetchDocAdmin(conn, docId)
+        : viewAs
+          ? await fetchBrainDoc(conn, viewAs, docId)
+          : { doc: null as BrainDocDetail | null }
+      setDetail(res.doc)
+      setDocMembers(res.doc ? await fetchRoleMembers(conn, res.doc.roles) : [])
     },
-    [conn, viewAs, onChangePayload],
+    [conn, viewAs, adminMode, onChangePayload],
+  )
+
+  // assign/replace a doc's roles, then refresh detail + tree + members + pickers
+  const applyDocRoles = useCallback(
+    async (roles: string[]) => {
+      if (!conn || !detail) return
+      const err = await setDocRoles(conn, detail.docId, roles)
+      if (err) {
+        setError(err)
+        return
+      }
+      setDetail({ ...detail, roles })
+      setDocMembers(await fetchRoleMembers(conn, roles))
+      fetchKnownRoles(conn).then((rs) => setKnownRoles(rs.map((r) => r.role)))
+      void reload()
+    },
+    [conn, detail, reload],
+  )
+
+  const doGrant = useCallback(
+    async (role: string, email: string, on = true) => {
+      if (!conn || !role.trim() || !email.trim()) return
+      const err = await grantMember(conn, role.trim(), email.trim(), on)
+      if (err) {
+        setError(err)
+        return
+      }
+      if (detail) setDocMembers(await fetchRoleMembers(conn, detail.roles))
+      void reload()
+    },
+    [conn, detail, reload],
   )
 
   const runSearch = useCallback(async () => {
@@ -317,21 +376,47 @@ export function BrainExplorerWindow({ payload, activeConnectionId, hasRvbbit, on
         <span className="font-semibold">Document Brain</span>
         <span className="opacity-50 text-xs">role-gated · semantic</span>
         <div className="ml-auto flex items-center gap-2">
-          <Eye size={13} className="opacity-60" />
-          <span className="text-xs opacity-60">View as</span>
-          <input
-            list="brain-principals"
-            value={viewAs}
-            onChange={(e) => setViewAs(e.target.value)}
-            placeholder="email…"
-            className="text-xs px-1.5 py-0.5 rounded outline-none"
-            style={{ background: "color-mix(in oklch, var(--chrome-text) 8%, transparent)", minWidth: 160 }}
-          />
-          <datalist id="brain-principals">
-            {principals.map((p) => (
-              <option key={p} value={p} />
-            ))}
-          </datalist>
+          <div className="flex rounded overflow-hidden text-[11px]" style={{ border: "1px solid color-mix(in oklch, var(--chrome-text) 20%, transparent)" }}>
+            <button
+              onClick={() => setAdminMode(false)}
+              className="px-2 py-0.5"
+              style={{ background: !adminMode ? "color-mix(in oklch, var(--chrome-text) 16%, transparent)" : undefined }}
+              title="See the warehouse exactly as one identity sees it"
+            >
+              View as
+            </button>
+            <button
+              onClick={() => setAdminMode(true)}
+              className="px-2 py-0.5"
+              style={{ background: adminMode ? "color-mix(in oklch, var(--chrome-text) 16%, transparent)" : undefined }}
+              title="All documents (admin) — incl. unassigned/invisible ones, for triage"
+            >
+              All docs
+            </button>
+          </div>
+          {adminMode ? (
+            <span className="flex items-center gap-1 text-xs opacity-60">
+              <Lock size={12} /> admin · all documents
+            </span>
+          ) : (
+            <>
+              <Eye size={13} className="opacity-60" />
+              <span className="text-xs opacity-60">as</span>
+              <input
+                list="brain-principals"
+                value={viewAs}
+                onChange={(e) => setViewAs(e.target.value)}
+                placeholder="email…"
+                className="text-xs px-1.5 py-0.5 rounded outline-none"
+                style={{ background: "color-mix(in oklch, var(--chrome-text) 8%, transparent)", minWidth: 150 }}
+              />
+              <datalist id="brain-principals">
+                {principals.map((p) => (
+                  <option key={p} value={p} />
+                ))}
+              </datalist>
+            </>
+          )}
           <button onClick={() => void reload()} className="opacity-70 hover:opacity-100" title="Refresh">
             <RefreshCw size={13} />
           </button>
@@ -469,6 +554,11 @@ export function BrainExplorerWindow({ payload, activeConnectionId, hasRvbbit, on
                   <span className="text-[10px] opacity-50 truncate w-full">
                     {d.source} · {fmtDate(d.occurredMs ? new Date(d.occurredMs).toISOString() : null)}
                   </span>
+                  {d.unassigned && (
+                    <span className="text-[9px] px-1 rounded" style={{ background: "color-mix(in oklch, var(--danger) 22%, transparent)", color: "var(--danger)" }}>
+                      unassigned
+                    </span>
+                  )}
                 </div>
               ))}
               {folderDocs.length === 0 && <div className="text-xs opacity-50 p-2">Empty folder.</div>}
@@ -491,16 +581,94 @@ export function BrainExplorerWindow({ payload, activeConnectionId, hasRvbbit, on
               {detail.author && <div>by {detail.author}</div>}
               <div>occurred {fmtDate(detail.occurredAt)} · ingested {fmtDate(detail.ingestedAt)}</div>
             </div>
-            <div className="flex items-center gap-1 flex-wrap">
-              <Lock size={11} className="opacity-60" />
-              {detail.roles.length ? (
-                detail.roles.map((r) => (
-                  <span key={r} className="text-[10px] px-1.5 py-0.5 rounded" style={{ background: "color-mix(in oklch, var(--chrome-text) 12%, transparent)" }}>
+            {/* access management — assign roles + grant people (the ingest→visible loop) */}
+            <div className="flex flex-col gap-1.5 mt-1 p-2 rounded" style={{ background: "color-mix(in oklch, var(--chrome-text) 4%, transparent)" }}>
+              <div className="flex items-center gap-1 text-[11px] opacity-70">
+                <Lock size={11} /> Roles that can see this
+              </div>
+              <div className="flex items-center gap-1 flex-wrap">
+                {detail.roles.length === 0 && (
+                  <span className="text-[10px]" style={{ color: "var(--danger)" }}>none — visible to no one (default-deny)</span>
+                )}
+                {detail.roles.map((r) => (
+                  <span key={r} className="text-[10px] px-1.5 py-0.5 rounded flex items-center gap-1" style={{ background: "color-mix(in oklch, var(--chrome-text) 12%, transparent)" }}>
                     {r}
+                    <button onClick={() => void applyDocRoles(detail.roles.filter((x) => x !== r))} className="opacity-60 hover:opacity-100" title="remove role">
+                      <X size={9} />
+                    </button>
                   </span>
-                ))
-              ) : (
-                <span className="text-[10px] opacity-50">no roles (default-deny)</span>
+                ))}
+                <input
+                  list="brain-known-roles"
+                  value={addRole}
+                  onChange={(e) => setAddRole(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" && addRole.trim()) {
+                      const r = addRole.trim()
+                      if (!detail.roles.includes(r)) void applyDocRoles([...detail.roles, r])
+                      setAddRole("")
+                    }
+                  }}
+                  placeholder="+ role"
+                  className="text-[10px] px-1 py-0.5 rounded outline-none"
+                  style={{ background: "color-mix(in oklch, var(--chrome-text) 8%, transparent)", width: 84 }}
+                />
+                <datalist id="brain-known-roles">
+                  {knownRoles.map((r) => (
+                    <option key={r} value={r} />
+                  ))}
+                </datalist>
+              </div>
+
+              <div className="flex items-center gap-1 text-[11px] opacity-70 mt-1">
+                <Users size={11} /> People who can see it
+              </div>
+              <div className="flex flex-col gap-0.5">
+                {docMembers.length === 0 && (
+                  <span className="text-[10px] opacity-50">no one yet — add a role above, then grant a person below</span>
+                )}
+                {docMembers.map((m) => (
+                  <div key={m.role + "·" + m.principal} className="flex items-center gap-2 text-[10px]">
+                    <span className="opacity-80">{m.principal}</span>
+                    <span className="opacity-40">via {m.role}</span>
+                    <button onClick={() => void doGrant(m.role, m.principal, false)} className="ml-auto opacity-50 hover:opacity-100" title="revoke">
+                      <X size={9} />
+                    </button>
+                  </div>
+                ))}
+              </div>
+              {detail.roles.length > 0 && (
+                <div className="flex items-center gap-1 mt-1">
+                  <input
+                    value={grantEmail}
+                    onChange={(e) => setGrantEmail(e.target.value)}
+                    placeholder="email…"
+                    className="text-[10px] px-1 py-0.5 rounded outline-none flex-1"
+                    style={{ background: "color-mix(in oklch, var(--chrome-text) 8%, transparent)" }}
+                  />
+                  <select
+                    value={grantRole || detail.roles[0]}
+                    onChange={(e) => setGrantRole(e.target.value)}
+                    className="text-[10px] px-1 py-0.5 rounded outline-none"
+                    style={{ background: "color-mix(in oklch, var(--chrome-text) 8%, transparent)" }}
+                  >
+                    {detail.roles.map((r) => (
+                      <option key={r} value={r}>
+                        {r}
+                      </option>
+                    ))}
+                  </select>
+                  <button
+                    onClick={() => {
+                      void doGrant(grantRole || detail.roles[0], grantEmail)
+                      setGrantEmail("")
+                    }}
+                    className="text-[10px] px-1.5 py-0.5 rounded"
+                    style={{ background: "color-mix(in oklch, var(--chrome-text) 14%, transparent)" }}
+                  >
+                    grant
+                  </button>
+                </div>
               )}
             </div>
             <pre className="text-xs whitespace-pre-wrap leading-relaxed mt-1" style={{ fontFamily: "inherit" }}>

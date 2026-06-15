@@ -49,6 +49,21 @@ export interface BrainDoc {
   occurredMs: number | null
   ingestedMs: number | null
   chunks: number
+  roles?: string[] // admin listing only
+  unassigned?: boolean // admin listing only — role-less = nobody can see it
+}
+
+/** Parse a Postgres text[] that may arrive as a JS array or a "{a,b}" string. */
+function arrParse(v: unknown): string[] {
+  if (Array.isArray(v)) return v.map(String)
+  if (typeof v === "string" && v.startsWith("{") && v.endsWith("}")) {
+    return v
+      .slice(1, -1)
+      .split(",")
+      .map((x) => x.replace(/^"|"$/g, "").trim())
+      .filter(Boolean)
+  }
+  return []
 }
 
 export interface BrainHit {
@@ -107,6 +122,95 @@ export async function fetchBrainTree(
       ingestedMs: num(row.ingested_ms),
       chunks: Number(row.chunks ?? 0),
     })),
+    error: null,
+  }
+}
+
+/** ADMIN: every doc (unfiltered) + its roles + unassigned flag — the triage surface. */
+export async function fetchAllDocs(connectionId: string): Promise<{ docs: BrainDoc[]; error: string | null }> {
+  const r = await run(
+    connectionId,
+    `SELECT folder_path, doc_id, title, source, mime, author,
+            extract(epoch FROM occurred_at) * 1000 AS occurred_ms,
+            extract(epoch FROM ingested_at) * 1000 AS ingested_ms, chunks, roles, unassigned
+       FROM rvbbit.brain_all_docs()`,
+  )
+  if (!r.ok) return { docs: [], error: r.error }
+  return {
+    docs: r.rows.map((row) => ({
+      folderPath: String(row.folder_path ?? "/"),
+      docId: Number(row.doc_id),
+      title: String(row.title ?? "(untitled)"),
+      source: String(row.source ?? ""),
+      mime: String(row.mime ?? "text/markdown"),
+      author: str(row.author),
+      occurredMs: num(row.occurred_ms),
+      ingestedMs: num(row.ingested_ms),
+      chunks: Number(row.chunks ?? 0),
+      roles: arrParse(row.roles),
+      unassigned: row.unassigned === true || row.unassigned === "t",
+    })),
+    error: null,
+  }
+}
+
+/** Replace a document's allowed-role set. */
+export async function setDocRoles(connectionId: string, docId: number, roles: string[]): Promise<string | null> {
+  const r = await run(connectionId, `SELECT rvbbit.brain_set_doc_roles(${Math.floor(docId)}, ${arr(roles)})`)
+  return r.ok ? null : r.error
+}
+
+/** Known roles anywhere + member/doc counts (role pickers + access overview). */
+export async function fetchKnownRoles(connectionId: string): Promise<{ role: string; members: number; docs: number }[]> {
+  const r = await run(connectionId, `SELECT role, members, docs FROM rvbbit.brain_list_roles()`)
+  if (!r.ok) return []
+  return r.rows.map((row) => ({ role: String(row.role), members: Number(row.members ?? 0), docs: Number(row.docs ?? 0) }))
+}
+
+/** Members (emails) of the given roles. */
+export async function fetchRoleMembers(connectionId: string, roles: string[]): Promise<{ role: string; principal: string }[]> {
+  if (!roles.length) return []
+  const r = await run(connectionId, `SELECT role, principal FROM rvbbit.brain_role_member_list(${arr(roles)})`)
+  if (!r.ok) return []
+  return r.rows.map((row) => ({ role: String(row.role), principal: String(row.principal) }))
+}
+
+/** Grant (on) or revoke a role for a principal (email). */
+export async function grantMember(connectionId: string, role: string, principal: string, on = true): Promise<string | null> {
+  const fn = on ? "brain_grant" : "brain_revoke"
+  const r = await run(connectionId, `SELECT rvbbit.${fn}(${q(role)}, ${q(principal)})`)
+  return r.ok ? null : r.error
+}
+
+/** ADMIN: open a doc's body bypassing ACL (so role-less docs can be triaged). */
+export async function fetchDocAdmin(
+  connectionId: string,
+  docId: number,
+): Promise<{ doc: BrainDocDetail | null; error: string | null }> {
+  const r = await run(
+    connectionId,
+    `SELECT d.doc_id, d.title, d.folder_path, s.label AS source, d.author, d.mime,
+            d.occurred_at::text AS occurred_at, d.ingested_at::text AS ingested_at, d.body,
+            coalesce((SELECT array_agg(role ORDER BY role) FROM rvbbit.brain_doc_roles dr WHERE dr.doc_id = d.doc_id), '{}') AS roles
+       FROM rvbbit.brain_documents d JOIN rvbbit.brain_sources s ON s.source_id = d.source_id
+      WHERE d.doc_id = ${Math.floor(docId)}`,
+  )
+  if (!r.ok) return { doc: null, error: r.error }
+  const d = r.rows[0]
+  if (!d) return { doc: null, error: null }
+  return {
+    doc: {
+      docId: Number(d.doc_id),
+      title: String(d.title ?? ""),
+      folderPath: String(d.folder_path ?? "/"),
+      source: String(d.source ?? ""),
+      author: str(d.author),
+      mime: String(d.mime ?? ""),
+      occurredAt: str(d.occurred_at),
+      ingestedAt: str(d.ingested_at),
+      body: str(d.body),
+      roles: arrParse(d.roles),
+    },
     error: null,
   }
 }
