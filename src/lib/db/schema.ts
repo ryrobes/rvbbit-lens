@@ -118,13 +118,13 @@ ORDER BY e.extname
 `
 
 export async function loadExtensions(connectionId: string): Promise<ExtensionInfo[]> {
-  const { pool } = await getPool(connectionId)
+  const { pool } = await getPool(connectionId, undefined, "meta")
   const result = await pool.query<ExtensionInfo>(EXTENSION_QUERY)
   return result.rows
 }
 
 export async function loadSchema(connectionId: string): Promise<SchemaSnapshot> {
-  const { pool } = await getPool(connectionId)
+  const { pool } = await getPool(connectionId, undefined, "meta")
   const client = await pool.connect()
   try {
     const [tablesResult, columnsResult, dbResult, schemasResult, extResult, functionsResult, opsResult, finderStats] = await Promise.all([

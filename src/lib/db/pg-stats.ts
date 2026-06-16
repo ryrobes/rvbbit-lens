@@ -283,7 +283,7 @@ SELECT
 // ── Executor ────────────────────────────────────────────────────────
 
 export async function fetchPgStats(connectionId: string): Promise<PgStatsSnapshot> {
-  const { pool } = await getPool(connectionId)
+  const { pool } = await getPool(connectionId, undefined, "meta")
 
   // Most queries hit shared-memory views (microseconds); they run in
   // parallel across separate pooled connections. WAL stats require

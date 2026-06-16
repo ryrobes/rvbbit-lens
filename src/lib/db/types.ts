@@ -53,6 +53,13 @@ export interface ConnectionTestResult {
   error?: string
 }
 
+export interface RvbbitStatus {
+  connectionId: string
+  hasRvbbit: boolean
+  rvbbitVersion: string | null
+  durationMs: number
+}
+
 export interface QueryResultColumn {
   name: string
   dataTypeId: number
@@ -66,6 +73,8 @@ export interface QueryResult {
   rows: Record<string, unknown>[]
   rowCount: number
   truncated: boolean
+  /** Time spent waiting for a pooled DB connection before the query began. */
+  queueWaitMs?: number
   durationMs: number
   command?: string
   warning?: string

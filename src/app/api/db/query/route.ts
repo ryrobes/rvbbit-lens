@@ -13,6 +13,9 @@ interface Body {
   /** Per-query statement_timeout (ms); 0 disables it. For long server-side jobs
    *  like rvbbit.catalog_crawl() that must outlive the pool's 30m default. */
   statementTimeout?: number
+  /** Internal UI metadata probes can opt into the small metadata pool so they
+   *  don't contend with user SQL blocks. */
+  poolLane?: "interactive" | "meta"
 }
 
 export async function POST(req: Request) {
@@ -26,6 +29,7 @@ export async function POST(req: Request) {
       readOnly: body.readOnly,
       database: body.database,
       statementTimeout: body.statementTimeout,
+      poolLane: body.poolLane,
     })
     return NextResponse.json({ ok: true, ...result })
   } catch (err) {

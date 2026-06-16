@@ -21,6 +21,7 @@ export interface LauncherItem {
   activate: () => void
   folder?: string
   rvbbit?: boolean
+  visible?: boolean
 }
 
 type FolderView = "icon" | "list"

@@ -6,7 +6,7 @@ import type { ConnectionTestResult } from "./types"
 export async function testConnection(connectionId: string): Promise<ConnectionTestResult> {
   const start = Date.now()
   try {
-    const { pool } = await getPool(connectionId)
+    const { pool } = await getPool(connectionId, undefined, "meta")
     const client = await pool.connect()
     try {
       const [version, db, schemas, tables, rvbbit] = await Promise.all([

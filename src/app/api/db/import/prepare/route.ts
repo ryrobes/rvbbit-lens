@@ -33,7 +33,7 @@ export async function POST(req: Request) {
   }
 
   try {
-    const { pool } = await getPool(config.connectionId)
+    const { pool } = await getPool(config.connectionId, undefined, "meta")
     const exists = await pool.query(
       `SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
        WHERE n.nspname = $1 AND c.relname = $2 LIMIT 1`,

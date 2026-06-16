@@ -2,6 +2,7 @@
 
 import { Activity, Flag, Tag, type LucideIcon } from "@/lib/icons"
 import type { DesktopColumnRef, RollupOp, SemanticOpMeta, SemanticOpShape } from "./types"
+import type { OpStep, RetryPlan, TakesPlan, WardsPlan } from "@/lib/rvbbit/operators"
 import { isDateRef, isNumericRef } from "./sql-builder"
 
 /**
@@ -23,6 +24,13 @@ const KNOWN_SHAPES = new Set<SemanticOpShape>(["scalar", "aggregate", "dimension
 // loaded before the `shape` field existed (legacy/HMR-stale state, which was
 // always scalar-only) keep surfacing tiles instead of blanking the overlay.
 const NON_SCALAR_SHAPES = new Set<string>(["aggregate", "dimension", "rowset", "query"])
+const OPERATOR_CATALOG_SQL =
+  "SELECT name, shape, arg_names, arg_types, return_type, model, " +
+  "system_prompt, user_prompt, parser, max_tokens, temperature, " +
+  "steps, retry, wards, takes, description " +
+  "FROM rvbbit.operators ORDER BY name"
+const BASIC_OPERATOR_CATALOG_SQL =
+  "SELECT name, shape, arg_names, arg_types, return_type, description FROM rvbbit.operators ORDER BY name"
 
 interface OperatorRow {
   name: string
@@ -31,6 +39,16 @@ interface OperatorRow {
   arg_types: string[] | null
   return_type: string
   description: string | null
+  model: string | null
+  system_prompt: string | null
+  user_prompt: string | null
+  parser: string | null
+  max_tokens: number | string | null
+  temperature: number | string | null
+  steps: unknown
+  retry: unknown
+  wards: unknown
+  takes: unknown
 }
 
 const cache = new Map<string, SemanticOpMeta[]>()
@@ -42,16 +60,8 @@ export async function loadSemanticOps(connectionId: string): Promise<SemanticOpM
   const cached = cache.get(connectionId)
   if (cached) return cached
   try {
-    const res = await fetch("/api/db/query", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        connectionId,
-        sql: "SELECT name, shape, arg_names, arg_types, return_type, description FROM rvbbit.operators ORDER BY name",
-        rowLimit: 500,
-      }),
-    })
-    const json = (await res.json()) as { ok: boolean; rows?: OperatorRow[] }
+    let json = await queryOperatorRows(connectionId, OPERATOR_CATALOG_SQL)
+    if (!json.ok) json = await queryOperatorRows(connectionId, BASIC_OPERATOR_CATALOG_SQL)
     // Don't cache failures/empties — a non-rvbbit connection (or a transient
     // error) shouldn't pin an empty catalog for the session; retry next time.
     if (!json.ok || !json.rows) return []
@@ -64,12 +74,48 @@ export async function loadSemanticOps(connectionId: string): Promise<SemanticOpM
       argTypes: Array.isArray(r.arg_types) ? r.arg_types : [],
       returnType: r.return_type as SemanticOpMeta["returnType"],
       description: r.description ?? undefined,
+      model: r.model ?? undefined,
+      systemPrompt: r.system_prompt ?? undefined,
+      userPrompt: r.user_prompt ?? undefined,
+      parser: r.parser ?? undefined,
+      maxTokens: r.max_tokens == null ? undefined : Number(r.max_tokens),
+      temperature: r.temperature == null ? null : Number(r.temperature),
+      steps: jsonValue<OpStep[]>(r.steps),
+      retry: jsonValue<RetryPlan>(r.retry),
+      wards: jsonValue<WardsPlan>(r.wards),
+      takes: jsonValue<TakesPlan>(r.takes),
     }))
     if (ops.length > 0) cache.set(connectionId, ops)
     return ops
   } catch {
     return []
   }
+}
+
+async function queryOperatorRows(
+  connectionId: string,
+  sql: string,
+): Promise<{ ok: boolean; rows?: OperatorRow[] }> {
+  const res = await fetch("/api/db/query", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ connectionId, sql, rowLimit: 500 }),
+  })
+  return (await res.json()) as { ok: boolean; rows?: OperatorRow[] }
+}
+
+function jsonValue<T>(value: unknown): T | null {
+  if (value == null) return null
+  if (typeof value === "string") {
+    const trimmed = value.trim()
+    if (!trimmed || trimmed === "null") return null
+    try {
+      return JSON.parse(trimmed) as T
+    } catch {
+      return null
+    }
+  }
+  return value as T
 }
 
 /** Drop the cached catalog (e.g. after operators change). */

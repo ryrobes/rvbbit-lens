@@ -119,7 +119,7 @@ export interface RvbbitSpecialist {
 
 // ── The operator row ────────────────────────────────────────────────
 
-export type OperatorShape = "scalar" | "aggregate" | "dimension" | "rowset"
+export type OperatorShape = "scalar" | "aggregate" | "dimension" | "rowset" | "query"
 export type OperatorReturn = "bool" | "text" | "float8" | "jsonb"
 
 export interface RvbbitOperator {

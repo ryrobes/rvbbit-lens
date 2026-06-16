@@ -100,6 +100,7 @@ import { CubeProposalsWindow } from "./cube-proposals-window"
 import { MetricBoardWindow } from "./metric-board-window"
 import { AlertsWindow } from "./alerts-window"
 import { BrainExplorerWindow } from "./brain-explorer-window"
+import { DagsterWindow } from "./dagster-window"
 import { CapabilitiesWindow } from "./capabilities-window"
 import { CapabilityDetailWindow } from "./capability-detail-window"
 import { HfDeployWindow } from "./hf-deploy-window"
@@ -124,7 +125,7 @@ import {
 } from "@/lib/desktop/state-store"
 import { shadowDesktopState, shadowScenes } from "@/lib/desktop/server-sync"
 import { usePresentMode } from "@/lib/desktop/present-mode"
-import type { ConnectionRecord, SchemaSnapshot } from "@/lib/db/types"
+import type { ConnectionRecord, RvbbitStatus, SchemaSnapshot } from "@/lib/db/types"
 import type {
   RvbbitCachePayload,
   CachePayload,
@@ -197,6 +198,7 @@ import type {
   CubeProposalsPayload,
   MetricBoardPayload,
   AlertsPayload,
+  DagsterPayload,
   BrainPayload,
 } from "@/lib/desktop/types"
 
@@ -240,6 +242,7 @@ import {
   rollupSpecFromColumns,
 } from "@/lib/desktop/sql-builder"
 import { invalidateSemanticOps, loadSemanticOps } from "@/lib/desktop/semantic-ops"
+import { detectDagsterStorage } from "@/lib/dagster/metadata"
 import { fetchKgEvidenceBySource, fetchPrimaryKeyColumn } from "@/lib/rvbbit/kg"
 import { buildDesktopRuntimeGraph, paramKey, resolveParamTableTarget, sameParamValue, sourceSqlForPayload, uniqueBlockName } from "@/lib/desktop/reactive-sql"
 import {
@@ -336,10 +339,14 @@ export function DesktopShell() {
   const [connections, setConnections] = useState<SanitizedConnection[]>([])
   const [activeConnectionId, setActiveConnectionId] = useState<string | null>(null)
   const [schema, setSchema] = useState<SchemaSnapshot | null>(null)
+  const [rvbbitStatus, setRvbbitStatus] = useState<RvbbitStatus | null>(null)
   const [schemaLoading, setSchemaLoading] = useState(false)
   // Scalar semantic-operator catalog (rvbbit.operators) for the drag-drop
   // semantic tiles. Empty on non-rvbbit connections.
   const [semanticOps, setSemanticOps] = useState<SemanticOpMeta[]>([])
+  // Read-only Dagster surface: visible only when the active database has a
+  // recognizable Dagster storage table set.
+  const [dagsterDetected, setDagsterDetected] = useState(false)
   // Multi-arg semantic op awaiting its literal args (the drop-site bind step).
   const [pendingBind, setPendingBind] = useState<{
     payload: DesktopColumnDragPayload
@@ -672,7 +679,10 @@ export function DesktopShell() {
     () => connections.find((c) => c.id === activeConnectionId) ?? null,
     [connections, activeConnectionId],
   )
-  const hasRvbbit = !!schema?.hasRvbbit
+  const activeSchema = schema?.connectionId === activeConnectionId ? schema : null
+  const activeRvbbitStatus = rvbbitStatus?.connectionId === activeConnectionId ? rvbbitStatus : null
+  const hasRvbbit = activeRvbbitStatus?.hasRvbbit ?? !!activeSchema?.hasRvbbit
+  const rvbbitVersion = activeRvbbitStatus?.rvbbitVersion ?? activeSchema?.rvbbitVersion ?? null
 
   // ── Connection bootstrap ────────────────────────────────────────────
 
@@ -713,6 +723,35 @@ export function DesktopShell() {
 
   useEffect(() => {
     if (!activeConnectionId) {
+      queueMicrotask(() => setRvbbitStatus(null))
+      return
+    }
+    let cancelled = false
+    fetch(`/api/db/rvbbit-status?connectionId=${encodeURIComponent(activeConnectionId)}`, { cache: "no-store" })
+      .then(async (res) => {
+        if (!res.ok) throw new Error(await res.text())
+        return (await res.json()) as RvbbitStatus
+      })
+      .then((status) => {
+        if (!cancelled) setRvbbitStatus(status)
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setRvbbitStatus({
+            connectionId: activeConnectionId,
+            hasRvbbit: false,
+            rvbbitVersion: null,
+            durationMs: 0,
+          })
+        }
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [activeConnectionId])
+
+  useEffect(() => {
+    if (!activeConnectionId) {
       setSchema(null)
       return
     }
@@ -735,6 +774,22 @@ export function DesktopShell() {
         )
       }
       setSemanticOps(ops)
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [activeConnectionId])
+
+  useEffect(() => {
+    if (!activeConnectionId) {
+      queueMicrotask(() => setDagsterDetected(false))
+      return
+    }
+    let cancelled = false
+    detectDagsterStorage(activeConnectionId).then((d) => {
+      if (!cancelled) setDagsterDetected(d.detected)
+    }).catch(() => {
+      if (!cancelled) setDagsterDetected(false)
     })
     return () => {
       cancelled = true
@@ -1819,6 +1874,22 @@ export function DesktopShell() {
       payload: { kind: "duck" } satisfies DuckPayload,
     })
   }, [focus, openWindow, liveWindows])
+
+  const openDagster = useCallback(() => {
+    if (!activeConnectionId) {
+      openConnections()
+      return
+    }
+    const existing = liveWindows().find((w) => w.kind === "dagster")
+    if (existing) return focus(existing.id)
+    openWindow({
+      id: randomUUID(),
+      kind: "dagster",
+      title: "Dagster",
+      x: 136, y: 74, width: 1060, height: 720,
+      payload: { kind: "dagster" } satisfies DagsterPayload,
+    })
+  }, [activeConnectionId, focus, openConnections, openWindow, liveWindows])
 
   const openCapabilities = useCallback((tagFilter?: string | null) => {
     const existing = liveWindows().find((w) => w.kind === "capabilities")
@@ -3434,12 +3505,13 @@ export function DesktopShell() {
     { id: "view-apps", label: "View Apps", icon: Boxes, color: "var(--brand-view-apps)", sublabel: viewAppCount ? `${viewAppCount} saved` : undefined, activate: openViewApps },
     { id: "connections", label: "Connections", icon: Plug, color: "var(--brand-connections)", activate: openConnections },
     { id: "data-search", label: "Data Search", icon: Search, color: "var(--brand-kg)", description: "Semantic search across data", activate: () => openDataSearch(), rvbbit: true },
+    { id: "dagster", label: "Dagster", icon: GitBranch, color: "oklch(70% 0.15 220)", sublabel: "detected", description: "Read-only runs, assets & checks", activate: openDagster, visible: dagsterDetected },
     // System
     { id: "system-objects", label: "System Objects", icon: Layers, color: "var(--brand-system-objects)", description: "Tables, indexes, roles, activity", activate: () => openSystemObjects("tables"), folder: "system" },
     { id: "extensions", label: "Extensions", icon: Settings2, color: "var(--brand-extensions)", description: "Installed Postgres extensions", activate: openExtensions, folder: "system" },
     { id: "monitor", label: "Monitor", icon: Activity, color: "var(--brand-pg-monitor)", description: "Live server activity & stats", activate: openPgMonitor, folder: "system" },
     { id: "cache", label: "Cache", icon: Database, color: "var(--brand-cache)", description: "Compiler & operator result caches", activate: openCache, folder: "system", rvbbit: true },
-    { id: "receipts", label: "Receipts", icon: FileText, color: "var(--brand-rvbbit-cache)", sublabel: schema?.rvbbitVersion ?? undefined, description: "Per-call LLM receipts & audit", activate: openRvbbitCache, folder: "system", rvbbit: true },
+    { id: "receipts", label: "Receipts", icon: FileText, color: "var(--brand-rvbbit-cache)", sublabel: rvbbitVersion ?? undefined, description: "Per-call LLM receipts & audit", activate: openRvbbitCache, folder: "system", rvbbit: true },
     { id: "costs", label: "Costs", icon: DollarSign, color: "var(--brand-costs)", description: "LLM/sidecar spend breakdown", activate: () => openCosts(), folder: "system", rvbbit: true },
     { id: "sync-mirror", label: "Temporal Mirror", icon: Database, color: "var(--brand-cache)", description: "Sync Postgres sources into time-travel tables", activate: openSyncMirror, folder: "system", rvbbit: true },
     // Semantic
@@ -3471,12 +3543,12 @@ export function DesktopShell() {
     { id: "query-lens", label: "Query Lens", icon: Eye, color: "var(--brand-query-lens)", description: "Trace a query's execution", activate: () => openQueryLens(), folder: "knowledge", rvbbit: true },
     { id: "drift", label: "Drift", icon: LineChart, color: "var(--brand-kg)", description: "Compare extraction runs", activate: () => openDrift(), folder: "knowledge", rvbbit: true },
   ], [
-    viewAppCount, schema,
+    viewAppCount, schema, rvbbitVersion,
     openFinder, openSqlScratch, openViewApps, openConnections, openDataSearch,
     openSystemObjects, openExtensions, openPgMonitor, openCache, openRvbbitCache,
     openCosts, openSyncMirror, openOperators, openSpecialists, openRouting,
     openMcpServers, openCapabilities, openHfDeploy, openWarren, openModelStudio,
-    openDuck, openMetricCatalog, openMetricCreator, openMetricInspector, openMetricBoard, openDashboards, openAlerts, openBrain,
+    openDuck, openDagster, dagsterDetected, openMetricCatalog, openMetricCreator, openMetricInspector, openMetricBoard, openDashboards, openAlerts, openBrain,
     openCubeCatalog, openCubeCreator, openCubeInspector, openCubeProposals,
     openKgBrowser, openKgExplorer, openQueryLens, openDrift,
   ])
@@ -3491,6 +3563,7 @@ export function DesktopShell() {
       hasRvbbit,
       launchers,
       schema,
+      semanticOps,
       schemaLoading,
       busy,
       setBusy,
@@ -3556,7 +3629,7 @@ export function DesktopShell() {
       openWarrenJob,
     }),
     [
-      activeConnectionId, hasRvbbit, launchers, schema, schemaLoading, busy, setBusy,
+      activeConnectionId, hasRvbbit, launchers, schema, semanticOps, schemaLoading, busy, setBusy,
       openTableFromFinder, openField, openViewAppBuilder, openViewApp, openArtifact,
       openQueryDocument, openSqlData, openCsvImport, openExtensions, openRvbbitCache, openCache, openConnections,
       loadSchema, loadConnections, updatePayload, emitParam, subscribeParam,
@@ -3775,12 +3848,12 @@ export function DesktopShell() {
               the react-hooks/refs flag here is a false positive. */}
           {/* eslint-disable-next-line react-hooks/refs */}
           {launchers
-            .filter((l) => !l.folder && (!l.rvbbit || hasRvbbit))
+            .filter((l) => l.visible !== false && !l.folder && (!l.rvbbit || hasRvbbit))
             .map((l) => (
               <DesktopIcon key={l.id} label={l.label} sublabel={l.sublabel} icon={l.icon} iconColor={l.color} onActivate={l.activate} />
             ))}
           {/* eslint-disable-next-line react-hooks/refs */}
-          {FOLDERS.filter((f) => launchers.some((l) => l.folder === f.id && (!l.rvbbit || hasRvbbit))).map((f) => (
+          {FOLDERS.filter((f) => launchers.some((l) => l.visible !== false && l.folder === f.id && (!l.rvbbit || hasRvbbit))).map((f) => (
             <DesktopIcon key={`folder:${f.id}`} label={f.label} icon={Folder} iconColor={f.color} onActivate={() => openFolder(f.id)} />
           ))}
         </div>
@@ -3943,6 +4016,7 @@ interface WindowContext {
   /** The launcher registry — folder windows filter it by their folderId. */
   launchers: LauncherItem[]
   schema: SchemaSnapshot | null
+  semanticOps: SemanticOpMeta[]
   schemaLoading: boolean
   busy: boolean
   setBusy: (b: boolean) => void
@@ -4160,6 +4234,7 @@ function renderWindowContent(
           activeConnectionId={ctx.activeConnectionId}
           hasRvbbit={ctx.hasRvbbit}
           schema={ctx.schema}
+          semanticOps={ctx.semanticOps}
           allWindows={ctx.windows}
           params={ctx.params}
           runSignal={ctx.runSignal}
@@ -4518,9 +4593,11 @@ function renderWindowContent(
           onOpenCsvImport={(file) => ctx.openCsvImport(file)}
         />
       )
+    case "dagster":
+      return <DagsterWindow activeConnectionId={ctx.activeConnectionId} workspaceActive={ctx.workspaceActive} />
     case "folder": {
       const folderId = (w.payload as FolderPayload).folderId
-      const items = ctx.launchers.filter((l) => l.folder === folderId && (!l.rvbbit || ctx.hasRvbbit))
+      const items = ctx.launchers.filter((l) => l.visible !== false && l.folder === folderId && (!l.rvbbit || ctx.hasRvbbit))
       return <FolderWindow folderId={folderId} items={items} />
     }
     case "capabilities":
@@ -4740,6 +4817,7 @@ function iconForKind(kind: DesktopWindowState["kind"]) {
     case "sync-mirror": return Database
     case "dashboards": return LayoutDashboard
     case "duck": return Boxes
+    case "dagster": return GitBranch
     default: return Table2
   }
 }

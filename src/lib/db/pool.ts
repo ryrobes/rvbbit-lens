@@ -4,6 +4,8 @@ import { Pool, type ClientConfig, type PoolConfig } from "pg"
 import type { ConnectionRecord, SslMode } from "./types"
 import { getConnection } from "./registry"
 
+export type PoolLane = "interactive" | "meta"
+
 const POOL_CACHE = new Map<string, { pool: Pool; signature: string }>()
 
 function sslOption(mode: SslMode | undefined): PoolConfig["ssl"] {
@@ -35,10 +37,20 @@ export const DEFAULT_STATEMENT_TIMEOUT_MS = (() => {
   return Number.isFinite(raw) && raw >= 0 ? raw : 1_800_000
 })()
 
-/** Pool size. Configurable via RVBBIT_POOL_MAX (default 10, was 5). */
+function positiveEnvInt(name: string, fallback: number): number {
+  const raw = Number(process.env[name])
+  return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : fallback
+}
+
+/** Interactive/user SQL pool size. Configurable via RVBBIT_POOL_MAX. */
 const POOL_MAX = (() => {
-  const raw = Number(process.env.RVBBIT_POOL_MAX)
-  return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : 10
+  return positiveEnvInt("RVBBIT_POOL_MAX", 24)
+})()
+
+/** Metadata/status pool size. Isolated so monitor/schema fan-out cannot consume
+ *  the interactive query pool. Configurable via RVBBIT_META_POOL_MAX. */
+const META_POOL_MAX = (() => {
+  return positiveEnvInt("RVBBIT_META_POOL_MAX", 4)
 })()
 
 /** Connection-acquire timeout (ms). CRITICAL: without it, pool.connect() parks
@@ -68,10 +80,12 @@ export function buildClientConfig(
   }
 }
 
-function buildPoolConfig(c: ConnectionRecord): PoolConfig {
+function buildPoolConfig(c: ConnectionRecord, lane: PoolLane): PoolConfig {
   return {
-    ...buildClientConfig(c),
-    max: POOL_MAX,
+    ...buildClientConfig(c, {
+      applicationName: lane === "meta" ? "rvbbit-lens-meta" : "rvbbit-lens",
+    }),
+    max: lane === "meta" ? META_POOL_MAX : POOL_MAX,
     idleTimeoutMillis: 30_000,
     connectionTimeoutMillis: POOL_ACQUIRE_TIMEOUT_MS,
   }
@@ -92,6 +106,7 @@ function signatureOf(c: ConnectionRecord): string {
 export async function getPool(
   connectionId: string,
   databaseOverride?: string,
+  lane: PoolLane = "interactive",
 ): Promise<{ pool: Pool; record: ConnectionRecord }> {
   const base = await getConnection(connectionId)
   if (!base) throw new Error(`Unknown connection: ${connectionId}`)
@@ -104,8 +119,9 @@ export async function getPool(
     databaseOverride && databaseOverride !== base.database && !base.connectionString
       ? { ...base, database: databaseOverride }
       : base
-  const cacheKey =
+  const baseCacheKey =
     record.database !== base.database ? `${connectionId}::${record.database}` : connectionId
+  const cacheKey = `${lane}::${baseCacheKey}`
 
   const sig = signatureOf(record)
   const cached = POOL_CACHE.get(cacheKey)
@@ -116,7 +132,7 @@ export async function getPool(
     POOL_CACHE.delete(cacheKey)
   }
 
-  const pool = new Pool(buildPoolConfig(record))
+  const pool = new Pool(buildPoolConfig(record, lane))
   pool.on("error", (err) => {
     console.warn(`[rvbbit-lens] pool ${cacheKey} error:`, err.message)
   })

@@ -40,6 +40,7 @@ export async function POST(req: Request) {
     const result = await executeQuery(body.connectionId, PROGRESS_SQL, {
       rowLimit: 1,
       readOnly: true,
+      poolLane: "meta",
     })
     const row = (result.rows ?? [])[0] as Record<string, unknown> | undefined
 
@@ -50,6 +51,7 @@ export async function POST(req: Request) {
         const counts = await executeQuery(body.connectionId, countsSql(pid), {
           rowLimit: 50,
           readOnly: true,
+          poolLane: "meta",
         })
         operators = (counts.rows ?? []).map((r) => ({
           operator: String((r as Record<string, unknown>).operator ?? ""),

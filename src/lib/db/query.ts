@@ -1,7 +1,7 @@
 import "server-only"
 
 import type { PoolClient, QueryResult as PgQueryResult, QueryResultRow } from "pg"
-import { getPool } from "./pool"
+import { getPool, type PoolLane } from "./pool"
 import type { QueryResult, QueryResultColumn } from "./types"
 
 const DEFAULT_ROW_LIMIT = 5_000
@@ -54,6 +54,9 @@ export interface ExecuteOpts {
    * restored for the next borrower.
    */
   statementTimeout?: number
+  /** Pool lane. User SQL uses the interactive lane; progress/metadata probes
+   *  use the meta lane so they do not starve SQL blocks. */
+  poolLane?: PoolLane
 }
 
 export async function executeQuery(
@@ -61,9 +64,11 @@ export async function executeQuery(
   sql: string,
   opts: ExecuteOpts = {},
 ): Promise<QueryResult> {
-  const { pool, record } = await getPool(connectionId, opts.database)
+  const { pool, record } = await getPool(connectionId, opts.database, opts.poolLane)
   const limit = opts.rowLimit ?? DEFAULT_ROW_LIMIT
+  const acquireStart = Date.now()
   const client = await pool.connect()
+  const queueWaitMs = Date.now() - acquireStart
   const start = Date.now()
   // Override the connection's default statement_timeout for this one query, as a
   // separate message so Postgres re-arms the timer from the new value (see
@@ -109,6 +114,7 @@ export async function executeQuery(
       rowCount: typeof result.rowCount === "number" ? result.rowCount : rows.length,
       truncated,
       durationMs,
+      queueWaitMs,
       command: result.command,
     }
   } catch (err) {

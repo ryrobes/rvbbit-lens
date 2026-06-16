@@ -17,7 +17,7 @@ import {
   type SemanticOpTile,
 } from "@/lib/desktop/semantic-ops"
 import type { DesktopColumnDragPayload, SemanticOpMeta } from "@/lib/desktop/types"
-import { DropTargetCard, dimensionDropInfo, scalarDropInfo, type DropTargetInfo } from "./drop-target-card"
+import { SemanticOperatorTooltip } from "./semantic-operator-tooltip"
 
 const ACCENT = "var(--viz-op-pipeline)"
 
@@ -46,7 +46,13 @@ export function SemanticOpPalette({
 }) {
   const active = useActiveColumnDragSource()
   const [hot, setHot] = useState<string | null>(null)
-  const [hoverCard, setHoverCard] = useState<{ info: DropTargetInfo; tileRect: DOMRect; panelRect: DOMRect | null } | null>(null)
+  const [hovered, setHovered] = useState<{
+    tile: SemanticOpTile
+    signature: string
+    note: string
+    tileRect: DOMRect
+    panelRect: DOMRect | null
+  } | null>(null)
   // Defer the palette's appearance until *after* the drag has actually begun.
   // `onHeaderDragStart` sets the active drag source during the native
   // `dragstart`, which re-renders this subscriber in the SAME commit. Because
@@ -83,8 +89,13 @@ export function SemanticOpPalette({
     const el = e.currentTarget
     const panel = el.closest("[data-drop-panel]")
     const colName = active?.columns[0]?.name ?? "column"
-    const info = t.op.operator.shape === "dimension" ? dimensionDropInfo(t, colName) : scalarDropInfo(t, colName)
-    setHoverCard({ info, tileRect: el.getBoundingClientRect(), panelRect: panel?.getBoundingClientRect() ?? null })
+    setHovered({
+      tile: t,
+      signature: semanticSignature(t, colName),
+      note: semanticNote(t),
+      tileRect: el.getBoundingClientRect(),
+      panelRect: panel?.getBoundingClientRect() ?? null,
+    })
   }
 
   function renderTile(t: SemanticOpTile) {
@@ -104,7 +115,7 @@ export function SemanticOpPalette({
           e.preventDefault()
           e.stopPropagation()
           setHot(null)
-          setHoverCard(null)
+          setHovered(null)
           const payload = readColumnDragPayload(e.dataTransfer)
           if (payload) onDropOp(payload, t.op.operator, { x: e.clientX, y: e.clientY })
         }}
@@ -156,7 +167,7 @@ export function SemanticOpPalette({
         // Cursor genuinely left the palette (not just moving between tiles).
         if (!e.currentTarget.contains(e.relatedTarget as Node | null)) {
           setHot(null)
-          setHoverCard(null)
+          setHovered(null)
         }
       }}
     >
@@ -172,9 +183,33 @@ export function SemanticOpPalette({
           {renderGroup("group by ↘", Layers, dims)}
         </div>
       ) : null}
-      {hoverCard ? (
-        <DropTargetCard info={hoverCard.info} panelRect={hoverCard.panelRect} tileRect={hoverCard.tileRect} />
+      {hovered ? (
+        <SemanticOperatorTooltip
+          op={hovered.tile.op.operator}
+          title={hovered.tile.label}
+          signature={hovered.signature}
+          note={hovered.note}
+          accent={ACCENT}
+          panelRect={hovered.panelRect}
+          tileRect={hovered.tileRect}
+        />
       ) : null}
     </div>
   )
+}
+
+function semanticSignature(tile: SemanticOpTile, colName: string): string {
+  const op = tile.op.operator
+  if (op.shape === "dimension") return `LATERAL rvbbit.${op.name}(${colName}) -> GROUP BY label`
+  return `rvbbit.${op.name}(${[colName, ...op.argNames.slice(1)].join(", ")}) -> ${op.returnType}`
+}
+
+function semanticNote(tile: SemanticOpTile): string {
+  const op = tile.op.operator
+  if (op.shape === "dimension") {
+    return "On drop it fans this column out into label rows and counts them. The generated block opens on the SQL tab; nothing runs until you hit Run."
+  }
+  return tile.needsArgs
+    ? "On drop you'll fill the remaining args, then the generated block opens on the SQL tab. Nothing runs until you hit Run."
+    : "On drop it creates a per-row semantic projection. The generated block opens on the SQL tab; nothing runs until you hit Run."
 }

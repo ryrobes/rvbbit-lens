@@ -49,6 +49,7 @@ import type {
   ParamTarget,
   RollupGrain,
   RollupSpec,
+  SemanticOpMeta,
 } from "@/lib/desktop/types"
 import { effectiveRollup } from "@/lib/desktop/sql-builder"
 import { reconcileRollupLineage } from "@/lib/desktop/rollup-sql-parse"
@@ -96,6 +97,7 @@ interface DataGridWindowProps {
   /** Active-connection schema snapshot — powers table/column autocomplete in
    *  the SQL editor. Null until loaded / when no connection is active. */
   schema: SchemaSnapshot | null
+  semanticOps: SemanticOpMeta[]
   allWindows: DesktopWindowState[]
   params: DesktopParamValue[]
   runSignal: number
@@ -178,6 +180,7 @@ export function DataGridWindow({
   activeConnectionId,
   hasRvbbit,
   schema,
+  semanticOps,
   allWindows,
   params,
   runSignal,
@@ -1138,6 +1141,7 @@ export function DataGridWindow({
                 defaultSchema={sqlCompletion?.defaultSchema}
                 completionSources={completionSources}
                 blockReferences={blockReferences}
+                semanticOperators={semanticOps}
               />
             )}
           </div>
@@ -1378,6 +1382,7 @@ export function DataGridWindow({
                 defaultSchema={sqlCompletion?.defaultSchema}
                 completionSources={completionSources}
                 blockReferences={blockReferences}
+                semanticOperators={semanticOps}
               />
             </div>
           ) : null}

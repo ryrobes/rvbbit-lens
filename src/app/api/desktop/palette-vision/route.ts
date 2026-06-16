@@ -64,7 +64,7 @@ interface Specialist {
 
 async function findVisionSpecialist(connectionId: string): Promise<Specialist | null> {
   try {
-    const { pool } = await getPool(connectionId)
+    const { pool } = await getPool(connectionId, undefined, "meta")
     const r = await pool.query<Specialist>(
       `SELECT name, transport, endpoint_url,
               (transport_opts->>'model') AS model,

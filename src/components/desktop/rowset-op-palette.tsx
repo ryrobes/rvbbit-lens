@@ -10,7 +10,8 @@ import {
 } from "@/lib/desktop/block-drag"
 import { availableRowsetOps } from "@/lib/desktop/semantic-ops"
 import type { DesktopBlockDragPayload, SemanticOpMeta } from "@/lib/desktop/types"
-import { DropTargetCard, type DropTargetInfo } from "./drop-target-card"
+import type { DropTargetInfo } from "./drop-target-card"
+import { SemanticOperatorTooltip } from "./semantic-operator-tooltip"
 
 const ACCENT = "var(--viz-op-rowset)"
 
@@ -75,7 +76,7 @@ export function RowsetOpPalette({
 }) {
   const active = useActiveBlockDragSource()
   const [armedFor, setArmedFor] = useState<ActiveBlockDragSource | null>(null)
-  const [hovered, setHovered] = useState<{ name: string; info: DropTargetInfo; tileRect: DOMRect; panelRect: DOMRect | null } | null>(null)
+  const [hovered, setHovered] = useState<{ op: SemanticOpMeta; title: string; tileRect: DOMRect; panelRect: DOMRect | null } | null>(null)
 
   // Defer past the synchronous dragstart commit (see SemanticOpPalette): arm on
   // the first dragover, keyed to the source identity so a new drag re-resets.
@@ -91,12 +92,12 @@ export function RowsetOpPalette({
   if (tiles.length === 0) return null
 
   function setHot(e: DragEvent<HTMLDivElement>, name: string, op: SemanticOpMeta) {
-    if (hovered?.name === name) return
+    if (hovered?.op.name === name) return
     const tile = e.currentTarget as HTMLElement
     const panel = tile.closest("[data-rowset-panel]")
     setHovered({
-      name,
-      info: rowsetInfo(op),
+      op,
+      title: name.charAt(0).toUpperCase() + name.slice(1),
       tileRect: tile.getBoundingClientRect(),
       panelRect: panel?.getBoundingClientRect() ?? null,
     })
@@ -119,7 +120,7 @@ export function RowsetOpPalette({
         {tiles.map((t) => {
           const name = t.op.name
           const Icon = rowsetOpIcon(name)
-          const isHot = hovered?.name === name
+          const isHot = hovered?.op.name === name
           return (
             <div
               key={name}
@@ -152,8 +153,22 @@ export function RowsetOpPalette({
         })}
       </div>
       {hovered ? (
-        <DropTargetCard info={hovered.info} panelRect={hovered.panelRect} tileRect={hovered.tileRect} />
+        <SemanticOperatorTooltip
+          op={hovered.op}
+          title={hovered.title}
+          signature={`... then ${hovered.op.name}('<prompt>')`}
+          note={rowsetTooltipNote(hovered.op)}
+          accent={ACCENT}
+          panelRect={hovered.panelRect}
+          tileRect={hovered.tileRect}
+        />
       ) : null}
     </div>
   )
+}
+
+function rowsetTooltipNote(op: SemanticOpMeta): string {
+  return op.name === "analyze" || op.name === "enrich"
+    ? "Adds an LLM stage that can run per row. The generated block opens on the SQL tab; nothing runs until you hit Run."
+    : "Adds a whole-result pipeline stage from your prompt. The generated block opens on the SQL tab; nothing runs until you hit Run."
 }

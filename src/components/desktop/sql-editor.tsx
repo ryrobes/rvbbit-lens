@@ -8,6 +8,8 @@ import type { CompletionSource } from "@codemirror/autocomplete"
 import { EditorView, keymap, tooltips } from "@codemirror/view"
 import { rvbbitLensCodeMirrorTheme } from "@/lib/desktop/codemirror-theme"
 import { blockReferenceExtensions, type BlockReferenceMap } from "@/lib/desktop/sql-block-refs"
+import { semanticOperatorExtensions } from "@/lib/desktop/sql-semantic-operators"
+import type { SemanticOpMeta } from "@/lib/desktop/types"
 import { hasParamDragPayload } from "@/lib/desktop/param-drag"
 import { hasColumnDragPayload } from "@/lib/desktop/column-drag"
 import { hasBlockDragPayload } from "@/lib/desktop/block-drag"
@@ -49,6 +51,9 @@ interface SqlEditorProps {
   /** Cross-block `{name}` references → info, for highlighting + hover tooltips
    *  showing the referenced block's SQL. Omit to disable reference decoration. */
   blockReferences?: BlockReferenceMap
+  /** Active connection's rvbbit semantic operator catalog, for highlighting
+   *  and explaining `rvbbit.<operator>(...)` calls in SQL. */
+  semanticOperators?: SemanticOpMeta[]
 }
 
 export function SqlEditor({
@@ -66,6 +71,7 @@ export function SqlEditor({
   defaultSchema,
   completionSources,
   blockReferences,
+  semanticOperators,
 }: SqlEditorProps) {
   const ref = useRef<ReactCodeMirrorRef | null>(null)
   const plain = language === "plain"
@@ -103,6 +109,8 @@ export function SqlEditor({
       }
       // highlight cross-block {name} references + hover-to-see their SQL.
       if (blockReferences) exts.push(blockReferenceExtensions(blockReferences))
+      // highlight semantic operator calls + hover-to-see their workflow.
+      if (semanticOperators?.length) exts.push(...semanticOperatorExtensions(semanticOperators))
       // Render tooltips (hover cards + the completion popup) into <body> so the
       // editor's overflow-hidden chrome (rail, window body) can't clip them. CM
       // copies the editor's theme classes onto the external container, so the
@@ -123,7 +131,7 @@ export function SqlEditor({
       )
     }
     return exts
-  }, [onRun, plain, isJson, wrap, schema, defaultSchema, completionSources, blockReferences])
+  }, [onRun, plain, isJson, wrap, schema, defaultSchema, completionSources, blockReferences, semanticOperators])
 
   // Auto-focus on first mount (skipped for read-only previews).
   useEffect(() => {

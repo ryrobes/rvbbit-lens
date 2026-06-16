@@ -1,5 +1,6 @@
 import type { ExtensionInfo, QueryResultColumn, SchemaColumn, SchemaTable } from "@/lib/db/types"
 import type { DataSearchHit } from "@/lib/rvbbit/data-search"
+import type { OpStep, RetryPlan, TakesPlan, WardsPlan } from "@/lib/rvbbit/operators"
 
 export type DesktopWindowKind =
   | "finder"
@@ -54,6 +55,7 @@ export type DesktopWindowKind =
   | "cube-proposals"
   | "metric-board"
   | "alerts"
+  | "dagster"
   | "brain"
 
 export interface DesktopWindowPosition {
@@ -134,12 +136,19 @@ export type WindowPayload =
   | CubeProposalsPayload
   | MetricBoardPayload
   | AlertsPayload
+  | DagsterPayload
 
 /** The Alerts cockpit — an observable view over rvbbit.alert_* (rules, state,
  *  queue, events, sweep heartbeats). `rule` is the selected rule name. */
 export interface AlertsPayload {
   kind?: "alerts"
   rule?: string
+}
+
+/** Read-only Dagster instance observer, backed by any Dagster metadata tables
+ *  present in the active Postgres database. */
+export interface DagsterPayload {
+  kind?: "dagster"
 }
 
 export interface FinderPayload {
@@ -379,6 +388,16 @@ export interface SemanticOpMeta {
   argTypes: string[]
   returnType: "bool" | "text" | "float8" | "jsonb"
   description?: string
+  model?: string
+  systemPrompt?: string
+  userPrompt?: string
+  parser?: string
+  maxTokens?: number
+  temperature?: number | null
+  steps?: OpStep[] | null
+  retry?: RetryPlan | null
+  wards?: WardsPlan | null
+  takes?: TakesPlan | null
 }
 
 /**

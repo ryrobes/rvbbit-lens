@@ -44,8 +44,8 @@ import {
   returnTypeIcon,
   type SemanticOpTile,
 } from "@/lib/desktop/semantic-ops"
-import { DropTargetCard, dimensionDropInfo, scalarDropInfo, type DropTargetInfo } from "./drop-target-card"
-import { rowsetInfo, rowsetOpIcon } from "./rowset-op-palette"
+import { DropTargetCard, type DropTargetInfo } from "./drop-target-card"
+import { rowsetOpIcon } from "./rowset-op-palette"
 import type {
   DesktopBlockDragPayload,
   DesktopColumnDragPayload,
@@ -55,6 +55,7 @@ import type {
   SemanticOpMeta,
 } from "@/lib/desktop/types"
 import { cn } from "@/lib/utils"
+import { SemanticOperatorTooltip } from "./semantic-operator-tooltip"
 
 function rollupOpKey(op: RollupOp): string {
   if (op.kind === "measure") return `measure:${op.agg}`
@@ -189,6 +190,15 @@ export function DesktopWindow({
   const [hoveredOpKey, setHoveredOpKey] = useState<string | null>(null)
   // Detail card shown beside the panel while a tile is hovered mid-drag.
   const [hoverCard, setHoverCard] = useState<{ info: DropTargetInfo; tileRect: DOMRect; panelRect: DOMRect | null } | null>(null)
+  const [semanticHover, setSemanticHover] = useState<{
+    op: SemanticOpMeta
+    title: string
+    signature: string
+    note: string
+    accent: string
+    tileRect: DOMRect
+    panelRect: DOMRect | null
+  } | null>(null)
   // Block-drag: when THIS window's own block chip is being dragged, offer rowset
   // tiles to chain a `then op('…')` stage onto this very block (in place). The
   // overlay is deferred (armed on the first dragover) so mounting it over the
@@ -244,6 +254,7 @@ export function DesktopWindow({
     setColumnDragHover(false)
     setHoveredOpKey(null)
     setHoverCard(null)
+    setSemanticHover(null)
   }
   const draggedColName = draggedColumns.length === 1 ? draggedColumns[0]?.name ?? "col" : "cols"
 
@@ -255,10 +266,36 @@ export function DesktopWindow({
   function setHotTile(e: React.DragEvent, key: string, build: () => DropTargetInfo) {
     if (hoveredOpKey === key) return
     setHoveredOpKey(key)
+    setSemanticHover(null)
     const tile = e.currentTarget as HTMLElement
     const panel = tile.closest("[data-drop-panel]")
     setHoverCard({
       info: build(),
+      tileRect: tile.getBoundingClientRect(),
+      panelRect: panel?.getBoundingClientRect() ?? null,
+    })
+  }
+
+  function setHotSemanticTile(
+    e: React.DragEvent,
+    key: string,
+    op: SemanticOpMeta,
+    title: string,
+    signature: string,
+    note: string,
+    accent: string,
+  ) {
+    if (hoveredOpKey === key) return
+    setHoveredOpKey(key)
+    setHoverCard(null)
+    const tile = e.currentTarget as HTMLElement
+    const panel = tile.closest("[data-drop-panel]")
+    setSemanticHover({
+      op,
+      title,
+      signature,
+      note,
+      accent,
       tileRect: tile.getBoundingClientRect(),
       panelRect: panel?.getBoundingClientRect() ?? null,
     })
@@ -272,14 +309,6 @@ export function DesktopWindow({
       description: rollupOpDescription(tile.op),
       signature: tile.hint,
     }
-  }
-
-  function semanticTileInfo(tile: SemanticOpTile): DropTargetInfo {
-    // Per-shape copy: dimension tiles fan out → frequency table; scalar tiles
-    // add a per-row projection. (Shared with the top-center palette.)
-    return tile.op.operator.shape === "dimension"
-      ? dimensionDropInfo(tile, draggedColName)
-      : scalarDropInfo(tile, draggedColName)
   }
 
   function renderRollupTile(tile: { op: RollupOp; label: string; hint: string }, fullWidth: boolean) {
@@ -329,16 +358,22 @@ export function DesktopWindow({
     const accent = "var(--viz-op-pipeline)"
     // Dimension (fan-out) tiles read as Layers; scalar tiles show their return-type glyph.
     const Icon = tile.op.operator.shape === "dimension" ? Layers : returnTypeIcon(tile.returnType)
+    const signature = semanticSignature(tile, draggedColName)
+    const note = semanticNote(tile)
     return (
       <div
         key={key}
         title={tile.hint}
-        onDragEnter={(e) => { e.preventDefault(); e.stopPropagation(); setHotTile(e, key, () => semanticTileInfo(tile)) }}
+        onDragEnter={(e) => {
+          e.preventDefault()
+          e.stopPropagation()
+          setHotSemanticTile(e, key, tile.op.operator, tile.label, signature, note, accent)
+        }}
         onDragOver={(e) => {
           e.preventDefault()
           e.stopPropagation()
           e.dataTransfer.dropEffect = "copy"
-          setHotTile(e, key, () => semanticTileInfo(tile))
+          setHotSemanticTile(e, key, tile.op.operator, tile.label, signature, note, accent)
         }}
         onDrop={(e) => {
           e.preventDefault()
@@ -378,16 +413,22 @@ export function DesktopWindow({
     const hot = hoveredOpKey === key
     const accent = "var(--viz-op-rowset)"
     const Icon = rowsetOpIcon(tile.op.name)
+    const signature = `... then ${tile.op.name}('<prompt>')`
+    const note = rowsetTooltipNote(tile.op)
     return (
       <div
         key={key}
         title={tile.hint}
-        onDragEnter={(e) => { e.preventDefault(); e.stopPropagation(); setHotTile(e, key, () => rowsetInfo(tile.op)) }}
+        onDragEnter={(e) => {
+          e.preventDefault()
+          e.stopPropagation()
+          setHotSemanticTile(e, key, tile.op, tile.label, signature, note, accent)
+        }}
         onDragOver={(e) => {
           e.preventDefault()
           e.stopPropagation()
           e.dataTransfer.dropEffect = "copy"
-          setHotTile(e, key, () => rowsetInfo(tile.op))
+          setHotSemanticTile(e, key, tile.op, tile.label, signature, note, accent)
         }}
         onDrop={(e) => {
           e.preventDefault()
@@ -749,6 +790,7 @@ export function DesktopWindow({
             if (hoveredOpKey !== null) {
               setHoveredOpKey(null)
               setHoverCard(null)
+              setSemanticHover(null)
             }
           }}
           onDragLeave={(e) => {
@@ -869,7 +911,7 @@ export function DesktopWindow({
           onDragOver={(e) => {
             e.preventDefault()
             e.dataTransfer.dropEffect = "copy"
-            if (hoveredOpKey !== null) { setHoveredOpKey(null); setHoverCard(null) }
+            if (hoveredOpKey !== null) { setHoveredOpKey(null); setHoverCard(null); setSemanticHover(null) }
           }}
           onDragLeave={(e) => {
             if (!e.currentTarget.contains(e.relatedTarget as Node | null)) resetColumnDragState()
@@ -905,6 +947,17 @@ export function DesktopWindow({
       {hoverCard ? (
         <DropTargetCard info={hoverCard.info} panelRect={hoverCard.panelRect} tileRect={hoverCard.tileRect} />
       ) : null}
+      {semanticHover ? (
+        <SemanticOperatorTooltip
+          op={semanticHover.op}
+          title={semanticHover.title}
+          signature={semanticHover.signature}
+          note={semanticHover.note}
+          accent={semanticHover.accent}
+          panelRect={semanticHover.panelRect}
+          tileRect={semanticHover.tileRect}
+        />
+      ) : null}
 
       {present ? null : (
         <button
@@ -920,6 +973,28 @@ export function DesktopWindow({
       )}
     </section>
   )
+}
+
+function semanticSignature(tile: SemanticOpTile, colName: string): string {
+  const op = tile.op.operator
+  if (op.shape === "dimension") return `LATERAL rvbbit.${op.name}(${colName}) -> GROUP BY label`
+  return `rvbbit.${op.name}(${[colName, ...op.argNames.slice(1)].join(", ")}) -> ${op.returnType}`
+}
+
+function semanticNote(tile: SemanticOpTile): string {
+  const op = tile.op.operator
+  if (op.shape === "dimension") {
+    return "On drop it fans this column out into label rows and counts them. The generated block opens on the SQL tab; nothing runs until you hit Run."
+  }
+  return tile.needsArgs
+    ? "On drop you'll fill the remaining args, then the generated block opens on the SQL tab. Nothing runs until you hit Run."
+    : "On drop it creates a per-row semantic projection. The generated block opens on the SQL tab; nothing runs until you hit Run."
+}
+
+function rowsetTooltipNote(op: SemanticOpMeta): string {
+  return op.name === "analyze" || op.name === "enrich"
+    ? "Adds an LLM stage that can run per row. The generated block opens on the SQL tab; nothing runs until you hit Run."
+    : "Adds a whole-result pipeline stage from your prompt. The generated block opens on the SQL tab; nothing runs until you hit Run."
 }
 
 interface ChromeColors {
