@@ -33,6 +33,7 @@ import {
   isCatalogJob,
   isCubesJob,
   isMetricsJob,
+  isBrainSyncJob,
   isRouteOptimizeJob,
   isSemanticJob,
   isSyncJob,
@@ -40,6 +41,7 @@ import {
   listCronRuns,
   runDetached,
   scheduleSql,
+  BRAIN_SYNC_COMMAND,
   ROUTE_OPTIMIZE_COMMAND,
   setActiveSql,
   unscheduleSql,
@@ -227,6 +229,7 @@ export function SchedulerTray({ activeConnectionId, hasRvbbit, onOpenSql, onOpen
   const metricsJob = jobs.find(isMetricsJob)
   const cubesJob = jobs.find(isCubesJob)
   const routeOptimizeJob = jobs.find(isRouteOptimizeJob)
+  const brainSyncJob = jobs.find(isBrainSyncJob)
   // Where newly scheduled jobs RUN: the working db the user is connected to. The
   // job is registered in the home db (cron.database_name) but targets this db via
   // cron.schedule_in_database, so it need not equal the home db.
@@ -381,6 +384,19 @@ export function SchedulerTray({ activeConnectionId, hasRvbbit, onOpenSql, onOpen
                       busy={busy}
                       onSchedule={() =>
                         void mutate(scheduleSql("rvbbit_route_optimize", "0 5 * * *", ROUTE_OPTIMIZE_COMMAND, targetDb))
+                      }
+                    />
+                  </div>
+                ) : null}
+
+                {/* document brain: nightly remote-source sync (Google Drive, etc.) */}
+                {hasRvbbit ? (
+                  <div className="mt-1">
+                    <BrainSyncPreset
+                      job={brainSyncJob}
+                      busy={busy}
+                      onSchedule={() =>
+                        void mutate(scheduleSql("rvbbit_brain_sync", "0 2 * * *", BRAIN_SYNC_COMMAND, targetDb))
                       }
                     />
                   </div>
@@ -650,6 +666,38 @@ function RouteOptimizePreset({ job, busy, onSchedule }: { job?: CronJob; busy: b
       <Zap className="h-3.5 w-3.5 shrink-0 text-chrome-text/60" />
       <span className="text-[11px] text-chrome-text/70">
         Benchmark the hottest query shapes still on base rules and pin the engines that win.
+      </span>
+      <button
+        type="button"
+        disabled={busy}
+        onClick={onSchedule}
+        className="ml-auto rounded bg-rvbbit-accent/15 px-2 py-0.5 text-[11px] font-medium text-rvbbit-accent hover:bg-rvbbit-accent/25 disabled:opacity-40"
+      >
+        Schedule nightly
+      </button>
+    </div>
+  )
+}
+
+// ── Document brain remote-source sync preset ────────────────────────
+
+function BrainSyncPreset({ job, busy, onSchedule }: { job?: CronJob; busy: boolean; onSchedule: () => void }) {
+  if (job) {
+    return (
+      <div className="flex items-center gap-2 rounded-md border border-rvbbit-accent/30 bg-rvbbit-bg/30 px-2.5 py-1.5">
+        <Database className="h-3.5 w-3.5 shrink-0 text-rvbbit-accent" />
+        <span className="text-[11px] text-chrome-text/80">
+          Document brain sync — <span className="text-foreground">{describeCron(job.schedule)}</span>
+        </span>
+        <span className={cn("ml-auto h-1.5 w-1.5 rounded-full", job.active ? "bg-success" : "bg-chrome-text/40")} />
+      </div>
+    )
+  }
+  return (
+    <div className="flex items-center gap-2 rounded-md border border-chrome-border bg-secondary-background/40 px-2.5 py-1.5">
+      <Database className="h-3.5 w-3.5 shrink-0 text-chrome-text/60" />
+      <span className="text-[11px] text-chrome-text/70">
+        Scan configured Drive/remote folders, re-ingest changed docs, refresh folder permissions.
       </span>
       <button
         type="button"

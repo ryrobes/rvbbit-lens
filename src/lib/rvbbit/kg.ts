@@ -1132,7 +1132,8 @@ export async function fetchKgGraphOverview(
   graphId: string,
   maxNodes: number = 60,
 ): Promise<{ graph: KgGraph | null; error?: string }> {
-  const lim = Math.max(2, Math.min(200, maxNodes))
+  const lim = Math.max(2, Math.min(500, maxNodes))
+  const edgeLimit = Math.max(80, Math.min(2500, lim * 5))
   const res = await runQuery(
     connectionId,
     `WITH node_deg AS (
@@ -1153,6 +1154,8 @@ export async function fetchKgGraphOverview(
        WHERE e.graph_id = ${sqlStr(graphId)}
          AND e.subject_node_id IN (SELECT node_id FROM top)
          AND e.object_node_id IN (SELECT node_id FROM top)
+       ORDER BY e.confidence DESC NULLS LAST, e.edge_id
+       LIMIT ${edgeLimit}
      )
      SELECT
        (SELECT jsonb_agg(jsonb_build_object(

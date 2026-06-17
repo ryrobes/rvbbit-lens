@@ -283,3 +283,10 @@ export function isRouteOptimizeJob(j: CronJob): boolean {
 }
 /** Default command for the nightly route auto-optimizer: top-20 hot shapes, 600s budget, 3 samples. */
 export const ROUTE_OPTIMIZE_COMMAND = "SELECT rvbbit.route_optimize_auto(20, 600, 3)"
+/** Does this job sync the document brain's remote sources (Google Drive, etc.)? */
+export function isBrainSyncJob(j: CronJob): boolean {
+  return /brain_sync_sources/i.test(j.command) || j.jobname === "rvbbit_brain_sync"
+}
+/** Default command for the nightly brain job: scan configured sources, re-ingest changed docs,
+ *  then enrich the backlog into the knowledge graph (entities/relations/wikilinks). */
+export const BRAIN_SYNC_COMMAND = "SELECT rvbbit.brain_nightly()"

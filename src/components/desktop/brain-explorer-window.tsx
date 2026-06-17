@@ -17,6 +17,7 @@ import {
   type BrainHit,
   type BrainDocDetail,
 } from "@/lib/rvbbit/brain"
+import { SourcesPanel, DocGraph } from "./brain-sources-panel"
 import type { BrainPayload } from "@/lib/desktop/types"
 
 interface BrainExplorerWindowProps {
@@ -191,6 +192,7 @@ export function BrainExplorerWindow({ payload, activeConnectionId, hasRvbbit, on
   const [dropMsg, setDropMsg] = useState<string | null>(null)
   // access management
   const [adminMode, setAdminMode] = useState(false) // "All docs" (unfiltered triage) vs "View as"
+  const [showSources, setShowSources] = useState(false) // remote-source admin panel
   const [knownRoles, setKnownRoles] = useState<string[]>([])
   const [docMembers, setDocMembers] = useState<{ role: string; principal: string }[]>([])
   const [addRole, setAddRole] = useState("")
@@ -394,6 +396,14 @@ export function BrainExplorerWindow({ payload, activeConnectionId, hasRvbbit, on
               All docs
             </button>
           </div>
+          <button
+            onClick={() => setShowSources((v) => !v)}
+            className="px-2 py-0.5 rounded text-[11px]"
+            style={{ background: showSources ? "color-mix(in oklch, var(--chrome-text) 16%, transparent)" : "color-mix(in oklch, var(--chrome-text) 6%, transparent)" }}
+            title="Configure remote sources (Google Drive, …), sync, approve grants"
+          >
+            Sources
+          </button>
           {adminMode ? (
             <span className="flex items-center gap-1 text-xs opacity-60">
               <Lock size={12} /> admin · all documents
@@ -423,6 +433,10 @@ export function BrainExplorerWindow({ payload, activeConnectionId, hasRvbbit, on
         </div>
       </div>
 
+      {showSources ? (
+        <SourcesPanel conn={conn} />
+      ) : (
+        <>
       {/* search bar */}
       <div className="flex items-center gap-2 px-2 py-1.5 border-b" style={{ borderColor: "color-mix(in oklch, var(--chrome-text) 10%, transparent)" }}>
         <Search size={13} className="opacity-60" />
@@ -671,12 +685,15 @@ export function BrainExplorerWindow({ payload, activeConnectionId, hasRvbbit, on
                 </div>
               )}
             </div>
+            <DocGraph conn={conn} email={viewAs} docId={detail.docId} onOpenDoc={(id) => void openDoc(id)} />
             <pre className="text-xs whitespace-pre-wrap leading-relaxed mt-1" style={{ fontFamily: "inherit" }}>
               {detail.body ?? "(no body)"}
             </pre>
           </div>
         )}
       </div>
+        </>
+      )}
     </div>
   )
 }

@@ -1,9 +1,10 @@
 "use client"
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import { useCallback, useEffect, useState } from "react"
 import { Database, Eye, Search, TreeStructure, X } from "@/lib/icons"
 import { fmtAgo, fmtCount } from "./instruments"
 import { colorForVizKind, VIZ_CHIP_FG } from "@/lib/desktop/viz-colors"
+import { KnowledgeGraphCanvas, type KgExplorerLayout } from "./kg-sigma-canvas"
 import {
   evidenceProvenanceLabel,
   fetchGraphs,
@@ -48,8 +49,7 @@ interface SeedCrumb {
 }
 
 /** Layout options when no seed is set (overview mode). */
-type OverviewLayout = "circular" | "clusters" | "force"
-const FORCE_MAX_NODES = 200
+type OverviewLayout = KgExplorerLayout
 
 export function KgExplorerWindow({
   payload,
@@ -271,7 +271,7 @@ export function KgExplorerWindow({
       <div className="flex min-h-0 flex-1">
         <div className="relative min-h-0 flex-1 bg-doc-bg/40">
           {graph && graph.nodes.length > 0 ? (
-            <ConstellationCanvas
+            <KnowledgeGraphCanvas
               graph={graph}
               mode={seedKind && seedLabel ? "constellation" : overviewLayout}
               hoveredNodeId={hoveredNodeId}
@@ -452,7 +452,6 @@ function ExplorerHeader({
         <LayoutPicker
           value={overviewLayout}
           onChange={onChangeOverviewLayout}
-          disableForce={nodes > FORCE_MAX_NODES}
         />
       )}
 
@@ -461,8 +460,8 @@ function ExplorerHeader({
         <input
           type="range"
           min={20}
-          max={300}
-          step={10}
+          max={500}
+          step={20}
           value={maxEdges}
           onChange={(e) => onChangeMaxEdges(parseInt(e.target.value, 10))}
           className="w-20"
@@ -481,20 +480,17 @@ function ExplorerHeader({
 function LayoutPicker({
   value,
   onChange,
-  disableForce,
 }: {
   value: OverviewLayout
   onChange: (v: OverviewLayout) => void
-  disableForce: boolean
 }) {
-  const opts: Array<{ id: OverviewLayout; label: string; hint: string; disabled?: boolean }> = [
-    { id: "circular", label: "circular", hint: "chord diagram around a single ring" },
+  const opts: Array<{ id: OverviewLayout; label: string; hint: string }> = [
+    { id: "circular", label: "radial", hint: "ordered ring for reading cross-kind chords" },
     { id: "clusters", label: "clusters", hint: "group by kind, see the implicit schema" },
     {
       id: "force",
-      label: "force",
-      hint: `physics layout (capped at ${FORCE_MAX_NODES} nodes)`,
-      disabled: disableForce,
+      label: "atlas",
+      hint: "ForceAtlas2 layout on the WebGL graph surface",
     },
   ]
   return (
@@ -504,13 +500,12 @@ function LayoutPicker({
         <button
           key={o.id}
           type="button"
-          onClick={() => !o.disabled && onChange(o.id)}
-          disabled={o.disabled}
-          title={o.disabled ? `${o.hint} — too many nodes` : o.hint}
+          onClick={() => onChange(o.id)}
+          title={o.hint}
           className={
             value === o.id
               ? "bg-rvbbit-bg/60 px-2 py-0.5 font-mono text-foreground"
-              : "px-2 py-0.5 font-mono text-chrome-text hover:bg-foreground/[0.04] hover:text-foreground disabled:opacity-40 disabled:hover:bg-transparent"
+              : "px-2 py-0.5 font-mono text-chrome-text hover:bg-foreground/[0.04] hover:text-foreground"
           }
         >
           {o.label}
@@ -700,324 +695,6 @@ function SeedEmptyState({
   )
 }
 
-// ── Constellation canvas ────────────────────────────────────────────
-
-const RING_PADDING = 56
-
-function ConstellationCanvas({
-  graph,
-  mode,
-  hoveredNodeId,
-  hoveredEdgeId,
-  selectedEdgeId,
-  onHoverNode,
-  onHoverEdge,
-  onClickNode,
-  onClickEdge,
-  onOpenNodeDetail,
-}: {
-  graph: KgGraph
-  mode: "constellation" | OverviewLayout
-  hoveredNodeId: number | null
-  hoveredEdgeId: number | null
-  selectedEdgeId: number | null
-  onHoverNode: (id: number | null) => void
-  onHoverEdge: (id: number | null) => void
-  onClickNode: (n: KgGraphNode) => void
-  onClickEdge: (e: KgGraphEdge) => void
-  onOpenNodeDetail: (n: KgGraphNode) => void
-}) {
-  const ref = useRef<HTMLDivElement>(null)
-  const [size, setSize] = useState({ w: 0, h: 0 })
-  useEffect(() => {
-    const el = ref.current
-    if (!el) return
-    const ro = new ResizeObserver((entries) => {
-      const r = entries[0].contentRect
-      setSize({ w: r.width, h: r.height })
-    })
-    ro.observe(el)
-    setSize({ w: el.clientWidth, h: el.clientHeight })
-    return () => ro.disconnect()
-  }, [])
-
-  const layout = useMemo(() => {
-    if (mode === "constellation") return layoutConstellation(graph, size.w, size.h)
-    if (mode === "clusters") return layoutClusters(graph, size.w, size.h)
-    if (mode === "force") return layoutForce(graph, size.w, size.h)
-    return layoutCircular(graph, size.w, size.h)
-  }, [graph, mode, size.w, size.h])
-
-  const hoveredNode = hoveredNodeId != null ? graph.nodes.find((n) => n.nodeId === hoveredNodeId) : null
-  const hoveredEdge = hoveredEdgeId != null ? graph.edges.find((e) => e.edgeId === hoveredEdgeId) : null
-
-  return (
-    <div ref={ref} className="relative h-full w-full">
-      {size.w > 0 && size.h > 0 ? (
-        <svg width={size.w} height={size.h}>
-          {/* Ring guides — constellation shows depth rings; circular shows
-              the single outer rim. Clusters and force layouts get no guides. */}
-          {mode === "constellation"
-            ? [1, 2, 3].map((d) => {
-                const r = ringRadius(d, size.w, size.h)
-                if (r <= 0) return null
-                return (
-                  <circle
-                    key={d}
-                    cx={size.w / 2}
-                    cy={size.h / 2}
-                    r={r}
-                    fill="none"
-                    stroke="var(--chrome-border)"
-                    strokeOpacity={0.2}
-                    strokeDasharray="3 3"
-                  />
-                )
-              })
-            : mode === "circular"
-              ? (() => {
-                  const r = circularRadius(size.w, size.h)
-                  if (r <= 0) return null
-                  return (
-                    <circle
-                      cx={size.w / 2}
-                      cy={size.h / 2}
-                      r={r}
-                      fill="none"
-                      stroke="var(--chrome-border)"
-                      strokeOpacity={0.2}
-                      strokeDasharray="3 3"
-                    />
-                  )
-                })()
-              : null}
-
-          {/* Edges */}
-          {graph.edges.map((e) => {
-            const a = layout.positions.get(e.fromNodeId)
-            const b = layout.positions.get(e.toNodeId)
-            if (!a || !b) return null
-            const isSel = e.edgeId === selectedEdgeId
-            const isHover = e.edgeId === hoveredEdgeId
-            const isDim = hoveredNodeId != null &&
-              e.fromNodeId !== hoveredNodeId &&
-              e.toNodeId !== hoveredNodeId
-            const thickness = Math.max(0.7, Math.min(3.5, e.score * 4))
-            return (
-              <g key={e.edgeId}>
-                <line
-                  x1={a.x}
-                  y1={a.y}
-                  x2={b.x}
-                  y2={b.y}
-                  stroke={isSel ? "var(--rvbbit-accent)" : "var(--foreground)"}
-                  strokeOpacity={
-                    isSel ? 0.95 : isHover ? 0.85 : isDim ? 0.06 : 0.28
-                  }
-                  strokeWidth={isSel ? thickness + 1 : isHover ? thickness + 0.5 : thickness}
-                  style={{ cursor: "pointer" }}
-                  onMouseEnter={() => onHoverEdge(e.edgeId)}
-                  onMouseLeave={() => onHoverEdge(null)}
-                  onClick={() => onClickEdge(e)}
-                />
-                {/* Click target (wider transparent stroke) */}
-                <line
-                  x1={a.x}
-                  y1={a.y}
-                  x2={b.x}
-                  y2={b.y}
-                  stroke="transparent"
-                  strokeWidth={10}
-                  style={{ cursor: "pointer" }}
-                  onMouseEnter={() => onHoverEdge(e.edgeId)}
-                  onMouseLeave={() => onHoverEdge(null)}
-                  onClick={() => onClickEdge(e)}
-                />
-              </g>
-            )
-          })}
-
-          {/* Nodes */}
-          {graph.nodes.map((n) => {
-            const pos = layout.positions.get(n.nodeId)
-            if (!pos) return null
-            const r = n.isSeed ? 9 : n.depth === 1 ? 7 : 5
-            const isHover = n.nodeId === hoveredNodeId
-            const color = kindColor(n.kind)
-            return (
-              <g
-                key={n.nodeId}
-                onMouseEnter={() => onHoverNode(n.nodeId)}
-                onMouseLeave={() => onHoverNode(null)}
-                onClick={() => onClickNode(n)}
-                style={{ cursor: n.isSeed ? "default" : "pointer" }}
-              >
-                <circle
-                  cx={pos.x}
-                  cy={pos.y}
-                  r={r + 2}
-                  fill={color}
-                  opacity={0.15}
-                />
-                <circle
-                  cx={pos.x}
-                  cy={pos.y}
-                  r={r}
-                  fill={color}
-                  stroke={
-                    isHover
-                      ? "var(--foreground)"
-                      : n.isSeed
-                        ? "var(--rvbbit-accent)"
-                        : "transparent"
-                  }
-                  strokeWidth={isHover ? 1.5 : n.isSeed ? 2 : 0}
-                />
-              </g>
-            )
-          })}
-
-          {/* Labels — only seed and hovered, to avoid clutter */}
-          {graph.nodes.map((n) => {
-            const pos = layout.positions.get(n.nodeId)
-            if (!pos) return null
-            const showLabel = n.isSeed || n.nodeId === hoveredNodeId
-            if (!showLabel) return null
-            return (
-              <text
-                key={`label-${n.nodeId}`}
-                x={pos.x}
-                y={pos.y + (n.isSeed ? -14 : -10)}
-                textAnchor="middle"
-                fontSize={n.isSeed ? 12 : 11}
-                fill="var(--foreground)"
-                style={{
-                  pointerEvents: "none",
-                  fontFamily: "ui-monospace, SFMono-Regular, monospace",
-                }}
-              >
-                {n.label}
-              </text>
-            )
-          })}
-        </svg>
-      ) : null}
-
-      {/* Hover popovers */}
-      {hoveredNode ? (
-        <NodeHoverCard
-          node={hoveredNode}
-          pos={layout.positions.get(hoveredNode.nodeId)!}
-          onOpenDetail={() => onOpenNodeDetail(hoveredNode)}
-        />
-      ) : null}
-      {hoveredEdge && !hoveredNode ? (
-        <EdgeHoverCard
-          edge={hoveredEdge}
-          fromLabel={
-            graph.nodes.find((n) => n.nodeId === hoveredEdge.fromNodeId)?.label ?? "?"
-          }
-          toLabel={
-            graph.nodes.find((n) => n.nodeId === hoveredEdge.toNodeId)?.label ?? "?"
-          }
-          pos={midpoint(
-            layout.positions.get(hoveredEdge.fromNodeId)!,
-            layout.positions.get(hoveredEdge.toNodeId)!,
-          )}
-        />
-      ) : null}
-    </div>
-  )
-}
-
-function NodeHoverCard({
-  node,
-  pos,
-  onOpenDetail,
-}: {
-  node: KgGraphNode
-  pos: { x: number; y: number }
-  onOpenDetail: () => void
-}) {
-  return (
-    <div
-      className="pointer-events-auto absolute z-10 -translate-x-1/2 translate-y-3 rounded-md border border-chrome-border bg-chrome-bg/95 px-2 py-1.5 text-[11px] shadow-lg"
-      style={{ left: pos.x, top: pos.y + 12 }}
-    >
-      <div className="flex items-center gap-1.5">
-        <span
-          className="rounded-full px-1.5 py-0 text-[9px] uppercase tracking-wider"
-          style={{ background: kindColor(node.kind), color: VIZ_CHIP_FG }}
-        >
-          {node.kind}
-        </span>
-        <span className="font-mono text-foreground">{node.label}</span>
-      </div>
-      <div className="mt-1 flex items-center gap-2 text-[10px] tabular-nums text-chrome-text/60">
-        <span>depth {node.depth}</span>
-        {node.isSeed ? <span className="text-rvbbit-accent">· SEED</span> : null}
-      </div>
-      {!node.isSeed ? (
-        <button
-          type="button"
-          onClick={(e) => {
-            e.stopPropagation()
-            onOpenDetail()
-          }}
-          className="mt-1.5 inline-flex items-center gap-1 rounded border border-chrome-border/60 px-1.5 py-0.5 text-[10px] hover:border-chrome-border hover:bg-foreground/[0.06]"
-          style={{ color: "var(--brand-kg)" }}
-        >
-          <TreeStructure className="h-3 w-3" />
-          open detail
-        </button>
-      ) : null}
-      {!node.isSeed ? (
-        <div className="mt-1 text-[9px] italic text-chrome-text/45">
-          click node to re-center
-        </div>
-      ) : null}
-    </div>
-  )
-}
-
-function EdgeHoverCard({
-  edge,
-  fromLabel,
-  toLabel,
-  pos,
-}: {
-  edge: KgGraphEdge
-  fromLabel: string
-  toLabel: string
-  pos: { x: number; y: number }
-}) {
-  return (
-    <div
-      className="pointer-events-none absolute z-10 -translate-x-1/2 -translate-y-1/2 rounded-md border border-chrome-border bg-chrome-bg/95 px-2 py-1 text-[11px] shadow-lg"
-      style={{ left: pos.x, top: pos.y }}
-    >
-      <div className="flex items-center gap-1.5">
-        <span className="truncate font-mono text-foreground">{fromLabel}</span>
-        <span className="text-chrome-text/55">—[</span>
-        <span
-          className="rounded-full px-1 py-0 text-[9px] uppercase tracking-wider"
-          style={{
-            background: "color-mix(in oklch, var(--rvbbit-accent) 18%, transparent)",
-            color: "var(--rvbbit-accent)",
-          }}
-        >
-          {edge.predicate}
-        </span>
-        <span className="text-chrome-text/55">]→</span>
-        <span className="truncate font-mono text-foreground">{toLabel}</span>
-      </div>
-      <div className="mt-0.5 text-[10px] tabular-nums text-chrome-text/55">
-        score {edge.score.toFixed(2)} · depth {edge.depth}
-      </div>
-    </div>
-  )
-}
-
 // ── Edge evidence drawer ────────────────────────────────────────────
 
 function EdgeEvidenceDrawer({
@@ -1182,277 +859,6 @@ function EdgeEvidenceDrawer({
       </div>
     </aside>
   )
-}
-
-// ── Layout math ─────────────────────────────────────────────────────
-
-function ringRadius(depth: number, w: number, h: number) {
-  const base = Math.min(w, h) / 2 - RING_PADDING
-  if (base <= 0) return 0
-  // 3 rings spaced unevenly to give the outer ring more room for labels.
-  if (depth === 1) return base * 0.34
-  if (depth === 2) return base * 0.68
-  if (depth >= 3) return base * 1.0
-  return 0
-}
-
-interface NodePos { x: number; y: number; angle: number }
-
-function layoutConstellation(graph: KgGraph, w: number, h: number) {
-  const positions = new Map<number, NodePos>()
-  if (w <= 0 || h <= 0) return { positions }
-  const cx = w / 2
-  const cy = h / 2
-
-  // Group by depth.
-  const byDepth = new Map<number, KgGraphNode[]>()
-  for (const n of graph.nodes) {
-    const arr = byDepth.get(n.depth) ?? []
-    arr.push(n)
-    byDepth.set(n.depth, arr)
-  }
-
-  // Seed.
-  for (const n of byDepth.get(0) ?? []) {
-    positions.set(n.nodeId, { x: cx, y: cy, angle: 0 })
-  }
-
-  // Depth-1: evenly distributed.
-  const d1 = byDepth.get(1) ?? []
-  const r1 = ringRadius(1, w, h)
-  d1.forEach((n, i) => {
-    const angle = (i / Math.max(1, d1.length)) * Math.PI * 2 - Math.PI / 2
-    positions.set(n.nodeId, {
-      x: cx + Math.cos(angle) * r1,
-      y: cy + Math.sin(angle) * r1,
-      angle,
-    })
-  })
-
-  // Build adjacency for depth-2+ positioning.
-  const neighbors = new Map<number, number[]>()
-  for (const e of graph.edges) {
-    neighbors.set(e.fromNodeId, [...(neighbors.get(e.fromNodeId) ?? []), e.toNodeId])
-    neighbors.set(e.toNodeId, [...(neighbors.get(e.toNodeId) ?? []), e.fromNodeId])
-  }
-
-  // Depth-2+: cluster each node near the mean angle of its already-placed
-  // neighbors (typically depth-1), then add a small offset so siblings don't
-  // collide. Falls back to even distribution if no parent is placed.
-  for (let depth = 2; depth <= 5; depth += 1) {
-    const layer = byDepth.get(depth) ?? []
-    if (layer.length === 0) continue
-    const r = ringRadius(depth, w, h)
-    // First pass: collect proposed angles per cluster (parent's angle).
-    const clusters = new Map<number, KgGraphNode[]>()
-    for (const n of layer) {
-      let parentAngle: number | null = null
-      for (const nb of neighbors.get(n.nodeId) ?? []) {
-        const p = positions.get(nb)
-        if (p && (graph.nodes.find((x) => x.nodeId === nb)?.depth ?? 99) < depth) {
-          parentAngle = p.angle
-          break
-        }
-      }
-      const key = parentAngle == null ? -1 : Math.round((parentAngle + Math.PI) * 1e4)
-      const arr = clusters.get(key) ?? []
-      arr.push(n)
-      clusters.set(key, arr)
-    }
-    // Second pass: place each cluster's children spread out around the parent.
-    for (const [key, members] of clusters.entries()) {
-      const baseAngle =
-        key === -1 ? Math.random() * Math.PI * 2 : key / 1e4 - Math.PI
-      const spread = Math.min((Math.PI * 2) / Math.max(layer.length, 6), 0.5)
-      members.forEach((n, i) => {
-        const offset = (i - (members.length - 1) / 2) * spread
-        const angle = baseAngle + offset
-        positions.set(n.nodeId, {
-          x: cx + Math.cos(angle) * r,
-          y: cy + Math.sin(angle) * r,
-          angle,
-        })
-      })
-    }
-  }
-
-  // Resolve any leftover unplaced nodes (e.g., depth=99 if BFS didn't reach).
-  const unplaced = graph.nodes.filter((n) => !positions.has(n.nodeId))
-  const rOuter = ringRadius(3, w, h)
-  unplaced.forEach((n, i) => {
-    const angle = (i / Math.max(1, unplaced.length)) * Math.PI * 2
-    positions.set(n.nodeId, {
-      x: cx + Math.cos(angle) * rOuter,
-      y: cy + Math.sin(angle) * rOuter,
-      angle,
-    })
-  })
-
-  return { positions }
-}
-
-function circularRadius(w: number, h: number) {
-  return Math.max(0, Math.min(w, h) / 2 - RING_PADDING)
-}
-
-/**
- * Circular layout used in overview mode — all nodes evenly distributed
- * on a single ring, grouped by kind. Edges become chords. With no
- * seed at center, this is a chord-diagram view of the whole graph.
- */
-function layoutCircular(graph: KgGraph, w: number, h: number) {
-  const positions = new Map<number, NodePos>()
-  if (w <= 0 || h <= 0 || graph.nodes.length === 0) return { positions }
-  const cx = w / 2
-  const cy = h / 2
-  const r = circularRadius(w, h)
-  // Stable order: sort by kind alphabetical, then by label, so the ring
-  // groups same-kind nodes together visually.
-  const sorted = [...graph.nodes].sort((a, b) => {
-    if (a.kind !== b.kind) return a.kind < b.kind ? -1 : 1
-    return a.label < b.label ? -1 : 1
-  })
-  sorted.forEach((n, i) => {
-    const angle = (i / sorted.length) * Math.PI * 2 - Math.PI / 2
-    positions.set(n.nodeId, {
-      x: cx + Math.cos(angle) * r,
-      y: cy + Math.sin(angle) * r,
-      angle,
-    })
-  })
-  return { positions }
-}
-
-/**
- * Cluster layout — each `kind` gets its own region of the canvas. Kind
- * centroids are placed evenly on an outer ring; nodes of that kind
- * spiral out from their centroid. The result reveals the implicit
- * schema: bands of one kind, arcs of cross-kind edges between them.
- */
-function layoutClusters(graph: KgGraph, w: number, h: number) {
-  const positions = new Map<number, NodePos>()
-  if (w <= 0 || h <= 0 || graph.nodes.length === 0) return { positions }
-  const cx = w / 2
-  const cy = h / 2
-  const outer = Math.max(0, Math.min(w, h) / 2 - RING_PADDING)
-  const byKind = new Map<string, KgGraphNode[]>()
-  for (const n of graph.nodes) {
-    const arr = byKind.get(n.kind) ?? []
-    arr.push(n)
-    byKind.set(n.kind, arr)
-  }
-  const kinds = Array.from(byKind.keys()).sort()
-  const centroidR = outer * 0.55
-  // Cluster cap radius scales with the largest kind; keep clusters from
-  // overlapping by giving each one at most (2π * centroidR / K) / 2 room.
-  const maxClusterR = Math.min(outer * 0.32, (centroidR * Math.PI) / Math.max(kinds.length, 1))
-  kinds.forEach((kind, ki) => {
-    const angle = (ki / kinds.length) * Math.PI * 2 - Math.PI / 2
-    const cxk = cx + Math.cos(angle) * centroidR
-    const cyk = cy + Math.sin(angle) * centroidR
-    const members = byKind.get(kind) ?? []
-    // Spiral-pack the members around the centroid.
-    members.forEach((n, i) => {
-      if (members.length === 1) {
-        positions.set(n.nodeId, { x: cxk, y: cyk, angle })
-        return
-      }
-      // Phyllotaxis spiral — golden-angle for even fill.
-      const t = i / Math.max(members.length - 1, 1)
-      const phi = i * 2.39996
-      const rho = maxClusterR * Math.sqrt(t)
-      positions.set(n.nodeId, {
-        x: cxk + Math.cos(phi) * rho,
-        y: cyk + Math.sin(phi) * rho,
-        angle,
-      })
-    })
-  })
-  return { positions }
-}
-
-/**
- * Force-directed layout — Fruchterman-Reingold with fixed iterations.
- * Best for medium graphs (capped at FORCE_MAX_NODES); for larger graphs
- * the picker disables this option to keep the canvas responsive.
- */
-function layoutForce(graph: KgGraph, w: number, h: number) {
-  const positions = new Map<number, NodePos>()
-  if (w <= 0 || h <= 0 || graph.nodes.length === 0) return { positions }
-  if (graph.nodes.length > FORCE_MAX_NODES) {
-    // Too many nodes for an interactive simulation — fall back to circular.
-    return layoutCircular(graph, w, h)
-  }
-  const cx = w / 2
-  const cy = h / 2
-  const area = w * h
-  const k = Math.sqrt(area / Math.max(graph.nodes.length, 1)) * 0.5
-  // Initialize from circular so the layout is deterministic and starts
-  // already spread out — much faster convergence than random.
-  const r0 = circularRadius(w, h)
-  const xs = new Float64Array(graph.nodes.length)
-  const ys = new Float64Array(graph.nodes.length)
-  const idxOf = new Map<number, number>()
-  graph.nodes.forEach((n, i) => {
-    const a = (i / graph.nodes.length) * Math.PI * 2 - Math.PI / 2
-    xs[i] = cx + Math.cos(a) * r0
-    ys[i] = cy + Math.sin(a) * r0
-    idxOf.set(n.nodeId, i)
-  })
-  const edges = graph.edges
-    .map((e) => [idxOf.get(e.fromNodeId)!, idxOf.get(e.toNodeId)!] as const)
-    .filter(([a, b]) => a != null && b != null && a !== b)
-  let temp = Math.min(w, h) / 10
-  const iterations = 100
-  const cool = temp / iterations
-  for (let it = 0; it < iterations; it += 1) {
-    const dx = new Float64Array(graph.nodes.length)
-    const dy = new Float64Array(graph.nodes.length)
-    // Repulsive: O(n²) — fine for n ≤ 200.
-    for (let i = 0; i < graph.nodes.length; i += 1) {
-      for (let j = i + 1; j < graph.nodes.length; j += 1) {
-        const ddx = xs[i] - xs[j]
-        const ddy = ys[i] - ys[j]
-        const dist = Math.sqrt(ddx * ddx + ddy * ddy) || 0.01
-        const force = (k * k) / dist
-        const ux = ddx / dist
-        const uy = ddy / dist
-        dx[i] += ux * force
-        dy[i] += uy * force
-        dx[j] -= ux * force
-        dy[j] -= uy * force
-      }
-    }
-    // Attractive: along each edge.
-    for (const [a, b] of edges) {
-      const ddx = xs[a] - xs[b]
-      const ddy = ys[a] - ys[b]
-      const dist = Math.sqrt(ddx * ddx + ddy * ddy) || 0.01
-      const force = (dist * dist) / k
-      const ux = ddx / dist
-      const uy = ddy / dist
-      dx[a] -= ux * force
-      dy[a] -= uy * force
-      dx[b] += ux * force
-      dy[b] += uy * force
-    }
-    // Apply clipped displacement + cool.
-    for (let i = 0; i < graph.nodes.length; i += 1) {
-      const disp = Math.sqrt(dx[i] * dx[i] + dy[i] * dy[i]) || 0.01
-      const cap = Math.min(disp, temp) / disp
-      xs[i] = cx + Math.max(-w / 2 + RING_PADDING, Math.min(w / 2 - RING_PADDING, xs[i] - cx + dx[i] * cap))
-      ys[i] = cy + Math.max(-h / 2 + RING_PADDING, Math.min(h / 2 - RING_PADDING, ys[i] - cy + dy[i] * cap))
-    }
-    temp = Math.max(0.5, temp - cool)
-  }
-  graph.nodes.forEach((n, i) => {
-    positions.set(n.nodeId, { x: xs[i], y: ys[i], angle: 0 })
-  })
-  return { positions }
-}
-
-function midpoint(a: { x: number; y: number }, b: { x: number; y: number }) {
-  return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 }
 }
 
 // ── Color ───────────────────────────────────────────────────────────
