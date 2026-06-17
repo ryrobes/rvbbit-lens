@@ -1042,6 +1042,7 @@ const KIND_HUE: Record<string, number> = {
   "metric-board": 95,
   "alerts": 25,
   "mcp-servers": 55,
+  "mcp-incoming": 205,
   "mcp-server-detail": 55,
   "query-lens": 200,
   costs: 130,

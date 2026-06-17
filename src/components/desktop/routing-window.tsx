@@ -42,9 +42,9 @@ import {
   type ProfileData,
   type RouteExecution,
 } from "@/lib/rvbbit/routing"
-import { RoutingProfileTab } from "./routing-profile-tab"
+import { RoutingOverlayTab } from "./routing-overlay-tab"
 import { RoutingExplainTab } from "./routing-explain-tab"
-import { RoutingTrainTab } from "./routing-train-tab"
+import { RoutingAutoTrainTab } from "./routing-auto-train-tab"
 import { RoutingFreshnessTab } from "./routing-freshness-tab"
 
 interface RoutingWindowProps {
@@ -59,13 +59,13 @@ const REFRESH_OPTIONS_MS = [
   { ms: 30_000, label: "30s" },
 ]
 
-type TabKey = "flow" | "freshness" | "profile" | "explain" | "train"
+type TabKey = "flow" | "freshness" | "overlay" | "explain" | "autotrain"
 const TABS: { key: TabKey; label: string }[] = [
   { key: "flow", label: "Flow" },
   { key: "freshness", label: "Freshness" },
-  { key: "profile", label: "Profile" },
+  { key: "overlay", label: "Overlay" },
   { key: "explain", label: "Explain" },
-  { key: "train", label: "Train" },
+  { key: "autotrain", label: "Auto-Train" },
 ]
 
 /**
@@ -281,15 +281,15 @@ export function RoutingWindow({ activeConnectionId, hasRvbbit }: RoutingWindowPr
           />
         ) : tab === "freshness" ? (
           <RoutingFreshnessTab activeConnectionId={activeConnectionId} />
-        ) : tab === "profile" ? (
-          <RoutingProfileTab data={profileData} />
+        ) : tab === "overlay" ? (
+          <RoutingOverlayTab activeConnectionId={activeConnectionId} />
         ) : tab === "explain" ? (
           <RoutingExplainTab
             activeConnectionId={activeConnectionId}
             columnarTables={columnarTables}
           />
         ) : (
-          <RoutingTrainTab activeConnectionId={activeConnectionId} />
+          <RoutingAutoTrainTab activeConnectionId={activeConnectionId} />
         )}
       </div>
     </div>

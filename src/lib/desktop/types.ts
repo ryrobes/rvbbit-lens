@@ -26,6 +26,7 @@ export type DesktopWindowKind =
   | "specialist-detail"
   | "routing"
   | "mcp-servers"
+  | "mcp-incoming"
   | "mcp-server-detail"
   | "query-lens"
   | "kg-browser"
@@ -107,6 +108,7 @@ export type WindowPayload =
   | SpecialistDetailPayload
   | RoutingPayload
   | McpServersPayload
+  | McpIncomingPayload
   | McpServerDetailPayload
   | QueryLensPayload
   | KgBrowserPayload
@@ -785,6 +787,10 @@ export interface RoutingPayload {
 
 export interface McpServersPayload {
   kind?: "mcp-servers"
+}
+
+export interface McpIncomingPayload {
+  kind?: "mcp-incoming"
 }
 
 export interface McpServerDetailPayload {

@@ -921,3 +921,151 @@ export function recommendPolicy(r: AccelFreshnessRow): PolicyRecommendation {
   }
   return { strategy: "demand", targetSecs: null, why: "low traffic — only refresh when it's actually being hit" }
 }
+
+// ── routing overlay (tested pins) + auto-optimizer ──────────────────────
+// The overlay supersedes the named-profile model: a flat set of tested
+// shape→engine pins layered on the base rules, grown by the benchmarker.
+
+export interface OverlayPin {
+  shapeKey: string
+  shapeFamily: string
+  engine: string
+  baseEngine: string
+  marginPct: number
+  source: string
+  testedAt: number
+  sampleMs: Record<string, number> | null
+}
+
+export async function fetchOverlayPins(
+  connectionId: string,
+): Promise<{ rows: OverlayPin[]; error: string | null }> {
+  const res = await runQuery(
+    connectionId,
+    "SELECT shape_key, shape_family, engine, base_engine, margin_pct, source, " +
+      "tested_at, sample_ms FROM rvbbit.route_overlay WHERE enabled " +
+      "ORDER BY margin_pct DESC NULLS LAST",
+  )
+  if (!res.ok) return { rows: [], error: res.error }
+  return {
+    error: null,
+    rows: res.rows.map((r) => ({
+      shapeKey: String(r.shape_key ?? ""),
+      shapeFamily: String(r.shape_family ?? ""),
+      engine: normalizeCandidate(String(r.engine ?? "")),
+      baseEngine: normalizeCandidate(String(r.base_engine ?? "")),
+      marginPct: num(r.margin_pct),
+      source: String(r.source ?? ""),
+      testedAt: epoch(r.tested_at),
+      sampleMs: (r.sample_ms as Record<string, number> | null) ?? null,
+    })),
+  }
+}
+
+export interface OptimizeCandidate {
+  shapeKey: string
+  shapeFamily: string
+  executions: number
+  avgMs: number
+  potentialMs: number
+  lastSeen: number
+  /** Engine this shape currently routes to (the base-rule target you'd be trying to beat). */
+  engine: string
+}
+
+export async function fetchOptimizationCandidates(
+  connectionId: string,
+): Promise<{ rows: OptimizeCandidate[]; error: string | null }> {
+  // Enrich each candidate with the engine it predominantly runs on today. Routing is
+  // deterministic per shape, so this is effectively the base-rule target — the engine a
+  // benchmark would have to beat. The candidate set itself stays sourced from the view.
+  const res = await runQuery(
+    connectionId,
+    "SELECT c.shape_key, c.shape_family, c.executions, c.avg_ms, c.potential_ms, c.last_seen, " +
+      "(SELECT mode() WITHIN GROUP (ORDER BY e.candidate) FROM rvbbit.route_executions e " +
+      "WHERE e.shape_key = c.shape_key AND e.executed_at > now() - interval '1 day' " +
+      "AND e.status = 'ok' AND e.candidate IS NOT NULL) AS engine " +
+      "FROM rvbbit.route_optimization_candidates c LIMIT 50",
+  )
+  if (!res.ok) return { rows: [], error: res.error }
+  return {
+    error: null,
+    rows: res.rows.map((r) => ({
+      shapeKey: String(r.shape_key ?? ""),
+      shapeFamily: String(r.shape_family ?? ""),
+      executions: num(r.executions),
+      avgMs: num(r.avg_ms),
+      potentialMs: num(r.potential_ms),
+      lastSeen: epoch(r.last_seen),
+      engine: normalizeCandidate(String(r.engine ?? "")),
+    })),
+  }
+}
+
+export interface OptimizeRunDetail {
+  shape_key: string
+  pinned: boolean
+  winner: string | null
+  margin_pct: number | null
+}
+
+export interface OptimizeRun {
+  runId: number
+  startedAt: number
+  finishedAt: number | null
+  trigger: string
+  shapesTested: number
+  pinned: number
+  errors: number
+  elapsedSec: number | null
+  detail: OptimizeRunDetail[] | null
+}
+
+export async function fetchOptimizeRuns(
+  connectionId: string,
+): Promise<{ rows: OptimizeRun[]; error: string | null }> {
+  const res = await runQuery(
+    connectionId,
+    "SELECT run_id, started_at, finished_at, trigger, shapes_tested, pinned, errors, " +
+      "elapsed_sec, detail FROM rvbbit.route_optimize_runs ORDER BY started_at DESC LIMIT 30",
+  )
+  if (!res.ok) return { rows: [], error: res.error }
+  return {
+    error: null,
+    rows: res.rows.map((r) => ({
+      runId: num(r.run_id),
+      startedAt: epoch(r.started_at),
+      finishedAt: r.finished_at == null ? null : epoch(r.finished_at),
+      trigger: String(r.trigger ?? ""),
+      shapesTested: num(r.shapes_tested),
+      pinned: num(r.pinned),
+      errors: num(r.errors),
+      elapsedSec: numOrNull(r.elapsed_sec),
+      detail: (r.detail as OptimizeRunDetail[] | null) ?? null,
+    })),
+  }
+}
+
+/** Trigger an auto-optimizer pass now (manual). Returns the function's JSON summary. */
+export async function runOptimizeAuto(
+  connectionId: string,
+  topK: number,
+  maxSeconds: number,
+): Promise<{ ok: boolean; result: Record<string, unknown> | null; error: string | null }> {
+  const res = await runQuery(
+    connectionId,
+    `SELECT rvbbit.route_optimize_auto(${Math.max(1, Math.trunc(topK))}, ${Math.max(1, Math.trunc(maxSeconds))}) AS r`,
+  )
+  if (!res.ok) return { ok: false, result: null, error: res.error }
+  return { ok: true, result: (res.rows[0]?.r as Record<string, unknown>) ?? null, error: null }
+}
+
+/** Benchmark one query across all engines and pin it if a non-base engine wins. */
+export async function runOptimizeQuery(
+  connectionId: string,
+  sql: string,
+): Promise<{ ok: boolean; result: Record<string, unknown> | null; error: string | null }> {
+  const res = await runQuery(connectionId, `SELECT rvbbit.route_optimize_query(${sqlStr(sql)}) AS r`)
+  if (!res.ok) return { ok: false, result: null, error: res.error }
+  return { ok: true, result: (res.rows[0]?.r as Record<string, unknown>) ?? null, error: null }
+}

@@ -75,6 +75,7 @@ import { SpecialistsWindow } from "./specialists-window"
 import { SpecialistDetailWindow } from "./specialist-detail-window"
 import { RoutingWindow } from "./routing-window"
 import { McpServersWindow } from "./mcp-servers-window"
+import { McpIncomingWindow } from "./mcp-incoming-window"
 import { McpServerDetailWindow } from "./mcp-server-detail-window"
 import { QueryLensWindow } from "./query-lens-window"
 import { KgBrowserWindow } from "./kg-browser-window"
@@ -160,6 +161,7 @@ import type {
   SpecialistDetailPayload,
   RoutingPayload,
   McpServersPayload,
+  McpIncomingPayload,
   McpServerDetailPayload,
   QueryLensPayload,
   KgBrowserPayload,
@@ -1815,6 +1817,22 @@ export function DesktopShell() {
       payload: { kind: "mcp-servers" } satisfies McpServersPayload,
     })
   }, [focus, openWindow, liveWindows])
+
+  const openMcpIncoming = useCallback(() => {
+    if (!activeConnectionId) {
+      openConnections()
+      return
+    }
+    const existing = liveWindows().find((w) => w.kind === "mcp-incoming")
+    if (existing) return focus(existing.id)
+    openWindow({
+      id: randomUUID(),
+      kind: "mcp-incoming",
+      title: "MCP Incoming",
+      x: 132, y: 70, width: 1120, height: 740,
+      payload: { kind: "mcp-incoming" } satisfies McpIncomingPayload,
+    })
+  }, [activeConnectionId, focus, openConnections, openWindow, liveWindows])
 
   const openCosts = useCallback((initialFilter?: CostsPayload["initialFilter"]) => {
     const existing = liveWindows().find((w) => w.kind === "costs")
@@ -3505,6 +3523,7 @@ export function DesktopShell() {
     { id: "view-apps", label: "View Apps", icon: Boxes, color: "var(--brand-view-apps)", sublabel: viewAppCount ? `${viewAppCount} saved` : undefined, activate: openViewApps },
     { id: "connections", label: "Connections", icon: Plug, color: "var(--brand-connections)", activate: openConnections },
     { id: "data-search", label: "Data Search", icon: Search, color: "var(--brand-kg)", description: "Semantic search across data", activate: () => openDataSearch(), rvbbit: true },
+    { id: "mcp-incoming", label: "MCP Incoming", icon: Activity, color: "oklch(71% 0.17 205)", description: "Warehouse MCP usage", activate: openMcpIncoming, rvbbit: true },
     { id: "dagster", label: "Dagster", icon: GitBranch, color: "oklch(70% 0.15 220)", sublabel: "detected", description: "Read-only runs, assets & checks", activate: openDagster, visible: dagsterDetected },
     // System
     { id: "system-objects", label: "System Objects", icon: Layers, color: "var(--brand-system-objects)", description: "Tables, indexes, roles, activity", activate: () => openSystemObjects("tables"), folder: "system" },
@@ -3544,7 +3563,7 @@ export function DesktopShell() {
     { id: "drift", label: "Drift", icon: LineChart, color: "var(--brand-kg)", description: "Compare extraction runs", activate: () => openDrift(), folder: "knowledge", rvbbit: true },
   ], [
     viewAppCount, schema, rvbbitVersion,
-    openFinder, openSqlScratch, openViewApps, openConnections, openDataSearch,
+    openFinder, openSqlScratch, openViewApps, openConnections, openDataSearch, openMcpIncoming,
     openSystemObjects, openExtensions, openPgMonitor, openCache, openRvbbitCache,
     openCosts, openSyncMirror, openOperators, openSpecialists, openRouting,
     openMcpServers, openCapabilities, openHfDeploy, openWarren, openModelStudio,
@@ -4370,6 +4389,15 @@ function renderWindowContent(
           onOpenCapability={ctx.openCapabilityDetail}
         />
       )
+    case "mcp-incoming":
+      return (
+        <McpIncomingWindow
+          activeConnectionId={ctx.activeConnectionId}
+          hasRvbbit={ctx.hasRvbbit}
+          workspaceActive={ctx.workspaceActive}
+          onOpenSql={ctx.openSqlData}
+        />
+      )
     case "mcp-server-detail":
       return (
         <McpServerDetailWindow
@@ -4772,6 +4800,8 @@ function iconForKind(kind: DesktopWindowState["kind"]) {
     case "specialist-detail":
       return Brain
     case "routing": return GitBranch
+    case "mcp-incoming":
+      return Activity
     case "mcp-servers":
     case "mcp-server-detail":
       return Globe

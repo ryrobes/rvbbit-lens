@@ -1,7 +1,7 @@
 "use client"
 
 import { useCallback, useMemo, useState } from "react"
-import { AlertTriangle, Database, GitBranch, Layers, Play, Sigma } from "@/lib/icons"
+import { AlertTriangle, Check, Database, GitBranch, Layers, Play, Sigma, Sparkles } from "@/lib/icons"
 import { cn } from "@/lib/utils"
 import { fmtCount, Metric, Panel } from "./instruments"
 import { EngineDot, ShapeChips } from "./routing-charts"
@@ -9,6 +9,7 @@ import {
   ENGINES,
   engineMeta,
   routeExplain,
+  runOptimizeQuery,
   type ColumnarTable,
   type RouteExplain,
 } from "@/lib/rvbbit/routing"
@@ -41,6 +42,8 @@ export function RoutingExplainTab({
   const [result, setResult] = useState<RouteExplain | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [running, setRunning] = useState(false)
+  const [optimizing, setOptimizing] = useState(false)
+  const [optMsg, setOptMsg] = useState<{ ok: boolean; text: string } | null>(null)
 
   const run = useCallback(async () => {
     if (!activeConnectionId || !sql.trim()) return
@@ -50,6 +53,32 @@ export function RoutingExplainTab({
     setResult(res.explain)
     setRunning(false)
   }, [activeConnectionId, sql])
+
+  // Benchmark this exact query across every engine; pin it if a non-base engine wins.
+  const optimize = useCallback(async () => {
+    if (!activeConnectionId || !sql.trim() || optimizing) return
+    setOptimizing(true)
+    setOptMsg(null)
+    const res = await runOptimizeQuery(activeConnectionId, sql)
+    setOptimizing(false)
+    if (!res.ok || !res.result) {
+      setOptMsg({ ok: false, text: res.error ?? "optimize failed" })
+      return
+    }
+    const r = res.result
+    if (r.ok === false) {
+      setOptMsg({ ok: false, text: String(r.reason ?? "not optimizable") })
+    } else if (r.skipped) {
+      setOptMsg({ ok: false, text: String(r.skipped) })
+    } else if (r.pinned) {
+      const margin = typeof r.margin_pct === "number" ? `+${r.margin_pct.toFixed(0)}%` : ""
+      setOptMsg({ ok: true, text: `pinned ${String(r.winner)} ${margin} over ${String(r.base_engine)}` })
+      void run()
+    } else {
+      const margin = typeof r.margin_pct === "number" ? ` (best +${r.margin_pct.toFixed(0)}%)` : ""
+      setOptMsg({ ok: true, text: `base engine kept — no decisive win${margin}` })
+    }
+  }, [activeConnectionId, sql, optimizing, run])
 
   const examples = useMemo(() => {
     const out: { label: string; sql: string }[] = []
@@ -93,6 +122,16 @@ export function RoutingExplainTab({
             {running ? "Routing…" : "Route it"}
             <span className="text-[9px] text-rvbbit-accent/60">⌘⏎</span>
           </button>
+          <button
+            type="button"
+            onClick={() => void optimize()}
+            disabled={optimizing || !sql.trim() || !activeConnectionId}
+            title="Benchmark this query across every engine and pin the fastest if it decisively beats the base rule"
+            className="inline-flex items-center gap-1 rounded border border-chrome-border bg-secondary-background px-2 py-1 text-[11px] font-medium text-chrome-text/80 hover:border-rvbbit-accent/40 hover:text-foreground disabled:opacity-40"
+          >
+            <Sparkles className={cn("h-3 w-3", optimizing && "animate-pulse")} />
+            {optimizing ? "Benchmarking…" : "Optimize"}
+          </button>
           {columnarTables.length > 0 ? (
             <span className="ml-1 text-[10px] text-chrome-text/45">
               {columnarTables.length} columnar table{columnarTables.length === 1 ? "" : "s"}:
@@ -115,6 +154,24 @@ export function RoutingExplainTab({
         <div className="flex items-start gap-1.5 rounded-md border border-danger/40 bg-danger/10 px-3 py-2 text-[11px] text-danger">
           <AlertTriangle className="mt-px h-3.5 w-3.5 shrink-0" />
           <span className="break-words font-mono">{error}</span>
+        </div>
+      ) : null}
+
+      {optMsg ? (
+        <div
+          className={cn(
+            "flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-[11px]",
+            optMsg.ok
+              ? "border-success/40 bg-success/10 text-success"
+              : "border-warning/40 bg-warning/10 text-warning",
+          )}
+        >
+          {optMsg.ok ? (
+            <Check className="h-3.5 w-3.5 shrink-0" />
+          ) : (
+            <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+          )}
+          <span className="break-words">{optMsg.text}</span>
         </div>
       ) : null}
 

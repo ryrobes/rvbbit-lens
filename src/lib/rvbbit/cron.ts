@@ -277,3 +277,9 @@ export function isMetricsJob(j: CronJob): boolean {
 export function isCubesJob(j: CronJob): boolean {
   return /refresh_all_cubes/i.test(j.command) || j.jobname === "rvbbit_refresh_cubes"
 }
+/** Does this job run the adaptive-routing auto-optimizer (benchmark hot shapes, pin wins)? */
+export function isRouteOptimizeJob(j: CronJob): boolean {
+  return /route_optimize_auto/i.test(j.command) || j.jobname === "rvbbit_route_optimize"
+}
+/** Default command for the nightly route auto-optimizer: top-20 hot shapes, 600s budget, 3 samples. */
+export const ROUTE_OPTIMIZE_COMMAND = "SELECT rvbbit.route_optimize_auto(20, 600, 3)"
