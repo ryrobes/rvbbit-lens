@@ -1,16 +1,40 @@
 import { NextResponse } from "next/server"
+import { executeQuery } from "@/lib/db/query"
 
 // Forward install-time MCP secrets (API keys) from the install UI straight to
 // the gateway's encrypted secret store. The value never touches Postgres —
 // mcp_servers only holds ${VAR} references; the gateway resolves them at spawn.
 //
-// Dev: the lens server runs on the host and reaches the gateway's published
-// localhost port. Prod: the lens runs in the docker network and reaches it by
-// service name. Override with MCP_GATEWAY_URL.
+// Gateway URL resolution (single source of truth = the DB):
+//   1. MCP_GATEWAY_URL env — explicit override (dev: the gateway's published
+//      localhost port, since the lens runs on the host).
+//   2. rvbbit.mcp_gateway_endpoint() via the caller's connection — authoritative;
+//      it reflects the endpoint the installed MCP-gateway warren registered, so
+//      no per-deployment env wiring is needed in-cluster.
+//   3. the compose service name as a last-resort default.
 export const runtime = "nodejs"
 
-const GATEWAY_URL = (process.env.MCP_GATEWAY_URL ?? "http://127.0.0.1:9180").replace(/\/$/, "")
+const ENV_GATEWAY_URL = process.env.MCP_GATEWAY_URL ? process.env.MCP_GATEWAY_URL.replace(/\/$/, "") : null
+const DEFAULT_GATEWAY_URL = "http://rvbbit-mcp-gateway:9180"
 const GATEWAY_TOKEN = process.env.MCP_GATEWAY_TOKEN || null
+
+async function resolveGatewayUrl(connectionId?: string | null): Promise<string> {
+  if (ENV_GATEWAY_URL) return ENV_GATEWAY_URL
+  if (connectionId) {
+    try {
+      const r = await executeQuery(connectionId, "SELECT rvbbit.mcp_gateway_endpoint() AS url", {
+        rowLimit: 1,
+        readOnly: true,
+        poolLane: "meta",
+      })
+      const url = (r?.rows?.[0] as { url?: unknown } | undefined)?.url
+      if (typeof url === "string" && /^https?:\/\//.test(url)) return url.replace(/\/$/, "")
+    } catch {
+      // fall through to the service-name default
+    }
+  }
+  return DEFAULT_GATEWAY_URL
+}
 
 function authHeaders(): Record<string, string> {
   const h: Record<string, string> = { "content-type": "application/json" }
@@ -20,50 +44,58 @@ function authHeaders(): Record<string, string> {
 
 export async function POST(req: Request) {
   const body = (await req.json().catch(() => null)) as
-    | { server?: string; name?: string; value?: string }
+    | { connectionId?: string; server?: string; name?: string; value?: string }
     | null
   if (!body?.server || !body?.name || body.value == null) {
     return NextResponse.json({ ok: false, error: "server, name and value are required" }, { status: 400 })
   }
+  const gatewayUrl = await resolveGatewayUrl(body.connectionId)
   try {
-    const res = await fetch(`${GATEWAY_URL}/secrets`, {
+    const res = await fetch(`${gatewayUrl}/secrets`, {
       method: "POST",
       headers: authHeaders(),
       body: JSON.stringify({ server: body.server, name: body.name, value: body.value }),
     })
     if (!res.ok) {
       const text = await res.text().catch(() => "")
-      return NextResponse.json({ ok: false, error: `gateway ${res.status}: ${text.slice(0, 200)}` }, { status: 502 })
+      const hint = res.status === 404
+        ? " — this gateway image predates the /secrets API; rebuild/redeploy the MCP gateway runtime"
+        : ""
+      return NextResponse.json({ ok: false, error: `gateway ${res.status}: ${text.slice(0, 200)}${hint}` }, { status: 502 })
     }
     // Never echo the value back.
     return NextResponse.json({ ok: true, server: body.server, name: body.name })
   } catch (e) {
     return NextResponse.json(
-      { ok: false, error: `gateway unreachable at ${GATEWAY_URL}: ${(e as Error).message}` },
+      { ok: false, error: `gateway unreachable at ${gatewayUrl}: ${(e as Error).message}` },
       { status: 502 },
     )
   }
 }
 
 export async function DELETE(req: Request) {
-  const body = (await req.json().catch(() => null)) as { server?: string; name?: string } | null
+  const body = (await req.json().catch(() => null)) as { connectionId?: string; server?: string; name?: string } | null
   if (!body?.server || !body?.name) {
     return NextResponse.json({ ok: false, error: "server and name are required" }, { status: 400 })
   }
+  const gatewayUrl = await resolveGatewayUrl(body.connectionId)
   try {
-    const res = await fetch(`${GATEWAY_URL}/secrets`, {
+    const res = await fetch(`${gatewayUrl}/secrets`, {
       method: "DELETE",
       headers: authHeaders(),
       body: JSON.stringify({ server: body.server, name: body.name }),
     })
     if (!res.ok) {
       const text = await res.text().catch(() => "")
-      return NextResponse.json({ ok: false, error: `gateway ${res.status}: ${text.slice(0, 200)}` }, { status: 502 })
+      const hint = res.status === 404
+        ? " — this gateway image predates the /secrets API; rebuild/redeploy the MCP gateway runtime"
+        : ""
+      return NextResponse.json({ ok: false, error: `gateway ${res.status}: ${text.slice(0, 200)}${hint}` }, { status: 502 })
     }
     return NextResponse.json({ ok: true, server: body.server, name: body.name })
   } catch (e) {
     return NextResponse.json(
-      { ok: false, error: `gateway unreachable at ${GATEWAY_URL}: ${(e as Error).message}` },
+      { ok: false, error: `gateway unreachable at ${gatewayUrl}: ${(e as Error).message}` },
       { status: 502 },
     )
   }

@@ -27,6 +27,8 @@ interface BrainExplorerWindowProps {
   onChangePayload: (mut: (p: BrainPayload) => BrainPayload) => void
   // a dropped .csv/.tsv routes to the existing CSV import dialog instead of doc-ingest
   onOpenCsvImport?: (file: File) => void
+  // deep-link to a capability's install panel (e.g. the GLiNER NER capability)
+  onOpenCapability?: (catalogId: string, tab?: string) => void
 }
 
 interface FolderNode {
@@ -173,7 +175,7 @@ function FolderRow({
   )
 }
 
-export function BrainExplorerWindow({ payload, activeConnectionId, hasRvbbit, onChangePayload, onOpenCsvImport }: BrainExplorerWindowProps) {
+export function BrainExplorerWindow({ payload, activeConnectionId, hasRvbbit, onChangePayload, onOpenCsvImport, onOpenCapability }: BrainExplorerWindowProps) {
   const conn = activeConnectionId
   const [principals, setPrincipals] = useState<string[]>([])
   const [viewAs, setViewAs] = useState<string>(payload.viewAs ?? "")
@@ -434,7 +436,7 @@ export function BrainExplorerWindow({ payload, activeConnectionId, hasRvbbit, on
       </div>
 
       {showSources ? (
-        <SourcesPanel conn={conn} />
+        <SourcesPanel conn={conn} onOpenCapability={onOpenCapability} />
       ) : (
         <>
       {/* search bar */}

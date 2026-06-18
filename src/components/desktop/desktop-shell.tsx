@@ -4619,6 +4619,7 @@ function renderWindowContent(
           hasRvbbit={ctx.hasRvbbit}
           onChangePayload={(mut) => ctx.updatePayload(w.id, (p) => mut(p as BrainPayload))}
           onOpenCsvImport={(file) => ctx.openCsvImport(file)}
+          onOpenCapability={(catalogId, tab) => ctx.openCapabilityDetail(catalogId, tab as CapabilityDetailPayload["initialTab"])}
         />
       )
     case "dagster":

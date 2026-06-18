@@ -1,23 +1,33 @@
 import { useCallback, useEffect, useState } from "react"
-import { Database, RefreshCw, Plus, Check, Clock, Zap, Users, AlertTriangle, GitBranch, Trash2, X } from "@/lib/icons"
+import { Database, RefreshCw, Plus, Check, Clock, Zap, Users, AlertTriangle, GitBranch, Trash2, X, Plug, FileCode2, Layers } from "@/lib/icons"
 import {
   fetchSources,
   fetchSyncRuns,
   fetchPendingGrants,
+  fetchProviders,
+  defineProvider,
+  deleteProvider,
+  addQuerySource,
   configureSource,
   setSourceEnabled,
   syncSourceNow,
+  enrichSource,
   deleteSource,
   approvePendingGrant,
   fetchDocGraph,
   fetchDocRelations,
   enrichDocNow,
+  fetchNerStatus,
   type BrainSource,
   type BrainSyncRun,
   type BrainPendingGrant,
+  type BrainProvider,
   type BrainGraphRow,
   type BrainRelation,
+  type NerStatus,
 } from "@/lib/rvbbit/brain"
+
+const GLINER_CATALOG_ID = "extract/gliner-medium-v2.1"
 
 const SOFT = "color-mix(in oklch, var(--chrome-text) 8%, transparent)"
 const SOFTER = "color-mix(in oklch, var(--chrome-text) 4%, transparent)"
@@ -33,13 +43,22 @@ function ago(ms: number | null): string {
 }
 
 // ── Sources admin: configure remote stores, sync, view runs, approve grants ────
-export function SourcesPanel({ conn }: { conn: string | null }) {
+export function SourcesPanel({
+  conn,
+  onOpenCapability,
+}: {
+  conn: string | null
+  onOpenCapability?: (catalogId: string, tab?: string) => void
+}) {
   const [sources, setSources] = useState<BrainSource[]>([])
   const [runs, setRuns] = useState<BrainSyncRun[]>([])
   const [grants, setGrants] = useState<BrainPendingGrant[]>([])
+  const [providers, setProviders] = useState<BrainProvider[]>([])
+  const [ner, setNer] = useState<NerStatus | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [toast, setToast] = useState<{ ok: boolean; msg: string } | null>(null)
   const [busy, setBusy] = useState<number | null>(null)
+  const [enrichBusy, setEnrichBusy] = useState<number | null>(null)
   const [confirmDel, setConfirmDel] = useState<{ sourceId: number; purge: boolean } | null>(null)
 
   // add-source form
@@ -50,11 +69,15 @@ export function SourcesPanel({ conn }: { conn: string | null }) {
 
   const reload = useCallback(async () => {
     if (!conn) return
-    const [s, r, g] = await Promise.all([fetchSources(conn), fetchSyncRuns(conn), fetchPendingGrants(conn)])
-    setError(s.error ?? r.error ?? g.error ?? null)
+    const [s, r, g, p, n] = await Promise.all([
+      fetchSources(conn), fetchSyncRuns(conn), fetchPendingGrants(conn), fetchProviders(conn), fetchNerStatus(conn),
+    ])
+    setError(s.error ?? r.error ?? g.error ?? p.error ?? null)
     setSources(s.sources)
     setRuns(r.runs)
     setGrants(g.grants)
+    setProviders(p.providers)
+    setNer(n)
   }, [conn])
 
   useEffect(() => {
@@ -90,10 +113,30 @@ export function SourcesPanel({ conn }: { conn: string | null }) {
         setToast({ ok: false, msg: r.error ?? String(r.result?.error ?? "sync failed") })
       } else {
         const x = r.result
+        const detail = x.provider != null ? `fetched ${x.fetched ?? 0}` : `extracted ${x.extracted ?? 0}`
         setToast({
           ok: true,
-          msg: `${s.label}: +${x.added ?? 0} ~${x.changed ?? 0} −${x.removed ?? 0} (extracted ${x.extracted ?? 0})`,
+          msg: `${s.label}: +${x.added ?? 0} ~${x.changed ?? 0} −${x.removed ?? 0} (${detail})`,
         })
+      }
+      void reload()
+    },
+    [conn, reload],
+  )
+
+  const enrichNow = useCallback(
+    async (s: BrainSource, force: boolean) => {
+      if (!conn) return
+      setEnrichBusy(s.sourceId)
+      setToast(null)
+      const r = await enrichSource(conn, s.sourceId, { force })
+      setEnrichBusy(null)
+      if (r.error || !r.result) {
+        setToast({ ok: false, msg: r.error ?? "enrich failed" })
+      } else {
+        const x = r.result
+        const skipped = x.skip_triples === true ? " · NER+edges" : " · full"
+        setToast({ ok: true, msg: `${s.label}: enriched ${x.enriched_docs ?? 0} doc${x.enriched_docs === 1 ? "" : "s"}${skipped}${x.errors ? ` · ${x.errors} err` : ""}` })
       }
       void reload()
     },
@@ -127,6 +170,34 @@ export function SourcesPanel({ conn }: { conn: string | null }) {
         </div>
       )}
 
+      {/* enrichment / NER capability status */}
+      {ner && (
+        <div className="rounded p-2 flex items-center gap-2 text-[11px]" style={{ background: SOFTER }}>
+          <GitBranch size={12} className="opacity-70" />
+          {ner.installed ? (
+            <span className="flex items-center gap-1.5">
+              <span className="h-1.5 w-1.5 rounded-full" style={{ background: "var(--success)" }} />
+              Entity extraction (GLiNER NER) is active — enrichment tags comprehensive entities per chunk, alongside relations.
+            </span>
+          ) : (
+            <>
+              <span className="flex items-center gap-1.5">
+                <span className="h-1.5 w-1.5 rounded-full" style={{ background: "var(--warning)" }} />
+                NER not installed — enrichment captures relationships only, not full entity coverage.
+              </span>
+              <button
+                onClick={() => onOpenCapability?.(ner.catalogId || GLINER_CATALOG_ID, "install")}
+                className="ml-auto px-2 py-0.5 rounded"
+                style={{ background: "color-mix(in oklch, var(--chrome-text) 14%, transparent)" }}
+                title="Open the GLiNER capability (deploy on a local CPU or a remote GPU warren node)"
+              >
+                Install GLiNER →
+              </button>
+            </>
+          )}
+        </div>
+      )}
+
       {/* add source */}
       <div className="rounded p-2 flex flex-col gap-1.5" style={{ background: SOFTER }}>
         <div className="flex items-center gap-1 text-[11px] opacity-70">
@@ -150,6 +221,9 @@ export function SourcesPanel({ conn }: { conn: string | null }) {
         </div>
       </div>
 
+      {/* providers & query sources (MCP / SQL-backed document types) */}
+      <ProvidersSection conn={conn} providers={providers} reload={reload} setToast={setToast} />
+
       {/* sources */}
       <div className="flex flex-col gap-1.5">
         <div className="flex items-center gap-1 text-[11px] opacity-70">
@@ -162,19 +236,42 @@ export function SourcesPanel({ conn }: { conn: string | null }) {
               <span className="h-1.5 w-1.5 rounded-full shrink-0"
                 style={{ background: s.enabled ? "var(--success)" : "color-mix(in oklch, var(--chrome-text) 40%, transparent)" }} />
               <div className="flex flex-col">
-                <span className="font-medium">{s.label} <span className="opacity-40">· {s.kind}</span></span>
-                <span className="opacity-50">{s.folders.length} folder{s.folders.length === 1 ? "" : "s"} · {s.docs} docs · synced {ago(s.lastSyncedMs)}</span>
+                <span className="font-medium flex items-center gap-1">
+                  {s.label}
+                  {s.provider ? (
+                    <span className="px-1 rounded inline-flex items-center gap-0.5 opacity-80"
+                      style={{ background: "color-mix(in oklch, var(--rvbbit-accent, var(--chrome-text)) 16%, transparent)" }}
+                      title={`MCP / query source · provider “${s.provider}”`}>
+                      <Plug size={9} /> {s.provider}
+                    </span>
+                  ) : (
+                    <span className="opacity-40">· {s.kind}</span>
+                  )}
+                </span>
+                <span className="opacity-50">
+                  {s.provider
+                    ? `query · global · ${s.docs} docs · synced ${ago(s.lastSyncedMs)}`
+                    : `${s.folders.length} folder${s.folders.length === 1 ? "" : "s"} · ${s.docs} docs · synced ${ago(s.lastSyncedMs)}`}
+                </span>
               </div>
               <div className="ml-auto flex items-center gap-2">
                 <button onClick={() => void (conn && setSourceEnabled(conn, s.sourceId, !s.enabled).then(reload))}
                   className="opacity-60 hover:opacity-100" title={s.enabled ? "disable (skip nightly)" : "enable"}>
                   {s.enabled ? "on" : "off"}
                 </button>
-                <button onClick={() => void syncNow(s)} disabled={busy === s.sourceId}
+                <button onClick={() => void syncNow(s)} disabled={busy === s.sourceId || enrichBusy === s.sourceId}
                   className="px-1.5 py-0.5 rounded flex items-center gap-1 disabled:opacity-40"
-                  style={{ background: "color-mix(in oklch, var(--rvbbit-accent, var(--chrome-text)) 16%, transparent)" }}>
+                  style={{ background: "color-mix(in oklch, var(--rvbbit-accent, var(--chrome-text)) 16%, transparent)" }}
+                  title={s.provider ? "Index this MCP/query set: fetch items → ingest + embed" : "Sync from the connector"}>
                   <Zap size={11} className={busy === s.sourceId ? "animate-pulse" : ""} />
-                  {busy === s.sourceId ? "syncing…" : "Sync now"}
+                  {busy === s.sourceId ? "syncing…" : s.provider ? "Index" : "Sync now"}
+                </button>
+                <button onClick={(e) => void enrichNow(s, e.shiftKey)} disabled={enrichBusy === s.sourceId || busy === s.sourceId}
+                  className="px-1.5 py-0.5 rounded flex items-center gap-1 disabled:opacity-40"
+                  style={{ background: "color-mix(in oklch, var(--chrome-text) 12%, transparent)" }}
+                  title={"Bulk-enrich this set into the knowledge graph (entities + structured edges). Shift-click to force re-enrich every doc."}>
+                  <GitBranch size={11} className={enrichBusy === s.sourceId ? "animate-pulse" : ""} />
+                  {enrichBusy === s.sourceId ? "enriching…" : "Enrich"}
                 </button>
                 <button onClick={() => setConfirmDel(confirmDel?.sourceId === s.sourceId ? null : { sourceId: s.sourceId, purge: true })}
                   className="opacity-50 hover:opacity-100" style={{ color: "var(--danger)" }} title="delete source">
@@ -235,6 +332,178 @@ export function SourcesPanel({ conn }: { conn: string | null }) {
             </div>
           ))}
         </div>
+      </div>
+    </div>
+  )
+}
+
+// ── Providers: MCP/SQL-backed document types + instantiate them as query sources ──
+const LIST_EXAMPLE = `SELECT 'linear:'||(r->>'id')                         AS uri,
+       (r->>'identifier')||' · '||(r->>'title')      AS title,
+       (r->>'updatedAt')                             AS content_hash,
+       (r->>'updatedAt')::timestamptz                AS occurred_at,
+       concat_ws(E'\\n\\n', r->>'title', r->>'description',
+                 'Status: '||(r->>'state'))          AS body
+  FROM rvbbit.mcp_rows('Linear','list_issues','{}'::jsonb) r`
+
+function ProvidersSection({
+  conn, providers, reload, setToast,
+}: {
+  conn: string | null
+  providers: BrainProvider[]
+  reload: () => void
+  setToast: (t: { ok: boolean; msg: string } | null) => void
+}) {
+  const [open, setOpen] = useState(false)
+  const [provider, setProvider] = useState("")
+  const [label, setLabel] = useState("")
+  const [listSql, setListSql] = useState("")
+  const [itemSql, setItemSql] = useState("")
+  const [icon, setIcon] = useState("")
+  const [edgeMap, setEdgeMap] = useState("")
+  const [editing, setEditing] = useState(false)
+
+  const resetForm = () => {
+    setProvider(""); setLabel(""); setListSql(""); setItemSql(""); setIcon(""); setEdgeMap(""); setEditing(false); setOpen(false)
+  }
+  const loadInto = (p: BrainProvider) => {
+    setProvider(p.provider); setLabel(p.label); setListSql(p.listSql); setItemSql(p.itemSql ?? "")
+    setIcon(p.icon ?? ""); setEdgeMap(p.edgeCount > 0 ? p.edgeMap : ""); setEditing(true); setOpen(true)
+  }
+  const save = async () => {
+    if (!conn || !provider.trim() || !label.trim() || !listSql.trim()) return
+    if (edgeMap.trim()) {
+      try { JSON.parse(edgeMap) } catch { setToast({ ok: false, msg: "edge map is not valid JSON" }); return }
+    }
+    const err = await defineProvider(conn, {
+      provider: provider.trim(), label: label.trim(), listSql, itemSql: itemSql.trim() || null, icon: icon.trim() || null,
+      edgeMap: edgeMap.trim() || null,
+    })
+    setToast(err ? { ok: false, msg: err } : { ok: true, msg: `provider “${label.trim()}” saved` })
+    if (!err) resetForm()
+    reload()
+  }
+  const remove = async (p: string) => {
+    if (!conn) return
+    const err = await deleteProvider(conn, p)
+    setToast(err ? { ok: false, msg: err } : { ok: true, msg: "provider deleted" })
+    reload()
+  }
+
+  return (
+    <div className="flex flex-col gap-1.5">
+      <div className="flex items-center gap-1 text-[11px] opacity-70">
+        <Plug size={12} /> Document providers <span className="opacity-50">(MCP / query — Linear, JIRA, …)</span>
+        <button onClick={() => { if (open && !editing) resetForm(); else { setEditing(false); setProvider(""); setLabel(""); setListSql(""); setItemSql(""); setIcon(""); setOpen(true) } }}
+          className="ml-auto opacity-60 hover:opacity-100 flex items-center gap-0.5">
+          <Plus size={11} /> New provider
+        </button>
+      </div>
+
+      {providers.length === 0 && !open && (
+        <div className="text-[10px] opacity-50">
+          Define a provider whose “scrape” is a SQL query (e.g. <code>rvbbit.mcp_rows(&apos;Linear&apos;,&apos;list_issues&apos;,…)</code>),
+          then add it as a source. Its items become first-class, searchable, KG-linked documents.
+        </div>
+      )}
+
+      {providers.map((p) => (
+        <ProviderCard key={p.provider} conn={conn} p={p} onEdit={() => loadInto(p)} onDelete={() => void remove(p.provider)}
+          reload={reload} setToast={setToast} />
+      ))}
+
+      {open && (
+        <div className="rounded p-2 flex flex-col gap-1.5 text-[11px]" style={{ background: SOFTER, border: `1px solid ${LINE}` }}>
+          <div className="flex items-center gap-1.5">
+            <input value={provider} onChange={(e) => setProvider(e.target.value)} disabled={editing}
+              placeholder="id (e.g. linear-issues)" className="px-1.5 py-0.5 rounded outline-none disabled:opacity-50"
+              style={{ background: SOFT, width: 150 }} />
+            <input value={label} onChange={(e) => setLabel(e.target.value)} placeholder="label (e.g. Linear Issues)"
+              className="px-1.5 py-0.5 rounded outline-none flex-1" style={{ background: SOFT }} />
+            <input value={icon} onChange={(e) => setIcon(e.target.value)} placeholder="icon"
+              className="px-1.5 py-0.5 rounded outline-none" style={{ background: SOFT, width: 70 }} />
+          </div>
+          <div className="flex items-center gap-1 text-[10px] opacity-50">
+            <FileCode2 size={10} /> list SQL → columns: <code>uri, title, content_hash, occurred_at</code> (+ <code>body</code> if single-phase)
+          </div>
+          <textarea value={listSql} onChange={(e) => setListSql(e.target.value)} placeholder={LIST_EXAMPLE} rows={6}
+            className="px-1.5 py-1 rounded outline-none font-mono text-[10px] leading-snug resize-y" style={{ background: SOFT }} />
+          <div className="flex items-center gap-1 text-[10px] opacity-50">
+            <FileCode2 size={10} /> item SQL <span className="opacity-70">(optional — two-phase list→get)</span>: <code>$1</code> = uri → <code>body, title, occurred_at</code>
+          </div>
+          <textarea value={itemSql} onChange={(e) => setItemSql(e.target.value)} rows={2}
+            placeholder="leave blank if list SQL already returns body"
+            className="px-1.5 py-1 rounded outline-none font-mono text-[10px] leading-snug resize-y" style={{ background: SOFT }} />
+          <div className="flex items-center gap-1 text-[10px] opacity-50">
+            <GitBranch size={10} /> edge map <span className="opacity-70">(optional)</span>: deterministic KG edges from a <code>props</code> column —
+            <code>[{"{"}&quot;predicate&quot;,&quot;kind&quot;,&quot;path&quot;{"}"}]</code> where path is a JSONPath
+          </div>
+          <textarea value={edgeMap} onChange={(e) => setEdgeMap(e.target.value)} rows={3}
+            placeholder={'[{"predicate":"in_project","kind":"project","path":"$.project.name"},\n {"predicate":"assigned_to","kind":"person","path":"$.assignee.name"}]'}
+            className="px-1.5 py-1 rounded outline-none font-mono text-[10px] leading-snug resize-y" style={{ background: SOFT }} />
+          <div className="flex items-center gap-2">
+            <button onClick={() => void save()} disabled={!provider.trim() || !label.trim() || !listSql.trim()}
+              className="px-2 py-0.5 rounded disabled:opacity-40" style={{ background: "color-mix(in oklch, var(--chrome-text) 14%, transparent)" }}>
+              {editing ? "Update provider" : "Save provider"}
+            </button>
+            <button onClick={resetForm} className="opacity-60 hover:opacity-100 flex items-center gap-0.5"><X size={11} /> cancel</button>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function ProviderCard({
+  conn, p, onEdit, onDelete, reload, setToast,
+}: {
+  conn: string | null
+  p: BrainProvider
+  onEdit: () => void
+  onDelete: () => void
+  reload: () => void
+  setToast: (t: { ok: boolean; msg: string } | null) => void
+}) {
+  const [label, setLabel] = useState("")
+  const [adding, setAdding] = useState(false)
+  const add = async () => {
+    if (!conn || !label.trim()) return
+    setAdding(true)
+    const r = await addQuerySource(conn, { label: label.trim(), provider: p.provider })
+    setAdding(false)
+    setToast(r.error ? { ok: false, msg: r.error } : { ok: true, msg: `source “${label.trim()}” added — hit Sync now` })
+    if (!r.error) setLabel("")
+    reload()
+  }
+  return (
+    <div className="rounded p-2 flex flex-col gap-1.5 text-[11px]" style={{ background: SOFTER }}>
+      <div className="flex items-center gap-2">
+        <Layers size={12} className="opacity-60 shrink-0" />
+        <div className="flex flex-col">
+          <span className="font-medium">{p.label} <span className="opacity-40">· {p.provider}</span></span>
+          <span className="opacity-50">
+            {p.itemSql ? "two-phase (list→get)" : "single-phase"} · {p.sources} source{p.sources === 1 ? "" : "s"}
+            {p.edgeCount > 0 ? ` · ${p.edgeCount} edge${p.edgeCount === 1 ? "" : "s"}` : ""}
+            {p.description ? ` · ${p.description}` : ""}
+          </span>
+        </div>
+        <div className="ml-auto flex items-center gap-2">
+          <button onClick={onEdit} className="opacity-60 hover:opacity-100">edit</button>
+          <button onClick={onDelete} disabled={p.sources > 0} title={p.sources > 0 ? "remove its sources first" : "delete provider"}
+            className="opacity-50 hover:opacity-100 disabled:opacity-20" style={{ color: "var(--danger)" }}>
+            <Trash2 size={12} />
+          </button>
+        </div>
+      </div>
+      <div className="flex items-center gap-1.5 pl-5">
+        <input value={label} onChange={(e) => setLabel(e.target.value)} placeholder="new source label (e.g. Linear · ENG)"
+          onKeyDown={(e) => { if (e.key === "Enter") void add() }}
+          className="px-1.5 py-0.5 rounded outline-none flex-1" style={{ background: SOFT }} />
+        <button onClick={() => void add()} disabled={!label.trim() || adding}
+          className="px-2 py-0.5 rounded flex items-center gap-1 disabled:opacity-40"
+          style={{ background: "color-mix(in oklch, var(--rvbbit-accent, var(--chrome-text)) 16%, transparent)" }}>
+          <Plus size={11} /> {adding ? "adding…" : "Add source"}
+        </button>
       </div>
     </div>
   )

@@ -15,12 +15,12 @@ interface Err {
   error: string
 }
 
-async function run(connectionId: string, sql: string, rowLimit = 5000): Promise<Ok | Err> {
+async function run(connectionId: string, sql: string, rowLimit = 5000, statementTimeout?: number): Promise<Ok | Err> {
   try {
     const res = await fetch("/api/db/query", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ connectionId, sql, rowLimit }),
+      body: JSON.stringify({ connectionId, sql, rowLimit, ...(statementTimeout != null ? { statementTimeout } : {}) }),
     })
     return (await res.json()) as Ok | Err
   } catch (e) {
@@ -272,6 +272,8 @@ export interface BrainSource {
   credsRef: string | null
   lastSyncedMs: number | null
   docs: number
+  /** non-null → a query source (MCP/SQL); the provider it's bound to */
+  provider: string | null
 }
 
 /** All configured sources + their live doc counts + remote config. */
@@ -280,6 +282,7 @@ export async function fetchSources(connectionId: string): Promise<{ sources: Bra
     connectionId,
     `SELECT s.source_id, s.label, s.kind, s.enabled, s.creds_ref,
             s.config->>'endpoint' AS endpoint, s.config->'folders' AS folders,
+            s.config->>'provider' AS provider,
             extract(epoch FROM s.last_synced_at) * 1000 AS last_ms,
             (SELECT count(*) FROM rvbbit.brain_documents d WHERE d.source_id = s.source_id AND d.deleted_at IS NULL) AS docs
        FROM rvbbit.brain_sources s ORDER BY s.label`,
@@ -296,9 +299,91 @@ export async function fetchSources(connectionId: string): Promise<{ sources: Bra
       credsRef: str(row.creds_ref),
       lastSyncedMs: num(row.last_ms),
       docs: Number(row.docs ?? 0),
+      provider: str(row.provider),
     })),
     error: null,
   }
+}
+
+export interface BrainProvider {
+  provider: string
+  label: string
+  listSql: string
+  itemSql: string | null
+  icon: string | null
+  description: string | null
+  /** declarative structured-edge specs [{predicate, kind, path}]; JSON string for the editor */
+  edgeMap: string
+  /** number of edge specs (for the card summary) */
+  edgeCount: number
+  /** how many sources currently bind this provider */
+  sources: number
+}
+
+/** All registered document-type providers (the reusable "scrape is SQL" definitions). */
+export async function fetchProviders(connectionId: string): Promise<{ providers: BrainProvider[]; error: string | null }> {
+  const r = await run(
+    connectionId,
+    `SELECT p.provider, p.label, p.list_sql, p.item_sql, p.icon, p.description,
+            p.edge_map::text AS edge_map, jsonb_array_length(coalesce(p.edge_map,'[]'::jsonb)) AS edge_count,
+            (SELECT count(*) FROM rvbbit.brain_sources s WHERE s.config->>'provider' = p.provider) AS sources
+       FROM rvbbit.brain_doc_providers p ORDER BY p.label`,
+  )
+  if (!r.ok) return { providers: [], error: r.error }
+  return {
+    providers: r.rows.map((row) => ({
+      provider: String(row.provider),
+      label: String(row.label ?? ""),
+      listSql: String(row.list_sql ?? ""),
+      itemSql: str(row.item_sql),
+      icon: str(row.icon),
+      description: str(row.description),
+      edgeMap: String(row.edge_map ?? "[]"),
+      edgeCount: Number(row.edge_count ?? 0),
+      sources: Number(row.sources ?? 0),
+    })),
+    error: null,
+  }
+}
+
+/** Create/update a provider (document type). item_sql null/empty → single-phase.
+ *  edgeMap is a JSON array string of {predicate, kind, path} structured-edge specs. */
+export async function defineProvider(
+  connectionId: string,
+  p: { provider: string; label: string; listSql: string; itemSql?: string | null; icon?: string | null; description?: string | null; edgeMap?: string | null },
+): Promise<string | null> {
+  const edge = p.edgeMap && p.edgeMap.trim() ? p.edgeMap.trim() : "[]"
+  const r = await run(
+    connectionId,
+    `SELECT rvbbit.brain_define_provider(${q(p.provider)}, ${q(p.label)}, ${q(p.listSql)}, ` +
+      `${p.itemSql && p.itemSql.trim() ? q(p.itemSql) : "NULL"}, ` +
+      `${p.icon ? q(p.icon) : "NULL"}, ${p.description ? q(p.description) : "NULL"}, ${q(edge)}::jsonb)`,
+  )
+  return r.ok ? null : r.error
+}
+
+/** Remove a provider (only if no source binds it). */
+export async function deleteProvider(connectionId: string, provider: string): Promise<string | null> {
+  const r = await run(
+    connectionId,
+    `DELETE FROM rvbbit.brain_doc_providers WHERE provider = ${q(provider)}
+       AND NOT EXISTS (SELECT 1 FROM rvbbit.brain_sources s WHERE s.config->>'provider' = ${q(provider)})`,
+  )
+  if (!r.ok) return r.error
+  return null
+}
+
+/** Create a query source bound to a provider (globally visible docs). */
+export async function addQuerySource(
+  connectionId: string,
+  s: { label: string; provider: string },
+): Promise<{ sourceId: number | null; error: string | null }> {
+  const r = await run(
+    connectionId,
+    `SELECT rvbbit.brain_add_query_source(${q(s.label)}, ${q(s.provider)}) AS id`,
+  )
+  if (!r.ok) return { sourceId: null, error: r.error }
+  return { sourceId: r.rows[0]?.id == null ? null : Number(r.rows[0].id), error: null }
 }
 
 /** Create/update a remote source (gdrive, …). config carries endpoint + folders. */
@@ -329,12 +414,12 @@ export async function setSourceEnabled(connectionId: string, sourceId: number, o
   return r.ok ? null : r.error
 }
 
-/** Trigger a sync now (connector → manifest → extract → reconcile). Returns the run summary. */
+/** Trigger a sync now — routed by source kind (connector OR query/MCP). Returns the run summary. */
 export async function syncSourceNow(
   connectionId: string,
   sourceId: number,
 ): Promise<{ result: Record<string, unknown> | null; error: string | null }> {
-  const r = await run(connectionId, `SELECT rvbbit.brain_sync_source(${Math.floor(sourceId)}, 'manual') AS r`, 1)
+  const r = await run(connectionId, `SELECT rvbbit.brain_sync_dispatch(${Math.floor(sourceId)}, 'manual') AS r`, 1)
   if (!r.ok) return { result: null, error: r.error }
   return { result: (r.rows[0]?.r as Record<string, unknown>) ?? null, error: null }
 }
@@ -457,6 +542,33 @@ export async function fetchDocGraph(
   }
 }
 
+export interface NerStatus {
+  /** the GLiNER extract_entities operator exists → enrichment will use it for full entity coverage */
+  installed: boolean
+  backendRegistered: boolean
+  /** catalog id to deep-link the install panel (falls back to the known id) */
+  catalogId: string | null
+}
+
+/** Whether the GLiNER NER capability is installed (enrichment uses it if so). */
+export async function fetchNerStatus(connectionId: string): Promise<NerStatus> {
+  const r = await run(
+    connectionId,
+    `SELECT EXISTS(SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+                   WHERE n.nspname='rvbbit' AND p.proname='extract_entities') AS installed,
+            EXISTS(SELECT 1 FROM rvbbit.backends WHERE name='extract_gliner') AS backend_registered,
+            (CASE WHEN to_regclass('rvbbit.capability_catalog') IS NOT NULL
+                  THEN (SELECT id FROM rvbbit.capability_catalog WHERE backend_name='extract_gliner' LIMIT 1) END) AS catalog_id`,
+  )
+  if (!r.ok) return { installed: false, backendRegistered: false, catalogId: null }
+  const row = r.rows[0] ?? {}
+  return {
+    installed: row.installed === true || row.installed === "t",
+    backendRegistered: row.backend_registered === true || row.backend_registered === "t",
+    catalogId: row.catalog_id ? String(row.catalog_id) : null,
+  }
+}
+
 /** Delete a source. purgeDocs=true wipes its docs + KG nodes + synthetic roles; false keeps docs
  *  (reassigned to a "<label> (archived)" manual source). Returns the summary. */
 export async function deleteSource(
@@ -514,6 +626,24 @@ export async function enrichDocNow(
   docId: number,
 ): Promise<{ result: Record<string, unknown> | null; error: string | null }> {
   const r = await run(connectionId, `SELECT rvbbit.brain_enrich_doc(${Math.floor(docId)}) AS r`, 1)
+  if (!r.ok) return { result: null, error: r.error }
+  return { result: (r.rows[0]?.r as Record<string, unknown>) ?? null, error: null }
+}
+
+/** Bulk-enrich a whole source ("set"): KG entities + structured edges for every doc. By default only
+ *  new/changed docs; force=true re-enriches all. Triples (LLM) auto-skip for query/MCP sources.
+ *  No statement timeout — a large set can take a while. */
+export async function enrichSource(
+  connectionId: string,
+  sourceId: number,
+  opts?: { force?: boolean },
+): Promise<{ result: Record<string, unknown> | null; error: string | null }> {
+  const r = await run(
+    connectionId,
+    `SELECT rvbbit.brain_enrich_source(${Math.floor(sourceId)}, ${opts?.force ? "true" : "false"}) AS r`,
+    1,
+    0,
+  )
   if (!r.ok) return { result: null, error: r.error }
   return { result: (r.rows[0]?.r as Record<string, unknown>) ?? null, error: null }
 }

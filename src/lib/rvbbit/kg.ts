@@ -184,6 +184,13 @@ function epoch(v: unknown): number | null {
 function sqlStr(s: string): string {
   return `'${String(s).replace(/'/g, "''")}'`
 }
+function sqlBigintArray(items: number[]): string {
+  const ids = items
+    .map((n) => Math.trunc(Number(n)))
+    .filter((n) => Number.isFinite(n) && n > 0)
+  if (ids.length === 0) return "ARRAY[]::bigint[]"
+  return `ARRAY[${Array.from(new Set(ids)).join(", ")}]::bigint[]`
+}
 
 // ── Graph-level: graphs + shape + activity ──────────────────────────
 
@@ -557,6 +564,138 @@ export async function fetchKgNeighborsById(
     fromFrequency: num(r.from_frequency),
     toFrequency: num(r.to_frequency),
   }))
+}
+
+export interface KgNeighborhoodNode {
+  nodeId: number
+  graphId: string
+  kind: string
+  label: string
+  confidence: number | null
+  properties: unknown
+  degree: number
+  frequency: number
+  isSeed: boolean
+}
+
+export interface KgNeighborhoodEdge {
+  edgeId: number
+  fromNodeId: number
+  toNodeId: number
+  predicate: string
+  confidence: number | null
+  properties: unknown
+  evidenceCount: number
+  connectsSeeds: boolean
+}
+
+export interface KgNeighborhood {
+  nodes: KgNeighborhoodNode[]
+  edges: KgNeighborhoodEdge[]
+}
+
+export async function fetchKgNeighborhoodByNodeIds(
+  connectionId: string,
+  graphId: string,
+  nodeIds: number[],
+  maxEdges: number = 900,
+): Promise<{ neighborhood: KgNeighborhood; error?: string }> {
+  const seedArray = sqlBigintArray(nodeIds)
+  if (seedArray === "ARRAY[]::bigint[]") return { neighborhood: { nodes: [], edges: [] } }
+  const edgeLimit = Math.max(1, Math.min(3000, maxEdges))
+  const res = await runQuery(
+    connectionId,
+    `WITH seeds AS (
+       SELECT DISTINCT unnest(${seedArray}) AS node_id
+     ),
+     ranked_edges AS (
+       SELECT e.edge_id, e.subject_node_id, e.object_node_id, e.predicate,
+              e.confidence, e.properties,
+              (e.subject_node_id IN (SELECT node_id FROM seeds)
+               AND e.object_node_id IN (SELECT node_id FROM seeds)) AS connects_seeds,
+              (SELECT count(*) FROM rvbbit.kg_evidence ev
+                WHERE ev.graph_id = ${sqlStr(graphId)} AND ev.edge_id = e.edge_id) AS evidence_count
+       FROM rvbbit.kg_edges e
+       WHERE e.graph_id = ${sqlStr(graphId)}
+         AND (e.subject_node_id IN (SELECT node_id FROM seeds)
+              OR e.object_node_id IN (SELECT node_id FROM seeds))
+       ORDER BY connects_seeds DESC, e.confidence DESC NULLS LAST, e.edge_id
+       LIMIT ${edgeLimit}
+     ),
+     endpoint_ids AS (
+       SELECT node_id FROM seeds
+       UNION
+       SELECT subject_node_id FROM ranked_edges
+       UNION
+       SELECT object_node_id FROM ranked_edges
+     ),
+     node_rows AS (
+       SELECT n.node_id, n.graph_id, n.kind, n.label, n.confidence, n.properties,
+              n.node_id IN (SELECT node_id FROM seeds) AS is_seed,
+              (SELECT count(*) FROM rvbbit.kg_edges e2
+                WHERE e2.graph_id = ${sqlStr(graphId)}
+                  AND (e2.subject_node_id = n.node_id OR e2.object_node_id = n.node_id)) AS degree,
+              (SELECT count(DISTINCT ev.source_pk)
+                 FROM rvbbit.kg_evidence ev
+                 JOIN rvbbit.kg_edges e3 ON e3.edge_id = ev.edge_id
+                WHERE ev.graph_id = ${sqlStr(graphId)}
+                  AND (e3.subject_node_id = n.node_id OR e3.object_node_id = n.node_id)) AS frequency
+       FROM rvbbit.kg_nodes n
+       WHERE n.graph_id = ${sqlStr(graphId)}
+         AND n.node_id IN (SELECT node_id FROM endpoint_ids)
+     )
+     SELECT
+       (SELECT COALESCE(jsonb_agg(jsonb_build_object(
+          'node_id', node_id,
+          'graph_id', graph_id,
+          'kind', kind,
+          'label', label,
+          'confidence', confidence,
+          'properties', properties,
+          'degree', degree,
+          'frequency', frequency,
+          'is_seed', is_seed
+        ) ORDER BY is_seed DESC, degree DESC, node_id), '[]'::jsonb) FROM node_rows) AS nodes,
+       (SELECT COALESCE(jsonb_agg(jsonb_build_object(
+          'edge_id', edge_id,
+          'from_node_id', subject_node_id,
+          'to_node_id', object_node_id,
+          'predicate', predicate,
+          'confidence', confidence,
+          'properties', properties,
+          'evidence_count', evidence_count,
+          'connects_seeds', connects_seeds
+        ) ORDER BY connects_seeds DESC, confidence DESC NULLS LAST, edge_id), '[]'::jsonb) FROM ranked_edges) AS edges`,
+  )
+  if (!res.ok) return { neighborhood: { nodes: [], edges: [] }, error: res.error }
+  const row = res.rows[0] ?? {}
+  const rawNodes = (row.nodes ?? []) as Array<Record<string, unknown>>
+  const rawEdges = (row.edges ?? []) as Array<Record<string, unknown>>
+  return {
+    neighborhood: {
+      nodes: rawNodes.map((n) => ({
+        nodeId: num(n.node_id),
+        graphId: String(n.graph_id ?? graphId),
+        kind: String(n.kind ?? ""),
+        label: String(n.label ?? ""),
+        confidence: numOrNull(n.confidence),
+        properties: n.properties ?? null,
+        degree: num(n.degree),
+        frequency: num(n.frequency),
+        isSeed: n.is_seed === true,
+      })),
+      edges: rawEdges.map((e) => ({
+        edgeId: num(e.edge_id),
+        fromNodeId: num(e.from_node_id),
+        toNodeId: num(e.to_node_id),
+        predicate: String(e.predicate ?? ""),
+        confidence: numOrNull(e.confidence),
+        properties: e.properties ?? null,
+        evidenceCount: num(e.evidence_count),
+        connectsSeeds: e.connects_seeds === true,
+      })),
+    },
+  }
 }
 
 export async function fetchKgEvidenceForNode(

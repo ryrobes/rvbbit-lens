@@ -121,11 +121,11 @@ export async function fetchColumnPreview(
 }
 
 /** Best-effort KG metadata — never throws; falls back to the hit's fingerprint. */
-export async function fetchNodeMeta(connectionId: string, hit: DataSearchHit): Promise<NodeMeta> {
+export async function fetchNodeMeta(connectionId: string, hit: DataSearchHit, graph: string = CATALOG_GRAPH): Promise<NodeMeta> {
   const fallbackDoc = hit.doc || null
   const sql =
     `SELECT properties FROM rvbbit.kg_nodes ` +
-    `WHERE node_id = ${Number(hit.nodeId)} AND graph_id = ${sqlStr(CATALOG_GRAPH)}`
+    `WHERE node_id = ${Number(hit.nodeId)} AND graph_id = ${sqlStr(graph)}`
   const res = await runQuery(connectionId, sql, 1)
   let props: Record<string, unknown> = {}
   if (res.ok && res.rows[0]?.properties != null) {

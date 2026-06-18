@@ -794,8 +794,10 @@ export async function listMcpCapabilities(
   }
 }
 
-/** Push one install-time secret to the gateway (never to Postgres). */
+/** Push one install-time secret to the gateway (never to Postgres). connectionId
+ *  lets the server resolve the gateway endpoint from rvbbit.mcp_gateway_endpoint(). */
 export async function pushMcpSecret(
+  connectionId: string,
   server: string,
   name: string,
   value: string,
@@ -804,7 +806,7 @@ export async function pushMcpSecret(
     const res = await fetch("/api/mcp/secret", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ server, name, value }),
+      body: JSON.stringify({ connectionId, server, name, value }),
     })
     const j = (await res.json()) as { ok: boolean; error?: string }
     return j.ok ? { ok: true } : { ok: false, error: j.error }
@@ -841,7 +843,7 @@ export async function installMcpCapability(
   // 2. Push secrets to the gateway (values never touch PG).
   for (const [name, value] of Object.entries(secrets)) {
     if (!value || !value.trim()) continue
-    const res = await pushMcpSecret(server, name, value)
+    const res = await pushMcpSecret(connectionId, server, name, value)
     if (!res.ok) return { ok: false, error: `secret ${name}: ${res.error}`, server }
   }
 

@@ -43,7 +43,9 @@ export function useScryCascade(
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const inputRefs = useRef<(HTMLInputElement | null)[]>([])
   const onSubmitRef = useRef(onSubmit)
-  onSubmitRef.current = onSubmit
+  useEffect(() => {
+    onSubmitRef.current = onSubmit
+  }, [onSubmit])
 
   const setStages = useCallback((next: ScryStage[]) => {
     stagesRef.current = next
@@ -53,9 +55,11 @@ export function useScryCascade(
   // Fresh chain each time Scry opens; focus the root input.
   useEffect(() => {
     if (!open) return
-    setStages([emptyStage()])
-    runRef.current++
-    const t = setTimeout(() => inputRefs.current[0]?.focus(), 30)
+    const t = setTimeout(() => {
+      setStages([emptyStage()])
+      runRef.current++
+      inputRefs.current[0]?.focus()
+    }, 30)
     return () => clearTimeout(t)
   }, [open, setStages])
 
@@ -73,20 +77,22 @@ export function useScryCascade(
     async (from: number) => {
       if (!connectionId) return
       const myRun = ++runRef.current
-      let scope: Set<string> | null =
-        from === 0 ? null : scopeFromHits(stagesRef.current[from - 1]?.hits ?? [])
+      let scope =
+        from === 0 ? null : await scopeFromHits(connectionId, graph, stagesRef.current[from - 1]?.hits ?? [])
+      if (runRef.current !== myRun) return
       for (let i = from; i < stagesRef.current.length; i++) {
         const q = stagesRef.current[i].query.trim()
         if (!q) {
           patch(i, { hits: [], loading: false, error: undefined })
-          scope = new Set()
+          scope = { nodeIds: new Set(), rels: new Set() }
           continue
         }
         patch(i, { loading: true })
         const { hits, error } = await runScryStage(connectionId, q, scope, graph)
         if (runRef.current !== myRun) return
         patch(i, { hits, loading: false, error })
-        scope = scopeFromHits(hits)
+        scope = await scopeFromHits(connectionId, graph, hits)
+        if (runRef.current !== myRun) return
       }
     },
     [connectionId, patch, graph],
@@ -94,7 +100,9 @@ export function useScryCascade(
 
   // Re-flow the whole chain against the new graph when the source toggles.
   const recomputeRef = useRef(recompute)
-  recomputeRef.current = recompute
+  useEffect(() => {
+    recomputeRef.current = recompute
+  }, [recompute])
   useEffect(() => {
     if (open) void recomputeRef.current(0)
   }, [graph, open])

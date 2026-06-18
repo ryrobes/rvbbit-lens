@@ -1,8 +1,8 @@
 "use client"
 
 import { Loader2, Sparkles, X } from "@/lib/icons"
-import { cn } from "@/lib/utils"
 import type { ScrySourceId } from "@/lib/desktop/scry"
+import type { KgGraphSummary } from "@/lib/rvbbit/kg"
 import type { UseScryCascade } from "./use-scry-cascade"
 
 /**
@@ -18,7 +18,10 @@ export function ScryHud({
   scopeActive = false,
   onExitScope,
   source = "catalog",
-  onSetSource,
+  graphId = source === "data" ? "data_kg" : "db_catalog",
+  graphs = [],
+  graphsError = null,
+  onSetGraphId,
 }: {
   cascade: UseScryCascade
   onClose: () => void
@@ -29,12 +32,21 @@ export function ScryHud({
   /** a subgraph scope is active */
   scopeActive?: boolean
   onExitScope?: () => void
-  /** active layer: "catalog" (structure) vs "data" (derived KG) */
+  /** active graph corpus class, derived from the selected graph id */
   source?: ScrySourceId
-  onSetSource?: (s: ScrySourceId) => void
+  /** active KG graph_id searched by rvbbit.data_search */
+  graphId?: string
+  /** available KG graph_ids from rvbbit.kg_* tables */
+  graphs?: KgGraphSummary[]
+  graphsError?: string | null
+  onSetGraphId?: (graphId: string) => void
 }) {
   const { stages, finalHits, finalError, canRefine } = cascade
   const relCount = new Set(finalHits.map((h) => `${h.schema}.${h.rel}`)).size
+  const factResults = finalHits.length > 0 && finalHits.every((h) => h.kind !== "db_table" && h.kind !== "db_column")
+  const graphOptions = graphs.length > 0
+    ? graphs
+    : [{ graphId, nodes: 0, edges: 0, evidenceRows: 0, lastActivity: null }]
 
   return (
     <div
@@ -44,24 +56,28 @@ export function ScryHud({
       <div className="flex items-center gap-2 border-b border-chrome-border/60 px-3 py-2">
         <Sparkles className="h-3.5 w-3.5 text-terminal" />
         <span className="font-mono text-[11px] uppercase tracking-[0.18em] text-terminal/80">scry</span>
-        {onSetSource ? (
-          <span
-            className="ml-1 inline-flex overflow-hidden rounded border border-chrome-border/60"
-            title="structure = schema/fingerprints · data = entities/relationships derived from the data itself"
+        {onSetGraphId ? (
+          <label
+            className="ml-1 flex min-w-0 items-center gap-1"
+            title="Graph corpus searched by rvbbit.data_search"
           >
-            {(["catalog", "data"] as ScrySourceId[]).map((s) => (
-              <button
-                key={s}
-                type="button"
-                onClick={() => onSetSource(s)}
-                className={cn(
-                  "px-2 py-0.5 font-mono text-[9px] uppercase tracking-wide transition-colors",
-                  source === s ? "bg-terminal/20 text-terminal" : "text-chrome-text/45 hover:text-foreground",
-                )}
-              >
-                {s === "data" ? "data" : "structure"}
-              </button>
-            ))}
+            <span className="sr-only">Search graph</span>
+            <select
+              value={graphId}
+              onChange={(e) => onSetGraphId(e.target.value)}
+              className="h-6 max-w-[230px] rounded border border-chrome-border/60 bg-chrome-bg px-2 font-mono text-[10px] text-chrome-text outline-none hover:bg-foreground/[0.05] focus:border-terminal/70 focus:text-foreground"
+            >
+              {graphOptions.map((graph) => (
+                <option key={graph.graphId} value={graph.graphId}>
+                  {graphOptionLabel(graph)}
+                </option>
+              ))}
+            </select>
+          </label>
+        ) : null}
+        {graphsError ? (
+          <span className="max-w-[140px] truncate text-[10px] text-danger" title={graphsError}>
+            graphs unavailable
           </span>
         ) : null}
         <span className="ml-auto text-[10px] text-chrome-text/45">
@@ -115,11 +131,9 @@ export function ScryHud({
           {finalError ? (
             <span className="text-danger">{finalError}</span>
           ) : finalHits.length > 0 ? (
-            `${finalHits.length} ${source === "data" ? "entities" : "nodes"} · ${relCount} relations`
-          ) : source === "data" ? (
-            "type to scry the data — entities & relationships pulled from the rows"
+            `${finalHits.length} ${factResults ? "entities" : "nodes"} · ${relCount} relations`
           ) : (
-            "type to scry the catalog"
+            `type to scry ${graphId}`
           )}
         </span>
         {bloomOverflow > 0 ? (
@@ -161,4 +175,16 @@ export function ScryHud({
       </div>
     </div>
   )
+}
+
+function graphOptionLabel(graph: KgGraphSummary): string {
+  const graphKind = graph.graphId === "db_catalog" ? "structure" : graph.graphId === "data_kg" ? "facts" : "graph"
+  const counts = graph.nodes > 0 || graph.edges > 0 ? ` - ${fmtCompact(graph.nodes)}n/${fmtCompact(graph.edges)}e` : ""
+  return `${graph.graphId} - ${graphKind}${counts}`
+}
+
+function fmtCompact(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(n >= 10_000_000 ? 0 : 1)}m`
+  if (n >= 1_000) return `${(n / 1_000).toFixed(n >= 10_000 ? 0 : 1)}k`
+  return String(n)
 }

@@ -196,6 +196,57 @@ const CAMERA_HISTORY_DEBOUNCE_MS = 260
 const CAMERA_RESTORE_MS = 240
 const TOPIC_POINT_CLOUD_LIMIT = 56
 const GOLDEN_ANGLE = Math.PI * (3 - Math.sqrt(5))
+const TOPIC_GENERIC_KINDS = new Set([
+  "document",
+  "documents",
+  "entity",
+  "entities",
+  "topic",
+  "node",
+  "record",
+  "row",
+  "chunk",
+])
+const TOPIC_STOP_WORDS = new Set([
+  "a",
+  "about",
+  "and",
+  "are",
+  "as",
+  "at",
+  "be",
+  "by",
+  "document",
+  "documents",
+  "entity",
+  "entities",
+  "for",
+  "from",
+  "has",
+  "have",
+  "in",
+  "into",
+  "is",
+  "it",
+  "kg",
+  "mentions",
+  "node",
+  "of",
+  "on",
+  "or",
+  "record",
+  "records",
+  "related",
+  "relates",
+  "relation",
+  "row",
+  "rows",
+  "the",
+  "this",
+  "to",
+  "topic",
+  "with",
+])
 
 export function KnowledgeGraphCanvas({
   graph,
@@ -1588,16 +1639,124 @@ function addTopicPointCloud(graph: Graph<KgSigmaNodeAttributes, KgSigmaEdgeAttri
 }
 
 function topicLabel(detail: GraphBundle, group: GraphGroup): string {
+  const memberSet = new Set(group.nodes)
   const kindCounts = new Map<string, number>()
+  const candidates = new Map<string, { label: string; score: number }>()
+
   for (const node of group.nodes) {
     if (!detail.graphology.hasNode(node)) continue
-    const kind = detail.graphology.getNodeAttribute(node, "kind")
-    kindCounts.set(kind, (kindCounts.get(kind) ?? 0) + 1)
+    const attrs = detail.graphology.getNodeAttributes(node)
+    kindCounts.set(attrs.kind, (kindCounts.get(attrs.kind) ?? 0) + 1)
+    const degreeBoost = Math.sqrt(Math.max(0, attrs.degree))
+    addTopicCandidate(candidates, attrs.label, 2.5 + degreeBoost * 0.75)
+    if (!isGenericTopicTerm(attrs.kind)) addTopicCandidate(candidates, attrs.kind, 0.9 + degreeBoost * 0.18)
   }
-  const topKinds = Array.from(kindCounts.entries()).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
-  const top = topKinds[0]?.[0] ?? group.label
+
+  detail.graphology.forEachEdge((_edge, attrs, source, target) => {
+    const sourceIn = memberSet.has(String(source))
+    const targetIn = memberSet.has(String(target))
+    if (!sourceIn && !targetIn) return
+    const internal = sourceIn && targetIn
+    const edgeWeight = internal ? 1.35 : 0.45
+    addTopicCandidate(candidates, attrs.predicate, edgeWeight)
+    if (sourceIn) addTopicCandidate(candidates, detail.nodeByKey.get(String(source))?.label, internal ? 1.1 : 0.35)
+    if (targetIn) addTopicCandidate(candidates, detail.nodeByKey.get(String(target))?.label, internal ? 1.1 : 0.35)
+  })
+
+  const labels = rankedTopicLabels(candidates, 2)
+  if (labels.length > 0) return `${labels.join(" / ")} (${group.count})`
+
+  const topKinds = Array.from(kindCounts.entries())
+    .filter(([kind]) => !isGenericTopicTerm(kind))
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+  const top = humanizeTopicText(topKinds[0]?.[0] ?? group.label) || "topic"
   const rest = topKinds.length > 1 ? ` +${topKinds.length - 1}` : ""
   return `${top}${rest} (${group.count})`
+}
+
+function addTopicCandidate(
+  candidates: Map<string, { label: string; score: number }>,
+  raw: string | null | undefined,
+  score: number,
+) {
+  const phrase = cleanTopicPhrase(raw)
+  if (phrase) bumpTopicCandidate(candidates, phrase, score)
+  for (const token of topicTokens(raw)) {
+    bumpTopicCandidate(candidates, token, score * 0.55)
+  }
+}
+
+function bumpTopicCandidate(candidates: Map<string, { label: string; score: number }>, label: string, score: number) {
+  if (!label || score <= 0) return
+  const key = normalizeTopicKey(label)
+  if (!key || TOPIC_STOP_WORDS.has(key) || isNumericTopicToken(key)) return
+  const existing = candidates.get(key)
+  if (existing) {
+    existing.score += score
+  } else {
+    candidates.set(key, { label, score })
+  }
+}
+
+function rankedTopicLabels(candidates: Map<string, { label: string; score: number }>, limit: number): string[] {
+  const chosen: string[] = []
+  const chosenKeys: string[] = []
+  const ranked = Array.from(candidates.values())
+    .sort((a, b) => b.score - a.score || a.label.length - b.label.length || a.label.localeCompare(b.label))
+  for (const candidate of ranked) {
+    const key = normalizeTopicKey(candidate.label)
+    if (!key || chosenKeys.some((existing) => topicKeysOverlap(existing, key))) continue
+    chosen.push(candidate.label)
+    chosenKeys.push(key)
+    if (chosen.length >= limit) break
+  }
+  return chosen
+}
+
+function cleanTopicPhrase(raw: string | null | undefined): string | null {
+  const human = humanizeTopicText(raw)
+  if (!human || human.length < 3 || human.length > 44) return null
+  const key = normalizeTopicKey(human)
+  if (!key || TOPIC_STOP_WORDS.has(key) || isGenericTopicTerm(key) || isNumericTopicToken(key)) return null
+  return human
+}
+
+function topicTokens(raw: string | null | undefined): string[] {
+  const human = humanizeTopicText(raw)
+  if (!human) return []
+  return human
+    .toLowerCase()
+    .split(/[^a-z0-9]+/g)
+    .map((token) => token.trim())
+    .filter((token) => token.length >= 3 && !TOPIC_STOP_WORDS.has(token) && !isNumericTopicToken(token))
+    .slice(0, 8)
+}
+
+function humanizeTopicText(raw: string | null | undefined): string {
+  return String(raw ?? "")
+    .replace(/[_:/\\.-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 44)
+}
+
+function normalizeTopicKey(value: string): string {
+  return humanizeTopicText(value).toLowerCase()
+}
+
+function isGenericTopicTerm(value: string): boolean {
+  return TOPIC_GENERIC_KINDS.has(normalizeTopicKey(value))
+}
+
+function isNumericTopicToken(value: string): boolean {
+  return /^[0-9]+$/.test(value)
+}
+
+function topicKeysOverlap(a: string, b: string): boolean {
+  if (a === b) return true
+  const aParts = new Set(a.split(/\s+/g))
+  const bParts = b.split(/\s+/g)
+  return bParts.some((part) => aParts.has(part))
 }
 
 function computeDegrees(graph: KgGraph): Map<number, number> {

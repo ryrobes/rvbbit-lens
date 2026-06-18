@@ -16,7 +16,7 @@
 
 export const CATALOG_GRAPH = "db_catalog"
 
-export type CatalogKind = "db_table" | "db_column"
+export type CatalogKind = "db_table" | "db_column" | (string & {})
 
 export interface DataSearchHit {
   nodeId: number
@@ -117,6 +117,7 @@ export async function searchData(
   if (!query.trim()) return { hits: [] }
   const lim = Math.max(1, Math.min(200, k))
   const g = sqlStr(graph)
+  const canFallbackToKgNodes = graph !== CATALOG_GRAPH
   // Wrap data_search to attach, per hit: DEGREE (incident edges = connectedness) and
   // FREQUENCY (distinct source rows mentioning the entity = recurrence across reports).
   // Both are single hash-joinable aggregates over the existing kg_edges/kg_evidence
@@ -149,16 +150,117 @@ export async function searchData(
        LEFT JOIN freq f ON f.node_id = s.node_id
       ORDER BY s.score DESC NULLS LAST`,
   )
+  if (!res.ok) {
+    if (canFallbackToKgNodes) {
+      const fallback = await searchKgNodes(connectionId, query, lim, kinds, graph)
+      if (!fallback.error) return fallback
+    }
+    return { hits: [], error: res.error }
+  }
+  const hits = res.rows.map((r) => ({
+    nodeId: num(r.node_id),
+    kind: (String(r.kind ?? "db_column") as CatalogKind),
+    schema: String(r.schema_name ?? ""),
+    rel: String(r.rel_name ?? ""),
+    col: strOrNull(r.col_name),
+    score: numOrNull(r.score),
+    doc: String(r.doc ?? ""),
+    degree: num(r.degree),
+    frequency: num(r.frequency),
+  }))
+  if (hits.length === 0 && canFallbackToKgNodes) return searchKgNodes(connectionId, query, lim, kinds, graph)
+  return { hits }
+}
+
+async function searchKgNodes(
+  connectionId: string,
+  query: string,
+  k: number,
+  kinds: CatalogKind[] | null,
+  graph: string,
+): Promise<{ hits: DataSearchHit[]; error?: string }> {
+  const q = query.trim()
+  if (!q) return { hits: [] }
+  const g = sqlStr(graph)
+  const res = await runQuery(
+    connectionId,
+    `WITH node_docs AS (
+       SELECT n.node_id, n.kind, n.label, n.confidence, n.properties,
+              left(concat_ws(E'\\n',
+                n.kind || ': ' || n.label,
+                NULLIF(n.properties::text, '{}'),
+                rels.relation_text
+              ), 32768) AS doc
+         FROM rvbbit.kg_nodes n
+         LEFT JOIN LATERAL (
+           SELECT string_agg(DISTINCT concat_ws(' ', e.predicate, other.label), ' ') AS relation_text
+             FROM rvbbit.kg_edges e
+             JOIN rvbbit.kg_nodes other
+               ON other.graph_id = e.graph_id
+              AND other.node_id = CASE
+                    WHEN e.subject_node_id = n.node_id THEN e.object_node_id
+                    ELSE e.subject_node_id
+                  END
+            WHERE e.graph_id = ${g}
+              AND (e.subject_node_id = n.node_id OR e.object_node_id = n.node_id)
+         ) rels ON true
+        WHERE n.graph_id = ${g}
+          AND (${sqlTextArray(kinds)} IS NULL OR n.kind = ANY (${sqlTextArray(kinds)}))
+     ),
+     scored AS (
+       SELECT nd.*,
+              (CASE WHEN lower(nd.label) LIKE lower(${sqlStr(q)}) || '%' THEN 4 ELSE 0 END
+               + CASE WHEN position(lower(${sqlStr(q)}) IN lower(nd.label)) > 0 THEN 3 ELSE 0 END
+               + CASE WHEN position(lower(${sqlStr(q)}) IN lower(nd.kind)) > 0 THEN 1.5 ELSE 0 END
+               + CASE WHEN position(lower(${sqlStr(q)}) IN lower(nd.doc)) > 0 THEN 1 ELSE 0 END
+               + ts_rank_cd(to_tsvector('english', nd.doc), websearch_to_tsquery('english', ${sqlStr(q)}))
+              )::float8 AS raw_score
+         FROM node_docs nd
+     ),
+     hits AS (
+       SELECT *
+         FROM scored
+        WHERE raw_score > 0
+        ORDER BY raw_score DESC, confidence DESC NULLS LAST, node_id
+        LIMIT ${k}
+     ),
+     deg AS (
+       SELECT h.node_id, count(e.edge_id) AS degree
+         FROM hits h
+         JOIN rvbbit.kg_edges e
+           ON e.graph_id = ${g}
+          AND (e.subject_node_id = h.node_id OR e.object_node_id = h.node_id)
+        GROUP BY h.node_id
+     ),
+     freq AS (
+       SELECT h.node_id, count(DISTINCT ev.source_pk) AS frequency
+         FROM hits h
+         LEFT JOIN rvbbit.kg_edges e
+           ON e.graph_id = ${g}
+          AND (e.subject_node_id = h.node_id OR e.object_node_id = h.node_id)
+         JOIN rvbbit.kg_evidence ev
+           ON ev.graph_id = ${g}
+          AND (ev.node_id = h.node_id OR ev.edge_id = e.edge_id)
+        GROUP BY h.node_id
+     )
+     SELECT h.node_id, h.kind, h.label,
+            h.raw_score / NULLIF(max(h.raw_score) OVER (), 0) AS score,
+            h.doc, COALESCE(d.degree, 0) AS degree, COALESCE(f.frequency, 0) AS frequency
+       FROM hits h
+       LEFT JOIN deg d ON d.node_id = h.node_id
+       LEFT JOIN freq f ON f.node_id = h.node_id
+      ORDER BY h.raw_score DESC, h.confidence DESC NULLS LAST, h.node_id`,
+  )
   if (!res.ok) return { hits: [], error: res.error }
   return {
     hits: res.rows.map((r) => ({
       nodeId: num(r.node_id),
-      kind: (String(r.kind ?? "db_column") as CatalogKind),
-      schema: String(r.schema_name ?? ""),
-      rel: String(r.rel_name ?? ""),
-      col: strOrNull(r.col_name),
+      kind: (String(r.kind ?? "entity") as CatalogKind),
+      schema: "kg",
+      rel: String(r.label ?? ""),
+      col: null,
       score: numOrNull(r.score),
-      doc: String(r.doc ?? ""),
+      doc: String(r.doc ?? r.label ?? ""),
       degree: num(r.degree),
       frequency: num(r.frequency),
     })),
