@@ -1,6 +1,7 @@
 "use client"
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react"
+import { createPortal } from "react-dom"
 import Graph from "graphology"
 import forceAtlas2 from "graphology-layout-forceatlas2"
 import type SigmaRenderer from "sigma"
@@ -19,6 +20,14 @@ import {
 } from "@/lib/rvbbit/kg"
 import { fetchColumnPreview, fetchNodeMeta, fetchTablePreview, type NodeMeta, type PreviewData } from "@/lib/desktop/scry-preview"
 import { sourceGraph, type ScrySourceId, type ScryStage } from "@/lib/desktop/scry"
+import {
+  colorForType,
+  fetchGraphTypeDistribution,
+  objectType,
+  objectTypeFromProps,
+  type ScryTypeBucket,
+} from "@/lib/desktop/scry-types"
+import type { ScryViewState } from "@/lib/desktop/types"
 import { MAX_BLOOM_NODES } from "@/lib/desktop/scry-limits"
 import { useScryCascade } from "./use-scry-cascade"
 import { ScryHud } from "./scry-hud"
@@ -52,6 +61,10 @@ interface ScryCanvasProps {
   onOpenTable: (schema: string, name: string) => void
   onOpenField: (schema: string, rel: string, col: string) => void
   onGraduate: (tables: { schema: string; rel: string }[]) => void
+  /** Restore a saved Scry view on open (graph + queries + filter + color). */
+  seed?: ScryViewState | null
+  /** Persist the current exploration as a saved Scry view. */
+  onSaveView?: (name: string, state: ScryViewState) => void
 }
 
 type LabelMode = "smart" | "dense" | "off"
@@ -92,6 +105,9 @@ interface ScrySigmaNodeAttributes {
   label: string
   nodeId: number
   kind: string
+  /** Source-aware object type (doc source / entity kind) — for the type color
+   *  mode + legend (see scry-types). */
+  objectType: string
   color: string
   baseColor: string
   size: number
@@ -210,12 +226,27 @@ export function ScryCanvas({
   onOpenTable,
   onOpenField,
   onGraduate,
+  seed = null,
+  onSaveView,
 }: ScryCanvasProps) {
   const [graphId, setGraphId] = useState(sourceGraph("catalog"))
   const source = sourceForGraph(graphId)
   const [graphs, setGraphs] = useState<KgGraphSummary[]>([])
   const [graphsError, setGraphsError] = useState<string | null>(null)
-  const cascade = useScryCascade(connectionId, open, onSpawnResults, graphId)
+  // Object-type filter + color legend (see scry-types). `enabledTypes === null`
+  // means every type is on; toggling re-flows the cascade. `colorMode` flips the
+  // node fills between the cascade-stage hue and the object-type hue.
+  const [typeDist, setTypeDist] = useState<ScryTypeBucket[]>([])
+  const [enabledTypes, setEnabledTypes] = useState<Set<string> | null>(null)
+  const [colorMode, setColorMode] = useState<"stage" | "type">("stage")
+  // Pending saved-view seed: applied once per open. The graphId-reset effect
+  // reads it so a restored view keeps its type filter (instead of resetting to
+  // "all" like a manual graph switch).
+  const pendingSeedRef = useRef<ScryViewState | null>(null)
+  const appliedSeedRef = useRef<ScryViewState | null>(null)
+  // Captured state for the "Save view" modal (non-null = modal open).
+  const [saveDraft, setSaveDraft] = useState<ScryViewState | null>(null)
+  const cascade = useScryCascade(connectionId, open, onSpawnResults, graphId, enabledTypes, seed?.queries ?? null)
   const containerRef = useRef<HTMLDivElement>(null)
   const rendererRef = useRef<SigmaRenderer<ScrySigmaNodeAttributes, ScrySigmaEdgeAttributes> | null>(null)
   const pendingCameraFocusRef = useRef<PendingCameraFocus | null>(null)
@@ -298,9 +329,52 @@ export function ScryCanvas({
       setSelectedEdgeKey(null)
       setHiddenStages(new Set())
       setExpandedNodeIds(new Set())
+      // The type vocabulary differs per graph — re-enable all on a switch, UNLESS
+      // we're restoring a saved view for this graph (keep its filter).
+      const pend = pendingSeedRef.current
+      pendingSeedRef.current = null
+      if (pend && pend.graphId === graphId) {
+        setEnabledTypes(pend.enabledTypes && pend.enabledTypes.length ? new Set(pend.enabledTypes) : null)
+      } else {
+        setEnabledTypes(null)
+      }
     }, 0)
     return () => window.clearTimeout(t)
   }, [graphId])
+
+  // Apply a saved-view seed on open: set graph + color + filter; the queries are
+  // seeded into the cascade (see useScryCascade's seedQueries). One-shot per open.
+  useEffect(() => {
+    if (!open) {
+      appliedSeedRef.current = null
+      return
+    }
+    if (!seed || appliedSeedRef.current === seed) return
+    appliedSeedRef.current = seed
+    pendingSeedRef.current = seed
+    const t = window.setTimeout(() => {
+      setColorMode(seed.colorMode === "type" ? "type" : "stage")
+      setEnabledTypes(seed.enabledTypes && seed.enabledTypes.length ? new Set(seed.enabledTypes) : null)
+      setGraphId(seed.graphId)
+    }, 0)
+    return () => window.clearTimeout(t)
+  }, [open, seed])
+
+  // The graph's object-type composition — drives the filter dropdown + the
+  // color legend (so a toggled-off type stays listed and re-enableable).
+  useEffect(() => {
+    if (!open || !connectionId) {
+      const t = window.setTimeout(() => setTypeDist([]), 0)
+      return () => window.clearTimeout(t)
+    }
+    let cancelled = false
+    fetchGraphTypeDistribution(connectionId, graphId).then((res) => {
+      if (!cancelled) setTypeDist(res.buckets)
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [connectionId, graphId, open])
 
   useEffect(() => {
     if (!open || !connectionId || searchHitIds.length === 0) {
@@ -329,8 +403,9 @@ export function ScryCanvas({
   }, [connectionId, graphId, open, searchHitIds])
 
   const bundle = useMemo(
-    () => buildScryGraphBundle(cascade.stages, neighborhood, graphId, source, hiddenStages, showContext, expandedNodeIds),
-    [cascade.stages, expandedNodeIds, graphId, hiddenStages, neighborhood, showContext, source],
+    () =>
+      buildScryGraphBundle(cascade.stages, neighborhood, graphId, source, hiddenStages, showContext, expandedNodeIds, colorMode, enabledTypes),
+    [cascade.stages, expandedNodeIds, graphId, hiddenStages, neighborhood, showContext, source, colorMode, enabledTypes],
   )
   const selectedNode = selectedKey ? bundle.nodes.get(selectedKey) ?? null : null
   const selectedEdge = selectedEdgeKey ? bundle.edges.get(selectedEdgeKey) ?? null : null
@@ -413,6 +488,19 @@ export function ScryCanvas({
     if (exploredTables.length > 0) onGraduate(exploredTables)
     onClose()
   }, [exploredTables, onClose, onGraduate])
+
+  // Open the Save-view modal with the current exploration captured (graph +
+  // queries + filter + color). The modal collects a name → onSaveView.
+  const saveCurrentView = useCallback(() => {
+    const queries = cascade.stages.map((s) => s.query.trim()).filter(Boolean)
+    if (queries.length === 0 || !onSaveView) return
+    setSaveDraft({
+      graphId,
+      queries,
+      enabledTypes: enabledTypes ? Array.from(enabledTypes) : null,
+      colorMode,
+    })
+  }, [cascade.stages, graphId, enabledTypes, colorMode, onSaveView])
 
   useEffect(() => {
     if (!open) return
@@ -662,7 +750,24 @@ export function ScryCanvas({
         graphs={graphOptions}
         graphsError={graphsError}
         onSetGraphId={setGraphId}
+        typeDist={typeDist}
+        enabledTypes={enabledTypes}
+        onSetEnabledTypes={setEnabledTypes}
+        colorMode={colorMode}
+        onSetColorMode={setColorMode}
+        onSaveView={onSaveView ? saveCurrentView : undefined}
       />
+
+      {saveDraft ? (
+        <SaveViewDialog
+          draft={saveDraft}
+          onSave={(name) => {
+            onSaveView?.(name, saveDraft)
+            setSaveDraft(null)
+          }}
+          onCancel={() => setSaveDraft(null)}
+        />
+      ) : null}
 
       <ScryResultsRail
         hits={cascade.finalHits}
@@ -1122,6 +1227,75 @@ function KindGlyph({ kind, dataLayer = false }: { kind: string; dataLayer?: bool
   )
 }
 
+/** Simple desktop-chrome modal for naming + saving the current Scry view.
+ *  Portaled above the full-screen canvas; replaces the native window.prompt. */
+function SaveViewDialog({
+  draft,
+  onSave,
+  onCancel,
+}: {
+  draft: ScryViewState
+  onSave: (name: string) => void
+  onCancel: () => void
+}) {
+  // Mounted fresh per open (parent renders conditionally), so initialize the
+  // name from the draft here — no effect, no set-state-in-effect.
+  const [name, setName] = useState(() => draft.queries[0]?.slice(0, 48) ?? "Scry view")
+  const submit = () => {
+    if (name.trim()) onSave(name.trim())
+  }
+  return createPortal(
+    <div
+      className="fixed inset-0 z-[200] grid place-items-center bg-black/40 backdrop-blur-sm"
+      onPointerDown={onCancel}
+    >
+      <div
+        className="w-[360px] overflow-hidden rounded-lg border border-chrome-border bg-chrome-bg/98 shadow-2xl"
+        onPointerDown={(e) => e.stopPropagation()}
+      >
+        <div className="border-b border-chrome-border/60 px-4 py-2.5 text-[12px] font-medium text-foreground">
+          Save Scry view
+        </div>
+        <div className="px-4 py-3">
+          <label className="mb-1 block text-[9px] uppercase tracking-wider text-chrome-text/55">name</label>
+          <input
+            autoFocus
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") submit()
+              else if (e.key === "Escape") onCancel()
+            }}
+            className="w-full rounded border border-chrome-border/70 bg-doc-bg px-2 py-1.5 text-[12px] text-foreground outline-none focus:border-main/60"
+          />
+          <p className="mt-2 text-[10px] text-chrome-text/45">
+            {draft.queries.length} stage{draft.queries.length === 1 ? "" : "s"} · {draft.graphId}
+            {draft.enabledTypes ? ` · ${draft.enabledTypes.length} types` : ""} · color by {draft.colorMode}
+          </p>
+        </div>
+        <div className="flex justify-end gap-2 border-t border-chrome-border/60 px-4 py-2.5">
+          <button
+            type="button"
+            onClick={onCancel}
+            className="rounded border border-chrome-border/60 px-3 py-1 text-[11px] text-chrome-text hover:bg-foreground/[0.06]"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={submit}
+            disabled={!name.trim()}
+            className="rounded border border-main/50 bg-main/15 px-3 py-1 text-[11px] text-main hover:bg-main/25 disabled:opacity-40"
+          >
+            Save
+          </button>
+        </div>
+      </div>
+    </div>,
+    document.body,
+  )
+}
+
 function buildScryGraphBundle(
   stages: ScryStage[],
   neighborhood: KgNeighborhood,
@@ -1130,7 +1304,10 @@ function buildScryGraphBundle(
   hiddenStages: Set<string>,
   showContext: boolean,
   expandedNodeIds: Set<number>,
+  colorMode: "stage" | "type" = "stage",
+  enabledTypes: Set<string> | null = null,
 ): ScryGraphBundle {
+  const typeFilterOn = !!enabledTypes && enabledTypes.size > 0
   const g = new Graph<ScrySigmaNodeAttributes, ScrySigmaEdgeAttributes>({ type: "directed", multi: false, allowSelfLoops: false })
   const nodes = new Map<string, ScryGraphNode>()
   const edges = new Map<string, ScryGraphEdge>()
@@ -1177,6 +1354,8 @@ function buildScryGraphBundle(
         stageIds: [stage.id],
         score: hit.score,
       })
+      const oType = objectType(hit)
+      const fill = colorMode === "type" ? colorForType(oType) : color
       const pos = initialPosition(key, stageIndex, rank, stage.hits.length, true)
       g.addNode(key, {
         x: pos.x,
@@ -1184,8 +1363,9 @@ function buildScryGraphBundle(
         label,
         nodeId: hit.nodeId,
         kind: String(hit.kind || "entity"),
-        color,
-        baseColor: color,
+        objectType: oType,
+        color: fill,
+        baseColor: fill,
         size: nodeSize({ degree, frequency, score: hit.score, isHit: true }),
         baseSize: nodeSize({ degree, frequency, score: hit.score, isHit: true }),
         zIndex: 10 + stageIndex,
@@ -1205,6 +1385,10 @@ function buildScryGraphBundle(
     neighborhood.nodes.forEach((n, index) => {
       if (nodes.has(String(n.nodeId))) return
       if (!expandedNodeIds.has(n.nodeId) && !isConnectedToAny(n.nodeId, neighborhood.edges, anchorIds)) return
+      const oType = objectTypeFromProps(n.kind, n.properties)
+      // A toggled-off type drops its context nodes too, so disabling e.g.
+      // meeting notes clears them from the whole scene, not just the hits.
+      if (typeFilterOn && !enabledTypes!.has(oType)) return
       const key = String(n.nodeId)
       nodes.set(key, {
         key,
@@ -1230,6 +1414,7 @@ function buildScryGraphBundle(
         label: n.label,
         nodeId: n.nodeId,
         kind: n.kind,
+        objectType: oType,
         color: CONTEXT_COLOR,
         baseColor: CONTEXT_COLOR,
         size,

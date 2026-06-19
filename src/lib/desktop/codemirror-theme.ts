@@ -62,6 +62,38 @@ const editorTheme = EditorView.theme(
       color: "var(--viz-op-specialist)",
       boxShadow: "inset 0 0 0 1px color-mix(in oklch, var(--viz-op-specialist) 34%, transparent)",
     },
+    ".cm-pgsql-body": {
+      color: "var(--foreground)",
+    },
+    ".cm-pgsql-dollar-delim": {
+      color: "color-mix(in oklch, var(--syntax-string) 74%, transparent) !important",
+    },
+    ".cm-pgsql-keyword": {
+      color: "var(--syntax-keyword) !important",
+      fontWeight: "500",
+    },
+    ".cm-pgsql-function": {
+      color: "var(--syntax-function) !important",
+    },
+    ".cm-pgsql-identifier": {
+      color: "var(--syntax-identifier) !important",
+    },
+    ".cm-pgsql-string": {
+      color: "var(--syntax-string) !important",
+    },
+    ".cm-pgsql-number": {
+      color: "var(--syntax-number) !important",
+    },
+    ".cm-pgsql-comment": {
+      color: "var(--syntax-comment) !important",
+      fontStyle: "italic",
+    },
+    ".cm-pgsql-operator": {
+      color: "var(--syntax-operator) !important",
+    },
+    ".cm-pgsql-punctuation": {
+      color: "color-mix(in oklch, var(--foreground) 55%, transparent) !important",
+    },
     ".cm-block-ref-tooltip": {
       padding: "7px 9px",
       maxWidth: "440px",

@@ -352,7 +352,13 @@ function TableTimelinePanel({ table, connectionId }: { table: SchemaTable; conne
  */
 function TimelineScrubber({ ticks }: { ticks: TimelineTick[] }) {
   const series = useMemo(() => ticks.slice().reverse(), [ticks]) // oldest → newest (left → right)
-  const values = useMemo(() => series.map((t) => t.visibleRowsEstimate), [series])
+  // Plot the per-checkpoint slice (rows written *in* that generation), NOT
+  // `visible_rows_estimate` — which is a running cumulative sum and so ramps
+  // upward forever for refresh-in-place tables (cubes, materialized aggs rewrite
+  // the full row count each generation, never tombstoned → the sum balloons).
+  // The slice reflects the table's actual size trajectory: flat when stable,
+  // up/down when it really grows or shrinks. Cumulative stays on hover.
+  const values = useMemo(() => series.map((t) => t.rowsWritten), [series])
   const max = useMemo(() => Math.max(1, ...values), [values])
   const [idx, setIdx] = useState<number | null>(null) // null ⇒ "now" (latest)
   const ref = useRef<HTMLDivElement | null>(null)
@@ -365,7 +371,7 @@ function TimelineScrubber({ ticks }: { ticks: TimelineTick[] }) {
   // mirror Sparkline.buildPath's toY (padTop=2, inner=H-4) so the dot rides the curve
   const PAD = 2
   const inner = Math.max(1, H - PAD * 2)
-  const dotTop = tick ? PAD + inner - (tick.visibleRowsEstimate / max) * inner : H / 2
+  const dotTop = tick ? PAD + inner - (tick.rowsWritten / max) * inner : H / 2
 
   const scrub = (clientX: number) => {
     const el = ref.current
@@ -387,7 +393,7 @@ function TimelineScrubber({ ticks }: { ticks: TimelineTick[] }) {
         onPointerMove={(e) => scrub(e.clientX)}
         onPointerUp={() => setIdx(null)}
         onPointerLeave={() => setIdx(null)}
-        title="drag to scrub the row count over time"
+        title="drag to scrub rows-per-checkpoint over time"
       >
         <Sparkline values={values} height={H} color="var(--rvbbit-accent)" yMin={0} yMax={max} />
         {n > 0 ? (
@@ -404,8 +410,18 @@ function TimelineScrubber({ ticks }: { ticks: TimelineTick[] }) {
         ) : null}
       </div>
       <div className="mt-1 flex items-baseline gap-1.5 font-mono text-[9px] text-chrome-text/55">
-        <span className="tabular-nums text-foreground">{tick ? tick.visibleRowsEstimate.toLocaleString() : "—"}</span>
-        <span>rows</span>
+        <span
+          className="tabular-nums text-foreground"
+          title={
+            tick
+              ? `${tick.visibleRowsEstimate.toLocaleString()} cumulative across all retained generations` +
+                (tick.tombstonesVisible ? ` · ${tick.tombstonesVisible.toLocaleString()} tombstoned` : "")
+              : undefined
+          }
+        >
+          {tick ? tick.rowsWritten.toLocaleString() : "—"}
+        </span>
+        <span>rows / gen</span>
         <span className="ml-auto">
           {tick ? `${idx == null ? "now" : "as of"} ${fmtDateTime(tick.committedAt)} · gen ${tick.generation}` : ""}
         </span>

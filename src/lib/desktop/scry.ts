@@ -17,6 +17,7 @@
 
 import { searchData, type DataSearchHit } from "@/lib/rvbbit/data-search"
 import { fetchKgNeighborhoodByNodeIds } from "@/lib/rvbbit/kg"
+import { objectType } from "@/lib/desktop/scry-types"
 
 /**
  * Corpus seam. "catalog" = the structure graph (schema/fingerprints from
@@ -75,19 +76,31 @@ export async function scopeFromHits(
  * Run one cascade stage. `scope === null` (stage 0) searches the whole catalog;
  * a scoped stage searches wide then narrows to the upstream relations. We pull
  * a larger `k` when scoped so the post-filter still has candidates to show.
+ *
+ * `enabledTypes` (the object-type filter) is applied to the wide result set
+ * BEFORE the top-40 cap, so disabling a dominant type (e.g. meeting notes)
+ * lets more of the remaining types rise into view — i.e. it re-ranks, not just
+ * hides. `null`/empty = all types.
  */
 export async function runScryStage(
   connectionId: string,
   query: string,
   scope: ScryScope | null,
   graph: string = "db_catalog",
+  enabledTypes: Set<string> | null = null,
 ): Promise<{ hits: DataSearchHit[]; error?: string }> {
   const q = query.trim()
   if (!q) return { hits: [] }
-  const { hits, error } = await searchData(connectionId, q, scope ? 200 : 60, null, graph)
+  // Pull wider when a type filter is on so the cap still has candidates to show.
+  const k = scope ? 200 : enabledTypes && enabledTypes.size > 0 ? 200 : 60
+  const { hits, error } = await searchData(connectionId, q, k, null, graph)
   if (error) return { hits: [], error }
   const scoped = scope
     ? hits.filter((h) => scope.nodeIds.has(h.nodeId) || scope.rels.has(relKey(h.schema, h.rel)))
     : hits
-  return { hits: scoped.slice(0, 40) }
+  const typed =
+    enabledTypes && enabledTypes.size > 0
+      ? scoped.filter((h) => enabledTypes.has(objectType(h)))
+      : scoped
+  return { hits: typed.slice(0, 40) }
 }

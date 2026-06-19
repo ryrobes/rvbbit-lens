@@ -81,7 +81,22 @@ function migrate(db: SqliteDb): void {
        ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
     ).run()
   }
-  // Future migrations: `if (version < 2) { ...; bump to '2' }`.
+  if (version < 2) {
+    // Saved Views (the artifacts formerly known as View Apps) — one JSON blob
+    // per home, mirroring lens_profile. Previously localStorage-only.
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS lens_views (
+        home_id    TEXT PRIMARY KEY,
+        views_json TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+    `)
+    db.prepare(
+      `INSERT INTO lens_meta (key, value) VALUES ('schema_version', '2')
+       ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+    ).run()
+  }
+  // Future migrations: `if (version < 3) { ...; bump to '3' }`.
 }
 
 export function lensDb(): SqliteDb {
@@ -117,6 +132,30 @@ export function putProfile(homeId: string, state: unknown): void {
        ON CONFLICT(home_id) DO UPDATE SET state_json = excluded.state_json, updated_at = excluded.updated_at`,
     )
     .run(homeId, JSON.stringify(state ?? null), new Date().toISOString())
+}
+
+// ── saved views (the per-home Saved Views blob) ─────────────────────────────
+
+export function getViews(homeId: string): { views: unknown[]; updatedAt: string } | null {
+  const row = lensDb()
+    .prepare(`SELECT views_json, updated_at FROM lens_views WHERE home_id = ?`)
+    .get(homeId) as { views_json?: string; updated_at?: string } | undefined
+  if (!row?.views_json) return null
+  try {
+    const parsed = JSON.parse(row.views_json)
+    return { views: Array.isArray(parsed) ? parsed : [], updatedAt: row.updated_at ?? "" }
+  } catch {
+    return null
+  }
+}
+
+export function putViews(homeId: string, views: unknown[]): void {
+  lensDb()
+    .prepare(
+      `INSERT INTO lens_views (home_id, views_json, updated_at) VALUES (?, ?, ?)
+       ON CONFLICT(home_id) DO UPDATE SET views_json = excluded.views_json, updated_at = excluded.updated_at`,
+    )
+    .run(homeId, JSON.stringify(Array.isArray(views) ? views : []), new Date().toISOString())
 }
 
 // ── home discovery ───────────────────────────────────────────────────────────

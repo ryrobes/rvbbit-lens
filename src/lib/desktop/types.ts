@@ -8,6 +8,7 @@ export type DesktopWindowKind =
   | "dashboards"
   | "csv-import"
   | "query-document"
+  | "row-inspector"
   | "artifact"
   | "view-app"
   | "view-app-builder"
@@ -58,6 +59,7 @@ export type DesktopWindowKind =
   | "alerts"
   | "dagster"
   | "brain"
+  | "agent-messages"
 
 export interface DesktopWindowPosition {
   x: number
@@ -90,6 +92,7 @@ export type WindowPayload =
   | BrainPayload
   | CsvImportPayload
   | QueryDocumentPayload
+  | RowInspectorPayload
   | ArtifactPayload
   | ViewAppPayload
   | ViewAppBuilderPayload
@@ -139,6 +142,7 @@ export type WindowPayload =
   | MetricBoardPayload
   | AlertsPayload
   | DagsterPayload
+  | AgentMessagesPayload
 
 /** The Alerts cockpit — an observable view over rvbbit.alert_* (rules, state,
  *  queue, events, sweep heartbeats). `rule` is the selected rule name. */
@@ -226,6 +230,16 @@ export interface DataPayload {
    * standalone SQL to project over). Updated on each run.
    */
   jsonbProjection?: JsonbProjectionColumn[]
+}
+
+/** Read-only inspector for one result row from a SQL block. */
+export interface RowInspectorPayload {
+  kind?: "row-inspector"
+  sourceTitle: string
+  rowIndex: number
+  columns: QueryResultColumn[]
+  row: Record<string, unknown>
+  selectedColumn?: string | null
 }
 
 /** One expanded column of a jsonb-returning block. `kind` is the coarse class used
@@ -627,6 +641,15 @@ export interface BrainPayload {
   selectedDocId?: number | null
 }
 
+/** The agent Messages app — a viewer over rvbbit.agent_messages, runs rolled
+ *  up by run_id (one agent-operator call), drill into the per-turn transcript.
+ *  `initialRunId` deep-links straight to a run; `operator` pre-filters. */
+export interface AgentMessagesPayload {
+  kind?: "agent-messages"
+  initialRunId?: string | null
+  operator?: string | null
+}
+
 export interface CostsPayload {
   kind?: "costs"
   /**
@@ -1021,16 +1044,32 @@ export interface SceneStoreV1 {
  * Saved "view app" — a SQL statement promoted to a desktop icon with
  * a custom icon glyph + color. Stored in localStorage for v0.
  */
+/** A saved Scry exploration — the restorable state of the graph explorer.
+ *  Layout isn't persisted (the force sim re-derives it). */
+export interface ScryViewState {
+  graphId: string
+  /** the cascade stage queries, top → bottom */
+  queries: string[]
+  /** enabled object types (null = all on) */
+  enabledTypes: string[] | null
+  colorMode: "stage" | "type"
+}
+
+/** A Saved View. `kind:"query"` (default, back-compat) is a SQL view rendered as
+ *  rows/chart; `kind:"scry"` reopens the graph explorer from `scry`. */
 export interface ViewApp {
   id: string
   name: string
   description?: string
+  kind?: "query" | "scry"
   sql: string
   iconKey: string
   iconColor: string
   connectionId?: string | null
-  /** Optional Vega-Lite spec to render the result. */
+  /** Optional Vega-Lite spec to render the result (query views). */
   chartSpec?: Record<string, unknown> | null
+  /** Saved Scry exploration (scry views). */
+  scry?: ScryViewState | null
   createdAt: string
   updatedAt: string
 }

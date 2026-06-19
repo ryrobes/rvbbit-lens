@@ -71,9 +71,39 @@ export interface BrainHit {
   title: string
   folderPath: string
   source: string
+  docType: string | null
   occurredAt: string | null
   chunk: string
   score: number | null
+}
+
+/** A search pre-filter: narrow the corpus by type/source/folder/date before the vector search. */
+export interface BrainFilter {
+  type?: string[]
+  source?: string[]
+  folder?: string
+  since?: string
+  until?: string
+}
+
+export interface BrainFacets {
+  types: { value: string; docs: number }[]
+  sources: { value: string; docs: number }[]
+}
+
+/** Discover what the identity can filter by: doc types + sources (with counts), ACL-aware. */
+export async function fetchFacets(connectionId: string, email: string): Promise<BrainFacets> {
+  if (!email) return { types: [], sources: [] }
+  const r = await run(connectionId, `SELECT facet, value, docs FROM rvbbit.brain_facets(${q(email)})`)
+  if (!r.ok) return { types: [], sources: [] }
+  const types: { value: string; docs: number }[] = []
+  const sources: { value: string; docs: number }[] = []
+  for (const row of r.rows) {
+    const e = { value: String(row.value ?? ""), docs: Number(row.docs ?? 0) }
+    if (row.facet === "type") types.push(e)
+    else if (row.facet === "source") sources.push(e)
+  }
+  return { types, sources }
 }
 
 export interface BrainDocDetail {
@@ -316,6 +346,8 @@ export interface BrainProvider {
   edgeMap: string
   /** number of edge specs (for the card summary) */
   edgeCount: number
+  /** the doc_type all this provider's sources are tagged with (document | ticket | meeting | …) */
+  docType: string
   /** how many sources currently bind this provider */
   sources: number
 }
@@ -324,7 +356,7 @@ export interface BrainProvider {
 export async function fetchProviders(connectionId: string): Promise<{ providers: BrainProvider[]; error: string | null }> {
   const r = await run(
     connectionId,
-    `SELECT p.provider, p.label, p.list_sql, p.item_sql, p.icon, p.description,
+    `SELECT p.provider, p.label, p.list_sql, p.item_sql, p.icon, p.description, p.doc_type,
             p.edge_map::text AS edge_map, jsonb_array_length(coalesce(p.edge_map,'[]'::jsonb)) AS edge_count,
             (SELECT count(*) FROM rvbbit.brain_sources s WHERE s.config->>'provider' = p.provider) AS sources
        FROM rvbbit.brain_doc_providers p ORDER BY p.label`,
@@ -340,6 +372,7 @@ export async function fetchProviders(connectionId: string): Promise<{ providers:
       description: str(row.description),
       edgeMap: String(row.edge_map ?? "[]"),
       edgeCount: Number(row.edge_count ?? 0),
+      docType: String(row.doc_type ?? "document"),
       sources: Number(row.sources ?? 0),
     })),
     error: null,
@@ -347,17 +380,19 @@ export async function fetchProviders(connectionId: string): Promise<{ providers:
 }
 
 /** Create/update a provider (document type). item_sql null/empty → single-phase.
- *  edgeMap is a JSON array string of {predicate, kind, path} structured-edge specs. */
+ *  edgeMap is a JSON array string of {predicate, kind, path} structured-edge specs.
+ *  docType tags every doc from this provider's sources (document | ticket | meeting | custom…). */
 export async function defineProvider(
   connectionId: string,
-  p: { provider: string; label: string; listSql: string; itemSql?: string | null; icon?: string | null; description?: string | null; edgeMap?: string | null },
+  p: { provider: string; label: string; listSql: string; itemSql?: string | null; icon?: string | null; description?: string | null; edgeMap?: string | null; docType?: string | null },
 ): Promise<string | null> {
   const edge = p.edgeMap && p.edgeMap.trim() ? p.edgeMap.trim() : "[]"
+  const docType = p.docType && p.docType.trim() ? p.docType.trim() : "document"
   const r = await run(
     connectionId,
     `SELECT rvbbit.brain_define_provider(${q(p.provider)}, ${q(p.label)}, ${q(p.listSql)}, ` +
       `${p.itemSql && p.itemSql.trim() ? q(p.itemSql) : "NULL"}, ` +
-      `${p.icon ? q(p.icon) : "NULL"}, ${p.description ? q(p.description) : "NULL"}, ${q(edge)}::jsonb)`,
+      `${p.icon ? q(p.icon) : "NULL"}, ${p.description ? q(p.description) : "NULL"}, ${q(edge)}::jsonb, ${q(docType)})`,
   )
   return r.ok ? null : r.error
 }
@@ -648,19 +683,26 @@ export async function enrichSource(
   return { result: (r.rows[0]?.r as Record<string, unknown>) ?? null, error: null }
 }
 
-/** Semantic search over the identity's permitted docs (filter-before-vector-search). */
+/** Semantic search over the identity's permitted docs, with an optional pre-filter (type/source/…). */
 export async function askBrain(
   connectionId: string,
   email: string,
   query: string,
   k = 8,
+  filter?: BrainFilter,
 ): Promise<{ hits: BrainHit[]; error: string | null }> {
   const trimmed = query.trim()
   if (!email || !trimmed) return { hits: [], error: null }
+  const f: Record<string, unknown> = {}
+  if (filter?.type?.length) f.type = filter.type
+  if (filter?.source?.length) f.source = filter.source
+  if (filter?.folder) f.folder = filter.folder
+  if (filter?.since) f.since = filter.since
+  if (filter?.until) f.until = filter.until
   const r = await run(
     connectionId,
-    `SELECT doc_id, title, folder_path, source, occurred_at::text AS occurred_at, chunk, score
-       FROM rvbbit.ask_brain(${q(email)}, ${q(trimmed)}, ${Math.max(1, Math.min(Math.floor(k), 50))})`,
+    `SELECT doc_id, title, folder_path, source, doc_type, occurred_at::text AS occurred_at, chunk, score
+       FROM rvbbit.ask_brain(${q(email)}, ${q(trimmed)}, ${Math.max(1, Math.min(Math.floor(k), 50))}, ${q(JSON.stringify(f))}::jsonb)`,
   )
   if (!r.ok) return { hits: [], error: r.error }
   return {
@@ -669,6 +711,7 @@ export async function askBrain(
       title: String(row.title ?? ""),
       folderPath: String(row.folder_path ?? "/"),
       source: String(row.source ?? ""),
+      docType: str(row.doc_type),
       occurredAt: str(row.occurred_at),
       chunk: String(row.chunk ?? ""),
       score: num(row.score),

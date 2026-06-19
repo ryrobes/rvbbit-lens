@@ -35,6 +35,12 @@ export function useScryCascade(
   open: boolean,
   onSubmit: (chain: { query: string }[], hits: DataSearchHit[]) => void,
   graph: string = "db_catalog",
+  /** Object-type filter (see scry-types). null/empty = every type. Toggling it
+   *  re-flows the cascade so results + rankings change. */
+  enabledTypes: Set<string> | null = null,
+  /** Restore a saved view: seed the cascade with these stage queries on open
+   *  (instead of a single empty stage) and run them. */
+  seedQueries: string[] | null = null,
 ): UseScryCascade {
   const [stages, setStagesState] = useState<ScryStage[]>([emptyStage()])
   // Mirror in a ref so the async re-flow + key handlers read the latest stages.
@@ -46,22 +52,15 @@ export function useScryCascade(
   useEffect(() => {
     onSubmitRef.current = onSubmit
   }, [onSubmit])
+  const seedQueriesRef = useRef(seedQueries)
+  useEffect(() => {
+    seedQueriesRef.current = seedQueries
+  }, [seedQueries])
 
   const setStages = useCallback((next: ScryStage[]) => {
     stagesRef.current = next
     setStagesState(next)
   }, [])
-
-  // Fresh chain each time Scry opens; focus the root input.
-  useEffect(() => {
-    if (!open) return
-    const t = setTimeout(() => {
-      setStages([emptyStage()])
-      runRef.current++
-      inputRefs.current[0]?.focus()
-    }, 30)
-    return () => clearTimeout(t)
-  }, [open, setStages])
 
   // Patch one stage's result fields against the LATEST stages so a write that
   // lands after the user edited another stage can't clobber their text.
@@ -88,14 +87,14 @@ export function useScryCascade(
           continue
         }
         patch(i, { loading: true })
-        const { hits, error } = await runScryStage(connectionId, q, scope, graph)
+        const { hits, error } = await runScryStage(connectionId, q, scope, graph, enabledTypes)
         if (runRef.current !== myRun) return
         patch(i, { hits, loading: false, error })
         scope = await scopeFromHits(connectionId, graph, hits)
         if (runRef.current !== myRun) return
       }
     },
-    [connectionId, patch, graph],
+    [connectionId, patch, graph, enabledTypes],
   )
 
   // Re-flow the whole chain against the new graph when the source toggles.
@@ -105,7 +104,28 @@ export function useScryCascade(
   }, [recompute])
   useEffect(() => {
     if (open) void recomputeRef.current(0)
-  }, [graph, open])
+  }, [graph, open, enabledTypes])
+
+  // On open: a fresh empty chain, OR — restoring a saved view — the seeded
+  // stages, run immediately. The graph + type filter are applied by the canvas
+  // before `open` flips true, so recompute here picks up the right scope.
+  // (Declared after recomputeRef so it doesn't forward-reference it.)
+  useEffect(() => {
+    if (!open) return
+    const t = setTimeout(() => {
+      const seed = seedQueriesRef.current
+      if (seed && seed.length > 0) {
+        setStages(seed.map((q) => ({ id: randomUUID(), query: q, hits: [], loading: false })))
+        runRef.current++
+        void recomputeRef.current(0)
+      } else {
+        setStages([emptyStage()])
+        runRef.current++
+        inputRefs.current[0]?.focus()
+      }
+    }, 30)
+    return () => clearTimeout(t)
+  }, [open, setStages])
 
   const scheduleRecompute = useCallback(
     (from: number) => {

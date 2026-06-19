@@ -90,6 +90,8 @@
   --viz-op-terminal: var(--main);
   --viz-op-pipeline: color-mix(in oklch, var(--brand-operators) 70%, var(--chart-2));
   --viz-op-rowset: color-mix(in oklch, var(--brand-operators) 64%, var(--chart-4));
+  /* agent (kind:agent) — a tool-calling loop; ties the autonomous-runtime hue to the llm core */
+  --viz-op-agent: color-mix(in oklch, var(--brand-warren) 70%, var(--viz-op-llm));
 
   --viz-role-numeric: var(--viz-series-1);
   --viz-role-temporal: var(--viz-series-3);

@@ -1,18 +1,18 @@
 "use client"
 
 import { randomUUID } from "@/lib/uuid"
-import type { ViewApp } from "./types"
+import { shadowViews } from "./server-sync"
+import type { ScryViewState, ViewApp } from "./types"
 
 /**
- * Local-only view-apps registry (saved SQL queries promoted to desktop
- * icons). Stored under one localStorage key as a JSON array.
- *
- * v1 puts these in the browser; v2 will let us mirror them into a
- * per-database `rvbbit_lens` schema so they travel with the database
- * rather than the browser profile.
+ * Saved Views registry (saved SQL queries + Scry explorations, promoted to
+ * desktop icons). localStorage stays the synchronous source of truth; every
+ * write also shadow-syncs to the server homebase (durable + travels with the
+ * "home id"), and `hydrateViews` restores from there on home adoption.
  */
 
 const STORAGE_KEY = "rvbbit-lens.view-apps.v1"
+const VIEWS_CHANGED_EVENT = "rvbbit-lens:apps-changed"
 
 function readAll(): ViewApp[] {
   if (typeof window === "undefined") return []
@@ -31,6 +31,23 @@ function writeAll(apps: ViewApp[]): void {
   if (typeof window === "undefined") return
   try {
     window.localStorage.setItem(STORAGE_KEY, JSON.stringify(apps))
+    window.dispatchEvent(new Event(VIEWS_CHANGED_EVENT))
+    shadowViews(apps) // durable backup to the server homebase (debounced, best-effort)
+  } catch {
+    // best-effort
+  }
+}
+
+/** Replace the local store with a server-pulled set (on home adoption). Writes
+ *  localStorage directly — never re-shadows, so a pull can't echo back. */
+export function hydrateViews(views: unknown): void {
+  if (typeof window === "undefined") return
+  try {
+    const arr = Array.isArray(views)
+      ? views.filter((p): p is ViewApp => !!p && typeof (p as ViewApp).id === "string")
+      : []
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(arr))
+    window.dispatchEvent(new Event(VIEWS_CHANGED_EVENT))
   } catch {
     // best-effort
   }
@@ -48,11 +65,13 @@ export interface ViewAppInput {
   id?: string
   name: string
   description?: string
-  sql: string
+  kind?: "query" | "scry"
+  sql?: string
   iconKey?: string
   iconColor?: string
   connectionId?: string | null
   chartSpec?: Record<string, unknown> | null
+  scry?: ScryViewState | null
 }
 
 export function upsertViewApp(input: ViewAppInput): ViewApp {
@@ -64,11 +83,13 @@ export function upsertViewApp(input: ViewAppInput): ViewApp {
     id: input.id ?? existing?.id ?? randomUUID(),
     name: input.name.trim() || existing?.name || "Untitled",
     description: input.description ?? existing?.description,
-    sql: input.sql,
+    kind: input.kind ?? existing?.kind ?? "query",
+    sql: input.sql ?? existing?.sql ?? "",
     iconKey: input.iconKey ?? existing?.iconKey ?? "play",
     iconColor: input.iconColor ?? existing?.iconColor ?? "oklch(76% 0.14 195)",
     connectionId: input.connectionId ?? existing?.connectionId ?? null,
     chartSpec: input.chartSpec ?? existing?.chartSpec ?? null,
+    scry: input.scry ?? existing?.scry ?? null,
     createdAt: existing?.createdAt ?? now,
     updatedAt: now,
   }

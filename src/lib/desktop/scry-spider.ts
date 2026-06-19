@@ -37,7 +37,7 @@ function reconstructHit(id: number, kind: string, label: string, props: unknown,
     // `${kind}:${nodeId}` matches the bloom hit's id — otherwise a spidered neighbor
     // that is also a search hit dedupes wrong and renders twice with a floating edge.
     const k = (kind as CatalogKind) || "db_column"
-    return { nodeId: id, kind: k, schema: "data", rel: label || "?", col: null, score: null, doc: doc || label, degree, frequency }
+    return { nodeId: id, kind: k, schema: "data", rel: label || "?", col: null, score: null, doc: doc || label, degree, frequency, source: null }
   }
   const parts = String(label ?? "").split(".")
   if (kind === "db_table") {
@@ -51,6 +51,7 @@ function reconstructHit(id: number, kind: string, label: string, props: unknown,
       doc,
       degree,
       frequency,
+      source: null,
     }
   }
   // anything non-table renders with the column glyph (safe fallback)
@@ -65,6 +66,7 @@ function reconstructHit(id: number, kind: string, label: string, props: unknown,
     doc,
     degree,
     frequency,
+    source: null,
   }
 }
 

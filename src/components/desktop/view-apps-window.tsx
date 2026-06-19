@@ -32,7 +32,7 @@ export function ViewAppsWindow({ onOpen, onCreate, onEdit }: ViewAppsWindowProps
       <div className="flex items-center justify-between border-b border-chrome-border bg-chrome-bg/40 px-3 py-1.5">
         <div className="flex items-center gap-1.5 text-[11px] uppercase tracking-wider text-chrome-text">
           <Boxes className="h-3.5 w-3.5" />
-          Saved view apps · {apps.length}
+          Saved views · {apps.length}
         </div>
         <Button size="sm" onClick={onCreate}>
           <Plus className="h-3 w-3" />
@@ -45,10 +45,10 @@ export function ViewAppsWindow({ onOpen, onCreate, onEdit }: ViewAppsWindowProps
           <div className="grid h-full place-items-center text-center text-xs text-chrome-text/80">
             <div className="max-w-sm">
               <Boxes className="mx-auto mb-2 h-8 w-8 text-rvbbit-accent" />
-              <div className="mb-1 text-sm text-foreground">No view apps yet.</div>
+              <div className="mb-1 text-sm text-foreground">No saved views yet.</div>
               <p>
-                Save any SQL window as a desktop app with a custom icon. Apps remember the
-                query, the connection, and an optional chart spec.
+                Save any SQL window as a view with a custom icon. Saved views remember the
+                query, the connection, and an optional chart — toggle rows ⇄ chart when you open one.
               </p>
             </div>
           </div>

@@ -360,15 +360,16 @@ function ProvidersSection({
   const [listSql, setListSql] = useState("")
   const [itemSql, setItemSql] = useState("")
   const [icon, setIcon] = useState("")
+  const [docType, setDocType] = useState("")
   const [edgeMap, setEdgeMap] = useState("")
   const [editing, setEditing] = useState(false)
 
   const resetForm = () => {
-    setProvider(""); setLabel(""); setListSql(""); setItemSql(""); setIcon(""); setEdgeMap(""); setEditing(false); setOpen(false)
+    setProvider(""); setLabel(""); setListSql(""); setItemSql(""); setIcon(""); setDocType(""); setEdgeMap(""); setEditing(false); setOpen(false)
   }
   const loadInto = (p: BrainProvider) => {
     setProvider(p.provider); setLabel(p.label); setListSql(p.listSql); setItemSql(p.itemSql ?? "")
-    setIcon(p.icon ?? ""); setEdgeMap(p.edgeCount > 0 ? p.edgeMap : ""); setEditing(true); setOpen(true)
+    setIcon(p.icon ?? ""); setDocType(p.docType === "document" ? "" : p.docType); setEdgeMap(p.edgeCount > 0 ? p.edgeMap : ""); setEditing(true); setOpen(true)
   }
   const save = async () => {
     if (!conn || !provider.trim() || !label.trim() || !listSql.trim()) return
@@ -377,7 +378,7 @@ function ProvidersSection({
     }
     const err = await defineProvider(conn, {
       provider: provider.trim(), label: label.trim(), listSql, itemSql: itemSql.trim() || null, icon: icon.trim() || null,
-      edgeMap: edgeMap.trim() || null,
+      edgeMap: edgeMap.trim() || null, docType: docType.trim() || null,
     })
     setToast(err ? { ok: false, msg: err } : { ok: true, msg: `provider “${label.trim()}” saved` })
     if (!err) resetForm()
@@ -422,6 +423,18 @@ function ProvidersSection({
               className="px-1.5 py-0.5 rounded outline-none flex-1" style={{ background: SOFT }} />
             <input value={icon} onChange={(e) => setIcon(e.target.value)} placeholder="icon"
               className="px-1.5 py-0.5 rounded outline-none" style={{ background: SOFT, width: 70 }} />
+          </div>
+          <div className="flex items-center gap-1.5">
+            <span className="text-[10px] opacity-50 w-14">doc type</span>
+            <input value={docType} onChange={(e) => setDocType(e.target.value)} list="brain-doc-types"
+              placeholder="document (default) — or ticket, meeting, pr, …"
+              title="The type every doc from this provider's sources is tagged with. Custom is fine — keep it low-cardinality so it's a useful filter facet."
+              className="px-1.5 py-0.5 rounded outline-none flex-1" style={{ background: SOFT }} />
+            <datalist id="brain-doc-types">
+              {["document", "ticket", "meeting", "transcript", "pr", "issue", "message", "table", "record"].map((t) => (
+                <option key={t} value={t} />
+              ))}
+            </datalist>
           </div>
           <div className="flex items-center gap-1 text-[10px] opacity-50">
             <FileCode2 size={10} /> list SQL → columns: <code>uri, title, content_hash, occurred_at</code> (+ <code>body</code> if single-phase)
@@ -480,7 +493,12 @@ function ProviderCard({
       <div className="flex items-center gap-2">
         <Layers size={12} className="opacity-60 shrink-0" />
         <div className="flex flex-col">
-          <span className="font-medium">{p.label} <span className="opacity-40">· {p.provider}</span></span>
+          <span className="font-medium flex items-center gap-1">
+            {p.label} <span className="opacity-40">· {p.provider}</span>
+            <span className="px-1 rounded opacity-80" style={{ background: "color-mix(in oklch, var(--rvbbit-accent, var(--chrome-text)) 14%, transparent)" }}>
+              {p.docType}
+            </span>
+          </span>
           <span className="opacity-50">
             {p.itemSql ? "two-phase (list→get)" : "single-phase"} · {p.sources} source{p.sources === 1 ? "" : "s"}
             {p.edgeCount > 0 ? ` · ${p.edgeCount} edge${p.edgeCount === 1 ? "" : "s"}` : ""}
@@ -556,6 +574,7 @@ export function DocGraph({
   const [rels, setRels] = useState<BrainRelation[]>([])
   const [loaded, setLoaded] = useState(false)
   const [enriching, setEnriching] = useState(false)
+  const [enrichMsg, setEnrichMsg] = useState<{ ok: boolean; text: string } | null>(null)
 
   const reload = useCallback(async () => {
     if (!conn || !email) {
@@ -593,16 +612,36 @@ export function DocGraph({
           onClick={async () => {
             if (!conn) return
             setEnriching(true)
-            await enrichDocNow(conn, docId)
+            setEnrichMsg(null)
+            const r = await enrichDocNow(conn, docId)
             setEnriching(false)
+            if (r.error || !r.result) {
+              setEnrichMsg({ ok: false, text: r.error ?? "enrich failed" })
+            } else {
+              const x = r.result
+              const parts = [
+                x.relations != null ? `${x.relations} rel` : null,
+                x.ner_entities != null ? `${x.ner_entities} ner` : null,
+                x.structured ? `${x.structured} edges` : null,
+              ].filter(Boolean)
+              setEnrichMsg({ ok: true, text: `enriched · ${parts.join(" · ") || "no entities found"}` })
+            }
             void reload()
           }}
           className="ml-auto opacity-60 hover:opacity-100 flex items-center gap-1"
-          title="(Re)extract entities, relations, and wikilinks for this doc"
+          title="(Re)extract entities, relations, structured edges, and wikilinks for this doc"
         >
           <RefreshCw size={10} className={enriching ? "animate-pulse" : ""} /> {enriching ? "enriching…" : "enrich"}
         </button>
       </div>
+      {enrichMsg && (
+        <div className="text-[10px] px-1.5 py-0.5 rounded flex items-center gap-1"
+          style={{ background: enrichMsg.ok ? "color-mix(in oklch, var(--success) 16%, transparent)" : "color-mix(in oklch, var(--danger) 16%, transparent)",
+                   color: enrichMsg.ok ? "var(--success)" : "var(--danger)" }}>
+          {enrichMsg.ok ? <Check size={10} /> : <AlertTriangle size={10} />} {enrichMsg.text}
+          {enrichMsg.ok && !email && <span className="opacity-70">— set a “View as” identity to see the graph</span>}
+        </div>
+      )}
 
       {!email ? (
         <span className="text-[10px] opacity-50">Set a “View as” identity to see the graph.</span>

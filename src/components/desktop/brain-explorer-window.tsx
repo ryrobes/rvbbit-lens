@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react"
-import { Brain, Folder, FolderOpen, FileText, Eye, Lock, Users, Search, RefreshCw, ChevronRight, ChevronDown, X } from "@/lib/icons"
+import { Brain, Folder, FolderOpen, FileText, Eye, Lock, Users, Search, RefreshCw, ChevronRight, ChevronDown, X, Database } from "@/lib/icons"
 import { cn } from "@/lib/utils"
 import {
   fetchPrincipals,
@@ -12,10 +12,12 @@ import {
   fetchRoleMembers,
   grantMember,
   askBrain,
+  fetchFacets,
   ingestDoc,
   type BrainDoc,
   type BrainHit,
   type BrainDocDetail,
+  type BrainFacets,
 } from "@/lib/rvbbit/brain"
 import { SourcesPanel, DocGraph } from "./brain-sources-panel"
 import type { BrainPayload } from "@/lib/desktop/types"
@@ -32,26 +34,41 @@ interface BrainExplorerWindowProps {
 }
 
 interface FolderNode {
-  path: string
+  path: string // synthetic tree key (NUL-joined: source ▸ folder segments)
   name: string
+  isSource: boolean // depth-1 node = a brain source (Linear, a Drive folder source, …)
+  realPath: string // the actual folderPath this node maps to (for drop-ingest target); "/" at source root
   children: Map<string, FolderNode>
   docs: BrainDoc[]
 }
 
+const SEP = ""
+
+// Group by SOURCE first (so the top branches are source NAMES, not raw Drive folder ids), then by the
+// folderPath hierarchy within each source. A query source (Linear, folderPath "/") becomes a single
+// source folder holding its docs directly.
 function buildTree(docs: BrainDoc[]): FolderNode {
-  const root: FolderNode = { path: "/", name: "/", children: new Map(), docs: [] }
+  const root: FolderNode = { path: "/", name: "/", isSource: false, realPath: "/", children: new Map(), docs: [] }
   for (const d of docs) {
-    const segs = d.folderPath.split("/").filter(Boolean)
+    const src = d.source || "(no source)"
     let node = root
-    let acc = ""
-    for (const seg of segs) {
-      acc += "/" + seg
-      let child = node.children.get(seg)
-      if (!child) {
-        child = { path: acc, name: seg, children: new Map(), docs: [] }
-        node.children.set(seg, child)
+    let acc = SEP + src
+    let child = node.children.get(src)
+    if (!child) {
+      child = { path: acc, name: src, isSource: true, realPath: "/", children: new Map(), docs: [] }
+      node.children.set(src, child)
+    }
+    node = child
+    let real = ""
+    for (const seg of d.folderPath.split("/").filter(Boolean)) {
+      acc += SEP + seg
+      real += "/" + seg
+      let f = node.children.get(seg)
+      if (!f) {
+        f = { path: acc, name: seg, isSource: false, realPath: real, children: new Map(), docs: [] }
+        node.children.set(seg, f)
       }
-      node = child
+      node = f
     }
     node.docs.push(d)
   }
@@ -62,6 +79,22 @@ function countDocs(n: FolderNode): number {
   let c = n.docs.length
   for (const ch of n.children.values()) c += countDocs(ch)
   return c
+}
+
+function findNode(root: FolderNode, path: string): FolderNode | null {
+  const stack: FolderNode[] = [root]
+  while (stack.length) {
+    const n = stack.pop() as FolderNode
+    if (n.path === path) return n
+    for (const c of n.children.values()) stack.push(c)
+  }
+  return null
+}
+
+function collectDocs(n: FolderNode): BrainDoc[] {
+  const out = [...n.docs]
+  for (const c of n.children.values()) out.push(...collectDocs(c))
+  return out
 }
 
 function fmtDate(s: string | null): string {
@@ -155,7 +188,13 @@ function FolderRow({
         ) : (
           <span style={{ width: 12, display: "inline-block" }} />
         )}
-        {isOpen && kids.length > 0 ? <FolderOpen size={14} /> : <Folder size={14} />}
+        {node.isSource ? (
+          <Database size={13} className="opacity-80" />
+        ) : isOpen && kids.length > 0 ? (
+          <FolderOpen size={14} />
+        ) : (
+          <Folder size={14} />
+        )}
         <span className="truncate">{node.name === "/" ? "All documents" : node.name}</span>
         <span className="ml-auto opacity-50 tabular-nums">{total}</span>
       </div>
@@ -185,6 +224,9 @@ export function BrainExplorerWindow({ payload, activeConnectionId, hasRvbbit, on
   const [detail, setDetail] = useState<BrainDocDetail | null>(null)
   const [query, setQuery] = useState<string>("")
   const [hits, setHits] = useState<BrainHit[] | null>(null)
+  const [facets, setFacets] = useState<BrainFacets>({ types: [], sources: [] })
+  const [filterType, setFilterType] = useState<string>("")
+  const [filterSource, setFilterSource] = useState<string>("")
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   // drag-drop ingest
@@ -238,12 +280,18 @@ export function BrainExplorerWindow({ payload, activeConnectionId, hasRvbbit, on
   }, [conn, docs.length])
 
   const tree = useMemo(() => buildTree(docs), [docs])
+  const selectedNode = useMemo(() => findNode(tree, selectedFolder), [tree, selectedFolder])
 
-  // docs shown in the right pane: search hits, or the docs in/under the selected folder
+  // docs shown in the middle pane: every doc under the selected source/folder node, sorted by title
   const folderDocs = useMemo(() => {
-    if (selectedFolder === "/") return docs
-    return docs.filter((d) => d.folderPath === selectedFolder || d.folderPath.startsWith(selectedFolder + "/"))
-  }, [docs, selectedFolder])
+    const collected = selectedFolder === "/" || !selectedNode ? docs : collectDocs(selectedNode)
+    return [...collected].sort((a, b) => a.title.localeCompare(b.title))
+  }, [docs, selectedNode, selectedFolder])
+
+  // drop-ingest target: the selected folder's real path if it's a concrete folder, else /<source>
+  const ingestFolder = selectedNode && selectedNode.realPath !== "/"
+    ? selectedNode.realPath
+    : "/" + (ingestSource || "dropped")
 
   const openDoc = useCallback(
     async (docId: number) => {
@@ -291,17 +339,28 @@ export function BrainExplorerWindow({ payload, activeConnectionId, hasRvbbit, on
     [conn, detail, reload],
   )
 
+  // facets (types/sources the identity can filter by) — drives the pre-search dropdowns
+  useEffect(() => {
+    if (!conn || !viewAs) return
+    let alive = true
+    void fetchFacets(conn, viewAs).then((f) => { if (alive) setFacets(f) })
+    return () => { alive = false }
+  }, [conn, viewAs, docs.length])
+
   const runSearch = useCallback(async () => {
     if (!conn || !viewAs || !query.trim()) {
       setHits(null)
       return
     }
     setLoading(true)
-    const { hits, error } = await askBrain(conn, viewAs, query, 12)
+    const { hits, error } = await askBrain(conn, viewAs, query, 12, {
+      type: filterType ? [filterType] : undefined,
+      source: filterSource ? [filterSource] : undefined,
+    })
     setHits(hits)
     setError(error)
     setLoading(false)
-  }, [conn, viewAs, query])
+  }, [conn, viewAs, query, filterType, filterSource])
 
   const handleDrop = useCallback(
     async (e: React.DragEvent) => {
@@ -330,7 +389,7 @@ export function BrainExplorerWindow({ payload, activeConnectionId, hasRvbbit, on
         return
       }
       const roles = ingestRoles.split(",").map((r) => r.trim()).filter(Boolean)
-      const base = (selectedFolder && selectedFolder !== "/" ? selectedFolder : "/" + (ingestSource || "dropped")).replace(/\/+$/, "")
+      const base = ingestFolder.replace(/\/+$/, "")
       setLoading(true)
       let ok = 0
       for (const c of docFiles) {
@@ -365,7 +424,7 @@ export function BrainExplorerWindow({ payload, activeConnectionId, hasRvbbit, on
       )
       await reload()
     },
-    [conn, ingestRoles, ingestSource, selectedFolder, reload],
+    [conn, ingestRoles, ingestSource, ingestFolder, reload],
   )
 
   if (!hasRvbbit) {
@@ -456,6 +515,28 @@ export function BrainExplorerWindow({ payload, activeConnectionId, hasRvbbit, on
           className="flex-1 text-xs px-2 py-1 rounded outline-none"
           style={{ background: "color-mix(in oklch, var(--chrome-text) 8%, transparent)" }}
         />
+        {!adminMode && facets.types.length > 0 && (
+          <select value={filterType} onChange={(e) => setFilterType(e.target.value)}
+            title="Pre-filter the search by document type"
+            className="text-xs px-1.5 py-1 rounded outline-none cursor-pointer"
+            style={{ background: "color-mix(in oklch, var(--chrome-text) 8%, transparent)" }}>
+            <option value="">All types</option>
+            {facets.types.map((t) => (
+              <option key={t.value} value={t.value}>{t.value} ({t.docs})</option>
+            ))}
+          </select>
+        )}
+        {!adminMode && facets.sources.length > 1 && (
+          <select value={filterSource} onChange={(e) => setFilterSource(e.target.value)}
+            title="Pre-filter the search by source"
+            className="text-xs px-1.5 py-1 rounded outline-none cursor-pointer"
+            style={{ background: "color-mix(in oklch, var(--chrome-text) 8%, transparent)" }}>
+            <option value="">All sources</option>
+            {facets.sources.map((s) => (
+              <option key={s.value} value={s.value}>{s.value} ({s.docs})</option>
+            ))}
+          </select>
+        )}
         {hits != null && (
           <button
             onClick={() => {
@@ -478,7 +559,7 @@ export function BrainExplorerWindow({ payload, activeConnectionId, hasRvbbit, on
         <span className="opacity-50">roles</span>
         <input value={ingestRoles} onChange={(e) => setIngestRoles(e.target.value)} placeholder="all_hands, hr"
           className="px-1 py-0.5 rounded outline-none flex-1" style={{ background: "color-mix(in oklch, var(--chrome-text) 8%, transparent)", minWidth: 120 }} />
-        <span className="opacity-40">into {selectedFolder === "/" ? "/" + (ingestSource || "dropped") : selectedFolder}</span>
+        <span className="opacity-40">into {ingestFolder}</span>
         {dropMsg && <span className="ml-auto" style={{ color: "var(--success)" }}>{dropMsg}</span>}
       </div>
 
@@ -542,12 +623,22 @@ export function BrainExplorerWindow({ payload, activeConnectionId, hasRvbbit, on
                 <div
                   key={`${h.docId}-${i}`}
                   className="flex flex-col gap-0.5 px-2 py-1.5 rounded cursor-pointer text-xs"
-                  style={{ background: "color-mix(in oklch, var(--chrome-text) 5%, transparent)" }}
+                  style={{
+                    background: detail?.docId === h.docId
+                      ? "color-mix(in oklch, var(--rvbbit-accent, var(--chrome-text)) 22%, transparent)"
+                      : "color-mix(in oklch, var(--chrome-text) 5%, transparent)",
+                  }}
                   onClick={() => void openDoc(h.docId)}
                 >
                   <div className="flex items-center gap-2">
                     <FileText size={13} className="opacity-70 shrink-0" />
                     <span className="font-medium truncate">{h.title}</span>
+                    {h.docType && (
+                      <span className="text-[9px] px-1 rounded shrink-0 opacity-80"
+                        style={{ background: "color-mix(in oklch, var(--rvbbit-accent, var(--chrome-text)) 14%, transparent)" }}>
+                        {h.docType}
+                      </span>
+                    )}
                     <span className="ml-auto tabular-nums opacity-60">{h.score?.toFixed(3)}</span>
                   </div>
                   <div className="opacity-60 truncate">{h.folderPath} · {h.source}</div>
@@ -556,27 +647,49 @@ export function BrainExplorerWindow({ payload, activeConnectionId, hasRvbbit, on
               ))}
             </div>
           ) : (
-            <div className="grid gap-1" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))" }}>
-              {folderDocs.map((d) => (
-                <div
-                  key={d.docId}
-                  className="flex flex-col items-center gap-1 p-2 rounded cursor-pointer text-center"
-                  style={{ background: "color-mix(in oklch, var(--chrome-text) 5%, transparent)" }}
-                  onClick={() => void openDoc(d.docId)}
-                  title={`${d.title}\n${d.folderPath}`}
-                >
-                  <FileText size={28} className="opacity-80" />
-                  <span className="text-xs truncate w-full">{d.title}</span>
-                  <span className="text-[10px] opacity-50 truncate w-full">
-                    {d.source} · {fmtDate(d.occurredMs ? new Date(d.occurredMs).toISOString() : null)}
-                  </span>
-                  {d.unassigned && (
-                    <span className="text-[9px] px-1 rounded" style={{ background: "color-mix(in oklch, var(--danger) 22%, transparent)", color: "var(--danger)" }}>
-                      unassigned
+            <div className="flex flex-col text-xs">
+              {/* column header (Windows Explorer "Details" view) */}
+              <div
+                className="flex items-center gap-2 px-2 py-1 sticky top-0 text-[10px] uppercase tracking-wide opacity-50 z-[1]"
+                style={{ background: "var(--chrome-bg, transparent)", borderBottom: "1px solid color-mix(in oklch, var(--chrome-text) 12%, transparent)" }}
+              >
+                <span className="w-4 shrink-0" />
+                <span className="flex-1 min-w-0">Name</span>
+                <span className="w-28 shrink-0">Folder</span>
+                <span className="w-24 shrink-0">Occurred</span>
+                <span className="w-12 shrink-0 text-right">Chunks</span>
+              </div>
+              {folderDocs.map((d, i) => {
+                const isSel = detail?.docId === d.docId
+                return (
+                  <div
+                    key={d.docId}
+                    className="flex items-center gap-2 px-2 py-1 cursor-pointer select-none"
+                    style={{
+                      background: isSel
+                        ? "color-mix(in oklch, var(--rvbbit-accent, var(--chrome-text)) 22%, transparent)"
+                        : i % 2
+                          ? "color-mix(in oklch, var(--chrome-text) 4%, transparent)"
+                          : undefined,
+                    }}
+                    onClick={() => void openDoc(d.docId)}
+                    title={`${d.title}\n${d.source} · ${d.folderPath}`}
+                  >
+                    <FileText size={14} className="shrink-0 opacity-70" />
+                    <span className="flex-1 min-w-0 truncate">{d.title}</span>
+                    {d.unassigned && (
+                      <span className="text-[9px] px-1 rounded shrink-0" style={{ background: "color-mix(in oklch, var(--danger) 22%, transparent)", color: "var(--danger)" }}>
+                        unassigned
+                      </span>
+                    )}
+                    <span className="w-28 shrink-0 truncate opacity-55">{d.folderPath === "/" ? "—" : d.folderPath}</span>
+                    <span className="w-24 shrink-0 opacity-55 tabular-nums">
+                      {fmtDate(d.occurredMs ? new Date(d.occurredMs).toISOString() : null)}
                     </span>
-                  )}
-                </div>
-              ))}
+                    <span className="w-12 shrink-0 text-right opacity-55 tabular-nums">{d.chunks}</span>
+                  </div>
+                )
+              })}
               {folderDocs.length === 0 && <div className="text-xs opacity-50 p-2">Empty folder.</div>}
             </div>
           )}

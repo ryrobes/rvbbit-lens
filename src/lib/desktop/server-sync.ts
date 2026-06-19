@@ -58,6 +58,7 @@ export function recentHomes(): string[] {
 const DEBOUNCE_MS = 1500
 let profileTimer: number | null = null
 let scenesTimer: number | null = null
+let viewsTimer: number | null = null
 
 function flush(path: string, payload: Record<string, unknown>): void {
   void fetch(path, {
@@ -85,5 +86,14 @@ export function shadowScenes(scenes: unknown[]): void {
   if (scenesTimer != null) window.clearTimeout(scenesTimer)
   scenesTimer = window.setTimeout(() => {
     flush("/api/lens/scenes", { home: getHomeId(), scenes })
+  }, DEBOUNCE_MS)
+}
+
+/** Mirror the full Saved Views store to the server (debounced). */
+export function shadowViews(views: unknown[]): void {
+  if (typeof window === "undefined") return
+  if (viewsTimer != null) window.clearTimeout(viewsTimer)
+  viewsTimer = window.setTimeout(() => {
+    flush("/api/lens/views", { home: getHomeId(), views })
   }, DEBOUNCE_MS)
 }

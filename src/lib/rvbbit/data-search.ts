@@ -34,6 +34,11 @@ export interface DataSearchHit {
    *  the real "semantic frequency": how many reports a concept recurs across, after
    *  embedding entity-resolution merges near-duplicate mentions. Drives size/heat. */
   frequency: number
+  /** kg_nodes.properties->>'source' — for brain `document` nodes this is the
+   *  provider+source ("Linear · all", "Fireflies · meetings", …); null for
+   *  structure (db_table/db_column) and most entity nodes. Drives the
+   *  source-aware object "type" (see scry-types.ts). */
+  source: string | null
 }
 
 export interface CatalogStatus {
@@ -144,10 +149,12 @@ export async function searchData(
            ON ev.graph_id = ${g} AND ev.edge_id = e.edge_id
         GROUP BY s.node_id)
      SELECT s.node_id, s.kind, s.schema_name, s.rel_name, s.col_name, s.score, s.doc,
-            COALESCE(d.degree, 0) AS degree, COALESCE(f.frequency, 0) AS frequency
+            COALESCE(d.degree, 0) AS degree, COALESCE(f.frequency, 0) AS frequency,
+            n.properties->>'source' AS source
        FROM s
        LEFT JOIN deg d ON d.node_id = s.node_id
        LEFT JOIN freq f ON f.node_id = s.node_id
+       LEFT JOIN rvbbit.kg_nodes n ON n.graph_id = ${g} AND n.node_id = s.node_id
       ORDER BY s.score DESC NULLS LAST`,
   )
   if (!res.ok) {
@@ -167,6 +174,7 @@ export async function searchData(
     doc: String(r.doc ?? ""),
     degree: num(r.degree),
     frequency: num(r.frequency),
+    source: strOrNull(r.source),
   }))
   if (hits.length === 0 && canFallbackToKgNodes) return searchKgNodes(connectionId, query, lim, kinds, graph)
   return { hits }
@@ -245,7 +253,8 @@ async function searchKgNodes(
      )
      SELECT h.node_id, h.kind, h.label,
             h.raw_score / NULLIF(max(h.raw_score) OVER (), 0) AS score,
-            h.doc, COALESCE(d.degree, 0) AS degree, COALESCE(f.frequency, 0) AS frequency
+            h.doc, COALESCE(d.degree, 0) AS degree, COALESCE(f.frequency, 0) AS frequency,
+            h.properties->>'source' AS source
        FROM hits h
        LEFT JOIN deg d ON d.node_id = h.node_id
        LEFT JOIN freq f ON f.node_id = h.node_id
@@ -263,6 +272,7 @@ async function searchKgNodes(
       doc: String(r.doc ?? r.label ?? ""),
       degree: num(r.degree),
       frequency: num(r.frequency),
+      source: strOrNull(r.source),
     })),
   }
 }

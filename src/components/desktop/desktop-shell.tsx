@@ -25,6 +25,7 @@ import {
   Palette as PaletteIcon,
   Plug,
   Plus,
+  Quote,
   Rocket,
   Search,
   Sparkles,
@@ -46,6 +47,7 @@ import { DesktopParamsSurface } from "./desktop-params-surface"
 import { DesktopWindow } from "./desktop-window"
 import { FinderWindow } from "./finder-window"
 import { DataGridWindow } from "./data-grid-window"
+import { RowInspectorWindow } from "./row-inspector-window"
 import { CsvImportWindow } from "./csv-import-window"
 import { SemanticOpPalette } from "./semantic-op-palette"
 import { SemanticBindPopover } from "./semantic-bind-popover"
@@ -67,6 +69,7 @@ import { NotificationToasts } from "./notification-toasts"
 import { NotificationCenterWindow } from "./notification-center-window"
 import { OperatorsWindow } from "./operators-window"
 import { CostsWindow } from "./costs-window"
+import { AgentMessagesWindow } from "./agent-messages-window"
 import { SyncMirrorWindow } from "./sync-mirror-window"
 import { DashboardsWindow } from "./dashboards-window"
 import { DuckWindow } from "./duck-window"
@@ -136,6 +139,7 @@ import type {
   DashboardsPayload,
   DataSearchPayload,
   DriftPayload,
+  RowInspectorPayload,
   FolderPayload,
   ModelStudioPayload,
   DesktopBlockDragPayload,
@@ -153,6 +157,7 @@ import type {
   FinderPayload,
   NotificationsPayload,
   CostsPayload,
+  AgentMessagesPayload,
   SyncMirrorPayload,
   DuckPayload,
   OperatorFlowPayload,
@@ -186,6 +191,8 @@ import type {
   ViewAppBuilderPayload,
   ViewAppPayload,
   ViewAppsPayload,
+  ViewApp,
+  ScryViewState,
   Scene,
   SceneConnectionFingerprint,
   SlotId,
@@ -217,7 +224,7 @@ function cloneCanvas(c: WorkspaceCanvas): WorkspaceCanvas {
 }
 import { randomUUID } from "@/lib/uuid"
 import { putImportFile } from "@/lib/import/file-store"
-import { listViewApps } from "@/lib/desktop/view-apps"
+import { getViewApp, listViewApps, upsertViewApp } from "@/lib/desktop/view-apps"
 import {
   buildSceneBundle,
   contentHashOf,
@@ -506,6 +513,7 @@ export function DesktopShell() {
   const [busy, setBusy] = useState(false)
   // ⌘K / Ctrl-K toggles the Scry cascade search prompt (a top-layer overlay).
   const [scryOpen, setScryOpen] = useState(false)
+  const [scrySeed, setScrySeed] = useState<ScryViewState | null>(null)
   const scrySpawnCountRef = useRef(0)
   const stateLoadedRef = useRef(false)
   const wallpaperInputRef = useRef<HTMLInputElement | null>(null)
@@ -1589,30 +1597,61 @@ export function DesktopShell() {
     openWindow({
       id: randomUUID(),
       kind: "view-apps",
-      title: "View Apps",
+      title: "Saved Views",
       x: 240, y: 120, width: 720, height: 480,
       payload: { kind: "view-apps" } satisfies ViewAppsPayload,
     })
   }, [focus, openWindow, liveWindows])
 
-  const openViewApp = useCallback((appId: string) => {
-    openWindow({
-      id: randomUUID(),
-      kind: "view-app",
-      title: "View App",
-      x: 180 + Math.random() * 60,
-      y: 130 + Math.random() * 60,
-      width: 760,
-      height: 520,
-      payload: { kind: "view-app", appId } satisfies ViewAppPayload,
-    })
-  }, [openWindow])
+  // Restore a saved Scry exploration: seed the explorer and open it.
+  const openScryView = useCallback((view: ViewApp) => {
+    setScrySeed(view.scry ?? null)
+    setScryOpen(true)
+  }, [])
+
+  const openViewApp = useCallback(
+    (appId: string) => {
+      const app = getViewApp(appId)
+      // A scry view reopens the graph explorer; a query view opens the rows/chart window.
+      if (app?.kind === "scry") {
+        openScryView(app)
+        return
+      }
+      openWindow({
+        id: randomUUID(),
+        kind: "view-app",
+        title: "Saved View",
+        x: 180 + Math.random() * 60,
+        y: 130 + Math.random() * 60,
+        width: 760,
+        height: 520,
+        payload: { kind: "view-app", appId } satisfies ViewAppPayload,
+      })
+    },
+    [openWindow, openScryView],
+  )
+
+  // Persist the current Scry exploration as a kind:"scry" Saved View.
+  const saveScryView = useCallback(
+    (name: string, state: ScryViewState) => {
+      upsertViewApp({
+        name,
+        kind: "scry",
+        scry: state,
+        sql: "",
+        connectionId: activeConnectionId,
+        iconKey: "search",
+        iconColor: "var(--brand-kg)",
+      })
+    },
+    [activeConnectionId],
+  )
 
   const openViewAppBuilder = useCallback((seed?: ViewAppBuilderPayload) => {
     openWindow({
       id: randomUUID(),
       kind: "view-app-builder",
-      title: "New View App",
+      title: "New Saved View",
       x: 220 + Math.random() * 50,
       y: 140 + Math.random() * 50,
       width: 640,
@@ -1856,6 +1895,34 @@ export function DesktopShell() {
       } satisfies CostsPayload,
     })
   }, [focus, openWindow, liveWindows, updatePayload])
+
+  const openAgentMessages = useCallback(
+    (opts?: { runId?: string | null; operator?: string | null }) => {
+      const existing = liveWindows().find((w) => w.kind === "agent-messages")
+      if (existing) {
+        if (opts?.runId || opts?.operator) {
+          updatePayload(existing.id, (p) => ({
+            ...(p as AgentMessagesPayload),
+            initialRunId: opts.runId ?? (p as AgentMessagesPayload).initialRunId,
+            operator: opts.operator ?? (p as AgentMessagesPayload).operator,
+          }))
+        }
+        return focus(existing.id)
+      }
+      openWindow({
+        id: randomUUID(),
+        kind: "agent-messages",
+        title: "Agent Messages",
+        x: 124, y: 66, width: 1080, height: 720,
+        payload: {
+          kind: "agent-messages",
+          initialRunId: opts?.runId ?? null,
+          operator: opts?.operator ?? null,
+        } satisfies AgentMessagesPayload,
+      })
+    },
+    [focus, openWindow, liveWindows, updatePayload],
+  )
 
   const openSyncMirror = useCallback(() => {
     const existing = liveWindows().find((w) => w.kind === "sync-mirror")
@@ -2662,6 +2729,19 @@ export function DesktopShell() {
         origin: "derived",
         view: { activeTab: "rows", sqlRailOpen: true, sqlRailWidthPx: 360 },
       } satisfies DataPayload,
+    })
+  }, [openWindow])
+
+  const openRowInspector = useCallback((payload: RowInspectorPayload) => {
+    openWindow({
+      id: randomUUID(),
+      kind: "row-inspector",
+      title: `Row ${payload.rowIndex + 1} · ${payload.sourceTitle}`,
+      x: 260 + Math.random() * 60,
+      y: 140 + Math.random() * 60,
+      width: 760,
+      height: 520,
+      payload: { ...payload, kind: "row-inspector" },
     })
   }, [openWindow])
 
@@ -3520,7 +3600,7 @@ export function DesktopShell() {
   const launchers: LauncherItem[] = useMemo(() => [
     { id: "finder", label: "Finder", icon: FolderOpen, color: "var(--brand-finder)", activate: openFinder },
     { id: "sql-scratch", label: "SQL Scratch", icon: FileCode2, color: "var(--brand-sql-scratch)", activate: openSqlScratch },
-    { id: "view-apps", label: "View Apps", icon: Boxes, color: "var(--brand-view-apps)", sublabel: viewAppCount ? `${viewAppCount} saved` : undefined, activate: openViewApps },
+    { id: "view-apps", label: "Saved Views", icon: Boxes, color: "var(--brand-view-apps)", sublabel: viewAppCount ? `${viewAppCount} saved` : undefined, activate: openViewApps },
     { id: "connections", label: "Connections", icon: Plug, color: "var(--brand-connections)", activate: openConnections },
     { id: "data-search", label: "Data Search", icon: Search, color: "var(--brand-kg)", description: "Semantic search across data", activate: () => openDataSearch(), rvbbit: true },
     { id: "mcp-incoming", label: "MCP Incoming", icon: Activity, color: "oklch(71% 0.17 205)", description: "Warehouse MCP usage", activate: openMcpIncoming, rvbbit: true },
@@ -3535,6 +3615,7 @@ export function DesktopShell() {
     { id: "sync-mirror", label: "Temporal Mirror", icon: Database, color: "var(--brand-cache)", description: "Sync Postgres sources into time-travel tables", activate: openSyncMirror, folder: "system", rvbbit: true },
     // Semantic
     { id: "operators", label: "Operators", icon: FlowArrow, color: "var(--brand-operators)", description: "Semantic SQL operators", activate: openOperators, folder: "semantic", rvbbit: true },
+    { id: "agent-messages", label: "Messages", icon: Quote, color: "var(--viz-op-agent, var(--brand-warren))", description: "Agent transcripts — by run, with cost", activate: () => openAgentMessages(), folder: "semantic", rvbbit: true },
     { id: "specialists", label: "Specialists", icon: Brain, color: "var(--brand-specialists)", description: "Fine-tuned task models", activate: openSpecialists, folder: "semantic", rvbbit: true },
     { id: "routing", label: "Routing", icon: GitBranch, color: "var(--brand-routing)", description: "Model/backend routing rules", activate: openRouting, folder: "semantic", rvbbit: true },
     { id: "mcp", label: "MCP", icon: Globe, color: "var(--brand-mcp)", description: "MCP servers & tools", activate: openMcpServers, folder: "semantic", rvbbit: true },
@@ -3565,7 +3646,7 @@ export function DesktopShell() {
     viewAppCount, schema, rvbbitVersion,
     openFinder, openSqlScratch, openViewApps, openConnections, openDataSearch, openMcpIncoming,
     openSystemObjects, openExtensions, openPgMonitor, openCache, openRvbbitCache,
-    openCosts, openSyncMirror, openOperators, openSpecialists, openRouting,
+    openCosts, openAgentMessages, openSyncMirror, openOperators, openSpecialists, openRouting,
     openMcpServers, openCapabilities, openHfDeploy, openWarren, openModelStudio,
     openDuck, openDagster, dagsterDetected, openMetricCatalog, openMetricCreator, openMetricInspector, openMetricBoard, openDashboards, openAlerts, openBrain,
     openCubeCatalog, openCubeCreator, openCubeInspector, openCubeProposals,
@@ -3593,6 +3674,7 @@ export function DesktopShell() {
       openArtifact,
       openQueryDocument,
       openSqlData,
+      openRowInspector,
       openCsvImport,
       openExtensions,
       openRvbbitCache,
@@ -3650,7 +3732,7 @@ export function DesktopShell() {
     [
       activeConnectionId, hasRvbbit, launchers, schema, semanticOps, schemaLoading, busy, setBusy,
       openTableFromFinder, openField, openViewAppBuilder, openViewApp, openArtifact,
-      openQueryDocument, openSqlData, openCsvImport, openExtensions, openRvbbitCache, openCache, openConnections,
+      openQueryDocument, openSqlData, openRowInspector, openCsvImport, openExtensions, openRvbbitCache, openCache, openConnections,
       loadSchema, loadConnections, updatePayload, emitParam, subscribeParam,
       editRollupSpec, repivotWindow, probeColumnValues, activePalette, paletteOverrides,
       wallpaperUrl, onReExtractPalette, onReExtractWithRvbbit, setPaletteOverrides,
@@ -3687,12 +3769,17 @@ export function DesktopShell() {
       ) : null}
       <ScryCanvas
         open={scryOpen}
-        onClose={() => setScryOpen(false)}
+        onClose={() => {
+          setScryOpen(false)
+          setScrySeed(null)
+        }}
         connectionId={activeConnectionId}
         onSpawnResults={spawnScryResults}
         onOpenTable={openTableFromFinder}
         onOpenField={openField}
         onGraduate={graduateTables}
+        seed={scrySeed}
+        onSaveView={saveScryView}
       />
       <div
         className="pointer-events-none fixed inset-0 opacity-[0.07]"
@@ -4046,6 +4133,7 @@ interface WindowContext {
   openArtifact: (artifactId: string) => void
   openQueryDocument: (payload: QueryDocumentPayload) => void
   openSqlData: (sql: string, title: string) => void
+  openRowInspector: (payload: RowInspectorPayload) => void
   openCsvImport: (file: File) => void
   openExtensions: () => void
   openRvbbitCache: () => void
@@ -4259,6 +4347,7 @@ function renderWindowContent(
           runSignal={ctx.runSignal}
           onChangePayload={(mut) => ctx.updatePayload(w.id, (p) => mut(p as DataPayload))}
           onSaveAsViewApp={(sql) => ctx.openViewAppBuilder({ initialSql: sql })}
+          onOpenRow={ctx.openRowInspector}
           onEmitParam={ctx.emitParam}
           onSubscribeParam={(key, field, target) => ctx.subscribeParam(w.id, key, field, target)}
           onEditRollup={(transform) => ctx.editRollupSpec(w.id, transform)}
@@ -4267,6 +4356,8 @@ function renderWindowContent(
           onOpenKgForSource={ctx.openKgForSource}
         />
       )
+    case "row-inspector":
+      return <RowInspectorWindow payload={w.payload as RowInspectorPayload} />
     case "connections":
       return <ConnectionsWindow onChanged={ctx.reloadConnections} />
     case "view-apps":
@@ -4694,6 +4785,14 @@ function renderWindowContent(
           }
         />
       )
+    case "agent-messages":
+      return (
+        <AgentMessagesWindow
+          payload={w.payload as AgentMessagesPayload}
+          activeConnectionId={ctx.activeConnectionId}
+          onOpenOperator={(name) => ctx.openOperatorFlow(name)}
+        />
+      )
     case "sync-mirror":
       // Key on the connection so a switch remounts (clears stale jobs/overview +
       // discards any in-flight overview fetch for the previous connection).
@@ -4779,6 +4878,7 @@ function iconForKind(kind: DesktopWindowState["kind"]) {
     case "finder": return FolderOpen
     case "folder": return Folder
     case "data": return Table2
+    case "row-inspector": return Table2
     case "csv-import": return FileCsv
     case "connections": return Plug
     case "view-apps":
@@ -4845,6 +4945,7 @@ function iconForKind(kind: DesktopWindowState["kind"]) {
     case "warren-job-detail":
       return Rocket
     case "costs": return DollarSign
+    case "agent-messages": return Quote
     case "sync-mirror": return Database
     case "dashboards": return LayoutDashboard
     case "duck": return Boxes

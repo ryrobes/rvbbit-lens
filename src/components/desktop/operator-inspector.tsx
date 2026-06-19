@@ -2,7 +2,7 @@
 
 import { useEffect, useLayoutEffect, useRef, useState } from "react"
 import { createPortal } from "react-dom"
-import { ChevronDown, Plus, Search, Trash2 } from "@/lib/icons"
+import { ChevronDown, Globe, Plus, Search, Trash2 } from "@/lib/icons"
 import { cn } from "@/lib/utils"
 import {
   defaultNode,
@@ -14,6 +14,8 @@ import {
   type RvbbitSpecialist,
   type NodeKind,
   type OpStep,
+  type AgentToolRef,
+  type AgentBudget,
   type RetryPlan,
   type TakesPlan,
   type Validator,
@@ -104,7 +106,7 @@ export function OperatorInspector({
   )
 }
 
-const NODE_KINDS: NodeKind[] = ["llm", "specialist", "python", "code", "sql", "mcp"]
+const NODE_KINDS: NodeKind[] = ["llm", "specialist", "python", "code", "sql", "mcp", "agent"]
 
 // ── Flow-control toggles ────────────────────────────────────────────
 
@@ -752,6 +754,14 @@ function StepEditor({
           onOpenMcpGateway={onOpenMcpGateway}
           onChange={onChange}
         />
+      ) : step.kind === "agent" ? (
+        <AgentFields
+          step={step}
+          mcpServers={mcpServers}
+          mcpTools={mcpTools}
+          llmModels={llmModels}
+          onChange={onChange}
+        />
       ) : (
         <>
           <Field label="SQL — a SELECT, with $1..$N placeholders">
@@ -961,6 +971,268 @@ function McpFields({
         onChange={(inputs) => onChange({ ...step, inputs })}
       />
     </>
+  )
+}
+
+/** Editor for an `agent` node — a bounded tool-calling loop. */
+function AgentFields({
+  step,
+  mcpServers,
+  mcpTools,
+  llmModels,
+  onChange,
+}: {
+  step: OpStep
+  mcpServers: McpServerOverview[]
+  mcpTools: McpToolLite[]
+  llmModels: LlmModel[]
+  onChange: (s: OpStep) => void
+}) {
+  const tools = step.tools ?? []
+  const budget = step.budget ?? {}
+  const num = (v: string): number | undefined => (v.trim() === "" ? undefined : Number(v))
+  const setTool = (i: number, next: AgentToolRef) => {
+    const arr = tools.slice()
+    arr[i] = next
+    onChange({ ...step, tools: arr })
+  }
+  const removeTool = (i: number) => onChange({ ...step, tools: tools.filter((_, j) => j !== i) })
+  const addQuery = () => {
+    if (tools.some((t) => "builtin" in t && t.builtin === "query")) return
+    onChange({ ...step, tools: [...tools, { builtin: "query" }] })
+  }
+  const addMcp = () => onChange({ ...step, tools: [...tools, { server: "", tool: "" }] })
+  const setBudget = (k: keyof AgentBudget, v: number | undefined) => {
+    const next: AgentBudget = { ...budget }
+    if (v === undefined) delete next[k]
+    else next[k] = v
+    onChange({ ...step, budget: next })
+  }
+  return (
+    <>
+      <ModelField
+        value={step.model ?? ""}
+        models={llmModels}
+        onChange={(v) => onChange({ ...step, model: v })}
+      />
+      <Field label="system — standing instructions + grounding">
+        <textarea
+          value={step.system ?? ""}
+          onChange={(e) => onChange({ ...step, system: e.target.value })}
+          rows={5}
+          className={areaCls}
+        />
+      </Field>
+      <Field label="task — the request (templated; {{ inputs.x }})">
+        <textarea
+          value={step.task ?? ""}
+          onChange={(e) => onChange({ ...step, task: e.target.value })}
+          rows={3}
+          className={areaCls}
+        />
+      </Field>
+
+      <div>
+        <div className="mb-1 flex items-center justify-between">
+          <span className="text-[9px] uppercase tracking-wider text-chrome-text/45">
+            tools — the loop may call
+          </span>
+          <div className="flex gap-1">
+            <button
+              type="button"
+              onClick={addQuery}
+              className="rounded border border-foreground/15 px-1.5 py-0.5 text-[9px] hover:bg-foreground/10"
+            >
+              + query
+            </button>
+            <button
+              type="button"
+              onClick={addMcp}
+              className="rounded border border-foreground/15 px-1.5 py-0.5 text-[9px] hover:bg-foreground/10"
+            >
+              + MCP tool
+            </button>
+          </div>
+        </div>
+        {tools.length === 0 ? (
+          <p className="px-1 text-[10px] text-warning/80">
+            No tools — the agent can only answer from the task. Add the read-only{" "}
+            <span className="font-mono">query</span> tool.
+          </p>
+        ) : (
+          <div className="space-y-1">
+            {tools.map((t, i) =>
+              "builtin" in t ? (
+                <div
+                  key={i}
+                  className="flex items-center gap-2 rounded border border-foreground/10 bg-foreground/[0.03] px-2 py-1"
+                >
+                  <span className="font-mono text-[10px] text-chrome-text/85">query</span>
+                  <span className="min-w-0 flex-1 truncate text-[9px] text-chrome-text/50">
+                    built-in · read-only SQL, 200-row cap
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => removeTool(i)}
+                    className="text-chrome-text/40 hover:text-danger"
+                  >
+                    <Trash2 className="h-3 w-3" />
+                  </button>
+                </div>
+              ) : (
+                <AgentMcpToolRow
+                  key={i}
+                  value={t}
+                  mcpServers={mcpServers}
+                  mcpTools={mcpTools}
+                  onChange={(next) => setTool(i, next)}
+                  onRemove={() => removeTool(i)}
+                />
+              ),
+            )}
+          </div>
+        )}
+      </div>
+
+      <Row>
+        <Field label="max iterations">
+          <input
+            type="number"
+            value={step.max_iters ?? ""}
+            onChange={(e) => onChange({ ...step, max_iters: num(e.target.value) })}
+            placeholder="8"
+            className={inputCls}
+          />
+        </Field>
+        <Field label="tool result max chars">
+          <input
+            type="number"
+            value={step.tool_result_max_chars ?? ""}
+            onChange={(e) => onChange({ ...step, tool_result_max_chars: num(e.target.value) })}
+            placeholder="8000"
+            className={inputCls}
+          />
+        </Field>
+      </Row>
+      <div>
+        <span className="mb-0.5 block text-[9px] uppercase tracking-wider text-chrome-text/45">
+          budget — first cap to trip ends the loop
+        </span>
+        <Row>
+          <Field label="max tokens">
+            <input
+              type="number"
+              value={budget.tokens ?? ""}
+              onChange={(e) => setBudget("tokens", num(e.target.value))}
+              placeholder="—"
+              className={inputCls}
+            />
+          </Field>
+          <Field label="max cost (USD)">
+            <input
+              type="number"
+              step="0.01"
+              value={budget.cost_usd ?? ""}
+              onChange={(e) => setBudget("cost_usd", num(e.target.value))}
+              placeholder="0.50"
+              className={inputCls}
+            />
+          </Field>
+          <Field label="wall (ms)">
+            <input
+              type="number"
+              value={budget.wall_ms ?? ""}
+              onChange={(e) => setBudget("wall_ms", num(e.target.value))}
+              placeholder="120000"
+              className={inputCls}
+            />
+          </Field>
+        </Row>
+      </div>
+      <p className="px-1 text-[10px] leading-relaxed text-chrome-text/50">
+        A bounded tool-calling loop: the model gets the system prompt + task, calls tools, and each
+        result is fed back until it answers with no tool call — or a cap trips. Every turn is recorded
+        in <span className="font-mono">rvbbit.agent_messages</span> (see the Messages app). Agent
+        operators bypass the result cache automatically.
+      </p>
+    </>
+  )
+}
+
+/** One MCP-tool row in an agent's tool list — a server + tool picker. */
+function AgentMcpToolRow({
+  value,
+  mcpServers,
+  mcpTools,
+  onChange,
+  onRemove,
+}: {
+  value: { server: string; tool: string }
+  mcpServers: McpServerOverview[]
+  mcpTools: McpToolLite[]
+  onChange: (next: { server: string; tool: string }) => void
+  onRemove: () => void
+}) {
+  const tools = mcpTools.filter((t) => t.server === value.server)
+  return (
+    <div className="flex items-center gap-1 rounded border border-foreground/10 bg-foreground/[0.03] px-1.5 py-1">
+      <Globe className="h-3 w-3 shrink-0 text-chrome-text/40" />
+      {mcpServers.length === 0 ? (
+        <input
+          value={value.server}
+          onChange={(e) => onChange({ server: e.target.value, tool: "" })}
+          placeholder="server"
+          className={cn(inputCls, "h-6 flex-1")}
+        />
+      ) : (
+        <select
+          value={value.server}
+          onChange={(e) => onChange({ server: e.target.value, tool: "" })}
+          className={cn(inputCls, "h-6 flex-1")}
+        >
+          <option value="">— server —</option>
+          {value.server && !mcpServers.find((s) => s.name === value.server) ? (
+            <option value={value.server}>{value.server}</option>
+          ) : null}
+          {mcpServers.map((s) => (
+            <option key={s.name} value={s.name}>
+              {s.name}
+            </option>
+          ))}
+        </select>
+      )}
+      {tools.length === 0 ? (
+        <input
+          value={value.tool}
+          onChange={(e) => onChange({ ...value, tool: e.target.value })}
+          placeholder="tool"
+          className={cn(inputCls, "h-6 flex-1 font-mono")}
+        />
+      ) : (
+        <select
+          value={value.tool}
+          onChange={(e) => onChange({ ...value, tool: e.target.value })}
+          className={cn(inputCls, "h-6 flex-1")}
+        >
+          <option value="">— tool —</option>
+          {value.tool && !tools.find((t) => t.name === value.tool) ? (
+            <option value={value.tool}>{value.tool}</option>
+          ) : null}
+          {tools.map((t) => (
+            <option key={t.name} value={t.name}>
+              {t.name}
+            </option>
+          ))}
+        </select>
+      )}
+      <button
+        type="button"
+        onClick={onRemove}
+        className="text-chrome-text/40 hover:text-danger"
+      >
+        <Trash2 className="h-3 w-3" />
+      </button>
+    </div>
   )
 }
 

@@ -67,7 +67,7 @@ export function ContextMenu({ state, onClose }: { state: ContextMenuState | null
       ref={ref}
       role="menu"
       onContextMenu={(e) => e.preventDefault()}
-      className="fixed z-[100] min-w-[200px] origin-top-left animate-in fade-in-0 zoom-in-95 rounded-lg border border-chrome-border/60 bg-chrome-bg/90 p-1 text-[12px] text-chrome-text shadow-2xl backdrop-blur-[6px] duration-100"
+      className="fixed z-[10000] min-w-[200px] origin-top-left animate-in fade-in-0 zoom-in-95 rounded-lg border border-chrome-border/60 bg-chrome-bg/90 p-1 text-[12px] text-chrome-text shadow-2xl backdrop-blur-[6px] duration-100"
       style={{ left, top }}
     >
       {state.items.map((it) => (

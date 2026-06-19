@@ -49,6 +49,7 @@ import type {
   ParamTarget,
   RollupGrain,
   RollupSpec,
+  RowInspectorPayload,
   SemanticOpMeta,
 } from "@/lib/desktop/types"
 import { effectiveRollup } from "@/lib/desktop/sql-builder"
@@ -56,7 +57,7 @@ import { reconcileRollupLineage } from "@/lib/desktop/rollup-sql-parse"
 import { rollupChartSpec } from "@/lib/desktop/rollup-chart"
 import { classifyColumn } from "@/lib/desktop/chart-infer"
 import { RollupShelf, type FilterKind } from "./rollup-shelf"
-import type { QueryResult, SchemaSnapshot } from "@/lib/db/types"
+import type { QueryResult, QueryResultColumn, SchemaSnapshot } from "@/lib/db/types"
 import { buildSqlCompletionSchema } from "@/lib/desktop/sql-completion"
 import type { BlockReferenceMap } from "@/lib/desktop/sql-block-refs"
 import { cn } from "@/lib/utils"
@@ -103,6 +104,7 @@ interface DataGridWindowProps {
   runSignal: number
   onChangePayload: (mutate: (payload: DataPayload) => DataPayload) => void
   onSaveAsViewApp: (sql: string, title?: string) => void
+  onOpenRow: (payload: RowInspectorPayload) => void
   onEmitParam: (input: {
     sourceWindowId: string
     sourceBlockName: string
@@ -186,6 +188,7 @@ export function DataGridWindow({
   runSignal,
   onChangePayload,
   onSaveAsViewApp,
+  onOpenRow,
   onEmitParam,
   onSubscribeParam,
   onEditRollup,
@@ -569,6 +572,14 @@ export function DataGridWindow({
         // effect treats *this* as the baseline (not the unfiltered first
         // render).
         prevCompiledRef.current = compiled
+        // Advance the payload.sql sync baseline too: the onChangePayload below
+        // writes `sql: trimmedSource`, and the payload.sql-sync effect would
+        // otherwise read that self-induced change as an *external* edit and
+        // re-run the query a second time. Harmless for memoized ops (cache
+        // hit), but a cache_policy='never' agent operator would execute twice
+        // (two transcripts + double cost). Claiming the baseline here makes
+        // that effect a no-op for our own write.
+        lastSyncedSqlRef.current = trimmedSource
         onChangePayload((p) => ({
           ...p,
           sql: trimmedSource,
@@ -1261,10 +1272,10 @@ export function DataGridWindow({
                 size="sm"
                 variant="ghost"
                 onClick={() => onSaveAsViewApp(payload.sql || draftSql, payload.title)}
-                title="Save as View App"
+                title="Save as a view (rows + chart)"
               >
                 <Boxes className="h-3.5 w-3.5" />
-                <span className="text-xs">Save app</span>
+                <span className="text-xs">Save view</span>
               </Button>
             </div>
           ) : null}
@@ -1294,6 +1305,16 @@ export function DataGridWindow({
                 rows={result.rows}
                 columnDragSource={columnDragSource}
                 activeParams={blockParams}
+                onOpenRow={({ row, rowIndex, column }) => {
+                  onOpenRow({
+                    kind: "row-inspector",
+                    sourceTitle: payload.title || w.title || blockName,
+                    rowIndex,
+                    columns: result.columns as QueryResultColumn[],
+                    row,
+                    selectedColumn: column.name,
+                  })
+                }}
                 onEmitCellParam={(field, value, dataTypeId, operator, cascade) => {
                   onEmitParam({
                     sourceWindowId: w.id,

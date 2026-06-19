@@ -1,9 +1,11 @@
 "use client"
 
 import { useCallback, useEffect, useMemo, useState } from "react"
-import { AlertTriangle, Play, RefreshCw } from "@/lib/icons"
+import { AlertTriangle, BarChart3, Play, RefreshCw, Table2 } from "@/lib/icons"
 import { Button } from "@/components/ui/button"
+import { cn } from "@/lib/utils"
 import { ResultGrid } from "./result-grid"
+import { ChartView } from "./chart-view"
 import { getViewApp } from "@/lib/desktop/view-apps"
 import { iconFor } from "@/lib/desktop/icon-glyphs"
 import { usePresentMode } from "@/lib/desktop/present-mode"
@@ -23,6 +25,11 @@ export function ViewAppWindow({ payload, activeConnectionId }: ViewAppWindowProp
   // Present mode: the query auto-runs on mount, so the manual Re-run control is
   // editor chrome — drop it and keep the branded title/description header.
   const present = usePresentMode()
+  // A saved view shows rows or its chart. Default to chart when the saved view
+  // carries a spec (that's the intent of saving it). Edits here are in-session;
+  // the canonical chart is authored in the SQL builder.
+  const [viewMode, setViewMode] = useState<"rows" | "chart">(app?.chartSpec ? "chart" : "rows")
+  const [chartSpec, setChartSpec] = useState<Record<string, unknown> | null>(app?.chartSpec ?? null)
 
   const run = useCallback(async () => {
     if (!app) return
@@ -80,6 +87,32 @@ export function ViewAppWindow({ payload, activeConnectionId }: ViewAppWindowProp
             <div className="truncate text-[10px] text-chrome-text">{app.description}</div>
           ) : null}
         </div>
+        {result && !error ? (
+          <div className="flex items-center overflow-hidden rounded border border-chrome-border/60 text-[10px]">
+            <button
+              type="button"
+              onClick={() => setViewMode("rows")}
+              title="Rows"
+              className={cn(
+                "flex items-center gap-1 px-1.5 py-0.5",
+                viewMode === "rows" ? "bg-foreground/[0.1] text-foreground" : "text-chrome-text/60 hover:bg-foreground/[0.05]",
+              )}
+            >
+              <Table2 className="h-3 w-3" /> rows
+            </button>
+            <button
+              type="button"
+              onClick={() => setViewMode("chart")}
+              title="Chart"
+              className={cn(
+                "flex items-center gap-1 px-1.5 py-0.5",
+                viewMode === "chart" ? "bg-foreground/[0.1] text-foreground" : "text-chrome-text/60 hover:bg-foreground/[0.05]",
+              )}
+            >
+              <BarChart3 className="h-3 w-3" /> chart
+            </button>
+          </div>
+        ) : null}
         {present ? null : (
           <Button size="sm" variant="neutral" onClick={run} disabled={running} title="Re-run">
             <RefreshCw className={running ? "h-3 w-3 animate-spin" : "h-3 w-3"} />
@@ -94,7 +127,17 @@ export function ViewAppWindow({ payload, activeConnectionId }: ViewAppWindowProp
             {error}
           </div>
         ) : null}
-        {!error && result ? <ResultGrid columns={result.columns} rows={result.rows} /> : null}
+        {!error && result && viewMode === "chart" ? (
+          <ChartView
+            result={result}
+            userSpec={chartSpec}
+            onChangeUserSpec={setChartSpec}
+            onEmitParam={() => {}}
+          />
+        ) : null}
+        {!error && result && viewMode === "rows" ? (
+          <ResultGrid columns={result.columns} rows={result.rows} />
+        ) : null}
         {!error && !result ? (
           <div className="grid h-full place-items-center text-xs text-chrome-text">
             <Button size="sm" onClick={run}>

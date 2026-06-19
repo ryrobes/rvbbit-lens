@@ -1,8 +1,12 @@
 "use client"
 
-import { Loader2, Sparkles, X } from "@/lib/icons"
+import { useEffect, useLayoutEffect, useRef, useState } from "react"
+import { createPortal } from "react-dom"
+import { Loader2, Save, Sparkles, X } from "@/lib/icons"
+import { cn } from "@/lib/utils"
 import type { ScrySourceId } from "@/lib/desktop/scry"
 import type { KgGraphSummary } from "@/lib/rvbbit/kg"
+import { objectTypeLabel, type ScryTypeBucket } from "@/lib/desktop/scry-types"
 import type { UseScryCascade } from "./use-scry-cascade"
 
 /**
@@ -22,6 +26,12 @@ export function ScryHud({
   graphs = [],
   graphsError = null,
   onSetGraphId,
+  typeDist = [],
+  enabledTypes = null,
+  onSetEnabledTypes,
+  colorMode = "stage",
+  onSetColorMode,
+  onSaveView,
 }: {
   cascade: UseScryCascade
   onClose: () => void
@@ -40,6 +50,15 @@ export function ScryHud({
   graphs?: KgGraphSummary[]
   graphsError?: string | null
   onSetGraphId?: (graphId: string) => void
+  /** object-type composition of the active graph — filter + color legend */
+  typeDist?: ScryTypeBucket[]
+  /** enabled object types; null = all on */
+  enabledTypes?: Set<string> | null
+  onSetEnabledTypes?: (next: Set<string> | null) => void
+  colorMode?: "stage" | "type"
+  onSetColorMode?: (mode: "stage" | "type") => void
+  /** Save the current exploration as a Saved View. */
+  onSaveView?: () => void
 }) {
   const { stages, finalHits, finalError, canRefine } = cascade
   const relCount = new Set(finalHits.map((h) => `${h.schema}.${h.rel}`)).size
@@ -80,8 +99,17 @@ export function ScryHud({
             graphs unavailable
           </span>
         ) : null}
+        {onSetEnabledTypes && typeDist.length > 0 ? (
+          <TypeFilterMenu
+            typeDist={typeDist}
+            enabledTypes={enabledTypes}
+            onSetEnabledTypes={onSetEnabledTypes}
+            colorMode={colorMode}
+            onSetColorMode={onSetColorMode}
+          />
+        ) : null}
         <span className="ml-auto text-[10px] text-chrome-text/45">
-          {addedCount > 0 ? `${addedCount} on desktop · ` : ""}drag to pan · scroll to zoom · esc to exit
+          {addedCount > 0 ? `${addedCount} on desktop` : ""}
         </span>
         <button
           type="button"
@@ -155,6 +183,17 @@ export function ScryHud({
           </button>
         ) : null}
         <span className="ml-auto flex items-center gap-2">
+          {onSaveView ? (
+            <button
+              type="button"
+              onClick={onSaveView}
+              disabled={finalHits.length === 0}
+              title="Save this exploration as a Saved View"
+              className="flex items-center gap-1 rounded border border-chrome-border/60 px-2 py-0.5 text-chrome-text hover:bg-foreground/[0.06] hover:text-foreground disabled:opacity-40"
+            >
+              <Save className="h-3 w-3" /> Save view
+            </button>
+          ) : null}
           <button
             type="button"
             onClick={() => cascade.addStage()}
@@ -174,6 +213,171 @@ export function ScryHud({
         </span>
       </div>
     </div>
+  )
+}
+
+/**
+ * The object-type filter — a dropdown that doubles as the color legend. Each row
+ * is a checkbox + color swatch + label + count; toggling re-flows the cascade
+ * (results + rankings change). The color-mode toggle flips node fills between the
+ * cascade-stage hue and the object-type hue (the swatches shown here).
+ */
+function TypeFilterMenu({
+  typeDist,
+  enabledTypes,
+  onSetEnabledTypes,
+  colorMode,
+  onSetColorMode,
+}: {
+  typeDist: ScryTypeBucket[]
+  enabledTypes: Set<string> | null
+  onSetEnabledTypes: (next: Set<string> | null) => void
+  colorMode: "stage" | "type"
+  onSetColorMode?: (mode: "stage" | "type") => void
+}) {
+  const [open, setOpen] = useState(false)
+  const btnRef = useRef<HTMLButtonElement>(null)
+  const panelRef = useRef<HTMLDivElement>(null)
+  // The HUD is overflow-hidden, so the menu is portaled to <body> and anchored
+  // to the trigger by a fixed position (computed below) — no clipping.
+  const [pos, setPos] = useState<{ left: number; top: number } | null>(null)
+
+  useEffect(() => {
+    if (!open) return
+    const onDown = (e: PointerEvent) => {
+      const t = e.target as Node
+      if (btnRef.current?.contains(t) || panelRef.current?.contains(t)) return
+      setOpen(false)
+    }
+    window.addEventListener("pointerdown", onDown)
+    return () => window.removeEventListener("pointerdown", onDown)
+  }, [open])
+
+  useLayoutEffect(() => {
+    if (!open) return
+    const b = btnRef.current?.getBoundingClientRect()
+    if (!b) return
+    const W = 256 // w-64
+    const m = 8
+    setPos({ left: Math.max(m, Math.min(b.left, window.innerWidth - W - m)), top: b.bottom + 4 })
+  }, [open])
+
+  const allTypes = typeDist.map((b) => b.type)
+  const isOn = (t: string) => enabledTypes === null || enabledTypes.has(t)
+  const enabledCount = enabledTypes === null ? allTypes.length : allTypes.filter((t) => enabledTypes.has(t)).length
+  const filtered = enabledTypes !== null && enabledCount < allTypes.length
+
+  const toggle = (t: string) => {
+    const cur = enabledTypes === null ? new Set(allTypes) : new Set(enabledTypes)
+    if (cur.has(t)) cur.delete(t)
+    else cur.add(t)
+    // Empty or full both mean "no filter" — collapse to null so the checkbox
+    // state always matches what's on screen (never a stuck all-unchecked view).
+    onSetEnabledTypes(cur.size === 0 || cur.size === allTypes.length ? null : cur)
+  }
+  const only = (t: string) => onSetEnabledTypes(allTypes.length === 1 ? null : new Set([t]))
+
+  return (
+    <>
+      <button
+        ref={btnRef}
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        title="Filter + color by object type"
+        className={cn(
+          "flex h-6 items-center gap-1 rounded border px-2 font-mono text-[10px] outline-none hover:bg-foreground/[0.05]",
+          filtered
+            ? "border-terminal/60 text-terminal"
+            : "border-chrome-border/60 text-chrome-text",
+        )}
+      >
+        <span>types</span>
+        <span className="tabular-nums text-chrome-text/55">
+          {filtered ? `${enabledCount}/${allTypes.length}` : "all"}
+        </span>
+        <span className="text-chrome-text/40">▾</span>
+      </button>
+      {open && pos
+        ? createPortal(
+            <div
+              ref={panelRef}
+              onPointerDown={(e) => e.stopPropagation()}
+              style={{ position: "fixed", left: pos.left, top: pos.top }}
+              className="z-[200] w-64 overflow-hidden rounded-md border border-chrome-border bg-chrome-bg/98 shadow-2xl backdrop-blur"
+            >
+          <div className="flex items-center gap-2 border-b border-chrome-border/50 px-2 py-1.5">
+            {onSetColorMode ? (
+              <div className="flex items-center overflow-hidden rounded border border-chrome-border/60 text-[9px]">
+                <button
+                  type="button"
+                  onClick={() => onSetColorMode("stage")}
+                  className={cn("px-1.5 py-0.5", colorMode === "stage" ? "bg-terminal/20 text-terminal" : "text-chrome-text/60 hover:bg-foreground/[0.05]")}
+                >
+                  stage
+                </button>
+                <button
+                  type="button"
+                  onClick={() => onSetColorMode("type")}
+                  className={cn("px-1.5 py-0.5", colorMode === "type" ? "bg-terminal/20 text-terminal" : "text-chrome-text/60 hover:bg-foreground/[0.05]")}
+                  title="Color nodes by object type (the swatches below)"
+                >
+                  type
+                </button>
+              </div>
+            ) : null}
+            <span className="text-[9px] text-chrome-text/45">color by</span>
+            <button
+              type="button"
+              onClick={() => onSetEnabledTypes(null)}
+              disabled={!filtered}
+              className="ml-auto rounded px-1.5 py-0.5 text-[9px] text-chrome-text/60 hover:bg-foreground/[0.06] hover:text-foreground disabled:opacity-30"
+            >
+              all on
+            </button>
+          </div>
+          <div className="max-h-[300px] overflow-y-auto py-0.5">
+            {typeDist.map((b) => {
+              const on = isOn(b.type)
+              return (
+                <div
+                  key={b.type}
+                  className="group flex cursor-pointer items-center gap-2 px-2 py-1 hover:bg-foreground/[0.05]"
+                  onClick={() => toggle(b.type)}
+                >
+                  <input
+                    type="checkbox"
+                    checked={on}
+                    readOnly
+                    className="h-3 w-3 shrink-0 accent-[var(--terminal)]"
+                  />
+                  <span
+                    className="h-2.5 w-2.5 shrink-0 rounded-[2px]"
+                    style={{ backgroundColor: b.color, opacity: on ? 1 : 0.3 }}
+                  />
+                  <span className={cn("min-w-0 flex-1 truncate font-mono text-[10px]", on ? "text-foreground/90" : "text-chrome-text/45")}>
+                    {objectTypeLabel(b.type)}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      only(b.type)
+                    }}
+                    title="Show only this type"
+                    className="hidden rounded px-1 text-[9px] text-chrome-text/50 hover:bg-foreground/[0.1] hover:text-foreground group-hover:block"
+                  >
+                    only
+                  </button>
+                  <span className="shrink-0 tabular-nums text-[9px] text-chrome-text/45">{b.count}</span>
+                </div>
+              )
+            })}
+          </div>
+            </div>,
+            document.body,
+          )
+        : null}
+    </>
   )
 }
 

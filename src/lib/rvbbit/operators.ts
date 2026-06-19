@@ -42,8 +42,21 @@ export interface TakesPlan {
   evaluator?: { model?: string; instructions?: string }
 }
 
-/** The six node-kind primitives — peers, each `inputs → output`. */
-export type NodeKind = "llm" | "specialist" | "python" | "code" | "sql" | "mcp"
+/** The node-kind primitives — peers, each `inputs → output`. */
+export type NodeKind = "llm" | "specialist" | "python" | "code" | "sql" | "mcp" | "agent"
+
+/**
+ * A tool an `agent` node may call: the built-in read-only `query` tool, or an
+ * allow-listed MCP tool (a `rvbbit.mcp_tools` row addressed by server + tool).
+ */
+export type AgentToolRef = { builtin: "query" } | { server: string; tool: string }
+
+/** Termination budget for an `agent` loop — first cap to trip ends it. */
+export interface AgentBudget {
+  tokens?: number
+  cost_usd?: number
+  wall_ms?: number
+}
 
 export interface OpStep {
   name: string
@@ -69,8 +82,23 @@ export interface OpStep {
   // sql
   sql?: string
   params?: string[]
+  // agent — a bounded tool-calling loop (kind:"agent"). `model` + `system`
+  // are reused from above; `task` is the user turn; the loop calls `tools`,
+  // feeds results back, and stops on no-tool-call or a `budget`/max_iters cap.
+  task?: string
+  tools?: AgentToolRef[]
+  max_iters?: number
+  budget?: AgentBudget
+  tool_result_max_chars?: number
   // specialist / python / code / mcp — templated input mapping
   inputs?: Record<string, string>
+}
+
+/** True if any step is an agent loop — such operators must NOT be cached
+ * (a memoized agent replays a frozen transcript instead of re-inspecting
+ * live state), so the save path forces cache_policy='never'. */
+export function hasAgentStep(steps: OpStep[] | null): boolean {
+  return !!steps?.some((s) => s.kind === "agent")
 }
 
 /**
@@ -102,6 +130,19 @@ export function defaultNode(kind: NodeKind, name: string): OpStep {
       return { name, kind, sql: "SELECT 1 AS value", params: [] }
     case "mcp":
       return { name, kind, server: "", tool: "", inputs: {} }
+    case "agent":
+      return {
+        name,
+        kind,
+        model: "openai/gpt-5.4-mini",
+        system:
+          "You are a helpful analyst. Use the `query` tool (read-only SQL) to gather what you need, then answer. Stop calling tools once you can answer.",
+        task: "{{ inputs.text }}",
+        tools: [{ builtin: "query" }],
+        max_iters: 8,
+        budget: { cost_usd: 0.5, wall_ms: 120000 },
+        tool_result_max_chars: 8000,
+      }
   }
 }
 
@@ -654,6 +695,13 @@ export function buildSaveSql(op: RvbbitOperator, opts: { create: boolean }): str
     ]
     stmts.push(`UPDATE rvbbit.operators SET ${sets.join(", ")} WHERE name = ${sqlStr(op.name)}`)
   }
+
+  // Agent operators must bypass the result cache (a memoized agent would
+  // replay a frozen transcript); plain operators stay memoized. create_operator
+  // leaves cache_policy at its default, so set it explicitly on every save.
+  stmts.push(
+    `UPDATE rvbbit.operators SET cache_policy = ${sqlStr(hasAgentStep(op.steps) ? "never" : "memoize")} WHERE name = ${sqlStr(op.name)}`,
+  )
 
   stmts.push(`SELECT rvbbit.set_operator_retry(${sqlStr(op.name)}, ${sqlJsonbOrNull(op.retry)})`)
   stmts.push(`SELECT rvbbit.set_operator_wards(${sqlStr(op.name)}, ${sqlJsonbOrNull(op.wards)})`)

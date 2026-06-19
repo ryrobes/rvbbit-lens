@@ -791,6 +791,7 @@ const PALETTE_KINDS: { kind: NodeKind; label: string; Icon: React.ComponentType<
   { kind: "code", label: "code", Icon: Cpu },
   { kind: "sql", label: "sql", Icon: Database },
   { kind: "mcp", label: "mcp", Icon: Globe },
+  { kind: "agent", label: "agent", Icon: RefreshCw },
 ]
 
 function NodePalette({ showInput }: { showInput: boolean }) {
@@ -847,6 +848,7 @@ type NodeAccent =
   | "python"
   | "sql"
   | "mcp"
+  | "agent"
   | "terminal"
 
 const ACCENT_COLOR: Record<NodeAccent, string> = {
@@ -860,6 +862,7 @@ const ACCENT_COLOR: Record<NodeAccent, string> = {
   python: "var(--viz-op-runtime)",
   sql: "var(--viz-op-sql)",
   mcp: "var(--viz-op-mcp)",
+  agent: "var(--viz-op-agent)",
   terminal: "var(--viz-op-terminal)",
 }
 
@@ -1249,6 +1252,19 @@ function describeStepNode(step: OpStep | undefined, fallbackModel: string): Node
         badges: [],
         accent: "mcp",
       }
+    case "agent": {
+      const nTools = step.tools?.length ?? 0
+      return {
+        Icon: RefreshCw,
+        kindLabel: "agent",
+        title: shortModel(step.model ?? fallbackModel),
+        subtitle: step.name,
+        body: preview(step.task ?? "", 80),
+        foot: `${nTools} tool${nTools === 1 ? "" : "s"} · ≤${step.max_iters ?? 8} iters`,
+        badges: ["loop"],
+        accent: "agent",
+      }
+    }
     default:
       return {
         Icon: Sparkles,
@@ -1305,6 +1321,8 @@ export function accentForSubCallKind(kind: string): string {
       return "var(--viz-op-sql)"
     case "mcp":
       return "var(--viz-op-mcp)"
+    case "agent":
+      return "var(--viz-op-agent)"
     default:
       return "var(--chrome-border)"
   }

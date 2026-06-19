@@ -8,6 +8,7 @@ import type { CompletionSource } from "@codemirror/autocomplete"
 import { EditorView, keymap, tooltips } from "@codemirror/view"
 import { rvbbitLensCodeMirrorTheme } from "@/lib/desktop/codemirror-theme"
 import { blockReferenceExtensions, type BlockReferenceMap } from "@/lib/desktop/sql-block-refs"
+import { postgresDollarPlpgsqlExtension } from "@/lib/desktop/sql-dollar-plpgsql"
 import { semanticOperatorExtensions } from "@/lib/desktop/sql-semantic-operators"
 import type { SemanticOpMeta } from "@/lib/desktop/types"
 import { hasParamDragPayload } from "@/lib/desktop/param-drag"
@@ -102,6 +103,7 @@ export function SqlEditor({
       // with type hints); falls back to keyword-only completion otherwise.
       const lang = sql({ dialect: PostgreSQL, upperCaseKeywords: false, schema, defaultSchema })
       exts.push(lang)
+      exts.push(postgresDollarPlpgsqlExtension)
       // merge any extra sources (e.g. rvbbit semantic functions) into the SQL
       // language's completion — they run alongside the schema/keyword sources.
       for (const source of completionSources ?? []) {

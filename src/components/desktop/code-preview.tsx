@@ -37,11 +37,14 @@ interface CodePreviewProps {
   code: string
   lang: CodeLang
   className?: string
+  overflow?: "auto" | "x" | "visible"
 }
 
-export function CodePreview({ code, lang, className }: CodePreviewProps) {
+export function CodePreview({ code, lang, className, overflow = "auto" }: CodePreviewProps) {
   const [html, setHtml] = useState<string | null>(null)
   const generation = useRef(0)
+  const overflowClass =
+    overflow === "x" ? "overflow-x-auto overflow-y-visible" : overflow === "visible" ? "overflow-visible" : "overflow-auto"
 
   useEffect(() => {
     const gen = ++generation.current
@@ -74,7 +77,8 @@ export function CodePreview({ code, lang, className }: CodePreviewProps) {
     return (
       <pre
         className={cn(
-          "av-code-preview overflow-auto bg-doc-bg p-3 font-mono text-[11px] leading-relaxed text-foreground/90",
+          "av-code-preview bg-doc-bg p-3 font-mono text-[11px] leading-relaxed text-foreground/90",
+          overflowClass,
           className,
         )}
       >
@@ -86,7 +90,8 @@ export function CodePreview({ code, lang, className }: CodePreviewProps) {
   return (
     <div
       className={cn(
-        "av-code-preview overflow-auto bg-doc-bg p-3 font-mono text-[11px] leading-relaxed",
+        "av-code-preview bg-doc-bg p-3 font-mono text-[11px] leading-relaxed",
+        overflowClass,
         className,
       )}
       // Shiki emits well-formed, escaped HTML. The block is read-only and

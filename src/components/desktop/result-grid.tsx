@@ -2,7 +2,7 @@
 
 import { useMemo, useRef, useState } from "react"
 import { useVirtualizer } from "@tanstack/react-virtual"
-import { GripVertical } from "@/lib/icons"
+import { ClipboardCopy, Eye, GripVertical, Table2 } from "@/lib/icons"
 import type { QueryResultColumn } from "@/lib/db/types"
 import type { DesktopColumnDragPayload, DesktopColumnRef, DesktopParamValue } from "@/lib/desktop/types"
 import { cn } from "@/lib/utils"
@@ -10,6 +10,7 @@ import { formatCellValue } from "@/lib/sql/format"
 import { setActiveColumnDragSource, writeColumnDragPayload } from "@/lib/desktop/column-drag"
 import { attachDragGhost } from "@/lib/desktop/drag-ghost"
 import { usePresentMode } from "@/lib/desktop/present-mode"
+import { ContextMenu, type ContextMenuState } from "./context-menu"
 
 interface ColumnDragSource {
   parentWindowId: string
@@ -39,11 +40,15 @@ interface ResultGridProps {
   /** Params sourced from THIS block — used to highlight the cells that are the
    *  live filter (cascade) or a published pick value. */
   activeParams?: DesktopParamValue[]
+  onOpenRow?: (input: {
+    row: Record<string, unknown>
+    rowIndex: number
+    column: QueryResultColumn
+  }) => void
 }
 
 const ROW_HEIGHT = 24
 const MIN_COL_WIDTH = 80
-const DEFAULT_COL_WIDTH = 160
 
 export function ResultGrid({
   columns,
@@ -52,10 +57,12 @@ export function ResultGrid({
   columnDragSource,
   onEmitCellParam,
   activeParams,
+  onOpenRow,
 }: ResultGridProps) {
   const parentRef = useRef<HTMLDivElement>(null)
   const [colWidths, setColWidths] = useState<Record<string, number>>({})
   const [selectedHeaders, setSelectedHeaders] = useState<Set<string>>(new Set())
+  const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null)
   // Present mode: cell-click filtering stays, but column drag-to-group, header
   // multi-select, and width-resize are authoring affordances — turn them off.
   const present = usePresentMode()
@@ -172,6 +179,42 @@ export function ResultGrid({
 
   const totalWidth = columnWidths.reduce((a, b) => a + b, 0)
 
+  function openCellContextMenu(
+    e: React.MouseEvent<HTMLDivElement>,
+    row: Record<string, unknown>,
+    rowIndex: number,
+    column: QueryResultColumn,
+  ) {
+    e.preventDefault()
+    e.stopPropagation()
+    const value = row?.[column.name]
+    setContextMenu({
+      x: e.clientX,
+      y: e.clientY,
+      items: [
+        {
+          id: "open-row",
+          label: "Open row",
+          icon: Eye,
+          disabled: !onOpenRow,
+          onSelect: () => onOpenRow?.({ row, rowIndex, column }),
+        },
+        {
+          id: "copy-cell",
+          label: "Copy cell",
+          icon: ClipboardCopy,
+          onSelect: () => void copyToClipboard(value == null ? "" : cellText(value)),
+        },
+        {
+          id: "copy-row",
+          label: "Copy row JSON",
+          icon: Table2,
+          onSelect: () => void copyToClipboard(stringifyJson(row)),
+        },
+      ],
+    })
+  }
+
   return (
     <div
       ref={parentRef}
@@ -251,6 +294,7 @@ export function ResultGrid({
                       const cascade = e.metaKey || e.ctrlKey
                       onEmitCellParam(c.name, value, c.dataTypeId, "in", cascade)
                     }}
+                    onContextMenu={(e) => openCellContextMenu(e, row, vrow.index, c)}
                     className={cn(
                       "truncate border-r border-chrome-border/30 px-2 py-0.5 text-[12px]",
                       isNumeric ? "text-right tabular-nums" : "text-left",
@@ -276,6 +320,7 @@ export function ResultGrid({
           )
         })}
       </div>
+      <ContextMenu state={contextMenu} onClose={() => setContextMenu(null)} />
     </div>
   )
 }
@@ -303,4 +348,26 @@ function estimateWidth(column: QueryResultColumn, rows: Record<string, unknown>[
     return Math.max(max, len)
   }, column.name.length)
   return Math.min(360, Math.max(MIN_COL_WIDTH, sampleMax * 7 + 24))
+}
+
+async function copyToClipboard(text: string) {
+  try {
+    await navigator.clipboard.writeText(text)
+  } catch {
+    // Best effort only; right-click copy should never disturb the grid.
+  }
+}
+
+function cellText(value: unknown): string {
+  if (typeof value === "string") return value
+  if (value != null && typeof value === "object") return stringifyJson(value)
+  return formatCellValue(value)
+}
+
+function stringifyJson(value: unknown): string {
+  try {
+    return JSON.stringify(value, (_key, v: unknown) => (typeof v === "bigint" ? v.toString() : v), 2)
+  } catch {
+    return String(value)
+  }
 }

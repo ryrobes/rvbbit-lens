@@ -21,6 +21,7 @@ export type OpNodeKind =
   | "python"
   | "mcp"
   | "sql"
+  | "agent"
   | "ward"
   | "reduce"
 

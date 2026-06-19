@@ -1,8 +1,9 @@
 "use client"
 
-import { setHomeId, shadowDesktopState, shadowScenes } from "./server-sync"
+import { setHomeId, shadowDesktopState, shadowScenes, shadowViews } from "./server-sync"
 import { hydrateDesktopState, loadDesktopState } from "./state-store"
 import { hydrateScenes, listScenes } from "./scenes"
+import { hydrateViews, listViewApps } from "./view-apps"
 import type { Scene } from "./types"
 
 /**
@@ -68,18 +69,23 @@ export async function peekHome(slug: string): Promise<{ hasData: boolean }> {
  */
 export async function adoptHome(slug: string): Promise<void> {
   slug = slugifyHome(slug)
-  const [p, s] = await Promise.all([
+  const [p, s, v] = await Promise.all([
     fetch(`/api/lens/profile?home=${encodeURIComponent(slug)}`)
       .then((x) => x.json())
       .catch(() => null),
     fetch(`/api/lens/scenes?home=${encodeURIComponent(slug)}`)
       .then((x) => x.json())
       .catch(() => null),
+    fetch(`/api/lens/views?home=${encodeURIComponent(slug)}`)
+      .then((x) => x.json())
+      .catch(() => null),
   ])
   const profile = (p as { profile?: { state?: unknown } | null } | null)?.profile ?? null
   const scenes = ((s as { scenes?: unknown } | null)?.scenes ?? []) as Scene[]
+  const views = (v as { views?: unknown } | null)?.views ?? []
   hydrateDesktopState(profile?.state ?? null)
   hydrateScenes(Array.isArray(scenes) ? scenes : [])
+  hydrateViews(views)
   setHomeId(slug)
   if (typeof window !== "undefined") window.location.reload()
 }
@@ -93,4 +99,5 @@ export function claimHome(slug: string): void {
   setHomeId(slug)
   shadowDesktopState(loadDesktopState())
   shadowScenes(listScenes())
+  shadowViews(listViewApps())
 }
