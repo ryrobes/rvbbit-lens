@@ -2,6 +2,7 @@ import { NextResponse } from "next/server"
 import { Client } from "pg"
 import { getConnection } from "@/lib/db/registry"
 import { buildClientConfig } from "@/lib/db/pool"
+import { resolveEndpoint } from "@/lib/db/tunnel"
 
 export const runtime = "nodejs"
 
@@ -41,8 +42,12 @@ export async function POST(req: Request) {
       ? { ...base, database: body.database }
       : base
 
+  // Route through the SSH tunnel if this connection uses one (mirrors getPool /
+  // import-run) — otherwise this dedicated client would hit the real DB host
+  // directly, which is typically unreachable behind the bastion.
+  const endpoint = await resolveEndpoint(record)
   const client = new Client(
-    buildClientConfig(record, { statementTimeout: 0, applicationName: "rvbbit-lens-runnow" }),
+    buildClientConfig(endpoint, { statementTimeout: 0, applicationName: "rvbbit-lens-runnow" }),
   )
   try {
     await client.connect()

@@ -24,6 +24,23 @@ export interface ConnectionRecord {
   connectionString?: string
   /** True if the user has marked this as the default connection. */
   isDefault?: boolean
+  // ── SSH tunnel (bastion) ──────────────────────────────────────────────
+  // When enabled, the DB connection is forwarded through an SSH server. host/
+  // port above are then resolved *from the SSH host* (exactly like the host:port
+  // you'd put after `ssh -L`). Only valid in host/port mode (not connectionString).
+  /** Master switch — tunnel only engages when this is true AND sshHost is set. */
+  sshEnabled?: boolean
+  sshHost?: string
+  sshPort?: number
+  sshUser?: string
+  /** Path to a private key file on the machine running lens (e.g. ~/key.pem). */
+  sshKeyPath?: string
+  /** Pasted private-key contents (PEM). Secret — stripped by sanitize(). */
+  sshPrivateKey?: string
+  /** Passphrase for the private key. Secret. */
+  sshPassphrase?: string
+  /** Password auth (alternative to a key). Secret. */
+  sshPassword?: string
   createdAt: string
   updatedAt: string
 }
@@ -39,6 +56,14 @@ export interface ConnectionInput {
   sslMode?: SslMode
   connectionString?: string
   isDefault?: boolean
+  sshEnabled?: boolean
+  sshHost?: string
+  sshPort?: number
+  sshUser?: string
+  sshKeyPath?: string
+  sshPrivateKey?: string
+  sshPassphrase?: string
+  sshPassword?: string
 }
 
 export interface ConnectionTestResult {

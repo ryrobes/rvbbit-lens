@@ -7,6 +7,7 @@ import { Readable, Transform } from "node:stream"
 import { once } from "node:events"
 import type { ConnectionRecord } from "./types"
 import { buildClientConfig } from "./pool"
+import { resolveEndpoint } from "./tunnel"
 import type { ImportConfig, ImportProgress, ImportRunResult, RejectRow } from "@/lib/import/types"
 import { buildCopyColumnList, buildCreateTableSql, includedColumns, qualifiedName } from "@/lib/import/ddl"
 import { coerceCell, toCopyCsvLine } from "@/lib/import/coerce"
@@ -45,7 +46,8 @@ export async function runImport({ record, config, body, signal, onProgress }: Ru
   if (cols.length === 0) throw new Error("no columns selected")
   const start = Date.now()
 
-  const client = new Client(buildClientConfig(record, { statementTimeout: 0, applicationName: "rvbbit-lens-import" }))
+  const endpoint = await resolveEndpoint(record)
+  const client = new Client(buildClientConfig(endpoint, { statementTimeout: 0, applicationName: "rvbbit-lens-import" }))
   await client.connect()
 
   let rowsRead = 0

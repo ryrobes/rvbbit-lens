@@ -17,6 +17,7 @@ import {
   FileText,
   FlowArrow,
   Folder,
+  Bookmark,
   FolderOpen,
   GitBranch,
   Globe,
@@ -64,6 +65,7 @@ import { CacheWindow } from "./cache-window"
 import { ArtifactWindow } from "./artifact-window"
 import { QueryDocumentWindow } from "./query-document-window"
 import { PaletteWindow } from "./palette-window"
+import { CommandPalette, type PaletteGroup, type PaletteItem } from "./command-palette"
 import { PgMonitorWindow } from "./pg-monitor-window"
 import { NotificationToasts } from "./notification-toasts"
 import { NotificationCenterWindow } from "./notification-center-window"
@@ -129,7 +131,8 @@ import {
 } from "@/lib/desktop/state-store"
 import { shadowDesktopState, shadowScenes } from "@/lib/desktop/server-sync"
 import { usePresentMode } from "@/lib/desktop/present-mode"
-import type { ConnectionRecord, RvbbitStatus, SchemaSnapshot } from "@/lib/db/types"
+import type { RvbbitStatus, SchemaSnapshot } from "@/lib/db/types"
+import type { SanitizedConnection } from "@/lib/db/registry"
 import type {
   RvbbitCachePayload,
   CachePayload,
@@ -304,8 +307,6 @@ const DEFAULT_Z = 20
 const MAX_WORLD = 20000
 const MIN_WORLD = -20000
 
-type SanitizedConnection = Omit<ConnectionRecord, "password"> & { hasPassword: boolean }
-
 /** Present mode v1 — geometry for the fit-to-screen transform. */
 type PresentFit = { x: number; y: number; scale: number }
 const PRESENT_FIT_PAD = 48
@@ -397,6 +398,7 @@ export function DesktopShell() {
   const [runSignals, setRunSignals] = useState<Record<string, number>>({})
   const [viewport, setViewport] = useState<DesktopViewportState>(DEFAULT_VIEWPORT)
   const [ctxMenu, setCtxMenu] = useState<ContextMenuState | null>(null)
+  const [paletteOpen, setPaletteOpen] = useState(false)
   // Present (read-only) mode v1: chrome-off windows (handled per-window) plus a
   // fit-to-screen framing applied to the active layer. `presentFit` is local —
   // never persisted — so it can't leak into saved desktops/scenes.
@@ -3533,6 +3535,13 @@ export function DesktopShell() {
         setScryOpen((o) => !o)
         return
       }
+      // ⌘P / Ctrl-P — the command palette (quick-open over tables, views, tools,
+      // actions). Overrides the browser print dialog; fires even inside inputs.
+      if (cmd && e.key === "p" && !e.shiftKey) {
+        e.preventDefault()
+        setPaletteOpen((o) => !o)
+        return
+      }
       if (cmd && e.key === "n") {
         e.preventDefault()
         openSqlScratch()
@@ -3696,6 +3705,60 @@ export function DesktopShell() {
     openCubeCatalog, openCubeCreator, openCubeInspector, openCubeProposals,
     openKgBrowser, openKgExplorer, openQueryLens, openDrift,
   ])
+
+  // ── Command palette (⌘P) item groups ───────────────────────────────
+  // Reuses the launcher registry wholesale (already rvbbit-gated) and adds the
+  // schema tables, saved views, and a few verbs the registry doesn't cover.
+  const buildPaletteGroups = useCallback((): PaletteGroup[] => {
+    const actions: PaletteItem[] = [
+      { id: "act:new-sql", label: "New SQL window", hint: "⌘N", icon: Plus, keywords: ["query", "scratch", "editor"], run: openSqlScratch },
+      { id: "act:finder", label: "Open Finder", hint: "⌘F", icon: Search, keywords: ["schema", "browse", "tables"], run: openFinder },
+      { id: "act:undo", label: "Undo", hint: "⌘Z", run: undo },
+      { id: "act:redo", label: "Redo", hint: "⇧⌘Z", run: redo },
+      ...(["1", "2", "3", "4", "5"] as const).map(
+        (n): PaletteItem => ({
+          id: `act:ws-${n}`,
+          label: `Go to Workspace ${n}`,
+          hint: `⌥${n}`,
+          icon: Layers,
+          keywords: ["workspace", "desktop", "switch"],
+          run: () => switchWorkspace(n),
+        }),
+      ),
+      { id: "act:ws-scene", label: "Go to Scene", hint: "⌥6", icon: Layers, keywords: ["workspace", "scene", "saved desktop"], run: () => switchWorkspace(SCENE_SLOT) },
+    ]
+    const launcherItems: PaletteItem[] = launchers
+      .filter((l) => l.visible !== false && (!l.rvbbit || hasRvbbit))
+      .map((l) => ({ id: `launch:${l.id}`, label: l.label, hint: l.sublabel, icon: l.icon, color: l.color, run: l.activate }))
+    // All tables are emitted (so every one is searchable); the palette caps the
+    // RENDERED count per group via `limit`, not here.
+    const tableItems: PaletteItem[] = schema
+      ? schema.tables.map((t) => ({
+          id: `tbl:${t.schema}.${t.name}`,
+          label: t.name,
+          hint: t.schema,
+          icon: Table2,
+          keywords: ["table", t.schema, `${t.schema}.${t.name}`],
+          run: () => openTableFromFinder(t.schema, t.name),
+        }))
+      : []
+    const viewItems: PaletteItem[] = listViewApps().map((v) => ({
+      id: `view:${v.id}`,
+      label: v.name,
+      hint: v.kind === "scry" ? "Scry view" : "Saved view",
+      icon: Bookmark,
+      keywords: ["view", "saved"],
+      run: () => openViewApp(v.id),
+    }))
+    return [
+      { heading: "Actions", items: actions },
+      { heading: "Open", items: launcherItems },
+      { heading: "Tables", items: tableItems, limit: 50 },
+      { heading: "Saved Views", items: viewItems },
+    ]
+    // listViewApps() is re-read on every open (the palette remounts each ⌘P), so
+    // saved views are always current without threading viewAppCount through.
+  }, [launchers, hasRvbbit, schema, openSqlScratch, openFinder, undo, redo, switchWorkspace, openTableFromFinder, openViewApp])
 
   // Shared, per-window-invariant slice of WindowContext, memoized so the
   // per-window <WindowFrame> memo boundary can bail. Only its referenced
@@ -3937,6 +4000,9 @@ export function DesktopShell() {
       ) : null}
 
       <ContextMenu state={ctxMenu} onClose={() => setCtxMenu(null)} />
+      {paletteOpen ? (
+        <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} buildGroups={buildPaletteGroups} />
+      ) : null}
 
       {wallpaperError ? (
         <div className="pointer-events-auto fixed left-1/2 top-12 z-40 -translate-x-1/2 rounded-base border border-danger/60 bg-danger/15 px-3 py-1 text-[11px] text-danger">

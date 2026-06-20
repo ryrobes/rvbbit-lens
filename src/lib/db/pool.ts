@@ -3,6 +3,7 @@ import "server-only"
 import { Pool, type ClientConfig, type PoolConfig } from "pg"
 import type { ConnectionRecord, SslMode } from "./types"
 import { getConnection } from "./registry"
+import { resolveEndpoint, disposeAllTunnels } from "./tunnel"
 
 export type PoolLane = "interactive" | "meta"
 
@@ -123,7 +124,13 @@ export async function getPool(
     record.database !== base.database ? `${connectionId}::${record.database}` : connectionId
   const cacheKey = `${lane}::${baseCacheKey}`
 
-  const sig = signatureOf(record)
+  // If this connection tunnels over SSH, resolve (and lazily build) the tunnel and
+  // point the pool at the local forwarded port. `record` (real host) is returned
+  // to callers; only the pool config uses the rewritten endpoint. The resolved
+  // local port lands in the signature, so a tunnel rebuild rebuilds the pool too.
+  const endpoint = await resolveEndpoint(record)
+
+  const sig = signatureOf(endpoint)
   const cached = POOL_CACHE.get(cacheKey)
   if (cached && cached.signature === sig) return { pool: cached.pool, record }
 
@@ -132,7 +139,7 @@ export async function getPool(
     POOL_CACHE.delete(cacheKey)
   }
 
-  const pool = new Pool(buildPoolConfig(record, lane))
+  const pool = new Pool(buildPoolConfig(endpoint, lane))
   pool.on("error", (err) => {
     console.warn(`[rvbbit-lens] pool ${cacheKey} error:`, err.message)
   })
@@ -144,4 +151,5 @@ export async function disposeAllPools(): Promise<void> {
   const entries = Array.from(POOL_CACHE.values())
   POOL_CACHE.clear()
   await Promise.allSettled(entries.map((e) => e.pool.end()))
+  await disposeAllTunnels()
 }

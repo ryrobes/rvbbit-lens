@@ -8,7 +8,9 @@ const nextConfig: NextConfig = {
     // buffering it), so a high cap doesn't risk memory.
     proxyClientMaxBodySize: "8gb",
   },
-  serverExternalPackages: ["pg", "pg-native"],
+  // ssh2 (DB tunneling) dynamically loads a native crypto binding; keep it (and
+  // its optional cpu-features dep) external so it's a runtime Node require, not bundled.
+  serverExternalPackages: ["pg", "pg-native", "ssh2", "cpu-features"],
 }
 
 export default nextConfig

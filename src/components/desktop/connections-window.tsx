@@ -2,12 +2,11 @@
 
 import { useCallback, useEffect, useState } from "react"
 import { CheckCircle2, Plus, Trash2, XCircle, Plug, Loader2 } from "@/lib/icons"
-import type { ConnectionRecord, ConnectionTestResult, SslMode } from "@/lib/db/types"
+import type { ConnectionTestResult, SslMode } from "@/lib/db/types"
+import type { SanitizedConnection } from "@/lib/db/registry"
 import { Input } from "@/components/ui/input"
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
-
-type SanitizedConnection = Omit<ConnectionRecord, "password"> & { hasPassword: boolean }
 
 interface ConnectionsWindowProps {
   onChanged: () => Promise<void>
@@ -24,6 +23,19 @@ interface DraftConnection {
   sslMode: SslMode
   connectionString?: string
   isDefault: boolean
+  // ── SSH tunnel ──
+  sshEnabled: boolean
+  sshHost: string
+  sshPort: string
+  sshUser: string
+  sshKeyPath: string
+  sshPrivateKey: string
+  sshPassphrase: string
+  sshPassword: string
+  // placeholders: whether a secret is already stored (for "(unchanged)" hints)
+  hasSshPrivateKey: boolean
+  hasSshPassphrase: boolean
+  hasSshPassword: boolean
 }
 
 const EMPTY_DRAFT: DraftConnection = {
@@ -35,6 +47,17 @@ const EMPTY_DRAFT: DraftConnection = {
   password: "",
   sslMode: "prefer",
   isDefault: false,
+  sshEnabled: false,
+  sshHost: "",
+  sshPort: "22",
+  sshUser: "",
+  sshKeyPath: "",
+  sshPrivateKey: "",
+  sshPassphrase: "",
+  sshPassword: "",
+  hasSshPrivateKey: false,
+  hasSshPassphrase: false,
+  hasSshPassword: false,
 }
 
 export function ConnectionsWindow({ onChanged }: ConnectionsWindowProps) {
@@ -75,6 +98,17 @@ export function ConnectionsWindow({ onChanged }: ConnectionsWindowProps) {
       sslMode: c.sslMode ?? "prefer",
       connectionString: c.connectionString,
       isDefault: c.isDefault ?? false,
+      sshEnabled: c.sshEnabled ?? false,
+      sshHost: c.sshHost ?? "",
+      sshPort: c.sshPort ? String(c.sshPort) : "22",
+      sshUser: c.sshUser ?? "",
+      sshKeyPath: c.sshKeyPath ?? "",
+      sshPrivateKey: "",
+      sshPassphrase: "",
+      sshPassword: "",
+      hasSshPrivateKey: c.hasSshPrivateKey,
+      hasSshPassphrase: c.hasSshPassphrase,
+      hasSshPassword: c.hasSshPassword,
     })
   }
 
@@ -96,6 +130,18 @@ export function ConnectionsWindow({ onChanged }: ConnectionsWindowProps) {
           sslMode: draft.sslMode,
           connectionString: draft.connectionString,
           isDefault: draft.isDefault,
+          sshEnabled: draft.sshEnabled,
+          // Non-secret fields: send the (possibly empty) trimmed string so clearing
+          // a field actually sticks (server distinguishes "" = clear from undefined).
+          sshHost: draft.sshHost.trim(),
+          sshPort: draft.sshPort.trim() ? Number(draft.sshPort) : undefined,
+          sshUser: draft.sshUser.trim(),
+          sshKeyPath: draft.sshKeyPath.trim(),
+          // Secrets: send only when the user typed a new value, so a blank field
+          // preserves the stored secret (server-side normalizeInput keeps existing).
+          sshPrivateKey: draft.sshPrivateKey.length > 0 ? draft.sshPrivateKey : undefined,
+          sshPassphrase: draft.sshPassphrase.length > 0 ? draft.sshPassphrase : undefined,
+          sshPassword: draft.sshPassword.length > 0 ? draft.sshPassword : undefined,
         }),
       })
       const body = await res.json()
@@ -142,6 +188,10 @@ export function ConnectionsWindow({ onChanged }: ConnectionsWindowProps) {
     await reload()
     await onChanged()
   }
+
+  // A connection string and an SSH tunnel are mutually exclusive (a tunnel needs
+  // host/port mode), so each disables the other in the form.
+  const hasConnString = Boolean(draft.connectionString && draft.connectionString.length > 0)
 
   return (
     <div className="flex h-full">
@@ -238,8 +288,104 @@ export function ConnectionsWindow({ onChanged }: ConnectionsWindowProps) {
             value={draft.connectionString ?? ""}
             onChange={(e) => setDraft({ ...draft, connectionString: e.target.value || undefined })}
             placeholder="postgres://user:pass@host:5432/db?sslmode=prefer"
+            disabled={draft.sshEnabled}
+            title={draft.sshEnabled ? "Disabled while SSH tunneling is on — a tunnel needs host/port mode" : undefined}
           />
         </Field>
+
+        {/* ── SSH tunnel (bastion) ── */}
+        <div className="mt-4 rounded-base border border-border/60 bg-secondary-background/40 p-3">
+          <label
+            className={cn(
+              "flex items-center gap-2 text-sm text-foreground",
+              hasConnString && "opacity-50",
+            )}
+          >
+            <input
+              type="checkbox"
+              checked={draft.sshEnabled}
+              disabled={hasConnString}
+              onChange={(e) => setDraft({ ...draft, sshEnabled: e.target.checked })}
+            />
+            <span className="font-medium">Connect through an SSH tunnel</span>
+            {hasConnString ? (
+              <span className="text-[11px] font-normal text-chrome-text/60">
+                — clear the connection string to use a tunnel
+              </span>
+            ) : null}
+          </label>
+          {draft.sshEnabled ? (
+            <>
+              <p className="mt-2 text-[11px] leading-relaxed text-chrome-text/70">
+                The DB <span className="text-foreground">Host</span>/<span className="text-foreground">Port</span> above are
+                resolved <em>from the SSH host</em> (like <code className="text-chrome-text">ssh -L</code>). For a DB on the
+                bastion itself, use host <code className="text-chrome-text">localhost</code>. SSH tunneling requires
+                host/port mode (not a connection string), and typically SSL Mode <code className="text-chrome-text">disable</code>{" "}
+                or <code className="text-chrome-text">no-verify</code> since SSH already encrypts the hop.
+              </p>
+              <div className="mt-3 grid grid-cols-2 gap-3">
+                <Field label="SSH Host">
+                  <Input
+                    value={draft.sshHost}
+                    onChange={(e) => setDraft({ ...draft, sshHost: e.target.value })}
+                    placeholder="bastion.example.com"
+                  />
+                </Field>
+                <Field label="SSH Port">
+                  <Input
+                    value={draft.sshPort}
+                    onChange={(e) => setDraft({ ...draft, sshPort: e.target.value.replace(/[^0-9]/g, "") })}
+                    placeholder="22"
+                  />
+                </Field>
+                <Field label="SSH User">
+                  <Input
+                    value={draft.sshUser}
+                    onChange={(e) => setDraft({ ...draft, sshUser: e.target.value })}
+                    placeholder="ubuntu"
+                  />
+                </Field>
+                <Field label="Private key file (path)">
+                  <Input
+                    value={draft.sshKeyPath}
+                    onChange={(e) => setDraft({ ...draft, sshKeyPath: e.target.value })}
+                    placeholder="~/key.pem"
+                  />
+                </Field>
+              </div>
+              <Field label="…or paste private key" className="mt-3">
+                <textarea
+                  value={draft.sshPrivateKey}
+                  onChange={(e) => setDraft({ ...draft, sshPrivateKey: e.target.value })}
+                  placeholder={
+                    draft.hasSshPrivateKey ? "(unchanged — paste to replace)" : "-----BEGIN OPENSSH PRIVATE KEY-----"
+                  }
+                  rows={3}
+                  spellCheck={false}
+                  className="w-full rounded-base border-2 border-border bg-secondary-background px-2 py-1.5 font-mono text-[11px] text-foreground outline-none focus:ring-2 focus:ring-ring"
+                />
+              </Field>
+              <div className="mt-3 grid grid-cols-2 gap-3">
+                <Field label="Key passphrase">
+                  <Input
+                    type="password"
+                    value={draft.sshPassphrase}
+                    onChange={(e) => setDraft({ ...draft, sshPassphrase: e.target.value })}
+                    placeholder={draft.hasSshPassphrase ? "(unchanged)" : ""}
+                  />
+                </Field>
+                <Field label="…or SSH password">
+                  <Input
+                    type="password"
+                    value={draft.sshPassword}
+                    onChange={(e) => setDraft({ ...draft, sshPassword: e.target.value })}
+                    placeholder={draft.hasSshPassword ? "(unchanged)" : ""}
+                  />
+                </Field>
+              </div>
+            </>
+          ) : null}
+        </div>
 
         {error ? (
           <div className="mt-3 rounded-base border border-danger/50 bg-danger/10 px-3 py-2 text-xs text-danger">

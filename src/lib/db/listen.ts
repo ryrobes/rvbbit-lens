@@ -3,6 +3,7 @@ import "server-only"
 import { Client, type ClientConfig } from "pg"
 import type { ConnectionRecord, SslMode } from "./types"
 import { getConnection } from "./registry"
+import { resolveEndpoint } from "./tunnel"
 
 /**
  * Postgres LISTEN/NOTIFY plumbing.
@@ -81,7 +82,11 @@ async function createHub(connectionId: string): Promise<ListenHub> {
   const record = await getConnection(connectionId)
   if (!record) throw new Error(`Unknown connection: ${connectionId}`)
 
-  const client = new Client(buildClientConfig(record))
+  // Route through the SSH tunnel (local forward) if this connection uses one. If
+  // the tunnel later drops, the LISTEN client's socket dies → the "error" handler
+  // closes the hub → the next subscriber rebuilds, re-ensuring the tunnel.
+  const endpoint = await resolveEndpoint(record)
+  const client = new Client(buildClientConfig(endpoint))
   const hub: ListenHub = { client, channels: new Map(), subscribers: new Set() }
 
   client.on("notification", (msg) => {

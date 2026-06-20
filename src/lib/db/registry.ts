@@ -5,6 +5,7 @@ import path from "node:path"
 import os from "node:os"
 import { randomUUID } from "node:crypto"
 import type { ConnectionInput, ConnectionRecord } from "./types"
+import { disposeTunnel } from "./tunnel"
 
 /**
  * Filesystem-backed connection registry. Single JSON file, mode 0600.
@@ -66,6 +67,20 @@ function normalizeInput(input: ConnectionInput, existing?: ConnectionRecord): Co
     sslMode: input.sslMode ?? existing?.sslMode ?? "prefer",
     connectionString: input.connectionString?.trim() || existing?.connectionString,
     isDefault: input.isDefault ?? existing?.isDefault ?? false,
+    // SSH tunnel. Non-secret fields fall back to existing; secrets use `??` so an
+    // edit that omits them (the form sends undefined when left blank) keeps the
+    // stored value — exactly like `password` above.
+    sshEnabled: input.sshEnabled ?? existing?.sshEnabled ?? false,
+    // Non-secret fields: distinguish "omitted" (undefined → keep existing) from
+    // "cleared" (present empty string → drop), so blanking the key path actually
+    // sticks. Secrets below stay write-only (`?? existing`).
+    sshHost: input.sshHost !== undefined ? input.sshHost.trim() || undefined : existing?.sshHost,
+    sshPort: input.sshPort ?? existing?.sshPort,
+    sshUser: input.sshUser !== undefined ? input.sshUser.trim() || undefined : existing?.sshUser,
+    sshKeyPath: input.sshKeyPath !== undefined ? input.sshKeyPath.trim() || undefined : existing?.sshKeyPath,
+    sshPrivateKey: input.sshPrivateKey ?? existing?.sshPrivateKey,
+    sshPassphrase: input.sshPassphrase ?? existing?.sshPassphrase,
+    sshPassword: input.sshPassword ?? existing?.sshPassword,
     createdAt: existing?.createdAt ?? now,
     updatedAt: now,
   }
@@ -105,6 +120,9 @@ export async function deleteConnection(id: string): Promise<boolean> {
   const next = all.filter((c) => c.id !== id)
   if (next.length === all.length) return false
   await writeAll(next)
+  // The record is gone, so ensureTunnel will never be called for this id again —
+  // tear down any live tunnel now or its bastion session + local port leak forever.
+  disposeTunnel(id)
   return true
 }
 
@@ -114,9 +132,28 @@ export function configPathPublic(): string {
 
 /**
  * Strip secrets before serializing for clients. Keeps the *shape* the
- * UI needs (`hasPassword` boolean) without leaking the value.
+ * UI needs (`has*` booleans) without leaking the values. The SSH key path is
+ * NOT a secret (it's a local filename) so it stays; the key/passphrase/password
+ * are stripped exactly like the DB password.
  */
-export function sanitize(c: ConnectionRecord): Omit<ConnectionRecord, "password"> & { hasPassword: boolean } {
-  const { password, ...rest } = c
-  return { ...rest, hasPassword: typeof password === "string" && password.length > 0 }
+export type SanitizedConnection = Omit<
+  ConnectionRecord,
+  "password" | "sshPrivateKey" | "sshPassphrase" | "sshPassword"
+> & {
+  hasPassword: boolean
+  hasSshPrivateKey: boolean
+  hasSshPassphrase: boolean
+  hasSshPassword: boolean
+}
+
+export function sanitize(c: ConnectionRecord): SanitizedConnection {
+  const { password, sshPrivateKey, sshPassphrase, sshPassword, ...rest } = c
+  const set = (v: unknown) => typeof v === "string" && v.length > 0
+  return {
+    ...rest,
+    hasPassword: set(password),
+    hasSshPrivateKey: set(sshPrivateKey),
+    hasSshPassphrase: set(sshPassphrase),
+    hasSshPassword: set(sshPassword),
+  }
 }

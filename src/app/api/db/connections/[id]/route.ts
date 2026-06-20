@@ -19,6 +19,9 @@ export async function PUT(req: Request, { params }: { params: Promise<{ id: stri
   } catch {
     return NextResponse.json({ error: "invalid json" }, { status: 400 })
   }
+  if (!body || typeof body.label !== "string") {
+    return NextResponse.json({ error: "label required" }, { status: 400 })
+  }
   const next = await upsertConnection({ ...body, id })
   return NextResponse.json({ connection: sanitize(next) })
 }
