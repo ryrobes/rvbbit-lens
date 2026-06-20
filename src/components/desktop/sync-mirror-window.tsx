@@ -320,7 +320,7 @@ function JobDetail({
           <div className="px-3 py-5 text-center text-[11px] text-chrome-text/50">No runs yet — hit “Run now”.</div>
         ) : (
           <table className="w-full text-[11px]">
-            <thead className="sticky top-0 bg-chrome-background/95 text-[10px] uppercase tracking-wide text-chrome-text/45">
+            <thead className="sticky top-0 bg-chrome-bg text-[10px] uppercase tracking-wide text-chrome-text/45">
               <tr className="border-b border-chrome-border">
                 <th className="px-2.5 py-1 text-left font-medium">table</th>
                 <th className="px-2 py-1 text-left font-medium">action</th>

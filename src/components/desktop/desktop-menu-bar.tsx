@@ -53,8 +53,9 @@ interface DesktopMenuBarProps {
   onOpenQueryLens: () => void
   onOpenDataSearch: () => void
   onOpenDrift: () => void
-  /** Open a SQL window with given content (deep-links from the scheduler tray). */
-  onOpenSql: (sql: string, title: string) => void
+  /** Open a SQL window with given content (deep-links from the scheduler tray).
+   *  `database` targets a sibling db (cron links → the cron home db). */
+  onOpenSql: (sql: string, title: string, database?: string) => void
   onOpenModelStudio: () => void
   onOpenCatalogGraph: () => void
   onOpenKgBrowser: () => void
@@ -340,17 +341,13 @@ export function DesktopMenuBar({
         <MenuPane label="Edit" items={editItems} />
         <MenuPane label="Database" items={databaseItems} />
         <MenuPane label="Desktop" items={desktopItems} />
-      </div>
-
-      <div className="flex items-center gap-2" style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}>
-        {busy ? <Activity className="h-3.5 w-3.5 animate-pulse text-main" /> : null}
-        <WorkspaceSwitcher
-          activeWorkspace={activeWorkspace}
-          occupancy={workspaceOccupancy}
-          onSwitch={onSwitchWorkspace}
-          sceneActive={activeWorkspace === SCENE_SLOT}
-          sceneOccupied={sceneSlotOccupied}
-          sceneDirty={sceneDirty}
+        <span className="mx-0.5 h-3.5 w-px bg-chrome-border/60" />
+        {/* Connection switcher + scenes live here as left-aligned dropdowns. */}
+        <ConnectionPicker
+          connections={connections}
+          active={active}
+          onSelect={onSelectConnection}
+          onManage={onOpenConnections}
         />
         <SceneTray
           sceneName={sceneName}
@@ -366,7 +363,21 @@ export function DesktopMenuBar({
           onDelete={onDeleteScene}
           nameExists={onSceneNameExists}
         />
-        <span className="text-chrome-text/30">·</span>
+      </div>
+
+      {/* Right cluster: desktop picker → present → scheduler → clock (far right). */}
+      <div className="flex items-center gap-2.5" style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}>
+        {busy ? <Activity className="h-3.5 w-3.5 animate-pulse text-main" /> : null}
+        <WorkspaceSwitcher
+          activeWorkspace={activeWorkspace}
+          occupancy={workspaceOccupancy}
+          onSwitch={onSwitchWorkspace}
+          sceneActive={activeWorkspace === SCENE_SLOT}
+          sceneOccupied={sceneSlotOccupied}
+          sceneDirty={sceneDirty}
+        />
+        <HomeIndicator />
+        <PresentToggle />
         <SchedulerTray
           activeConnectionId={activeConnectionId}
           hasRvbbit={hasRvbbit}
@@ -374,22 +385,6 @@ export function DesktopMenuBar({
           onOpenDrift={onOpenDrift}
         />
         <MenuBarClock />
-        <span className="text-chrome-text/30">·</span>
-        <HomeIndicator />
-        <span className="text-chrome-text/30">·</span>
-        <PresentToggle />
-        <span className="text-chrome-text/30">·</span>
-        {hasRvbbit ? (
-          <span className="rounded-full border border-rvbbit-accent/60 bg-rvbbit-bg/40 px-2 py-0.5 text-[10px] uppercase tracking-wide text-rvbbit-accent">
-            rvbbit
-          </span>
-        ) : null}
-        <ConnectionPicker
-          connections={connections}
-          active={active}
-          onSelect={onSelectConnection}
-          onManage={onOpenConnections}
-        />
       </div>
     </header>
     <AboutDialog
@@ -727,7 +722,7 @@ function ConnectionPicker({
         </span>
         <ChevronDown className="h-3 w-3 opacity-70" />
       </summary>
-      <div className="absolute right-0 top-full z-50 mt-1 w-72 rounded-md border border-chrome-border bg-chrome-bg p-1 shadow-xl">
+      <div className="absolute left-0 top-full z-50 mt-1 w-72 rounded-md border border-chrome-border bg-chrome-bg p-1 shadow-xl">
         {connections.length === 0 ? (
           <div className="px-2 py-2 text-[11px] text-chrome-text/70">No saved connections.</div>
         ) : null}

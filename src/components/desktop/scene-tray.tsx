@@ -90,7 +90,7 @@ export function SceneTray({
       </button>
 
       {open ? (
-        <div className="absolute right-0 top-7 z-50 w-72 overflow-hidden rounded-md border border-chrome-border bg-chrome-background/95 shadow-xl backdrop-blur">
+        <div className="absolute left-0 top-7 z-50 w-72 overflow-hidden rounded-md border border-chrome-border bg-chrome-bg shadow-xl">
           {/* Save / Save As */}
           <div className="space-y-1.5 border-b border-chrome-border/60 p-2">
             {canSave ? (

@@ -34,14 +34,13 @@ export function PresentToggle() {
           : "Enter present mode — a read-only view for sharing or demos."
       }
       className={cn(
-        "inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10px]",
+        "grid h-6 w-6 place-items-center rounded transition-colors",
         present
-          ? "border-rvbbit-accent/60 bg-rvbbit-accent/15 text-rvbbit-accent"
-          : "border-chrome-border/60 bg-chrome-bg/40 text-chrome-text/55 hover:border-rvbbit-accent/40 hover:text-foreground",
+          ? "bg-rvbbit-accent/15 text-rvbbit-accent"
+          : "text-chrome-text/55 hover:bg-foreground/[0.08] hover:text-foreground",
       )}
     >
-      <Eye className="h-3 w-3" />
-      Present
+      <Eye className="h-3.5 w-3.5" />
     </button>
   )
 }

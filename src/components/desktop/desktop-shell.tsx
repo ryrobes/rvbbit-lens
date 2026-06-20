@@ -1753,7 +1753,7 @@ export function DesktopShell() {
   }, [focus, openWindow, liveWindows])
 
   const openSqlWith = useCallback(
-    (sql: string, title: string) => {
+    (sql: string, title: string, database?: string) => {
       if (!activeConnectionId) {
         openConnections()
         return
@@ -1771,6 +1771,7 @@ export function DesktopShell() {
           title,
           sql,
           origin: "query",
+          database,
           view: { activeTab: "rows", sqlRailOpen: true, sqlRailWidthPx: 360 },
         } satisfies DataPayload,
       })
@@ -3595,9 +3596,16 @@ export function DesktopShell() {
         y: e.clientY,
         items: [
           {
+            id: "command-palette",
+            label: "Command Palette  ⌘P",
+            icon: Search,
+            onSelect: () => setPaletteOpen(true),
+          },
+          {
             id: "new-sql",
             label: "New SQL Block",
             icon: FileCode2,
+            separatorBefore: true,
             onSelect: () => openSqlScratchAtPos(world.x, world.y),
           },
           {
@@ -4144,7 +4152,7 @@ export function DesktopShell() {
             {/* Empty Scene slot = the Scene gallery: pick one to load, or
                 save the current desktop from the Scenes menu. */}
             {wsId === SCENE_SLOT && canvas.windows.length === 0 ? (
-              <div className="pointer-events-auto absolute left-1/2 top-1/2 w-80 -translate-x-1/2 -translate-y-1/2 rounded-lg border border-chrome-border bg-chrome-background/85 p-2 shadow-2xl backdrop-blur">
+              <div className="pointer-events-auto absolute left-1/2 top-1/2 w-80 -translate-x-1/2 -translate-y-1/2 rounded-lg border border-chrome-border bg-chrome-bg/85 p-2 shadow-2xl backdrop-blur">
                 <div className="flex items-center gap-1.5 px-1 pb-1.5 pt-0.5 text-[11px] font-medium text-chrome-text/70">
                   <Layers className="h-3.5 w-3.5" /> Scenes — saved desktops
                 </div>

@@ -63,7 +63,7 @@ import {
 interface SchedulerTrayProps {
   activeConnectionId: string | null
   hasRvbbit: boolean
-  onOpenSql: (sql: string, title: string) => void
+  onOpenSql: (sql: string, title: string, database?: string) => void
   onOpenDrift: () => void
 }
 
@@ -266,7 +266,7 @@ export function SchedulerTray({ activeConnectionId, hasRvbbit, onOpenSql, onOpen
             <div className="ml-auto flex items-center gap-1">
               <button
                 type="button"
-                onClick={() => onOpenSql("SELECT jobid, jobname, schedule, command, active FROM cron.job ORDER BY jobid;", "cron.job")}
+                onClick={() => onOpenSql("SELECT jobid, jobname, schedule, command, active FROM cron.job ORDER BY jobid;", "cron.job", state?.cronDb ?? "postgres")}
                 title="Open cron.job in a SQL window"
                 disabled={!state?.created}
                 className="grid h-6 w-6 place-items-center rounded text-chrome-text/60 hover:bg-foreground/[0.08] hover:text-foreground disabled:opacity-30"
@@ -459,6 +459,7 @@ export function SchedulerTray({ activeConnectionId, hasRvbbit, onOpenSql, onOpen
                           onOpenSql(
                             `SELECT runid, status, start_time, end_time, return_message\nFROM cron.job_run_details WHERE jobid = ${j.jobid}\nORDER BY start_time DESC LIMIT 50;`,
                             `runs · ${j.jobname ?? j.jobid}`,
+                            state?.cronDb ?? "postgres",
                           )
                         }
                         onOpenDrift={isCatalogJob(j) ? onOpenDrift : undefined}

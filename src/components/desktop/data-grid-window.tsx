@@ -251,7 +251,9 @@ export function DataGridWindow({
   // instead of a confusing "database…" placeholder). targetDb stays null until the
   // user picks a *different* db — null means "the connection default" (currentDb).
   const [currentDb, setCurrentDb] = useState<string | null>(null)
-  const [targetDb, setTargetDb] = useState<string | null>(null)
+  // Honor a payload-supplied initial target db (e.g. pg_cron links open against
+  // the cron home db 'postgres', not the connected working db).
+  const [targetDb, setTargetDb] = useState<string | null>(payload.database ?? null)
   // Manual transaction: when autocommit is off, txnSessionId pins a server-side
   // connection; txnActive means a statement has opened the transaction.
   const [txnSessionId, setTxnSessionId] = useState<string | null>(null)

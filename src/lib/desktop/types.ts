@@ -186,6 +186,13 @@ export interface DataPayload {
   view?: DataWindowViewState
   callerId?: string | null
   /**
+   * Initial target database for this window's db-switcher (the per-window
+   * `database` override). Used when a query must run against a sibling db on the
+   * same server — e.g. pg_cron links target the cron home db (default 'postgres'),
+   * not the connected working db, or the cron.* schema lookup fails.
+   */
+  database?: string
+  /**
    * Reactive overlay: every data window has a block name (defaulted to a
    * slug of its title). Other windows can reference this window's result
    * by name (`block.<name>`) or emit/receive params (`param.<block>.<field>`).
