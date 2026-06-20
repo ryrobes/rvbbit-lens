@@ -16,9 +16,11 @@ import {
   BarChart3,
   Bell,
   Boxes,
+  ClipboardCopy,
   Clock,
   Download,
   FileCode2,
+  FolderOpen,
   GitBranch,
   PanelLeftClose,
   PanelLeftOpen,
@@ -28,12 +30,15 @@ import {
   Sparkles,
   Table2,
   TreeStructure,
+  X,
 } from "@/lib/icons"
 import { format as formatSql } from "sql-formatter"
 import { ChartView } from "./chart-view"
 import { ControlView } from "./control-view"
 import { ModelField } from "./operator-inspector"
 import { ResultGrid } from "./result-grid"
+import { ContextMenu, type ContextMenuState } from "./context-menu"
+import { listQueryHistory, pushQueryHistory } from "@/lib/desktop/query-history"
 import { SingleCellCallout } from "./single-cell-callout"
 import { SqlEditor } from "./sql-editor"
 import { fetchLlmModels, type LlmModel } from "@/lib/rvbbit/operators"
@@ -139,7 +144,7 @@ type RunState =
   | { kind: "idle" }
   | { kind: "running"; sql: string; startedAt: number }
   | { kind: "done"; result: QueryResult }
-  | { kind: "error"; error: string; code?: string; detail?: string; hint?: string }
+  | { kind: "error"; error: string; code?: string; detail?: string; hint?: string; position?: number | null }
 
 type ExplainState =
   | { kind: "idle" }
@@ -235,6 +240,22 @@ export function DataGridWindow({
   // allowed to write payload.sql back; older resolutions would otherwise
   // revert the most recent merge.
   const runNonceRef = useRef(0)
+  // Abort controller + cancel token for the in-flight run, so a Stop button can
+  // both abort the client fetch and pg_cancel_backend the server query.
+  const runControlRef = useRef<{ controller: AbortController; token: string } | null>(null)
+  const [exportMenu, setExportMenu] = useState<ContextMenuState | null>(null)
+  const [historyMenu, setHistoryMenu] = useState<ContextMenuState | null>(null)
+  // Per-window target database (the connection's default unless overridden).
+  const [databases, setDatabases] = useState<string[]>([])
+  // The connection's actual current database (so the switcher shows it as selected
+  // instead of a confusing "database…" placeholder). targetDb stays null until the
+  // user picks a *different* db — null means "the connection default" (currentDb).
+  const [currentDb, setCurrentDb] = useState<string | null>(null)
+  const [targetDb, setTargetDb] = useState<string | null>(null)
+  // Manual transaction: when autocommit is off, txnSessionId pins a server-side
+  // connection; txnActive means a statement has opened the transaction.
+  const [txnSessionId, setTxnSessionId] = useState<string | null>(null)
+  const [txnActive, setTxnActive] = useState(false)
   // Baseline for the rerun-on-compiled-SQL effect. Lives up here (rather
   // than next to that effect) so the external-SQL sync effect can pin it.
   const prevCompiledRef = useRef<string | null>(null)
@@ -320,7 +341,7 @@ export function DataGridWindow({
           headers: { "content-type": "application/json" },
           // pipeline/synth are guarded out above, so this is always a plain
           // SELECT — run it under the read-only transaction guard.
-          body: JSON.stringify({ connectionId: activeConnectionId, sql, rowLimit: 1, readOnly: true }),
+          body: JSON.stringify({ connectionId: activeConnectionId, sql, rowLimit: 1, readOnly: true, database: targetDb ?? undefined }),
         })
         const body = (await res.json()) as { ok?: boolean; rows?: Record<string, unknown>[] }
         const row = body.ok && Array.isArray(body.rows) ? body.rows[0] : undefined
@@ -330,7 +351,7 @@ export function DataGridWindow({
         return null
       }
     },
-    [activeConnectionId, allWindows, params, w.id],
+    [activeConnectionId, allWindows, params, w.id, targetDb],
   )
 
   // First time this window opens, persist its unique block name into
@@ -456,10 +477,14 @@ export function DataGridWindow({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  const runSql = useCallback(async (sourceSql: string) => {
+  const runSql = useCallback(async (sourceSql: string, userInitiated = false) => {
     if (!activeConnectionId) return
     const trimmedSource = sourceSql.trim()
     if (!trimmedSource) return
+    // In a manual transaction, ONLY explicit user runs may issue a statement —
+    // reactive cascades, mount, and db-switch auto-runs must never inject a
+    // statement into the user's open transaction.
+    if (txnSessionId && !userInitiated) return
     const myNonce = ++runNonceRef.current
     // Compile *this draft* against the runtime graph by patching the
     // window's source SQL into the graph build. The simpler path: build
@@ -493,6 +518,9 @@ export function DataGridWindow({
     // expand those into real grid columns like a pipeline (but it isn't wrapped and
     // has no Steps tab).
     const isSynth = !isPipeline && isSynthQuery(compiled)
+    // Pipeline/synth results are client-expanded from one jsonb column — "Load
+    // more" must not offer to re-fetch them (it would bypass the expansion).
+    setLastRunExpanded(isPipeline || isSynth)
     if (isPipeline) {
       setFlowSteps(null)
       setFlowStepsError(null)
@@ -500,25 +528,55 @@ export function DataGridWindow({
     }
     setProgress(null)
     setRunState({ kind: "running", sql: compiled, startedAt: Date.now() })
+    const controller = new AbortController()
+    const cancelToken = crypto.randomUUID()
+    runControlRef.current = { controller, token: cancelToken }
+    // Manual-transaction mode routes through the pinned-connection endpoint.
+    const useTxn = !!txnSessionId
+    // Optimistically mark the transaction active: the statement is about to reach
+    // the pinned backend, so Commit/Rollback and the unmount-rollback guard must be
+    // armed even if this run is later aborted or errors (the txn may be open server
+    // side). Worst case Commit/Rollback no-op against a session that never opened.
+    if (useTxn) setTxnActive(true)
     try {
-      const res = await fetch("/api/db/query", {
+      const res = await fetch(useTxn ? "/api/db/txn" : "/api/db/query", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          connectionId: activeConnectionId,
-          sql: toRun,
-          rowLimit: 5000,
-          readOnly: false,
-        }),
+        signal: controller.signal,
+        body: JSON.stringify(
+          useTxn
+            ? {
+                action: "query",
+                sessionId: txnSessionId,
+                connectionId: activeConnectionId,
+                sql: toRun,
+                rowLimit: 5000,
+                cancelToken,
+                database: targetDb ?? undefined,
+              }
+            : {
+                connectionId: activeConnectionId,
+                sql: toRun,
+                rowLimit: 5000,
+                readOnly: false,
+                cancelToken,
+                database: targetDb ?? undefined,
+              },
+        ),
       })
       const body = (await res.json()) as
         | (QueryResult & { ok: true })
-        | { ok: false; error: string; code?: string; detail?: string; hint?: string }
+        | { ok: false; error: string; code?: string; detail?: string; hint?: string; position?: number | null }
       // A newer run started while this fetch was in flight — drop the
       // result so it doesn't overwrite state owned by the later run.
       if (runNonceRef.current !== myNonce) return
+      // (txnActive was set optimistically before the await — the statement reached
+      // the pinned backend, so the transaction is open regardless of this result.)
+      // Record only user-initiated runs (not reactive/cascade/mount auto-runs),
+      // and only the current (non-stale) one.
+      if (userInitiated) pushQueryHistory(trimmedSource, activeConnectionId, body.ok === false)
       if (body.ok === false) {
-        setRunState({ kind: "error", error: body.error, code: body.code, detail: body.detail, hint: body.hint })
+        setRunState({ kind: "error", error: body.error, code: body.code, detail: body.detail, hint: body.hint, position: body.position })
         setIsPipelineRun(false)
       } else {
         // For a rvbbit.synth() block, ask the compiler for the AUTHORITATIVE column
@@ -538,6 +596,7 @@ export function DataGridWindow({
                   sql: `SELECT column_name, data_type FROM rvbbit.synth_schema('${intent.replace(/'/g, "''")}')`,
                   rowLimit: 500,
                   readOnly: false,
+                  database: targetDb ?? undefined,
                 }),
               })
               const sbody = (await sres.json()) as {
@@ -598,9 +657,128 @@ export function DataGridWindow({
       }
     } catch (e) {
       if (runNonceRef.current !== myNonce) return
+      // User-initiated cancel: the fetch was aborted — quietly return to idle.
+      if (e instanceof DOMException && e.name === "AbortError") {
+        setRunState({ kind: "idle" })
+        return
+      }
       setRunState({ kind: "error", error: e instanceof Error ? e.message : String(e) })
+    } finally {
+      if (runControlRef.current?.token === cancelToken) runControlRef.current = null
     }
-  }, [activeConnectionId, activeTab, allWindows, blockName, onChangePayload, params, subscriptions, w.id])
+  }, [activeConnectionId, activeTab, allWindows, blockName, onChangePayload, params, subscriptions, w.id, targetDb, txnSessionId])
+
+  // Commit or roll back the open manual transaction.
+  const endTxn = useCallback(
+    async (action: "commit" | "rollback") => {
+      const sid = txnSessionId
+      if (!sid) return
+      // For a rollback, interrupt any in-flight statement on the pinned backend
+      // (server cancel + abort the fetch) so the ROLLBACK reaches the backend
+      // promptly instead of queuing behind a long-running statement. A commit lets
+      // the in-flight statement finish first.
+      if (action === "rollback") {
+        const ctl = runControlRef.current
+        if (ctl) {
+          await fetch("/api/db/cancel", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ cancelToken: ctl.token }),
+          }).catch(() => {})
+          ctl.controller.abort()
+        }
+      }
+      await fetch("/api/db/txn", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ action, sessionId: sid }),
+      }).catch(() => {})
+      setTxnActive(false)
+    },
+    [txnSessionId],
+  )
+
+  // Toggle autocommit: turning it OFF starts manual-transaction mode (a fresh
+  // session id); turning it ON rolls back any open transaction first.
+  const toggleAutocommit = useCallback(async () => {
+    if (txnSessionId) {
+      if (txnActive) await endTxn("rollback")
+      setTxnSessionId(null)
+      setTxnActive(false)
+    } else {
+      setTxnSessionId(crypto.randomUUID())
+    }
+  }, [txnSessionId, txnActive, endTxn])
+
+  // Roll back a still-open transaction if the window closes (best-effort).
+  const txnRef = useRef({ sessionId: null as string | null, active: false })
+  useEffect(() => {
+    txnRef.current = { sessionId: txnSessionId, active: txnActive }
+  }, [txnSessionId, txnActive])
+  useEffect(
+    () => () => {
+      const t = txnRef.current
+      if (t.sessionId && t.active) {
+        void fetch("/api/db/txn", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ action: "rollback", sessionId: t.sessionId }),
+          keepalive: true,
+        }).catch(() => {})
+      }
+    },
+    [],
+  )
+
+  // Stop the in-flight query: pg_cancel_backend on the server + abort the fetch.
+  const cancelRun = useCallback(() => {
+    const ctl = runControlRef.current
+    if (!ctl) return
+    void fetch("/api/db/cancel", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ cancelToken: ctl.token }),
+    }).catch(() => {})
+    ctl.controller.abort()
+  }, [])
+
+  // Fetch the next page: re-run the same compiled SQL with a higher row cap and
+  // replace the result. The 5000 cap is a client-side slice, so a bigger cap just
+  // returns more of the same query. Run read-only so a re-fetch can never re-fire
+  // a side-effecting statement, and nonce-guard so a concurrent run isn't clobbered.
+  // Only offered for plain non-expanded SELECTs (see the button gate).
+  const [loadingMore, setLoadingMore] = useState(false)
+  const [lastRunExpanded, setLastRunExpanded] = useState(false)
+  const loadMore = useCallback(async () => {
+    if (runState.kind !== "done" || !activeConnectionId) return
+    // While a manual transaction is open, "Load more" must not run — it re-fetches
+    // on a separate pooled connection that can't see this transaction's uncommitted
+    // rows, so it would replace the in-txn page with an inconsistent snapshot.
+    if (txnSessionId) return
+    const ran = runState.result
+    const myNonce = ++runNonceRef.current
+    setLoadingMore(true)
+    try {
+      const res = await fetch("/api/db/query", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          connectionId: activeConnectionId,
+          sql: ran.sql,
+          rowLimit: ran.rows.length + 5000,
+          readOnly: true,
+          database: targetDb ?? undefined,
+        }),
+      })
+      const body = (await res.json()) as (QueryResult & { ok?: boolean }) | { ok: false }
+      if (runNonceRef.current !== myNonce) return // a newer run superseded this page fetch
+      if (body && (body as { ok?: boolean }).ok !== false) setRunState({ kind: "done", result: body as QueryResult })
+    } catch {
+      /* keep the current page on failure */
+    } finally {
+      setLoadingMore(false)
+    }
+  }, [runState, activeConnectionId, targetDb, txnSessionId])
 
   // Ask mode: generate SQL from the plain-English question via rvbbit.synth_sql
   // (grounded text-to-SQL → a validated, read-only SELECT), drop it into the
@@ -650,7 +828,7 @@ export function DataGridWindow({
       // Hand off to runSql (it owns the next nonce); load + flip to SQL mode.
       setDraftSql(pretty)
       setQueryMode("sql")
-      void runSql(pretty)
+      void runSql(pretty, true)
     } catch (e) {
       if (runNonceRef.current !== myNonce) return
       setRunState({ kind: "error", error: e instanceof Error ? e.message : String(e) })
@@ -659,7 +837,7 @@ export function DataGridWindow({
 
   const onRun = useCallback(() => {
     if (queryMode === "ask") void runAsk(askDraft)
-    else void runSql(draftSql || payload.sql)
+    else void runSql(draftSql || payload.sql, true)
   }, [queryMode, askDraft, draftSql, payload.sql, runAsk, runSql])
 
   // Lazily load per-step rowsets for the Steps inspector when that tab opens.
@@ -806,6 +984,7 @@ export function DataGridWindow({
             connectionId: activeConnectionId,
             sql: prefix + sql,
             rowLimit: 1,
+            database: targetDb ?? undefined,
           }),
         })
         const body = (await res.json()) as
@@ -837,7 +1016,7 @@ export function DataGridWindow({
         if (silent) setExplainBusy(false)
       }
     },
-    [activeConnectionId, compileSource, draftSql, payload.sql, hasRvbbit],
+    [activeConnectionId, compileSource, draftSql, payload.sql, hasRvbbit, targetDb],
   )
 
   // Run ANALYZE for real — but a semantic query's ANALYZE makes actual
@@ -993,10 +1172,70 @@ export function DataGridWindow({
   }
   useEffect(() => () => { if (paramNoticeTimer.current) clearTimeout(paramNoticeTimer.current) }, [])
 
+  // Re-run against the newly-selected database when the target-db switches, so
+  // the visible rows always match the chosen db (skips the initial mount).
+  const prevTargetDbRef = useRef(targetDb)
+  useEffect(() => {
+    if (prevTargetDbRef.current === targetDb) return
+    prevTargetDbRef.current = targetDb
+    if (queryMode === "sql" && (runState.kind === "done" || runState.kind === "error")) {
+      void runSql(draftSql || payload.sql)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [targetDb])
+
+  // Databases on this server, for the per-window target-db switcher.
+  useEffect(() => {
+    if (!activeConnectionId) return
+    let cancelled = false
+    fetch("/api/db/query", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        connectionId: activeConnectionId,
+        sql: "SELECT datname, datname = current_database() AS is_current FROM pg_database WHERE datistemplate = false AND datallowconn ORDER BY datname",
+        poolLane: "meta",
+      }),
+    })
+      .then((r) => r.json())
+      .then((b: { ok?: boolean; rows?: { datname: string; is_current?: boolean }[] }) => {
+        if (cancelled || !b.ok || !b.rows) return
+        setDatabases(b.rows.map((r) => r.datname))
+        setCurrentDb(b.rows.find((r) => r.is_current)?.datname ?? null)
+      })
+      .catch(() => {})
+    return () => {
+      cancelled = true
+    }
+  }, [activeConnectionId])
+
   const onReset = useCallback(() => {
     if (queryMode === "ask") setAskDraft(view.askDraft ?? "")
     else setDraftSql(payload.sql || "")
   }, [queryMode, payload.sql, view.askDraft])
+
+  const onHistory = useCallback(
+    (e: React.MouseEvent) => {
+      const recent = listQueryHistory(activeConnectionId, 15)
+      setHistoryMenu({
+        x: e.clientX,
+        y: e.clientY,
+        items:
+          recent.length === 0
+            ? [{ id: "empty", label: "No history yet", disabled: true }]
+            : recent.map((h, i) => ({
+                id: `h${i}`,
+                label: h.sql.replace(/\s+/g, " ").trim().slice(0, 64) || "(empty)",
+                danger: h.errored,
+                onSelect: () => {
+                  setDraftSql(h.sql)
+                  void runSql(h.sql, true)
+                },
+              })),
+      })
+    },
+    [activeConnectionId, runSql],
+  )
 
   const onFormat = useCallback(() => {
     try {
@@ -1136,6 +1375,17 @@ export function DataGridWindow({
             onRun={onRun}
             onFormat={onFormat}
             onReset={onReset}
+            onHistory={onHistory}
+            onLoadFile={setDraftSql}
+            databases={databases}
+            currentDb={currentDb}
+            targetDb={targetDb}
+            onSetDb={setTargetDb}
+            txnMode={!!txnSessionId}
+            txnActive={txnActive}
+            onToggleAutocommit={toggleAutocommit}
+            onCommit={() => void endTxn("commit")}
+            onRollback={() => void endTxn("rollback")}
             queryMode={queryMode}
             onToggleMode={() => setQueryMode((m) => (m === "ask" ? "sql" : "ask"))}
             askable={hasRvbbit}
@@ -1161,7 +1411,9 @@ export function DataGridWindow({
               <ModelField value={askModel} models={llmModels} onChange={setAskModel} />
             </div>
           ) : null}
-          <RunStatus runState={runState} progress={progress} />
+          <RunStatus runState={runState} progress={progress} onCancel={cancelRun} />
+          <ContextMenu state={exportMenu} onClose={() => setExportMenu(null)} />
+          <ContextMenu state={historyMenu} onClose={() => setHistoryMenu(null)} />
         </aside>
         <div
           role="separator"
@@ -1265,7 +1517,37 @@ export function DataGridWindow({
               <span className="whitespace-nowrap text-[11px] tabular-nums text-chrome-text">
                 {result.rowCount} rows · {result.durationMs}ms{result.truncated ? " · truncated" : ""}
               </span>
-              <Button size="sm" variant="ghost" onClick={() => exportCsv(result, w.title)} title="Export CSV">
+              {result.truncated && result.command === "SELECT" && !lastRunExpanded && !txnSessionId ? (
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={loadMore}
+                  disabled={loadingMore}
+                  title="Fetch 5000 more rows"
+                  className="whitespace-nowrap text-[10px]"
+                >
+                  {loadingMore ? "Loading…" : "Load more"}
+                </Button>
+              ) : null}
+              <Button
+                size="sm"
+                variant="ghost"
+                title="Export…"
+                onClick={(e) => {
+                  const target = payload.table
+                    ? `"${payload.table.schema}"."${payload.table.name}"`
+                    : "target_table"
+                  setExportMenu({
+                    x: e.clientX,
+                    y: e.clientY,
+                    items: [
+                      { id: "csv", label: "Export CSV", icon: Download, onSelect: () => exportCsv(result, w.title) },
+                      { id: "json", label: "Export JSON", icon: FileCode2, onSelect: () => exportJson(result, w.title) },
+                      { id: "inserts", label: "Copy as INSERTs", icon: ClipboardCopy, onSelect: () => void copyText(buildInserts(result, target)) },
+                    ],
+                  })
+                }}
+              >
                 <Download className="h-3.5 w-3.5" />
               </Button>
               <Button
@@ -1562,6 +1844,17 @@ function Toolbar({
   onRun,
   onFormat,
   onReset,
+  onHistory,
+  onLoadFile,
+  databases,
+  currentDb,
+  targetDb,
+  onSetDb,
+  txnMode,
+  txnActive,
+  onToggleAutocommit,
+  onCommit,
+  onRollback,
   queryMode,
   onToggleMode,
   askable,
@@ -1570,6 +1863,17 @@ function Toolbar({
   onRun: () => void
   onFormat: () => void
   onReset: () => void
+  onHistory?: (e: React.MouseEvent) => void
+  onLoadFile?: (content: string) => void
+  databases?: string[]
+  currentDb?: string | null
+  targetDb?: string | null
+  onSetDb?: (db: string | null) => void
+  txnMode?: boolean
+  txnActive?: boolean
+  onToggleAutocommit?: () => void
+  onCommit?: () => void
+  onRollback?: () => void
   queryMode: "sql" | "ask"
   onToggleMode: () => void
   /** Whether the Ask (NL→SQL) toggle is offered — only on rvbbit connections. */
@@ -1577,7 +1881,10 @@ function Toolbar({
 }) {
   const ask = queryMode === "ask"
   return (
-    <div className="flex items-center gap-1 border-b border-chrome-border bg-chrome-bg/40 px-1.5 py-1">
+    <div className="flex h-9 shrink-0 items-center gap-1 overflow-x-auto border-b border-chrome-border bg-chrome-bg/40 px-1.5 [&>*]:shrink-0 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+      {/* Fixed height + no-shrink children: when the window is narrow the rail
+          stays one row at a static height (overflow is swipe-scrollable but the
+          scrollbar is hidden — matches the tab strip below). */}
       {/* SQL | Ask query-type toggle (rvbbit only). */}
       {askable ? (
         <div className="mr-0.5 inline-flex overflow-hidden rounded border border-chrome-border/70">
@@ -1613,6 +1920,80 @@ function Toolbar({
       <Button size="sm" variant="ghost" onClick={onReset} title={ask ? "Reset question" : "Reset to saved"}>
         <RotateCcw className="h-3 w-3" />
       </Button>
+      {!ask && onHistory ? (
+        <Button size="sm" variant="ghost" onClick={onHistory} title="Query history">
+          <Clock className="h-3 w-3" />
+        </Button>
+      ) : null}
+      {!ask && onLoadFile ? (
+        <Button
+          size="sm"
+          variant="ghost"
+          title="Open a .sql file into the editor"
+          onClick={() => {
+            const input = document.createElement("input")
+            input.type = "file"
+            input.accept = ".sql,.txt,text/plain"
+            input.onchange = () => {
+              const file = input.files?.[0]
+              if (file) void file.text().then((text) => onLoadFile(text)).catch(() => {})
+            }
+            input.click()
+          }}
+        >
+          <FolderOpen className="h-3 w-3" />
+        </Button>
+      ) : null}
+      {!ask && onSetDb && databases && databases.length > 1 ? (
+        <select
+          value={targetDb ?? currentDb ?? ""}
+          // Re-selecting the connection's own database clears the override (null) so
+          // it reads as "default" rather than a redundant per-window target.
+          onChange={(e) => onSetDb(e.target.value && e.target.value !== currentDb ? e.target.value : null)}
+          disabled={txnMode}
+          title={
+            txnMode
+              ? "Locked: a manual transaction is pinned to this database — commit or roll back to switch"
+              : "Target database for this window"
+          }
+          className="h-6 max-w-[150px] shrink-0 rounded border border-chrome-border/60 bg-chrome-bg px-1 text-[10px] text-chrome-text outline-none hover:bg-foreground/[0.05] disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          {!currentDb ? <option value="">database…</option> : null}
+          {databases.map((d) => (
+            <option key={d} value={d}>
+              {d}
+            </option>
+          ))}
+        </select>
+      ) : null}
+      {!ask && onToggleAutocommit ? (
+        <button
+          type="button"
+          onClick={onToggleAutocommit}
+          title={
+            txnMode
+              ? "Manual transaction (autocommit off) — click to return to autocommit"
+              : "Autocommit on — click to start a manual transaction"
+          }
+          className={cn(
+            "inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-[10px]",
+            txnMode ? "border-warning/60 text-warning" : "border-chrome-border/60 text-chrome-text/60 hover:bg-foreground/[0.05]",
+          )}
+        >
+          {txnActive ? <span className="h-1.5 w-1.5 rounded-full bg-warning" /> : null}
+          {txnMode ? "txn" : "auto"}
+        </button>
+      ) : null}
+      {!ask && txnMode && txnActive && onCommit && onRollback ? (
+        <>
+          <Button size="sm" variant="neutral" onClick={onCommit} title="COMMIT the transaction">
+            Commit
+          </Button>
+          <Button size="sm" variant="ghost" onClick={onRollback} title="ROLLBACK the transaction">
+            Rollback
+          </Button>
+        </>
+      ) : null}
       {ask ? (
         <span
           className="ml-auto inline-flex items-center gap-1 text-[10px] text-chrome-text/55"
@@ -1621,9 +2002,7 @@ function Toolbar({
           <Sparkles className="h-2.5 w-2.5" style={{ color: "var(--rvbbit-accent)" }} />
           ≈1 LLM call · cached after first
         </span>
-      ) : (
-        <span className="ml-auto text-[10px] text-chrome-text/60">⌘↩ to run</span>
-      )}
+      ) : null}
     </div>
   )
 }
@@ -1852,15 +2231,35 @@ function OpCountsViz({ operators }: { operators: OpCount[] }) {
   )
 }
 
-function RunStatus({ runState, progress }: { runState: RunState; progress: QueryProgress | null }) {
+function RunStatus({
+  runState,
+  progress,
+  onCancel,
+}: {
+  runState: RunState
+  progress: QueryProgress | null
+  onCancel?: () => void
+}) {
   if (runState.kind === "idle") return null
   return (
-    <div className="border-t border-chrome-border bg-chrome-bg/40 px-3 py-1.5 text-[11px] text-chrome-text">
+    <div className="flex items-center gap-2 border-t border-chrome-border bg-chrome-bg/40 px-3 py-1.5 text-[11px] text-chrome-text">
       {runState.kind === "running" ? (
-        <span className="inline-flex items-center gap-1.5">
-          <Clock className="h-3 w-3 animate-pulse" />
-          {progressLabel(progress)}
-        </span>
+        <>
+          <span className="inline-flex items-center gap-1.5">
+            <Clock className="h-3 w-3 animate-pulse" />
+            {progressLabel(progress)}
+          </span>
+          {onCancel ? (
+            <button
+              type="button"
+              onClick={onCancel}
+              title="Cancel the running query (pg_cancel_backend)"
+              className="ml-auto inline-flex items-center gap-1 rounded border border-danger/50 px-1.5 py-0.5 text-[10px] text-danger hover:bg-danger/10"
+            >
+              <X className="h-3 w-3" /> Stop
+            </button>
+          ) : null}
+        </>
       ) : null}
       {runState.kind === "done" ? (
         <span>
@@ -1880,7 +2279,7 @@ function EmptyResult({
   progress,
   onRun,
 }: {
-  error: { error: string; code?: string; detail?: string; hint?: string } | null
+  error: { error: string; code?: string; detail?: string; hint?: string; position?: number | null } | null
   running: boolean
   progress?: QueryProgress | null
   onRun: () => void
@@ -1909,6 +2308,9 @@ function EmptyResult({
           <AlertTriangle className="h-3.5 w-3.5" />
           {error.code ? <span className="font-mono">{error.code}</span> : null}
           <span>{error.error}</span>
+          {error.position != null ? (
+            <span className="font-mono text-danger/70">@ char {error.position}</span>
+          ) : null}
         </div>
         {error.detail ? <div className="text-chrome-text">{error.detail}</div> : null}
         {error.hint ? <div className="text-rvbbit-accent">Hint: {error.hint}</div> : null}
@@ -2068,15 +2470,68 @@ function ExplainTab({
   )
 }
 
-function exportCsv(result: QueryResult, title: string) {
-  const csv = rowsToCsv(result.columns, result.rows)
-  const blob = new Blob([csv], { type: "text/csv;charset=utf-8" })
+function download(content: string, mime: string, filename: string) {
+  const blob = new Blob([content], { type: mime })
   const url = URL.createObjectURL(blob)
   const a = document.createElement("a")
   a.href = url
-  a.download = `${slugify(title || "result")}.csv`
+  a.download = filename
   a.click()
   setTimeout(() => URL.revokeObjectURL(url), 500)
+}
+
+function exportCsv(result: QueryResult, title: string) {
+  download(rowsToCsv(result.columns, result.rows), "text/csv;charset=utf-8", `${slugify(title || "result")}.csv`)
+}
+
+function exportJson(result: QueryResult, title: string) {
+  const json = JSON.stringify(
+    result.rows,
+    (_k, v: unknown) => (typeof v === "bigint" ? v.toString() : v),
+    2,
+  )
+  download(json, "application/json", `${slugify(title || "result")}.json`)
+}
+
+function sqlLiteral(v: unknown): string {
+  if (v == null) return "NULL"
+  if (typeof v === "number") return Number.isFinite(v) ? String(v) : "NULL"
+  if (typeof v === "boolean") return v ? "TRUE" : "FALSE"
+  if (Array.isArray(v)) {
+    // Postgres array literal '{a,b}' (flat case) — let the column type coerce.
+    const inner = v
+      .map((e) =>
+        e == null
+          ? "NULL"
+          : typeof e === "number" || typeof e === "boolean"
+            ? String(e)
+            : `"${String(e).replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`,
+      )
+      .join(",")
+    return `'{${inner}}'`
+  }
+  if (typeof v === "object") return `'${JSON.stringify(v).replace(/'/g, "''")}'::jsonb`
+  return `'${String(v).replace(/'/g, "''")}'`
+}
+
+/** Result rows as INSERT statements (for moving data / seeding). */
+function buildInserts(result: QueryResult, target: string): string {
+  if (result.rows.length === 0) return "-- no rows"
+  const cols = result.columns.map((c) => `"${c.name.replace(/"/g, '""')}"`).join(", ")
+  return result.rows
+    .map(
+      (r) =>
+        `INSERT INTO ${target} (${cols}) VALUES (${result.columns.map((c) => sqlLiteral(r[c.name])).join(", ")});`,
+    )
+    .join("\n")
+}
+
+async function copyText(text: string) {
+  try {
+    await navigator.clipboard.writeText(text)
+  } catch {
+    /* best effort */
+  }
 }
 
 function slugify(s: string) {

@@ -7,6 +7,7 @@ import {
   Activity,
   AlertTriangle,
   Database,
+  GitBranch,
   KeyRound,
   Layers,
   Lock,
@@ -16,6 +17,7 @@ import {
   Settings2,
   Table2,
   Users,
+  Zap,
 } from "@/lib/icons"
 import { cn } from "@/lib/utils"
 import { ResultGrid } from "./result-grid"
@@ -50,6 +52,27 @@ const CATEGORIES: CategoryDef[] = [
     icon: KeyRound,
     sql: INDEXES_SQL(),
     description: "All indexes outside pg_catalog, sorted by on-disk size.",
+  },
+  {
+    key: "foreign-keys",
+    label: "Foreign Keys",
+    icon: GitBranch,
+    sql: FOREIGN_KEYS_SQL(),
+    description: "Foreign-key constraints and the tables they reference.",
+  },
+  {
+    key: "triggers",
+    label: "Triggers",
+    icon: Zap,
+    sql: TRIGGERS_SQL(),
+    description: "User triggers (excluding internal FK/constraint triggers) and their definitions.",
+  },
+  {
+    key: "sequences",
+    label: "Sequences",
+    icon: Layers,
+    sql: SEQUENCES_SQL(),
+    description: "Sequences in user schemas, with their bounds and last value.",
   },
   {
     key: "extensions",
@@ -447,6 +470,8 @@ function deriveCategorySummary(
         },
       ]
     }
+    default:
+      return []
   }
 }
 
@@ -508,6 +533,45 @@ JOIN pg_namespace n ON n.oid = t.relnamespace
 JOIN pg_am am ON am.oid = i.relam
 WHERE n.nspname NOT IN ('pg_catalog','information_schema')
 ORDER BY pg_relation_size(i.oid) DESC NULLS LAST`
+}
+
+function FOREIGN_KEYS_SQL(): string {
+  return `SELECT n.nspname || '.' || cl.relname  AS "table",
+       con.conname                        AS "constraint",
+       fn.nspname || '.' || fcl.relname   AS "references",
+       pg_get_constraintdef(con.oid)      AS definition
+FROM pg_constraint con
+JOIN pg_class cl     ON cl.oid = con.conrelid
+JOIN pg_namespace n  ON n.oid = cl.relnamespace
+LEFT JOIN pg_class fcl    ON fcl.oid = con.confrelid
+LEFT JOIN pg_namespace fn ON fn.oid = fcl.relnamespace
+WHERE con.contype = 'f'
+  AND n.nspname NOT IN ('pg_catalog','information_schema')
+  AND n.nspname NOT LIKE 'pg_toast%'
+ORDER BY 1, 2`
+}
+
+function TRIGGERS_SQL(): string {
+  return `SELECT n.nspname || '.' || cl.relname AS "table",
+       t.tgname                          AS trigger,
+       CASE WHEN t.tgenabled = 'D' THEN 'disabled' ELSE 'enabled' END AS status,
+       pg_get_triggerdef(t.oid)          AS definition
+FROM pg_trigger t
+JOIN pg_class cl    ON cl.oid = t.tgrelid
+JOIN pg_namespace n ON n.oid = cl.relnamespace
+WHERE NOT t.tgisinternal
+  AND n.nspname NOT IN ('pg_catalog','information_schema')
+ORDER BY 1, 2`
+}
+
+function SEQUENCES_SQL(): string {
+  return `SELECT schemaname || '.' || sequencename AS sequence,
+       data_type,
+       start_value, min_value, max_value, increment_by,
+       cycle, cache_size, last_value
+FROM pg_sequences
+WHERE schemaname NOT IN ('pg_catalog','information_schema')
+ORDER BY 1`
 }
 
 function EXT_SQL(): string {

@@ -4,21 +4,34 @@ import { useMemo, useRef, useState } from "react"
 import {
   ChevronDown,
   ChevronRight,
+  ClipboardCopy,
   Database,
   Eye,
+  FileCode2,
   FolderOpen,
   Layers,
+  Play,
   Plug,
+  Plus,
   RefreshCw,
   Search,
   Sparkles,
   Table2,
+  Trash2,
   Loader2,
 } from "@/lib/icons"
 import { Input } from "@/components/ui/input"
 import { Button } from "@/components/ui/button"
 import type { SchemaSnapshot, SchemaTable } from "@/lib/db/types"
 import { cn } from "@/lib/utils"
+import { ContextMenu, type ContextMenuItem, type ContextMenuState } from "./context-menu"
+import {
+  deleteTemplateSql,
+  insertTemplateSql,
+  quoteSqlIdent,
+  selectTopSql,
+  updateTemplateSql,
+} from "@/lib/desktop/sql-builder"
 import { Sparkline } from "./sparkline"
 import { useTableTimeline } from "@/lib/rvbbit/use-table-timeline"
 import type { TimelineTick } from "@/lib/rvbbit/time-travel"
@@ -33,6 +46,11 @@ interface FinderWindowProps {
   onOpenTable: (schema: string, name: string) => void
   onReload: () => void
   onOpenConnections: () => void
+  /** Open a SQL window with the given SQL — run it (SELECTs) or just show it
+   *  in the editor (DDL / templates / destructive ops to review-then-run). */
+  onOpenSql?: (title: string, sql: string, run: boolean) => void
+  /** Fetch + show an object's CREATE script (async). */
+  onViewDdl?: (schema: string, name: string, kind: string) => void
 }
 
 export function FinderWindow({
@@ -42,6 +60,8 @@ export function FinderWindow({
   onOpenTable,
   onReload,
   onOpenConnections,
+  onOpenSql,
+  onViewDdl,
 }: FinderWindowProps) {
   const [search, setSearch] = useState("")
   const [openSchemas, setOpenSchemas] = useState<Set<string>>(() => new Set(["public", "rvbbit"]))
@@ -132,6 +152,8 @@ export function FinderWindow({
                       onOpen={() => onOpenTable(t.schema, t.name)}
                       onHover={hover.open}
                       onHoverEnd={hover.close}
+                      onOpenSql={onOpenSql}
+                      onViewDdl={onViewDdl}
                     />
                   ))}
                 </div>
@@ -157,18 +179,101 @@ function TableRow({
   onOpen,
   onHover,
   onHoverEnd,
+  onOpenSql,
+  onViewDdl,
 }: {
   table: SchemaTable
   connectionId: string | null
   onOpen: () => void
   onHover: (table: SchemaTable, el: HTMLElement) => void
   onHoverEnd: () => void
+  onOpenSql?: (title: string, sql: string, run: boolean) => void
+  onViewDdl?: (schema: string, name: string, kind: string) => void
 }) {
   const [expanded, setExpanded] = useState(false)
+  const [menu, setMenu] = useState<ContextMenuState | null>(null)
   const isRvbbit = !!table.isRvbbit
+
+  const openMenu = (e: React.MouseEvent) => {
+    e.preventDefault()
+    const qual = `${quoteSqlIdent(table.schema)}.${quoteSqlIdent(table.name)}`
+    const cols = table.columns ?? []
+    const isViewish = table.kind === "view" || table.kind === "matview"
+    const dropVerb = table.kind === "matview" ? "MATERIALIZED VIEW" : table.kind === "view" ? "VIEW" : "TABLE"
+    const items: ContextMenuItem[] = [
+      { id: "open", label: "Open (200 rows)", icon: Play, onSelect: onOpen },
+      {
+        id: "select",
+        label: "Select 1000 rows",
+        icon: Table2,
+        disabled: !onOpenSql,
+        onSelect: () => onOpenSql?.(table.name, selectTopSql(table.schema, table.name, 1000), true),
+      },
+      {
+        id: "ddl",
+        label: "View DDL",
+        icon: FileCode2,
+        disabled: !onViewDdl,
+        onSelect: () => onViewDdl?.(table.schema, table.name, table.kind),
+      },
+      {
+        id: "copy",
+        label: "Copy qualified name",
+        icon: ClipboardCopy,
+        onSelect: () => void copyText(qual),
+      },
+    ]
+    if (!isViewish) {
+      items.push(
+        {
+          id: "insert",
+          label: "Generate INSERT",
+          icon: Plus,
+          separatorBefore: true,
+          disabled: !onOpenSql,
+          onSelect: () => onOpenSql?.(`INSERT ${table.name}`, insertTemplateSql(table.schema, table.name, cols), false),
+        },
+        {
+          id: "update",
+          label: "Generate UPDATE",
+          disabled: !onOpenSql,
+          onSelect: () => onOpenSql?.(`UPDATE ${table.name}`, updateTemplateSql(table.schema, table.name, cols), false),
+        },
+        {
+          id: "delete",
+          label: "Generate DELETE",
+          disabled: !onOpenSql,
+          onSelect: () => onOpenSql?.(`DELETE ${table.name}`, deleteTemplateSql(table.schema, table.name), false),
+        },
+        {
+          id: "truncate",
+          label: "Truncate…",
+          icon: Trash2,
+          danger: true,
+          separatorBefore: true,
+          disabled: !onOpenSql,
+          onSelect: () => onOpenSql?.(`TRUNCATE ${table.name}`, `TRUNCATE TABLE ${qual};`, false),
+        },
+      )
+    }
+    items.push({
+      id: "drop",
+      label: `Drop ${isViewish ? table.kind : "table"}…`,
+      icon: Trash2,
+      danger: true,
+      separatorBefore: isViewish,
+      disabled: !onOpenSql,
+      onSelect: () => onOpenSql?.(`DROP ${table.name}`, `DROP ${dropVerb} ${qual};`, false),
+    })
+    setMenu({ x: e.clientX, y: e.clientY, items })
+  }
+
   return (
     <div>
-      <div className="group flex items-center gap-1 px-2 py-1 text-xs hover:bg-foreground/[0.05]">
+      <div
+        onContextMenu={openMenu}
+        className="group flex items-center gap-1 px-2 py-1 text-xs hover:bg-foreground/[0.05]"
+      >
         {/* expand affordance — only rvbbit tables have a time-travel history */}
         {isRvbbit ? (
           <button
@@ -212,8 +317,17 @@ function TableRow({
           <DriftChips flags={table.driftFlags!} />
         </div>
       ) : null}
+      <ContextMenu state={menu} onClose={() => setMenu(null)} />
     </div>
   )
+}
+
+async function copyText(text: string): Promise<void> {
+  try {
+    await navigator.clipboard.writeText(text)
+  } catch {
+    /* best effort */
+  }
 }
 
 function TableKindIcon({ table, className }: { table: SchemaTable; className?: string }) {

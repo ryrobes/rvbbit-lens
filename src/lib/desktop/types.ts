@@ -602,6 +602,9 @@ export interface SystemObjectsPayload {
 export type SystemObjectCategory =
   | "tables"
   | "indexes"
+  | "foreign-keys"
+  | "triggers"
+  | "sequences"
   | "extensions"
   | "roles"
   | "settings"

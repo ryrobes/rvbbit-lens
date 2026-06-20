@@ -250,6 +250,7 @@ import {
   rollupSpecColumns,
   rollupSpecFromColumns,
 } from "@/lib/desktop/sql-builder"
+import { fetchObjectDdl } from "@/lib/db/object-ddl"
 import { invalidateSemanticOps, loadSemanticOps } from "@/lib/desktop/semantic-ops"
 import { detectDagsterStorage } from "@/lib/dagster/metadata"
 import { fetchKgEvidenceBySource, fetchPrimaryKeyColumn } from "@/lib/rvbbit/kg"
@@ -1526,6 +1527,49 @@ export function DesktopShell() {
       } satisfies DataPayload,
     })
   }, [activeConnectionId, openWindow])
+
+  // Open a SQL window with given SQL. run=true auto-runs (SELECTs → rows tab);
+  // run=false just shows it in the editor (DDL / templates / destructive ops to
+  // review before running).
+  const openSqlInWindow = useCallback(
+    (title: string, sql: string, run: boolean) => {
+      if (!activeConnectionId) {
+        openConnections()
+        return
+      }
+      openWindow({
+        id: randomUUID(),
+        kind: "data",
+        title,
+        x: 130 + Math.random() * 80,
+        y: 110 + Math.random() * 80,
+        width: 800,
+        height: 520,
+        payload: {
+          kind: "data",
+          title,
+          sql,
+          origin: run ? "table" : "query",
+          view: { activeTab: run ? "rows" : "sql", sqlRailOpen: !run, sqlRailWidthPx: 380 },
+        } satisfies DataPayload,
+      })
+    },
+    [activeConnectionId, openConnections, openWindow],
+  )
+
+  // Fetch an object's CREATE script and show it in a (read-to-run) SQL window.
+  const viewObjectDdl = useCallback(
+    async (schemaName: string, name: string, kind: string) => {
+      if (!activeConnectionId) return
+      const { ddl, error } = await fetchObjectDdl(activeConnectionId, schemaName, name, kind)
+      openSqlInWindow(
+        `DDL: ${name}`,
+        error ? `-- Could not build DDL for ${schemaName}.${name}: ${error}` : ddl,
+        false,
+      )
+    },
+    [activeConnectionId, openSqlInWindow],
+  )
 
   // Open a single FIELD as a focused query: value distribution (categorical) or
   // a numeric summary (sum/avg/min/max). Async — detects the column type first.
@@ -3668,6 +3712,8 @@ export function DesktopShell() {
       busy,
       setBusy,
       openTableFromFinder,
+      openSqlInWindow,
+      viewObjectDdl,
       openField,
       openViewAppBuilder,
       openViewApp,
@@ -3731,7 +3777,7 @@ export function DesktopShell() {
     }),
     [
       activeConnectionId, hasRvbbit, launchers, schema, semanticOps, schemaLoading, busy, setBusy,
-      openTableFromFinder, openField, openViewAppBuilder, openViewApp, openArtifact,
+      openTableFromFinder, openSqlInWindow, viewObjectDdl, openField, openViewAppBuilder, openViewApp, openArtifact,
       openQueryDocument, openSqlData, openRowInspector, openCsvImport, openExtensions, openRvbbitCache, openCache, openConnections,
       loadSchema, loadConnections, updatePayload, emitParam, subscribeParam,
       editRollupSpec, repivotWindow, probeColumnValues, activePalette, paletteOverrides,
@@ -4127,6 +4173,8 @@ interface WindowContext {
   busy: boolean
   setBusy: (b: boolean) => void
   openTableFromFinder: (schema: string, name: string) => void
+  openSqlInWindow: (title: string, sql: string, run: boolean) => void
+  viewObjectDdl: (schema: string, name: string, kind: string) => void
   openField: (schema: string, rel: string, col: string) => void
   openViewAppBuilder: (seed?: ViewAppBuilderPayload) => void
   openViewApp: (appId: string) => void
@@ -4331,6 +4379,8 @@ function renderWindowContent(
           onReload={ctx.reloadSchema}
           onOpenConnections={ctx.openConnections}
           activeConnectionId={ctx.activeConnectionId}
+          onOpenSql={ctx.openSqlInWindow}
+          onViewDdl={ctx.viewObjectDdl}
         />
       )
     case "data":

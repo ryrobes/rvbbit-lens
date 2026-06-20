@@ -16,6 +16,8 @@ interface Body {
   /** Internal UI metadata probes can opt into the small metadata pool so they
    *  don't contend with user SQL blocks. */
   poolLane?: "interactive" | "meta"
+  /** Token registering this query's backend so /api/db/cancel can stop it. */
+  cancelToken?: string
 }
 
 export async function POST(req: Request) {
@@ -30,6 +32,7 @@ export async function POST(req: Request) {
       database: body.database,
       statementTimeout: body.statementTimeout,
       poolLane: body.poolLane,
+      cancelToken: body.cancelToken,
     })
     return NextResponse.json({ ok: true, ...result })
   } catch (err) {

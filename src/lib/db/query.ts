@@ -57,6 +57,169 @@ export interface ExecuteOpts {
   /** Pool lane. User SQL uses the interactive lane; progress/metadata probes
    *  use the meta lane so they do not starve SQL blocks. */
   poolLane?: PoolLane
+  /** Client-supplied token registering this query's backend PID so a separate
+   *  request can pg_cancel_backend() exactly it (see cancelQueryByToken). */
+  cancelToken?: string
+}
+
+// token -> the backend running it, so a Stop button can cancel that exact query.
+const CANCEL_REGISTRY = new Map<string, { connectionId: string; pid: number; database?: string }>()
+
+// ── Manual transactions (autocommit off) ────────────────────────────────────
+//
+// A manual transaction must run all its statements on ONE pinned backend, but the
+// pool releases the client after each query. So a window's transaction checks out
+// a client, holds it across runs, and releases it on COMMIT/ROLLBACK. An idle
+// sweep rolls back + releases any forgotten session so it can't pin a connection
+// forever.
+
+interface TxnSession {
+  client: PoolClient
+  connectionId: string
+  database?: string
+  recordId: string
+  /** Backend PID of the pinned client, so a Stop can pg_cancel_backend exactly it. */
+  pid: number | null
+  lastUsed: number
+}
+const TXN_SESSIONS = new Map<string, TxnSession>()
+const TXN_IDLE_MS = 10 * 60_000
+let txnSweepStarted = false
+function ensureTxnSweep(): void {
+  if (txnSweepStarted) return
+  txnSweepStarted = true
+  const timer = setInterval(() => {
+    const now = Date.now()
+    for (const [id, s] of TXN_SESSIONS) {
+      if (now - s.lastUsed <= TXN_IDLE_MS) continue
+      TXN_SESSIONS.delete(id)
+      void (async () => {
+        try { await s.client.query("ROLLBACK") } catch { /* ignore */ } finally { s.client.release() }
+      })()
+    }
+  }, 60_000)
+  // Don't keep the process alive just for the sweep.
+  ;(timer as { unref?: () => void }).unref?.()
+}
+
+/** Run a statement inside the pinned transaction for `sessionId`, beginning the
+ *  transaction lazily on the first statement. The held client stays checked out
+ *  (even on a statement error, so the user can ROLLBACK) until txnEnd. */
+export async function txnQuery(
+  sessionId: string,
+  connectionId: string,
+  sql: string,
+  opts: { rowLimit?: number; database?: string; cancelToken?: string } = {},
+): Promise<QueryResult> {
+  ensureTxnSweep()
+  const limit = opts.rowLimit ?? DEFAULT_ROW_LIMIT
+  let session = TXN_SESSIONS.get(sessionId)
+  if (session) {
+    // A transaction is pinned to ONE backend (its original connection + database).
+    // Refuse a statement that arrived for a different target — otherwise it would
+    // silently run on the pinned backend while the caller believes it hit the new
+    // one (e.g. the db-switcher changed mid-transaction).
+    if (session.connectionId !== connectionId || (session.database ?? "") !== (opts.database ?? "")) {
+      throw new Error(
+        "This window has an open transaction pinned to its original connection/database. Commit or roll back before switching.",
+      )
+    }
+  } else {
+    const { pool, record } = await getPool(connectionId, opts.database, "interactive")
+    const client = await pool.connect()
+    try {
+      await client.query("BEGIN")
+    } catch (e) {
+      client.release()
+      throw e
+    }
+    let pid = (client as unknown as { processID?: number | null }).processID ?? null
+    if (pid == null) {
+      try {
+        pid = (await client.query<{ pid: number }>("SELECT pg_backend_pid() AS pid")).rows[0]?.pid ?? null
+      } catch {
+        pid = null
+      }
+    }
+    session = { client, connectionId, database: opts.database, recordId: record.id, pid, lastUsed: Date.now() }
+    TXN_SESSIONS.set(sessionId, session)
+  }
+  session.lastUsed = Date.now()
+  const client = session.client
+  const start = Date.now()
+  // Register the pinned backend for cancellation, but only around THIS statement —
+  // pg_cancel_backend has no statement identity, so the token must be gone before
+  // the next statement reuses the same backend (mirrors executeQuery).
+  let registered = false
+  if (opts.cancelToken && session.pid != null) {
+    CANCEL_REGISTRY.set(opts.cancelToken, { connectionId, pid: session.pid, database: opts.database })
+    registered = true
+  }
+  let raw: PgQueryResult<QueryResultRow> | PgQueryResult<QueryResultRow>[]
+  try {
+    raw = await client.query<QueryResultRow>({ text: sql })
+  } finally {
+    if (registered) CANCEL_REGISTRY.delete(opts.cancelToken!)
+  }
+  const durationMs = Date.now() - start
+  const result = pickPrimaryResult(raw)
+  const safeRows = result.rows ?? []
+  const truncated = safeRows.length > limit
+  const rows = truncated ? safeRows.slice(0, limit) : safeRows
+  const typeNames = await loadTypeNames(client, session.recordId)
+  const columns: QueryResultColumn[] = (result.fields || []).map(
+    (f: { name: string; dataTypeID: number }) => ({
+      name: f.name,
+      dataTypeId: f.dataTypeID,
+      dataTypeName: typeNames.get(f.dataTypeID),
+    }),
+  )
+  return {
+    sql,
+    connectionId,
+    columns,
+    rows,
+    rowCount: typeof result.rowCount === "number" ? result.rowCount : rows.length,
+    truncated,
+    durationMs,
+    queueWaitMs: 0,
+    command: result.command,
+  }
+}
+
+/** Commit or roll back the pinned transaction for `sessionId` and release its
+ *  connection back to the pool. Returns false if there was no open session. */
+export async function txnEnd(sessionId: string, action: "commit" | "rollback"): Promise<boolean> {
+  const session = TXN_SESSIONS.get(sessionId)
+  if (!session) return false
+  TXN_SESSIONS.delete(sessionId)
+  try {
+    await session.client.query(action === "commit" ? "COMMIT" : "ROLLBACK")
+  } catch {
+    /* the connection is being discarded anyway */
+  } finally {
+    session.client.release()
+  }
+  return true
+}
+
+/** Cancel the in-flight query registered under `token` via pg_cancel_backend on a
+ *  separate (meta-lane) connection. Returns true if a backend was signalled. */
+export async function cancelQueryByToken(token: string): Promise<boolean> {
+  const entry = CANCEL_REGISTRY.get(token)
+  if (!entry) return false
+  try {
+    const { pool } = await getPool(entry.connectionId, entry.database, "meta")
+    const client = await pool.connect()
+    try {
+      await client.query("SELECT pg_cancel_backend($1)", [entry.pid])
+      return true
+    } finally {
+      client.release()
+    }
+  } catch {
+    return false
+  }
 }
 
 export async function executeQuery(
@@ -82,7 +245,32 @@ export async function executeQuery(
     if (opts.readOnly) {
       await client.query("BEGIN READ ONLY")
     }
-    const raw = await client.query<QueryResultRow>({ text: sql })
+    // Register the backend PID for cancellation — but ONLY for the duration of the
+    // user statement. pg_cancel_backend has no statement identity, so the token
+    // must be gone before the post-query work (loadTypeNames / RESET) and before
+    // the connection is released and the PID reused, or a late Stop would cancel
+    // the wrong query. `processID` is captured at connect; fall back to a query.
+    let registered = false
+    if (opts.cancelToken) {
+      let pid = (client as unknown as { processID?: number | null }).processID ?? null
+      if (pid == null) {
+        try {
+          pid = (await client.query<{ pid: number }>("SELECT pg_backend_pid() AS pid")).rows[0]?.pid ?? null
+        } catch {
+          pid = null
+        }
+      }
+      if (pid != null) {
+        CANCEL_REGISTRY.set(opts.cancelToken, { connectionId, pid, database: opts.database })
+        registered = true
+      }
+    }
+    let raw: PgQueryResult<QueryResultRow> | PgQueryResult<QueryResultRow>[]
+    try {
+      raw = await client.query<QueryResultRow>({ text: sql })
+    } finally {
+      if (registered) CANCEL_REGISTRY.delete(opts.cancelToken!)
+    }
     const durationMs = Date.now() - start
 
     // node-postgres returns an array of results for multi-statement queries.
@@ -123,6 +311,7 @@ export async function executeQuery(
     }
     throw err
   } finally {
+    if (opts.cancelToken) CANCEL_REGISTRY.delete(opts.cancelToken)
     if (overrideTimeout) {
       try { await client.query("RESET statement_timeout") } catch { /* ignore */ }
     }

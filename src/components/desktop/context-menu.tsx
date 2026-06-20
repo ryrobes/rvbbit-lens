@@ -1,6 +1,7 @@
 "use client"
 
 import { useEffect, useRef } from "react"
+import { createPortal } from "react-dom"
 import { cn } from "@/lib/utils"
 import { Check } from "@/lib/icons"
 
@@ -62,7 +63,14 @@ export function ContextMenu({ state, onClose }: { state: ContextMenuState | null
   const left = Math.max(8, Math.min(state.x, window.innerWidth - EST_WIDTH - 8))
   const top = Math.max(8, Math.min(state.y, window.innerHeight - estHeight - 8))
 
-  return (
+  // Portal to <body>: rendered inline, the menu's `position: fixed` would resolve
+  // against the nearest ancestor with a transform/filter/backdrop-filter (every
+  // window card has a backdrop-filter), so the menu would land relative to the
+  // window box and visibly slide as that filter animates on focus. At the body
+  // root, `fixed` always means the viewport — it appears at the click point.
+  if (typeof document === "undefined") return null
+
+  return createPortal(
     <div
       ref={ref}
       role="menu"
@@ -98,6 +106,7 @@ export function ContextMenu({ state, onClose }: { state: ContextMenuState | null
           </button>
         </div>
       ))}
-    </div>
+    </div>,
+    document.body,
   )
 }

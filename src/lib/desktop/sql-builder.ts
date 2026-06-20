@@ -30,8 +30,28 @@ const NUMERIC_TYPE_IDS = new Set([
   1700,  // numeric
 ])
 
+// Postgres reserved keywords — a simple identifier that IS one of these must
+// still be double-quoted (e.g. a table named `order`/`user`/`group`), or the
+// generated SQL is a syntax error.
+const RESERVED_KEYWORDS = new Set([
+  "all", "analyse", "analyze", "and", "any", "array", "as", "asc", "asymmetric", "authorization",
+  "binary", "both", "case", "cast", "check", "collate", "collation", "column", "concurrently",
+  "constraint", "create", "cross", "current_catalog", "current_date", "current_role",
+  "current_schema", "current_time", "current_timestamp", "current_user", "default", "deferrable",
+  "desc", "distinct", "do", "else", "end", "except", "false", "fetch", "for", "foreign", "freeze",
+  "from", "full", "grant", "group", "having", "ilike", "in", "initially", "inner", "intersect",
+  "into", "is", "isnull", "join", "lateral", "leading", "left", "like", "limit", "localtime",
+  "localtimestamp", "natural", "not", "notnull", "null", "offset", "on", "only", "or", "order",
+  "outer", "overlaps", "placing", "primary", "references", "returning", "right", "select",
+  "session_user", "similar", "some", "symmetric", "system_user", "table", "tablesample", "then",
+  "to", "trailing", "true", "union", "unique", "user", "using", "variadic", "verbose", "when",
+  "where", "window", "with",
+])
+
 export function quoteSqlIdent(name: string): string {
-  return /^[a-z_][a-z0-9_]*$/.test(name) ? name : `"${name.replace(/"/g, '""')}"`
+  return /^[a-z_][a-z0-9_]*$/.test(name) && !RESERVED_KEYWORDS.has(name.toLowerCase())
+    ? name
+    : `"${name.replace(/"/g, '""')}"`
 }
 
 export function inferDesktopColumnRole(column: { type?: string; dataTypeId?: number }): DesktopColumnRef["role"] {
@@ -62,6 +82,34 @@ function aliasSuffix(name: string): string {
 
 export function previewSqlForTable(schema: string, name: string): string {
   return `SELECT *\nFROM ${quoteSqlIdent(schema)}.${quoteSqlIdent(name)}\nLIMIT 200;`
+}
+
+// ── DML scaffolds (right-click "generate …" templates) ─────────────────
+
+function qualified(schema: string, name: string): string {
+  return `${quoteSqlIdent(schema)}.${quoteSqlIdent(name)}`
+}
+
+export function selectTopSql(schema: string, name: string, n: number): string {
+  return `SELECT *\nFROM ${qualified(schema, name)}\nLIMIT ${n};`
+}
+
+export function insertTemplateSql(schema: string, name: string, columns: { name: string }[]): string {
+  const t = qualified(schema, name)
+  if (columns.length === 0) return `INSERT INTO ${t} DEFAULT VALUES;`
+  const cols = columns.map((c) => quoteSqlIdent(c.name))
+  const vals = columns.map(() => "NULL")
+  return `INSERT INTO ${t} (\n  ${cols.join(",\n  ")}\n) VALUES (\n  ${vals.join(",\n  ")}\n);`
+}
+
+export function updateTemplateSql(schema: string, name: string, columns: { name: string }[]): string {
+  const sets = columns.map((c) => `${quoteSqlIdent(c.name)} = NULL`)
+  const body = sets.length > 0 ? `\n  ${sets.join(",\n  ")}` : " /* col = value */"
+  return `UPDATE ${qualified(schema, name)} SET${body}\nWHERE /* condition */;`
+}
+
+export function deleteTemplateSql(schema: string, name: string): string {
+  return `DELETE FROM ${qualified(schema, name)}\nWHERE /* condition */;`
 }
 
 // ── Declarative rollup spec ────────────────────────────────────────────

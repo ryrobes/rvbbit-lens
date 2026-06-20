@@ -2,7 +2,7 @@
 
 import { useMemo, useRef, useState } from "react"
 import { useVirtualizer } from "@tanstack/react-virtual"
-import { ClipboardCopy, Eye, GripVertical, Table2 } from "@/lib/icons"
+import { ClipboardCopy, Eye, GripVertical, Search, Table2 } from "@/lib/icons"
 import type { QueryResultColumn } from "@/lib/db/types"
 import type { DesktopColumnDragPayload, DesktopColumnRef, DesktopParamValue } from "@/lib/desktop/types"
 import { cn } from "@/lib/utils"
@@ -63,6 +63,11 @@ export function ResultGrid({
   const [colWidths, setColWidths] = useState<Record<string, number>>({})
   const [selectedHeaders, setSelectedHeaders] = useState<Set<string>>(new Set())
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null)
+  // Client-side sort + filter over the already-fetched rows (no re-query).
+  const [filter, setFilter] = useState("")
+  const [sort, setSort] = useState<{ col: string; dir: "asc" | "desc" } | null>(null)
+  const cycleSort = (name: string) =>
+    setSort((s) => (!s || s.col !== name ? { col: name, dir: "asc" } : s.dir === "asc" ? { col: name, dir: "desc" } : null))
   // Present mode: cell-click filtering stays, but column drag-to-group, header
   // multi-select, and width-resize are authoring affordances — turn them off.
   const present = usePresentMode()
@@ -145,8 +150,41 @@ export function ResultGrid({
     return columns.map((c) => colWidths[c.name] ?? estimateWidth(c, rows))
   }, [colWidths, columns, rows])
 
+  // Rows actually shown: filtered (any cell contains the text) then sorted.
+  const viewRows = useMemo(() => {
+    let out = rows
+    const f = filter.trim().toLowerCase()
+    if (f) {
+      out = out.filter((r) =>
+        columns.some((c) => {
+          const v = r[c.name]
+          return v != null && String(formatCellValue(v)).toLowerCase().includes(f)
+        }),
+      )
+    }
+    if (sort) {
+      const { col, dir } = sort
+      const mul = dir === "asc" ? 1 : -1
+      out = [...out].sort((a, b) => {
+        const av = a[col]
+        const bv = b[col]
+        if (av == null && bv == null) return 0
+        if (av == null) return 1 // nulls last regardless of dir
+        if (bv == null) return -1
+        if (typeof av === "number" && typeof bv === "number") return (av - bv) * mul
+        const as = String(formatCellValue(av))
+        const bs = String(formatCellValue(bv))
+        const an = Number(as)
+        const bn = Number(bs)
+        if (Number.isFinite(an) && Number.isFinite(bn)) return (an - bn) * mul
+        return as.localeCompare(bs) * mul
+      })
+    }
+    return out
+  }, [rows, columns, filter, sort])
+
   const virtualizer = useVirtualizer({
-    count: rows.length,
+    count: viewRows.length,
     getScrollElement: () => parentRef.current,
     estimateSize: () => ROW_HEIGHT,
     overscan: 16,
@@ -216,15 +254,24 @@ export function ResultGrid({
   }
 
   return (
-    <div
-      ref={parentRef}
-      className={cn(
-        // Opaque while the window is focused (data stays crisp & readable);
-        // glass-tints to let the frame blur through when the window recedes.
-        "flex h-full flex-col overflow-auto bg-doc-bg group-data-[focused=false]/window:bg-doc-bg/70",
-        className,
-      )}
-    >
+    <div className={cn("flex h-full flex-col", className)}>
+      <div className="flex items-center gap-1.5 border-b border-chrome-border bg-chrome-bg/60 px-2 py-1">
+        <Search className="h-3 w-3 shrink-0 text-chrome-text/40" />
+        <input
+          value={filter}
+          onChange={(e) => setFilter(e.target.value)}
+          placeholder="filter rows…"
+          spellCheck={false}
+          className="h-5 min-w-0 flex-1 bg-transparent text-[11px] text-foreground outline-none placeholder:text-chrome-text/35"
+        />
+        <span className="shrink-0 text-[10px] tabular-nums text-chrome-text/45">
+          {filter.trim() || sort ? `${viewRows.length} of ${rows.length}` : `${rows.length} ${rows.length === 1 ? "row" : "rows"}`}
+        </span>
+      </div>
+      <div
+        ref={parentRef}
+        className="flex flex-1 flex-col overflow-auto bg-doc-bg group-data-[focused=false]/window:bg-doc-bg/70"
+      >
       <div className="sticky top-0 z-10 flex border-b border-chrome-border bg-chrome-bg/95 backdrop-blur" style={{ minWidth: totalWidth }}>
         {columns.map((c, i) => {
           const role = columnDragSource?.columns.find((col) => col.name === c.name)?.role
@@ -237,7 +284,7 @@ export function ResultGrid({
               onDragEnd={() => setActiveColumnDragSource(null)}
               onClick={(e) => onHeaderClick(e, c.name)}
               className={cn(
-                "relative flex select-none items-center border-r border-chrome-border/60 px-2 py-1 text-[11px] uppercase tracking-wider text-chrome-text",
+                "group relative flex select-none items-center border-r border-chrome-border/60 px-2 py-1 text-[11px] uppercase tracking-wider text-chrome-text",
                 dragEnabled && "cursor-grab active:cursor-grabbing hover:bg-foreground/[0.05]",
                 isSelected && "bg-main/15 text-foreground",
               )}
@@ -251,6 +298,22 @@ export function ResultGrid({
               <span className="ml-2 truncate text-[10px] text-chrome-text/70">
                 {c.dataTypeName ?? `oid:${c.dataTypeId}`}
               </span>
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation()
+                  cycleSort(c.name)
+                }}
+                title="Sort by this column"
+                className={cn(
+                  "ml-1 shrink-0 px-0.5 text-[10px] leading-none hover:text-foreground",
+                  sort?.col === c.name
+                    ? "text-main"
+                    : "text-chrome-text/40 opacity-0 group-hover:opacity-100",
+                )}
+              >
+                {sort?.col === c.name ? (sort.dir === "asc" ? "▲" : "▼") : "↕"}
+              </button>
               {present ? null : (
                 <div
                   onPointerDown={(e) => startResize(c.name, e)}
@@ -264,7 +327,7 @@ export function ResultGrid({
 
       <div style={{ height: virtualizer.getTotalSize(), minWidth: totalWidth }} className="relative">
         {virtualizer.getVirtualItems().map((vrow) => {
-          const row = rows[vrow.index]
+          const row = viewRows[vrow.index]
           return (
             <div
               key={vrow.key}
@@ -294,7 +357,7 @@ export function ResultGrid({
                       const cascade = e.metaKey || e.ctrlKey
                       onEmitCellParam(c.name, value, c.dataTypeId, "in", cascade)
                     }}
-                    onContextMenu={(e) => openCellContextMenu(e, row, vrow.index, c)}
+                    onContextMenu={(e) => openCellContextMenu(e, row, rows.indexOf(row), c)}
                     className={cn(
                       "truncate border-r border-chrome-border/30 px-2 py-0.5 text-[12px]",
                       isNumeric ? "text-right tabular-nums" : "text-left",
@@ -319,6 +382,7 @@ export function ResultGrid({
             </div>
           )
         })}
+      </div>
       </div>
       <ContextMenu state={contextMenu} onClose={() => setContextMenu(null)} />
     </div>
