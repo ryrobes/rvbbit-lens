@@ -2,11 +2,46 @@ import "server-only"
 
 import type { PoolClient, QueryResult as PgQueryResult, QueryResultRow } from "pg"
 import { getPool, type PoolLane } from "./pool"
-import type { QueryResult, QueryResultColumn } from "./types"
+import type { QueryResult, QueryResultColumn, StatementResult } from "./types"
+import { splitStatements } from "@/lib/sql/then-rewrite"
 
 const DEFAULT_ROW_LIMIT = 5_000
 
 const TYPE_NAME_CACHE = new Map<string, Map<number, string>>()
+
+/** Build one transcript entry per statement from the driver's multi-statement
+ *  result array. The statement TEXT is attached only when the split count matches
+ *  the result count 1:1 (else cards stay unlabeled rather than mislabeled). */
+function buildStatementResults(
+  rawArr: PgQueryResult<QueryResultRow>[],
+  sqlText: string,
+  typeNames: Map<number, string>,
+  limit: number,
+): StatementResult[] {
+  const statements = splitStatements(sqlText)
+  const labeled = statements.length === rawArr.length ? statements : null
+  return rawArr.map((r, i) => {
+    const safeRows = r.rows ?? []
+    const truncated = safeRows.length > limit
+    const rows = truncated ? safeRows.slice(0, limit) : safeRows
+    const columns: QueryResultColumn[] = (r.fields || []).map(
+      (f: { name: string; dataTypeID: number }) => ({
+        name: f.name,
+        dataTypeId: f.dataTypeID,
+        dataTypeName: typeNames.get(f.dataTypeID),
+      }),
+    )
+    return {
+      index: i,
+      sql: labeled ? labeled[i] : undefined,
+      command: r.command,
+      columns,
+      rows,
+      rowCount: typeof r.rowCount === "number" ? r.rowCount : rows.length,
+      truncated,
+    }
+  })
+}
 
 function pickPrimaryResult(
   raw: PgQueryResult<QueryResultRow> | PgQueryResult<QueryResultRow>[],
@@ -174,6 +209,10 @@ export async function txnQuery(
       dataTypeName: typeNames.get(f.dataTypeID),
     }),
   )
+  const results =
+    Array.isArray(raw) && raw.length > 1
+      ? buildStatementResults(raw, sql, typeNames, limit)
+      : undefined
   return {
     sql,
     connectionId,
@@ -184,6 +223,7 @@ export async function txnQuery(
     durationMs,
     queueWaitMs: 0,
     command: result.command,
+    results,
   }
 }
 
@@ -294,6 +334,13 @@ export async function executeQuery(
       await client.query("COMMIT")
     }
 
+    // Multi-statement runs carry a per-statement breakdown so the transcript can
+    // show every output; single-statement runs leave `results` absent (unchanged).
+    const results =
+      Array.isArray(raw) && raw.length > 1
+        ? buildStatementResults(raw, sql, typeNames, limit)
+        : undefined
+
     return {
       sql,
       connectionId,
@@ -304,6 +351,7 @@ export async function executeQuery(
       durationMs,
       queueWaitMs,
       command: result.command,
+      results,
     }
   } catch (err) {
     if (opts.readOnly) {

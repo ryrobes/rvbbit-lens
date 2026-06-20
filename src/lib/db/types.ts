@@ -103,6 +103,27 @@ export interface QueryResult {
   durationMs: number
   command?: string
   warning?: string
+  /**
+   * One entry per top-level statement when the block ran MORE THAN ONE statement
+   * (else absent — the single-statement path is unchanged). The top-level
+   * columns/rows/command above stay the "primary" (last result with rows) for
+   * back-compat (cross-block refs, single-grid render); `results` is what the
+   * multi-statement transcript renders so nothing gets swallowed.
+   */
+  results?: StatementResult[]
+}
+
+/** A single statement's result inside a multi-statement run (the transcript). */
+export interface StatementResult {
+  /** 0-based position among the run's statements. */
+  index: number
+  /** The statement text, when statements split 1:1 with results (else absent). */
+  sql?: string
+  command?: string
+  columns: QueryResultColumn[]
+  rows: Record<string, unknown>[]
+  rowCount: number
+  truncated: boolean
 }
 
 export interface QueryError {

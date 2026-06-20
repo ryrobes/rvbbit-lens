@@ -177,6 +177,9 @@ export interface CsvImportPayload {
   defaultSchema?: string
 }
 
+/** How a single statement's result renders in the multi-statement transcript. */
+export type StatementViewKind = "table" | "bar" | "line" | "number"
+
 export interface DataPayload {
   kind?: "data"
   title: string
@@ -192,6 +195,29 @@ export interface DataPayload {
    * not the connected working db, or the cron.* schema lookup fails.
    */
   database?: string
+  /**
+   * Per-statement view overrides for the multi-statement transcript, keyed by a
+   * hash of the statement text (so an override follows its statement across
+   * reorders and resets if rewritten). Sparse — only cards the user switched off
+   * their default (table, or a 1×1 scalar's number) are stored.
+   */
+  statementViews?: Record<string, StatementViewKind>
+  /**
+   * Mini-dashboard arrangement for the multi-statement transcript. Absent ⇒ the
+   * default vertical transcript (unchanged). Keyed by the SAME statementKeys set
+   * as statementViews, so a tile's slot + span follow its statement across reorder
+   * and reset if rewritten. All reconciliation is render-time against the live key
+   * set (stale entries ignored, pruned on the next write).
+   */
+  statementLayout?: {
+    /** Absent ⇒ "transcript". Only "arrange" diverges from today's behavior. */
+    mode?: "transcript" | "arrange"
+    /** Reading order by statement key; keys not listed append at the end. */
+    order?: string[]
+    /** Per-tile span overrides in grid units (sparse; absent ⇒ view-kind default).
+     *  `cw` is clamped to the live column count on READ, never mutated. */
+    tiles?: Record<string, { cw: number; rh: number }>
+  }
   /**
    * Reactive overlay: every data window has a block name (defaulted to a
    * slug of its title). Other windows can reference this window's result

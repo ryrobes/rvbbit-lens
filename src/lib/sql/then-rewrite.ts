@@ -108,6 +108,116 @@ export function hasTopLevelThen(sql: string): boolean {
 }
 
 /**
+ * Split `sql` into its top-level statements, separating on semicolons that sit
+ * outside strings, comments, dollar-quoted bodies, and parentheses. Uses the same
+ * scanner as hasTopLevelThen, so a `;` inside `'…'`, `$$…$$`, a `(…)`, or a
+ * comment never splits. Trailing/empty fragments are dropped. The result is used
+ * to LABEL the per-statement transcript cards (zipped positionally with the
+ * driver's result array — only when the counts match, so a mismatch degrades to
+ * unlabeled cards rather than mislabeling).
+ */
+/** True if `s` has any real (non-whitespace, non-comment) content. A fragment that
+ *  is ONLY comments/whitespace must be dropped: Postgres returns no result for it
+ *  (EmptyQueryResponse), so keeping it would break the 1:1 statement↔result count
+ *  the transcript relies on for labels (a lone `-- divider` or trailing comment). */
+function hasNonCommentContent(s: string): boolean {
+  const n = s.length
+  let i = 0
+  while (i < n) {
+    const c = s[i]
+    if (c === " " || c === "\t" || c === "\n" || c === "\r" || c === "\f" || c === "\v") { i++; continue }
+    if (c === "-" && s[i + 1] === "-") {
+      i += 2
+      while (i < n && s[i] !== "\n") i++
+      continue
+    }
+    if (c === "/" && s[i + 1] === "*") {
+      i += 2
+      while (i + 1 < n && !(s[i] === "*" && s[i + 1] === "/")) i++
+      i += 2
+      continue
+    }
+    return true
+  }
+  return false
+}
+
+export function splitStatements(sql: string): string[] {
+  const n = sql.length
+  const out: string[] = []
+  let i = 0
+  let start = 0
+  let paren = 0
+  const push = (frag: string) => {
+    const stmt = frag.trim()
+    if (stmt.length > 0 && hasNonCommentContent(stmt)) out.push(stmt)
+  }
+  while (i < n) {
+    const c = sql[i]
+    if (c === "-" && sql[i + 1] === "-") {
+      i += 2
+      while (i < n && sql[i] !== "\n") i++
+      continue
+    }
+    if (c === "/" && sql[i + 1] === "*") {
+      i += 2
+      while (i + 1 < n && !(sql[i] === "*" && sql[i + 1] === "/")) i++
+      i += 2
+      continue
+    }
+    if (c === "'") {
+      i++
+      while (i < n) {
+        if (sql[i] === "'") {
+          if (sql[i + 1] === "'") { i += 2; continue }
+          i++
+          break
+        }
+        i++
+      }
+      continue
+    }
+    if (c === '"') {
+      i++
+      while (i < n) {
+        if (sql[i] === '"') {
+          if (sql[i + 1] === '"') { i += 2; continue }
+          i++
+          break
+        }
+        i++
+      }
+      continue
+    }
+    if (c === "$") {
+      const tagEnd = dollarTagEnd(sql, i)
+      if (tagEnd !== null) {
+        const tag = sql.slice(i, tagEnd)
+        let j = tagEnd
+        let closed = false
+        while (j + tag.length <= n) {
+          if (sql.slice(j, j + tag.length) === tag) { j += tag.length; closed = true; break }
+          j++
+        }
+        i = closed ? j : n
+        continue
+      }
+    }
+    if (c === "(") { paren++; i++; continue }
+    if (c === ")") { if (paren > 0) paren--; i++; continue }
+    if (c === ";" && paren === 0) {
+      push(sql.slice(start, i))
+      i++
+      start = i
+      continue
+    }
+    i++
+  }
+  push(sql.slice(start))
+  return out
+}
+
+/**
  * True if `sql` selects from the executing text-to-SQL source `rvbbit.synth(…)`
  * (which returns one jsonb column per row, like flow). Matches `rvbbit.synth(`
  * but NOT `rvbbit.synth_sql(` (that returns the SQL text, not a rowset), so its

@@ -37,6 +37,8 @@ import { ChartView } from "./chart-view"
 import { ControlView } from "./control-view"
 import { ModelField } from "./operator-inspector"
 import { ResultGrid } from "./result-grid"
+import { ResultTranscript } from "./result-transcript"
+import { ArrangeGrid } from "./arrange-grid"
 import { ContextMenu, type ContextMenuState } from "./context-menu"
 import { listQueryHistory, pushQueryHistory } from "@/lib/desktop/query-history"
 import { SingleCellCallout } from "./single-cell-callout"
@@ -240,6 +242,10 @@ export function DataGridWindow({
   // allowed to write payload.sql back; older resolutions would otherwise
   // revert the most recent merge.
   const runNonceRef = useRef(0)
+  // Mirrors the run nonce as STATE, so the transcript/arrange grid can key={runEpoch}
+  // to remount per run (resetting expand + child-grid state) without reading a ref
+  // during render.
+  const [runEpoch, setRunEpoch] = useState(0)
   // Abort controller + cancel token for the in-flight run, so a Stop button can
   // both abort the client fetch and pg_cancel_backend the server query.
   const runControlRef = useRef<{ controller: AbortController; token: string } | null>(null)
@@ -488,6 +494,7 @@ export function DataGridWindow({
     // statement into the user's open transaction.
     if (txnSessionId && !userInitiated) return
     const myNonce = ++runNonceRef.current
+    setRunEpoch(myNonce)
     // Compile *this draft* against the runtime graph by patching the
     // window's source SQL into the graph build. The simpler path: build
     // the graph against the live windows array, swap the active window's
@@ -1247,6 +1254,13 @@ export function DataGridWindow({
   }, [draftSql])
 
   const result = runState.kind === "done" ? runState.result : null
+  // A multi-statement run carries a per-statement breakdown — render the transcript
+  // (nothing swallowed) instead of the single grid. Pipelines/synth always compile
+  // to ONE statement so they never set `results`; gate defensively anyway.
+  const multiResults = result && !isPipelineRun && result.results && result.results.length > 1
+    ? result.results
+    : null
+  const arrangeMode = !!multiResults && payload.statementLayout?.mode === "arrange"
   const error = runState.kind === "error" ? runState : null
   const isRunning = runState.kind === "running"
 
@@ -1517,9 +1531,36 @@ export function DataGridWindow({
           {result ? (
             <div className="flex shrink-0 items-center gap-1 pl-2">
               <span className="whitespace-nowrap text-[11px] tabular-nums text-chrome-text">
-                {result.rowCount} rows · {result.durationMs}ms{result.truncated ? " · truncated" : ""}
+                {multiResults
+                  ? `${multiResults.length} statements · ${result.durationMs}ms`
+                  : `${result.rowCount} rows · ${result.durationMs}ms${result.truncated ? " · truncated" : ""}`}
               </span>
-              {result.truncated && result.command === "SELECT" && !lastRunExpanded && !txnSessionId ? (
+              {multiResults ? (
+                <span className="inline-flex shrink-0 items-center overflow-hidden rounded border border-chrome-border/60 text-[10px]">
+                  {(["transcript", "arrange"] as const).map((m) => {
+                    const active = (payload.statementLayout?.mode ?? "transcript") === m
+                    return (
+                      <button
+                        key={m}
+                        type="button"
+                        onClick={() =>
+                          onChangePayload((p) => ({
+                            ...p,
+                            statementLayout: { ...(p.statementLayout ?? {}), mode: m },
+                          }))
+                        }
+                        className={cn(
+                          "px-1.5 py-0.5 capitalize transition-colors",
+                          active ? "bg-rvbbit-accent/20 text-rvbbit-accent" : "text-chrome-text/55 hover:text-foreground",
+                        )}
+                      >
+                        {m}
+                      </button>
+                    )
+                  })}
+                </span>
+              ) : null}
+              {!multiResults && result.truncated && result.command === "SELECT" && !lastRunExpanded && !txnSessionId ? (
                 <Button
                   size="sm"
                   variant="ghost"
@@ -1546,6 +1587,17 @@ export function DataGridWindow({
                       { id: "csv", label: "Export CSV", icon: Download, onSelect: () => exportCsv(result, w.title) },
                       { id: "json", label: "Export JSON", icon: FileCode2, onSelect: () => exportJson(result, w.title) },
                       { id: "inserts", label: "Copy as INSERTs", icon: ClipboardCopy, onSelect: () => void copyText(buildInserts(result, target)) },
+                      ...(arrangeMode
+                        ? [
+                            {
+                              id: "reset-layout",
+                              label: "Reset arrange layout",
+                              icon: RotateCcw,
+                              separatorBefore: true,
+                              onSelect: () => onChangePayload((p) => ({ ...p, statementLayout: { mode: "arrange" } })),
+                            },
+                          ]
+                        : []),
                     ],
                   })
                 }}
@@ -1578,7 +1630,41 @@ export function DataGridWindow({
 
         <div className="min-h-0 flex-1 overflow-hidden">
           {bodyTab === "rows" && result ? (
-            result.rows.length === 1 && result.columns.length === 1 ? (
+            multiResults ? (
+              // key by run nonce → remount each run so a prior expand/collapse and
+              // any child-grid sort/filter don't bleed onto the next run's rows.
+              // Per-card view picks + the arrange layout live in the payload, so
+              // they survive the remount.
+              arrangeMode ? (
+                <ArrangeGrid
+                  key={runEpoch}
+                  results={multiResults}
+                  views={payload.statementViews}
+                  onSetView={(viewKey, kind) =>
+                    onChangePayload((p) => ({
+                      ...p,
+                      statementViews: { ...(p.statementViews ?? {}), [viewKey]: kind },
+                    }))
+                  }
+                  layout={payload.statementLayout}
+                  onChangeLayout={(mut) =>
+                    onChangePayload((p) => ({ ...p, statementLayout: mut(p.statementLayout ?? {}) }))
+                  }
+                />
+              ) : (
+                <ResultTranscript
+                  key={runEpoch}
+                  results={multiResults}
+                  views={payload.statementViews}
+                  onSetView={(viewKey, kind) =>
+                    onChangePayload((p) => ({
+                      ...p,
+                      statementViews: { ...(p.statementViews ?? {}), [viewKey]: kind },
+                    }))
+                  }
+                />
+              )
+            ) : result.rows.length === 1 && result.columns.length === 1 ? (
               <SingleCellCallout
                 column={result.columns[0]}
                 value={result.rows[0]?.[result.columns[0].name]}
@@ -2265,7 +2351,9 @@ function RunStatus({
       ) : null}
       {runState.kind === "done" ? (
         <span>
-          {runState.result.command ?? "OK"} · {runState.result.rowCount} rows · {runState.result.durationMs}ms
+          {runState.result.results && runState.result.results.length > 1
+            ? `${runState.result.results.length} statements · ${runState.result.durationMs}ms`
+            : `${runState.result.command ?? "OK"} · ${runState.result.rowCount} rows · ${runState.result.durationMs}ms`}
         </span>
       ) : null}
       {runState.kind === "error" ? (
