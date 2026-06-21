@@ -1,43 +1,81 @@
 "use client"
 
-import { useEffect, useMemo, useRef, useState } from "react"
+import { Fragment, useEffect, useMemo, useRef, useState } from "react"
 import { GripVertical } from "@/lib/icons"
 import type { StatementResult } from "@/lib/db/types"
-import type { DataPayload, StatementViewKind } from "@/lib/desktop/types"
+import type { ArrangeRow, ArrangeTile, DataPayload, StatementViewKind } from "@/lib/desktop/types"
 import { cn } from "@/lib/utils"
 import { CardBody, CardMeta, ViewSwitcher, defaultKind, statementKeys } from "./result-transcript"
 
-// "Arrange" mode for a multi-statement block: the same per-statement cards as the
-// transcript, laid out in a bento CSS grid the user can REORDER (drag the grip)
-// and RESIZE (drag the corner, snapped to grid units). Reflow keeps tiles packed
-// with no overlap and no empty-space management — the grid is the layout engine,
-// so the only persisted state is a key order + sparse per-tile {cw,rh} spans.
-// Everything reconciles render-time against the live statement key set, so editing
-// the SQL (add/remove/reorder/rewrite statements) degrades gracefully.
+// "Arrange" mode as a tiling window manager INSIDE the block: rows top→bottom,
+// tiles left→right within each row, every boundary a draggable gutter, the block
+// area always fully tiled (flex weights ⇒ 100% fill, no gaps, no overlap). Drag a
+// tile's grip to MOVE it (drop on a tile edge to sit beside it, on a row edge to
+// make a new row). Persisted as relative weights in DataPayload.statementLayout.rows,
+// keyed by statementKeys — so the layout reconciles render-time against the live
+// statement set and degrades gracefully when you edit the SQL.
 
 type Layout = NonNullable<DataPayload["statementLayout"]>
-type Span = { cw: number; rh: number }
 
-const ROW_UNIT = 80 // px per grid row; integer rh spans multiply this
-const GAP = 6 // px (gap-1.5)
-const MAX_RH = 8
+const MIN_FRAC = 0.1 // each side of a resized boundary keeps ≥10% of the pair
+const EDGE_PX = 14 // top/bottom band of a row that means "drop into a NEW row"
+// Hit-test fuzz: must exceed half the 6px gutter so adjacent row/tile bands OVERLAP
+// and cover the gutter — otherwise the gutter centre matches no element and the drop
+// wrongly falls through to bottom/append. First-match (the earlier element) wins.
+const FUZZ = 8
 
-function colsForWidth(w: number): number {
-  return w < 520 ? 2 : w < 860 ? 3 : w < 1200 ? 4 : 6
+const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v))
+
+/** One render-time pass: keep live+deduped tiles (collapse emptied rows), then
+ *  append any live keys not yet placed as their own bottom row (added/rewritten/
+ *  fresh). Never mutates the persisted layout — purely derived each render. */
+function reconcile(keys: string[], rows: ArrangeRow[] | undefined): ArrangeRow[] {
+  const live = new Set(keys)
+  const seen = new Set<string>()
+  const out: ArrangeRow[] = []
+  for (const row of rows ?? []) {
+    const tiles: ArrangeTile[] = []
+    for (const t of row.tiles) {
+      if (live.has(t.key) && !seen.has(t.key)) {
+        seen.add(t.key)
+        tiles.push({ key: t.key, w: t.w > 0 ? t.w : 1 })
+      }
+    }
+    if (tiles.length) out.push({ h: row.h > 0 ? row.h : 1, tiles })
+  }
+  for (const k of keys) {
+    if (!seen.has(k)) {
+      seen.add(k)
+      out.push({ h: 1, tiles: [{ key: k, w: 1 }] })
+    }
+  }
+  return out
 }
 
-/** A fresh tile's span is a pure function of its view kind so a first Arrange looks
- *  sensible with zero clicks. Read-time default; never stored. */
-function defaultSpan(kind: StatementViewKind): Span {
-  if (kind === "number") return { cw: 1, rh: 1 }
-  if (kind === "bar" || kind === "line") return { cw: 2, rh: 2 }
-  return { cw: 2, rh: 3 } // table
+function pruneRows(rows: ArrangeRow[], live: Set<string>): ArrangeRow[] {
+  const seen = new Set<string>()
+  const out: ArrangeRow[] = []
+  for (const r of rows) {
+    const tiles: ArrangeTile[] = []
+    for (const t of r.tiles) {
+      if (live.has(t.key) && !seen.has(t.key)) {
+        seen.add(t.key)
+        tiles.push(t)
+      }
+    }
+    if (tiles.length) out.push({ h: r.h, tiles })
+  }
+  return out
 }
 
-function clampInt(v: number, lo: number, hi: number): number {
-  if (!Number.isFinite(v)) return lo
-  return Math.min(hi, Math.max(lo, Math.round(v)))
-}
+// A move drop target, referenced by a STABLE non-dragged tile key (not an index),
+// so it survives removing the dragged tile from its source before re-inserting.
+type Drop =
+  | { pos: "before" | "after"; refKey: string }
+  | { pos: "rowBefore" | "rowAfter" | "rowAppend"; refKey: string }
+  | { pos: "bottom" }
+
+type LiveResize = { kind: "row" | "tile"; ri: number; iA: number; iB: number; a: number; b: number }
 
 export function ArrangeGrid({
   results,
@@ -58,85 +96,156 @@ export function ArrangeGrid({
     keys.forEach((k, i) => m.set(k, results[i]))
     return m
   }, [keys, results])
+  const rows = useMemo(() => reconcile(keys, layout?.rows), [keys, layout?.rows])
 
-  // Effective reading order: persisted order ∩ live keys, then any new keys appended
-  // in statement-index order. Stale keys never render.
-  const order = useMemo(() => {
-    const live = new Set(keys)
-    const seen = new Set<string>()
-    const kept: string[] = []
-    for (const k of layout?.order ?? []) {
-      // Filter to live keys AND dedupe (a corrupted payload could repeat a key,
-      // which would render two tiles with the same React key).
-      if (live.has(k) && !seen.has(k)) {
-        seen.add(k)
-        kept.push(k)
-      }
-    }
-    return [...kept, ...keys.filter((k) => !seen.has(k))]
-  }, [keys, layout?.order])
-
-  // Responsive column count from the container width (clamp-on-read for tile cw).
   const containerRef = useRef<HTMLDivElement>(null)
-  const [cols, setCols] = useState(4)
-  useEffect(() => {
-    const el = containerRef.current
-    if (!el) return
-    const ro = new ResizeObserver((entries) => {
-      const w = entries[0]?.contentRect.width ?? 0
-      if (w > 0) setCols(colsForWidth(w))
-    })
-    ro.observe(el)
-    return () => ro.disconnect()
-  }, [])
-
-  const spanOf = (key: string, s: StatementResult): Span => {
-    const hasGrid = s.columns.length > 0 && s.rows.length > 0
-    const stored = layout?.tiles?.[key]
-    // No-grid (DML/DDL) cards have an empty body, so they default to a compact 1×1
-    // instead of a big empty table-sized tile — unless the user explicitly resized.
-    const base = stored ?? (hasGrid ? defaultSpan(views?.[key] ?? defaultKind(s)) : { cw: 1, rh: 1 })
-    return { cw: clampInt(base.cw, 1, cols), rh: clampInt(base.rh, 1, MAX_RH) }
-  }
-
-  // Commit a layout change, pruning stale order/tiles entries to the live keys so
-  // the payload never accrues cruft (render-time filtering already guarantees
-  // correctness; this just keeps it tidy on write).
-  const commit = (mut: (prev: Layout) => Layout) => {
-    const live = new Set(keys)
-    onChangeLayout((prev) => {
-      const next = mut(prev ?? {})
-      if (next.order) next.order = next.order.filter((k) => live.has(k))
-      if (next.tiles) {
-        const t: Record<string, Span> = {}
-        for (const k of Object.keys(next.tiles)) if (live.has(k)) t[k] = next.tiles[k]
-        next.tiles = t
-      }
-      return next
-    })
-  }
-
-  // ── Reorder (drag the grip; insertion index by reading-order hit-test) ──
+  const rowEls = useRef<Map<number, HTMLElement>>(new Map())
   const tileEls = useRef<Map<string, HTMLElement>>(new Map())
+
+  const commit = (nextRows: ArrangeRow[]) => {
+    const pruned = pruneRows(nextRows, new Set(keys))
+    onChangeLayout((prev) => ({ ...prev, mode: "arrange", rows: pruned }))
+  }
+
+  const release = (e: React.PointerEvent<Element>) => {
+    try {
+      e.currentTarget.releasePointerCapture(e.pointerId)
+    } catch {
+      /* already released (e.g. after pointercancel) */
+    }
+  }
+
+  // ── Resize (drag a gutter; shift weight between the two neighbors only) ──
+  const resizeRef = useRef<
+    { pointerId: number; kind: "row" | "tile"; ri: number; iA: number; iB: number; sa: number; sb: number; axis: number; start: number } | null
+  >(null)
+  const movedRef = useRef(false)
+  const [liveResize, setLiveResize] = useState<LiveResize | null>(null)
+  const liveResizeRef = useRef<LiveResize | null>(null)
+  const setLive = (v: LiveResize | null) => {
+    liveResizeRef.current = v
+    setLiveResize(v)
+  }
+
+  const rowGrow = (j: number) => {
+    const lr = liveResize
+    if (lr?.kind === "row") {
+      if (j === lr.iA) return lr.a
+      if (j === lr.iB) return lr.b
+    }
+    return rows[j]?.h ?? 1
+  }
+  const tileGrow = (ri: number, tj: number) => {
+    const lr = liveResize
+    if (lr?.kind === "tile" && lr.ri === ri) {
+      if (tj === lr.iA) return lr.a
+      if (tj === lr.iB) return lr.b
+    }
+    return rows[ri]?.tiles[tj]?.w ?? 1
+  }
+
+  const rowGutterDown = (e: React.PointerEvent<HTMLDivElement>, ri: number) => {
+    if (e.button !== 0) return
+    e.preventDefault()
+    e.stopPropagation()
+    const sa = rows[ri - 1].h
+    const sb = rows[ri].h
+    // axis = the two neighbors' COMBINED pixel height, so px↔weight is 1:1 with the
+    // seam (the pair only spans part of the container when there are 3+ rows).
+    const aPx = rowEls.current.get(ri - 1)?.getBoundingClientRect().height ?? 0
+    const bPx = rowEls.current.get(ri)?.getBoundingClientRect().height ?? 0
+    const axis = aPx + bPx || containerRef.current?.clientHeight || 1
+    movedRef.current = false
+    resizeRef.current = { pointerId: e.pointerId, kind: "row", ri, iA: ri - 1, iB: ri, sa, sb, axis, start: e.clientY }
+    setLive({ kind: "row", ri, iA: ri - 1, iB: ri, a: sa, b: sb })
+    e.currentTarget.setPointerCapture(e.pointerId)
+  }
+  const tileGutterDown = (e: React.PointerEvent<HTMLDivElement>, ri: number, ti: number) => {
+    if (e.button !== 0) return
+    e.preventDefault()
+    e.stopPropagation()
+    const sa = rows[ri].tiles[ti - 1].w
+    const sb = rows[ri].tiles[ti].w
+    const aPx = tileEls.current.get(rows[ri].tiles[ti - 1].key)?.getBoundingClientRect().width ?? 0
+    const bPx = tileEls.current.get(rows[ri].tiles[ti].key)?.getBoundingClientRect().width ?? 0
+    const axis = aPx + bPx || rowEls.current.get(ri)?.clientWidth || 1
+    movedRef.current = false
+    resizeRef.current = { pointerId: e.pointerId, kind: "tile", ri, iA: ti - 1, iB: ti, sa, sb, axis, start: e.clientX }
+    setLive({ kind: "tile", ri, iA: ti - 1, iB: ti, a: sa, b: sb })
+    e.currentTarget.setPointerCapture(e.pointerId)
+  }
+  const gutterMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    const r = resizeRef.current
+    if (!r || r.pointerId !== e.pointerId) return
+    movedRef.current = true
+    const sum = r.sa + r.sb
+    const cur = r.kind === "row" ? e.clientY : e.clientX
+    const a = clamp(r.sa + ((cur - r.start) / Math.max(1, r.axis)) * sum, MIN_FRAC * sum, (1 - MIN_FRAC) * sum)
+    setLive({ kind: r.kind, ri: r.ri, iA: r.iA, iB: r.iB, a, b: sum - a })
+  }
+  const gutterUp = (e: React.PointerEvent<HTMLDivElement>) => {
+    const r = resizeRef.current
+    if (!r || r.pointerId !== e.pointerId) return
+    resizeRef.current = null
+    release(e)
+    const lr = liveResizeRef.current
+    setLive(null)
+    // A plain click (no movement) must not persist an identical-weight no-op write
+    // — also stops a double-click from emitting two stale commits before the reset.
+    if (!lr || !movedRef.current) return
+    const next = rows.map((row, j) => {
+      if (lr.kind === "row") {
+        if (j === lr.iA) return { ...row, h: lr.a }
+        if (j === lr.iB) return { ...row, h: lr.b }
+        return row
+      }
+      if (j !== lr.ri) return row
+      return { ...row, tiles: row.tiles.map((t, ti) => (ti === lr.iA ? { ...t, w: lr.a } : ti === lr.iB ? { ...t, w: lr.b } : t)) }
+    })
+    commit(next)
+  }
+  const gutterCancel = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (resizeRef.current?.pointerId !== e.pointerId) return
+    resizeRef.current = null
+    release(e)
+    setLive(null)
+  }
+  // Double-click a gutter → split its two neighbors evenly.
+  const rowGutterReset = (ri: number) => {
+    const avg = (rows[ri - 1].h + rows[ri].h) / 2
+    commit(rows.map((row, j) => (j === ri - 1 || j === ri ? { ...row, h: avg } : row)))
+  }
+  const tileGutterReset = (ri: number, ti: number) => {
+    const avg = (rows[ri].tiles[ti - 1].w + rows[ri].tiles[ti].w) / 2
+    commit(rows.map((row, j) => (j !== ri ? row : { ...row, tiles: row.tiles.map((t, k) => (k === ti - 1 || k === ti ? { ...t, w: avg } : t)) })))
+  }
+
+  // ── Move (drag the grip; reference-based 4-zone drop) ──
   const dragRef = useRef<{ pointerId: number; key: string } | null>(null)
   const [draggingKey, setDraggingKey] = useState<string | null>(null)
-  const [dropIndex, setDropIndex] = useState<number | null>(null)
+  const [drop, setDrop] = useState<Drop | null>(null)
 
-  const insertIndex = (px: number, py: number, draggedKey: string): number => {
-    let before = 0
-    for (const key of order) {
-      if (key === draggedKey) continue
-      const el = tileEls.current.get(key)
+  const resolveDrop = (px: number, py: number, draggedKey: string): Drop | null => {
+    for (let ri = 0; ri < rows.length; ri++) {
+      const el = rowEls.current.get(ri)
       if (!el) continue
-      const r = el.getBoundingClientRect()
-      const cx = r.left + r.width / 2
-      // Use the tile's OWN rect (tiles span 1..8 rows): it's "before the cursor" in
-      // reading order if the cursor is below its bottom edge (a later row), or within
-      // its vertical extent and right of its horizontal midpoint (same row, to the left).
-      const inRow = py >= r.top && py <= r.bottom
-      if (r.bottom < py || (inRow && cx < px)) before++
+      const rr = el.getBoundingClientRect()
+      if (py < rr.top - FUZZ || py > rr.bottom + FUZZ) continue
+      const tiles = rows[ri].tiles
+      const refRowKey = tiles.find((t) => t.key !== draggedKey)?.key
+      if (py - rr.top < EDGE_PX) return refRowKey ? { pos: "rowBefore", refKey: refRowKey } : null
+      if (rr.bottom - py < EDGE_PX) return refRowKey ? { pos: "rowAfter", refKey: refRowKey } : null
+      for (const t of tiles) {
+        if (t.key === draggedKey) continue
+        const tEl = tileEls.current.get(t.key)
+        if (!tEl) continue
+        const tr = tEl.getBoundingClientRect()
+        if (px < tr.left - FUZZ || px > tr.right + FUZZ) continue
+        return { pos: px < tr.left + tr.width / 2 ? "before" : "after", refKey: t.key }
+      }
+      return refRowKey ? { pos: "rowAppend", refKey: refRowKey } : null
     }
-    return before
+    return { pos: "bottom" }
   }
 
   const gripDown = (e: React.PointerEvent<HTMLButtonElement>, key: string) => {
@@ -145,164 +254,201 @@ export function ArrangeGrid({
     e.stopPropagation()
     dragRef.current = { pointerId: e.pointerId, key }
     setDraggingKey(key)
-    setDropIndex(null)
+    setDrop(null)
     e.currentTarget.setPointerCapture(e.pointerId)
   }
   const gripMove = (e: React.PointerEvent<HTMLButtonElement>) => {
     const d = dragRef.current
     if (!d || d.pointerId !== e.pointerId) return
-    setDropIndex(insertIndex(e.clientX, e.clientY, d.key))
-  }
-  const release = (e: React.PointerEvent<HTMLButtonElement>) => {
-    try {
-      e.currentTarget.releasePointerCapture(e.pointerId)
-    } catch {
-      /* already released (e.g. after pointercancel) */
-    }
+    setDrop(resolveDrop(e.clientX, e.clientY, d.key))
   }
   const gripUp = (e: React.PointerEvent<HTMLButtonElement>) => {
     const d = dragRef.current
     if (!d || d.pointerId !== e.pointerId) return
-    const idx = insertIndex(e.clientX, e.clientY, d.key)
+    const target = resolveDrop(e.clientX, e.clientY, d.key)
     dragRef.current = null
     release(e)
     setDraggingKey(null)
-    setDropIndex(null)
-    const without = order.filter((k) => k !== d.key)
-    const next = [...without.slice(0, idx), d.key, ...without.slice(idx)]
-    commit((prev) => ({ ...prev, order: next }))
+    setDrop(null)
+    if (target) commit(applyMove(rows, d.key, target))
   }
-  // Interrupted drag (touch/OS gesture takeover): reset, do NOT commit a reorder.
   const gripCancel = (e: React.PointerEvent<HTMLButtonElement>) => {
     if (dragRef.current?.pointerId !== e.pointerId) return
     dragRef.current = null
     release(e)
     setDraggingKey(null)
-    setDropIndex(null)
+    setDrop(null)
   }
 
-  // ── Resize (drag the corner; snap to integer grid spans) ──
-  const resizeRef = useRef<{ pointerId: number; key: string; startX: number; startY: number; startCw: number; startRh: number } | null>(null)
-  const [liveResize, setLiveResize] = useState<{ key: string; cw: number; rh: number } | null>(null)
-  const liveResizeRef = useRef<{ key: string; cw: number; rh: number } | null>(null)
-  const setLive = (v: { key: string; cw: number; rh: number } | null) => {
-    liveResizeRef.current = v
-    setLiveResize(v)
-  }
-
-  const resizeDown = (e: React.PointerEvent<HTMLButtonElement>, key: string, span: Span) => {
-    if (e.button !== 0) return
-    e.preventDefault()
-    e.stopPropagation()
-    resizeRef.current = { pointerId: e.pointerId, key, startX: e.clientX, startY: e.clientY, startCw: span.cw, startRh: span.rh }
-    setLive({ key, cw: span.cw, rh: span.rh })
-    e.currentTarget.setPointerCapture(e.pointerId)
-  }
-  const resizeMove = (e: React.PointerEvent<HTMLButtonElement>) => {
-    const r = resizeRef.current
-    if (!r || r.pointerId !== e.pointerId) return
-    const cw0 = containerRef.current?.clientWidth ?? 800
-    const colPitch = Math.max(1, cw0 / cols)
-    const rowPitch = ROW_UNIT + GAP
-    const dCols = Math.round((e.clientX - r.startX) / colPitch)
-    const dRows = Math.round((e.clientY - r.startY) / rowPitch)
-    setLive({ key: r.key, cw: clampInt(r.startCw + dCols, 1, cols), rh: clampInt(r.startRh + dRows, 1, MAX_RH) })
-  }
-  const resizeUp = (e: React.PointerEvent<HTMLButtonElement>) => {
-    const r = resizeRef.current
-    if (!r || r.pointerId !== e.pointerId) return
-    resizeRef.current = null
-    release(e)
-    const lr = liveResizeRef.current
-    setLive(null)
-    if (lr) commit((prev) => ({ ...prev, tiles: { ...(prev?.tiles ?? {}), [r.key]: { cw: lr.cw, rh: lr.rh } } }))
-  }
-  // Interrupted resize: reset, do NOT commit a span.
-  const resizeCancel = (e: React.PointerEvent<HTMLButtonElement>) => {
-    if (resizeRef.current?.pointerId !== e.pointerId) return
-    resizeRef.current = null
-    release(e)
-    setLive(null)
-  }
-
-  // If the grid unmounts mid-gesture (mode toggle or re-run remount), drop the
-  // in-flight refs so nothing dangles on a detached node.
+  // Drop in-flight gesture refs on unmount (mode toggle / re-run remount).
   useEffect(() => () => {
     dragRef.current = null
     resizeRef.current = null
   }, [])
 
-  const withoutDragged = draggingKey != null ? order.filter((k) => k !== draggingKey) : order
-  const dropBeforeKey =
-    draggingKey != null && dropIndex != null ? withoutDragged[dropIndex] ?? null : null
-  // Appending past the last tile → no dropBeforeKey; show a trailing end-marker.
-  const appendingAtEnd =
-    draggingKey != null && dropIndex != null && dropBeforeKey == null && dropIndex >= withoutDragged.length
+  const tileAccent = (key: string): "left" | "right" | null => {
+    if (!drop) return null
+    if (drop.pos === "before" && drop.refKey === key) return "left"
+    if (drop.pos === "after" && drop.refKey === key) return "right"
+    return null
+  }
+  const rowAccent = (ri: number): "top" | "bottom" | "right" | null => {
+    if (!drop || drop.pos === "before" || drop.pos === "after" || drop.pos === "bottom") return null
+    if (!rows[ri].tiles.some((t) => t.key === drop.refKey)) return null
+    return drop.pos === "rowBefore" ? "top" : drop.pos === "rowAfter" ? "bottom" : "right"
+  }
 
   return (
-    <div
-      ref={containerRef}
-      className="grid h-full content-start gap-1.5 overflow-y-auto bg-doc-bg p-1.5"
-      style={{ gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))`, gridAutoRows: `${ROW_UNIT}px` }}
-    >
-      {order.map((key) => {
-        const s = keyToStmt.get(key)
-        if (!s) return null
-        const hasGrid = s.columns.length > 0 && s.rows.length > 0
-        const emptySelect = s.columns.length > 0 && s.rows.length === 0
-        const kind: StatementViewKind = views?.[key] ?? defaultKind(s)
-        const span = liveResize?.key === key ? { cw: liveResize.cw, rh: liveResize.rh } : spanOf(key, s)
+    <div ref={containerRef} className="flex h-full flex-col bg-doc-bg p-1.5">
+      {rows.map((row, ri) => {
+        const racc = rowAccent(ri)
         return (
-          <div
-            key={key}
-            ref={(el) => {
-              if (el) tileEls.current.set(key, el)
-              else tileEls.current.delete(key)
-            }}
-            style={{ gridColumn: `span ${Math.min(span.cw, cols)}`, gridRow: `span ${span.rh}` }}
-            className={cn(
-              "relative flex min-w-0 flex-col overflow-hidden rounded-md border border-chrome-border/70 bg-chrome-bg/40",
-              draggingKey === key && "opacity-40",
-              dropBeforeKey === key && "ring-2 ring-rvbbit-accent",
-            )}
-          >
-            <div className="flex items-center gap-2 border-b border-chrome-border/50 px-1.5 py-1 text-[11px]">
-              <button
-                type="button"
-                title="Drag to reorder"
-                onPointerDown={(e) => gripDown(e, key)}
-                onPointerMove={gripMove}
-                onPointerUp={gripUp}
-                onPointerCancel={gripCancel}
-                className="shrink-0 cursor-grab touch-none text-chrome-text/35 hover:text-foreground active:cursor-grabbing"
+          /* Key by the row's first tile (stable per-row identity), not its full
+             membership — else moving a tile remounts both rows' ResultGrids. */
+          <Fragment key={row.tiles[0].key}>
+            {ri > 0 ? (
+              <div
+                role="separator"
+                title="Drag to resize rows · double-click to even"
+                onPointerDown={(e) => rowGutterDown(e, ri)}
+                onPointerMove={gutterMove}
+                onPointerUp={gutterUp}
+                onPointerCancel={gutterCancel}
+                onDoubleClick={() => rowGutterReset(ri)}
+                className="group/g relative h-1.5 shrink-0 cursor-row-resize touch-none"
               >
-                <GripVertical className="h-3.5 w-3.5" />
-              </button>
-              <div className="flex min-w-0 flex-1 items-center gap-2">
-                <CardMeta s={s} />
+                <div className="absolute inset-x-0 top-1/2 h-px -translate-y-1/2 bg-chrome-border/40 group-hover/g:bg-rvbbit-accent/60" />
               </div>
-              {hasGrid ? <ViewSwitcher viewKey={key} kind={kind} onSetView={onSetView} /> : null}
-            </div>
-            <div className="min-h-0 flex-1 overflow-hidden">
-              <CardBody s={s} kind={hasGrid ? kind : "table"} hasGrid={hasGrid} emptySelect={emptySelect} fill />
-            </div>
-            <button
-              type="button"
-              title="Drag to resize"
-              onPointerDown={(e) => resizeDown(e, key, span)}
-              onPointerMove={resizeMove}
-              onPointerUp={resizeUp}
-              onPointerCancel={resizeCancel}
-              className="absolute bottom-0 right-0 grid h-4 w-4 cursor-se-resize touch-none place-items-center text-chrome-text/30 hover:text-foreground"
+            ) : null}
+            <div
+              ref={(el) => {
+                if (el) rowEls.current.set(ri, el)
+                else rowEls.current.delete(ri)
+              }}
+              className="relative flex min-h-0"
+              style={{ flexGrow: rowGrow(ri), flexShrink: 1, flexBasis: 0 }}
             >
-              <span className="block h-1.5 w-1.5 border-b-2 border-r-2 border-current" />
-            </button>
-          </div>
+              {racc === "top" ? <div className="pointer-events-none absolute inset-x-0 top-0 z-10 h-0.5 bg-rvbbit-accent" /> : null}
+              {racc === "bottom" ? <div className="pointer-events-none absolute inset-x-0 bottom-0 z-10 h-0.5 bg-rvbbit-accent" /> : null}
+              {racc === "right" ? <div className="pointer-events-none absolute inset-y-0 right-0 z-10 w-0.5 bg-rvbbit-accent" /> : null}
+              {row.tiles.map((t, ti) => {
+                const s = keyToStmt.get(t.key)
+                if (!s) return null
+                const hasGrid = s.columns.length > 0 && s.rows.length > 0
+                const emptySelect = s.columns.length > 0 && s.rows.length === 0
+                const kind: StatementViewKind = views?.[t.key] ?? defaultKind(s)
+                const acc = tileAccent(t.key)
+                return (
+                  <Fragment key={t.key}>
+                    {ti > 0 ? (
+                      <div
+                        role="separator"
+                        title="Drag to resize · double-click to even"
+                        onPointerDown={(e) => tileGutterDown(e, ri, ti)}
+                        onPointerMove={gutterMove}
+                        onPointerUp={gutterUp}
+                        onPointerCancel={gutterCancel}
+                        onDoubleClick={() => tileGutterReset(ri, ti)}
+                        className="group/g relative w-1.5 shrink-0 cursor-col-resize touch-none"
+                      >
+                        <div className="absolute inset-y-0 left-1/2 w-px -translate-x-1/2 bg-chrome-border/40 group-hover/g:bg-rvbbit-accent/60" />
+                      </div>
+                    ) : null}
+                    <div
+                      ref={(el) => {
+                        if (el) tileEls.current.set(t.key, el)
+                        else tileEls.current.delete(t.key)
+                      }}
+                      style={{ flexGrow: tileGrow(ri, ti), flexShrink: 1, flexBasis: 0 }}
+                      className={cn(
+                        "relative flex min-w-0 min-h-0 flex-col overflow-hidden rounded-md border border-chrome-border/70 bg-chrome-bg/40",
+                        draggingKey === t.key && "opacity-40",
+                      )}
+                    >
+                      {acc === "left" ? <div className="pointer-events-none absolute inset-y-0 left-0 z-10 w-0.5 bg-rvbbit-accent" /> : null}
+                      {acc === "right" ? <div className="pointer-events-none absolute inset-y-0 right-0 z-10 w-0.5 bg-rvbbit-accent" /> : null}
+                      <div className="flex items-center gap-2 border-b border-chrome-border/50 px-1.5 py-1 text-[11px]">
+                        <button
+                          type="button"
+                          title="Drag to move"
+                          onPointerDown={(e) => gripDown(e, t.key)}
+                          onPointerMove={gripMove}
+                          onPointerUp={gripUp}
+                          onPointerCancel={gripCancel}
+                          className="shrink-0 cursor-grab touch-none text-chrome-text/35 hover:text-foreground active:cursor-grabbing"
+                        >
+                          <GripVertical className="h-3.5 w-3.5" />
+                        </button>
+                        <div className="flex min-w-0 flex-1 items-center gap-2">
+                          <CardMeta s={s} />
+                        </div>
+                        {hasGrid ? <ViewSwitcher viewKey={t.key} kind={kind} onSetView={onSetView} /> : null}
+                      </div>
+                      <div className="min-h-0 flex-1 overflow-hidden">
+                        <CardBody s={s} kind={hasGrid ? kind : "table"} hasGrid={hasGrid} emptySelect={emptySelect} fill />
+                      </div>
+                    </div>
+                  </Fragment>
+                )
+              })}
+            </div>
+          </Fragment>
         )
       })}
-      {appendingAtEnd ? (
-        <div style={{ gridColumn: "1 / -1" }} className="h-1 self-start rounded-full bg-rvbbit-accent" />
-      ) : null}
+      {drop?.pos === "bottom" ? <div className="pointer-events-none mt-1 h-0.5 shrink-0 bg-rvbbit-accent" /> : null}
     </div>
   )
+}
+
+/** Move `draggedKey` to `target`: detach it (dropping any row it empties), then
+ *  re-insert relative to the target's reference tile. The dragged tile keeps its
+ *  own width weight; new rows get h:1. Weights are relative, so it renormalizes for
+ *  free — no rescaling. */
+function applyMove(rows: ArrangeRow[], draggedKey: string, target: Drop): ArrangeRow[] {
+  let dragged: ArrangeTile | undefined
+  for (const r of rows) {
+    const t = r.tiles.find((x) => x.key === draggedKey)
+    if (t) {
+      dragged = t
+      break
+    }
+  }
+  const tile: ArrangeTile = { key: draggedKey, w: dragged?.w && dragged.w > 0 ? dragged.w : 1 }
+  const base: ArrangeRow[] = rows
+    .map((r) => ({ h: r.h, tiles: r.tiles.filter((t) => t.key !== draggedKey) }))
+    .filter((r) => r.tiles.length > 0)
+
+  if (target.pos === "bottom") return [...base, { h: 1, tiles: [tile] }]
+
+  let ri = -1
+  let ti = -1
+  for (let i = 0; i < base.length; i++) {
+    const j = base[i].tiles.findIndex((t) => t.key === target.refKey)
+    if (j >= 0) {
+      ri = i
+      ti = j
+      break
+    }
+  }
+  if (ri < 0) return [...base, { h: 1, tiles: [tile] }] // ref vanished → bottom (shouldn't happen)
+
+  const next = base.map((r) => ({ h: r.h, tiles: [...r.tiles] }))
+  switch (target.pos) {
+    case "before":
+      next[ri].tiles.splice(ti, 0, tile)
+      break
+    case "after":
+      next[ri].tiles.splice(ti + 1, 0, tile)
+      break
+    case "rowAppend":
+      next[ri].tiles.push(tile)
+      break
+    case "rowBefore":
+      next.splice(ri, 0, { h: 1, tiles: [tile] })
+      break
+    case "rowAfter":
+      next.splice(ri + 1, 0, { h: 1, tiles: [tile] })
+      break
+  }
+  return next
 }

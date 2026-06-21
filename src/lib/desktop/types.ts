@@ -180,6 +180,20 @@ export interface CsvImportPayload {
 /** How a single statement's result renders in the multi-statement transcript. */
 export type StatementViewKind = "table" | "bar" | "line" | "number"
 
+/** One horizontal band of the Arrange tiling. `h` is a UNITLESS height weight
+ *  across rows (row height = h / Σ rows.h). */
+export interface ArrangeRow {
+  h: number
+  tiles: ArrangeTile[]
+}
+/** One tile in a row. `key` ∈ statementKeys(results) — the same identity space as
+ *  statementViews. `w` is a UNITLESS width weight within its row (tile width =
+ *  w / Σ row.tiles.w). */
+export interface ArrangeTile {
+  key: string
+  w: number
+}
+
 export interface DataPayload {
   kind?: "data"
   title: string
@@ -203,20 +217,19 @@ export interface DataPayload {
    */
   statementViews?: Record<string, StatementViewKind>
   /**
-   * Mini-dashboard arrangement for the multi-statement transcript. Absent ⇒ the
-   * default vertical transcript (unchanged). Keyed by the SAME statementKeys set
-   * as statementViews, so a tile's slot + span follow its statement across reorder
-   * and reset if rewritten. All reconciliation is render-time against the live key
-   * set (stale entries ignored, pruned on the next write).
+   * Mini-dashboard arrangement for the multi-statement transcript — a tiling-WM
+   * layout: rows top→bottom, tiles left→right within a row, every boundary
+   * resizable, the block area always fully tiled (no gaps). Absent ⇒ the default
+   * vertical transcript (unchanged). Tiles are keyed by the SAME statementKeys set
+   * as statementViews, so a tile's slot + view kind travel and reset together. All
+   * reconciliation is render-time against the live key set (stale entries ignored,
+   * pruned on the next write); a missing `rows` auto-seeds one tile per statement.
    */
   statementLayout?: {
     /** Absent ⇒ "transcript". Only "arrange" diverges from today's behavior. */
     mode?: "transcript" | "arrange"
-    /** Reading order by statement key; keys not listed append at the end. */
-    order?: string[]
-    /** Per-tile span overrides in grid units (sparse; absent ⇒ view-kind default).
-     *  `cw` is clamped to the live column count on READ, never mutated. */
-    tiles?: Record<string, { cw: number; rh: number }>
+    /** Tiling rows, top→bottom. Absent ⇒ auto-seed (one tile per statement). */
+    rows?: ArrangeRow[]
   }
   /**
    * Reactive overlay: every data window has a block name (defaulted to a
