@@ -7,8 +7,8 @@ import type {
   JsonbProjectionColumn,
   ParamTarget,
 } from "./types"
-import type { SchemaSnapshot } from "@/lib/db/types"
-import { buildJsonbProjection, isSynthQuery } from "@/lib/sql/then-rewrite"
+import type { QueryResultColumn, SchemaSnapshot, SchemaTable } from "@/lib/db/types"
+import { buildJsonbProjection, isSynthQuery, splitStatements } from "@/lib/sql/then-rewrite"
 import { parseAsOfComment, withAsOf } from "@/lib/rvbbit/time-travel"
 
 /**
@@ -116,8 +116,30 @@ export function shortParamValue(value: unknown): string {
   return text.length > 42 ? `${text.slice(0, 39)}...` : text
 }
 
+// Postgres reserved keywords (fully-reserved + the type/function-name-reserved set
+// that still can't be a BARE column reference). These match the simple-identifier
+// shape, so without an explicit check `quoteSqlIdent` would leave `select`, `order`,
+// `user`, … unquoted and emit `WHERE select = …` (a syntax error). A lowercased
+// identifier that IS a column always references the same column when double-quoted,
+// so force-quoting these is always safe.
+const RESERVED_SQL_WORDS = new Set([
+  "all", "analyse", "analyze", "and", "any", "array", "as", "asc", "asymmetric", "authorization",
+  "binary", "both", "case", "cast", "check", "collate", "collation", "column", "concurrently",
+  "constraint", "create", "cross", "current_catalog", "current_date", "current_role",
+  "current_schema", "current_time", "current_timestamp", "current_user", "default", "deferrable",
+  "desc", "distinct", "do", "else", "end", "except", "false", "fetch", "for", "foreign", "freeze",
+  "from", "full", "grant", "group", "having", "ilike", "in", "initially", "inner", "intersect",
+  "into", "is", "isnull", "join", "lateral", "leading", "left", "like", "limit", "localtime",
+  "localtimestamp", "natural", "not", "notnull", "null", "offset", "on", "only", "or", "order",
+  "outer", "overlaps", "placing", "primary", "references", "returning", "right", "select",
+  "session_user", "similar", "some", "symmetric", "table", "tablesample", "then", "to", "trailing",
+  "true", "union", "unique", "user", "using", "variadic", "verbose", "when", "where", "window", "with",
+])
+
 export function quoteSqlIdent(name: string): string {
-  return /^[a-z_][a-z0-9_]*$/.test(name) ? name : `"${name.replace(/"/g, '""')}"`
+  return /^[a-z_][a-z0-9_]*$/.test(name) && !RESERVED_SQL_WORDS.has(name.toLowerCase())
+    ? name
+    : `"${name.replace(/"/g, '""')}"`
 }
 
 /**
@@ -176,6 +198,10 @@ export function stripTrailingSqlTerminator(sql: string): string {
 export function buildDesktopRuntimeGraph(
   windows: DesktopWindowState[],
   params: DesktopParamValue[],
+  /** When provided, params flagged `broadcast` auto-apply to EVERY block that
+   *  safely references their source table (Tier-2). Without it, only the source +
+   *  explicit subscribers are filtered (the original behavior). */
+  schema?: SchemaSnapshot | null,
 ): DesktopRuntimeGraph {
   const blocks = dataWindowsToRuntimeInputs(windows)
   const byId = new Map(blocks.map((b) => [b.windowId, b]))
@@ -277,7 +303,18 @@ export function buildDesktopRuntimeGraph(
     // the first (true per-table as_of would need a real SQL clause).
     const ownAsOf = parseAsOfComment(rewritten).asOf
     const effectiveAsOf = ownAsOf ?? inheritedAsOfs.find(Boolean) ?? null
-    const cleanBody = parseAsOfComment(rewritten).body
+    let cleanBody = parseAsOfComment(rewritten).body
+
+    // Tier-2 broadcast: params flagged `broadcast` filter EVERY OTHER block that
+    // reads their source table. Applied here (post-compile) via the SAME proven
+    // cross-filter injector, so it lands PER-STATEMENT (every relevant statement of a
+    // multi-statement target, not just the first) and handles schema-qualified base
+    // tables. The source block is excluded (it self-filters above). jsonb/synth blocks
+    // are skipped (their projected columns aren't in the raw SQL).
+    if (!isJsonbBlock && schema) {
+      const bcfs = broadcastCrossFilters(block.blockName, params)
+      if (bcfs.length > 0) cleanBody = injectStatementFilters(cleanBody, bcfs, schema)
+    }
 
     const dedupedRefs = dedupeRefs(refs)
     // A synth block (single jsonb column) carries a typed projection so that
@@ -377,7 +414,7 @@ function applyParamSubscriptions(
   for (const s of subs) {
     const p = paramMap.get(s.key.toLowerCase())
     if (!p) { missing.push(s.key); continue }
-    const pred = predicateForParam(s.targetField, p)
+    const pred = predicateForParam(s.targetField, p.value, p.operator)
     if (s.target && s.target.kind !== "query") fromItemPreds.push(pred)
     else wrapPreds.push(pred)
   }
@@ -420,18 +457,20 @@ function quoteSqlLiteral(value: unknown): string {
   return `'${String(value).replace(/'/g, "''")}'`
 }
 
-function predicateForParam(field: string, p: DesktopParamValue): string {
+function predicateForParam(field: string, value: unknown, operator?: string): string {
   const q = quoteSqlIdent(field)
   // Range/threshold comparison (datepicker / slider). `col >= v` matches whole
   // timestamps correctly (no exact-midnight problem of `col = date`).
-  if (p.operator === "gte" || p.operator === "lte") {
-    if (p.value === null || p.value === undefined) return "TRUE"
-    return `${q} ${p.operator === "gte" ? ">=" : "<="} ${quoteSqlLiteral(p.value)}`
+  if (operator === "gte" || operator === "lte") {
+    if (value === null || value === undefined) return "TRUE"
+    return `${q} ${operator === "gte" ? ">=" : "<="} ${quoteSqlLiteral(value)}`
   }
-  if (p.operator !== "in" && !Array.isArray(p.value)) {
-    return `${q} = ${quoteSqlLiteral(p.value)}`
+  if (operator !== "in" && !Array.isArray(value)) {
+    // `col = NULL` is never true — filtering a NULL cell must mean IS NULL.
+    if (value === null || value === undefined) return `${q} IS NULL`
+    return `${q} = ${quoteSqlLiteral(value)}`
   }
-  const vals = Array.isArray(p.value) ? p.value : [p.value]
+  const vals = Array.isArray(value) ? value : [value]
   const nonNull = vals.filter((v) => v !== null && v !== undefined)
   const hasNull = nonNull.length !== vals.length
   const clauses: string[] = []
@@ -598,11 +637,18 @@ export function singleTableRef(sql: string): SqlTableRef | null {
   }
   const relation = mm[2] // unquoted region: masked === source here
   const explicitAlias = mm[3]
-  // Schema-qualified relation with no explicit alias: the outer query may
-  // reference columns via the qualified path (`public.t.col`), which a bare
-  // subquery alias can't satisfy. Bail to wrap. (With an explicit alias the
-  // outer query must use it, so the rewrite is safe.)
-  if (!explicitAlias && relation.includes(".")) return null
+  // Schema-qualified relation with no explicit alias (`fp_src.orders`): the surgical
+  // wrap aliases the subquery by the bare leaf (`… ) orders`), which DROPS the
+  // qualified FROM-entry — so a fully-qualified column reference to that path
+  // (`fp_src.orders.col`, including `fp_src.orders.*` and qualified GROUP BY/ORDER BY/
+  // HAVING/correlated refs) would dangle. If the statement uses that qualified path,
+  // bail to the whole-result wrap (inner SQL untouched, always valid). WITHOUT such a
+  // reference the bare-leaf alias is safe — bare and `orders.col` refs still resolve —
+  // so cross-filter / broadcast / drag-subscriptions work on schema-qualified tables.
+  if (!explicitAlias && relation.includes(".")) {
+    const escaped = relation.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+    if (new RegExp(`\\b${escaped}\\.`, "i").test(masked)) return null
+  }
   // A quoted alias (`FROM t "My Alias"`) is blanked by maskSql, so it escapes
   // the alias capture above and would be left dangling after the rewrite. If
   // the source text after the matched ref begins with a quote, bail to wrap.
@@ -756,6 +802,220 @@ function tableColumnSet(schema: SchemaSnapshot | null, relation: string): Set<st
   })
   if (matches.length !== 1) return null
   return new Set(matches[0].columns.map((c) => c.name.toLowerCase()))
+}
+
+/** Resolve a written relation (bare or schema-qualified) to its UNIQUE schema
+ *  table, or null if absent/ambiguous — the same matching as tableColumnSet but
+ *  returning the table so a cross-filter can confirm it targets the right one. */
+function findSchemaTable(schema: SchemaSnapshot | null, relation: string): SchemaTable | null {
+  if (!schema) return null
+  const rel = relation.toLowerCase()
+  const qualified = rel.includes(".")
+  const matches = schema.tables.filter((t) => {
+    const fq = `${t.schema}.${t.name}`.toLowerCase()
+    return fq === rel || (!qualified && t.name.toLowerCase() === rel)
+  })
+  return matches.length === 1 ? matches[0] : null
+}
+
+/** True if a BROADCAST param should auto-apply to the block with `blockSql`: a
+ *  single-table SELECT whose unambiguous table IS the param's source table (with
+ *  the column). The source block self-filters already, so it's excluded. Reuses
+ *  the surgical-targeting safety — anything ambiguous/joined/CTE/different-table
+ *  returns false (not filtered). */
+/** Broadcast params (as CrossFilters) that apply to a target block — every block
+ *  EXCEPT the one that emitted the param (it self-filters). Fed to
+ *  injectStatementFilters so broadcast lands per-statement, like a cross-filter. */
+function broadcastCrossFilters(blockName: string, params: DesktopParamValue[]): CrossFilter[] {
+  const out: CrossFilter[] = []
+  for (const p of params) {
+    if (!p.broadcast || !p.sourceTable || !p.sourceColumn) continue
+    if (p.sourceBlockName.toLowerCase() === blockName.toLowerCase()) continue
+    out.push({
+      sourceSchema: p.sourceSchema,
+      sourceTable: p.sourceTable,
+      column: p.sourceColumn,
+      value: p.value,
+      operator: p.operator,
+    })
+  }
+  return out
+}
+
+/** Would a broadcast param touch this block? True if ANY statement is a single
+ *  base-table SELECT on the param's source table — mirroring exactly what
+ *  injectStatementFilters mechanism-1 will inject, so the shelf blast-radius count
+ *  matches reality (works for multi-statement blocks and schema-qualified tables). */
+function blockTakesBroadcast(
+  blockSql: string,
+  isJsonb: boolean,
+  blockName: string,
+  param: DesktopParamValue,
+  schema: SchemaSnapshot | null,
+): boolean {
+  if (isJsonb || !schema || !param.broadcast || !param.sourceTable || !param.sourceColumn) return false
+  if (param.sourceBlockName.toLowerCase() === blockName.toLowerCase()) return false
+  const wantCol = param.sourceColumn.toLowerCase()
+  for (const stmt of splitStatements(blockSql)) {
+    const masked = maskSql(stmt)
+    if (masked.trim().length === 0 || !/^\s*SELECT\b/i.test(masked) || isSelectInto(masked)) continue
+    const item = singleFromItem(stmt)
+    if (!item || item.type !== "table") continue
+    const tbl = findSchemaTable(schema, item.relation)
+    if (!tbl || tbl.name.toLowerCase() !== param.sourceTable.toLowerCase()) continue
+    if (param.sourceSchema && tbl.schema.toLowerCase() !== param.sourceSchema.toLowerCase()) continue
+    if (tbl.columns.some((c) => c.name.toLowerCase() === wantCol)) return true
+  }
+  return false
+}
+
+/** Window ids a broadcast param would auto-filter — the blast radius shown in the
+ *  param shelf so a broadcast is never a surprise. */
+export function broadcastTargetWindowIds(
+  param: DesktopParamValue,
+  windows: DesktopWindowState[],
+  schema: SchemaSnapshot | null,
+): string[] {
+  if (!param.broadcast) return []
+  return dataWindowsToRuntimeInputs(windows)
+    .filter((b) => blockTakesBroadcast(b.sourceSql, !!(b.jsonbProjection && b.jsonbProjection.length > 0), b.blockName, param, schema))
+    .map((b) => b.windowId)
+}
+
+/** A block-local cross-filter: narrows sibling statements that read the clicked
+ *  value's REAL source table (from pg provenance). */
+export interface CrossFilter {
+  sourceSchema?: string
+  sourceTable: string
+  column: string
+  value: unknown
+  operator?: "eq" | "in" | "gte" | "lte"
+  /** Result index of the statement the cell was clicked in. That statement is NOT
+   *  filtered by this cross-filter — clicking a value narrows the SIBLINGS, not the
+   *  tile you clicked (no self-filter). */
+  sourceStmtIndex?: number
+}
+
+/**
+ * Push cross-filters into a multi-statement block. TWO mechanisms, both producing
+ * valid server-side SQL — we never front-end filter and never touch DML:
+ *
+ *  1. **Surgical pre-aggregation** (best): when a statement's FROM is a single
+ *     BASE TABLE that IS a filter's source table, wrap that table —
+ *     `FROM t` → `FROM (SELECT * FROM t WHERE <preds>) t`. Filters base rows even
+ *     when the column is not selected, and lands BEFORE a GROUP BY.
+ *  2. **Output-column wrap** (for everything else — a `{ref}`/subquery/JOIN FROM
+ *     that the compiler already inlined): `SELECT * FROM (<stmt>) __cf WHERE <col>=v`,
+ *     where <col> is the OUTPUT column whose pg provenance matches the filter
+ *     (provenance survives subqueries, so a tile reading the table through another
+ *     block's SQL still resolves to the real base column). Always valid because the
+ *     column is in the statement's own output. This needs `statementColumns` —
+ *     the per-statement result columns from the run the user clicked on.
+ *
+ * Statements we cannot prove safe are returned UNTOUCHED: the `SELECT`-only guard
+ * drops DML/DDL/CTE and `SELECT … INTO`; mechanism 1 only fires on a schema-resolved
+ * base table; mechanism 2 only fires when a filtered column is actually in the output
+ * (and unambiguous). So a `{ref}`-built block finally cross-filters, while joins /
+ * aggregates that do not expose the column, and unrelated statements, stay as-is.
+ */
+export function injectStatementFilters(
+  sql: string,
+  filters: CrossFilter[],
+  schema: SchemaSnapshot | null,
+  statementColumns?: (QueryResultColumn[] | undefined)[],
+): string {
+  if (filters.length === 0) return sql
+  const stmts = splitStatements(sql)
+  if (stmts.length === 0) return sql
+  // Index the per-statement columns the way PG returns results: one per content-
+  // bearing fragment (comment/whitespace-only fragments produce no result). Only
+  // trust the alignment when the counts match exactly — otherwise fall back to the
+  // surgical path alone so we never wrap a statement with another's columns.
+  const contentCount = stmts.filter((s) => maskSql(s).trim().length > 0).length
+  const aligned = !!statementColumns && statementColumns.length === contentCount
+  let resultIdx = -1
+  const out = stmts.map((stmt) => {
+    const masked = maskSql(stmt)
+    const hasContent = masked.trim().length > 0
+    if (hasContent) resultIdx++
+    // Only a plain SELECT is safe. Reject DML/DDL/CTE (not SELECT-led) AND
+    // `SELECT … INTO …` (a CREATE-TABLE-AS write whose rows we must not change).
+    if (!hasContent || !/^\s*SELECT\b/i.test(masked) || isSelectInto(masked)) return stmt
+    // A filter is skipped for the statement it ORIGINATED from — clicking a cell
+    // narrows the siblings, not the tile you clicked (no self-filter).
+    const applicable = filters.filter((f) => f.sourceStmtIndex !== resultIdx)
+    if (applicable.length === 0) return stmt
+    // (1) Surgical pre-aggregation wrap for a single base-table FROM.
+    const item = singleFromItem(stmt)
+    if (item && item.type === "table") {
+      const table = findSchemaTable(schema, item.relation)
+      if (table) {
+        const cols = new Set(table.columns.map((c) => c.name.toLowerCase()))
+        const matching = applicable.filter(
+          (f) =>
+            f.sourceTable.toLowerCase() === table.name.toLowerCase() &&
+            (!f.sourceSchema || f.sourceSchema.toLowerCase() === table.schema.toLowerCase()) &&
+            cols.has(f.column.toLowerCase()),
+        )
+        if (matching.length > 0) {
+          const preds = matching.map((f) => predicateForParam(f.column, f.value, f.operator))
+          const inner = `(SELECT * FROM ${item.relation} WHERE ${preds.join(" AND ")}) ${item.alias}`
+          return stmt.slice(0, item.start) + inner + stmt.slice(item.end)
+        }
+      }
+    }
+    // (2) Output-column wrap for a {ref}/subquery/JOIN FROM whose output exposes a
+    // filtered column (matched by pg provenance, which survives subqueries).
+    const outCols = aligned ? statementColumns?.[resultIdx] : undefined
+    if (outCols && outCols.length > 0) {
+      // A name that appears more than once can't be referenced unambiguously.
+      const nameCount = new Map<string, number>()
+      for (const c of outCols) {
+        const n = c.name.toLowerCase()
+        nameCount.set(n, (nameCount.get(n) ?? 0) + 1)
+      }
+      const used = new Set<string>()
+      const preds: string[] = []
+      for (const f of applicable) {
+        const match = outCols.find(
+          (c) =>
+            !!c.sourceTable &&
+            !!c.sourceColumn &&
+            c.sourceTable.toLowerCase() === f.sourceTable.toLowerCase() &&
+            c.sourceColumn.toLowerCase() === f.column.toLowerCase() &&
+            (!f.sourceSchema || !c.sourceSchema || c.sourceSchema.toLowerCase() === f.sourceSchema.toLowerCase()),
+        )
+        if (!match) continue
+        const n = match.name.toLowerCase()
+        if ((nameCount.get(n) ?? 0) > 1 || used.has(n)) continue
+        used.add(n)
+        preds.push(predicateForParam(match.name, f.value, f.operator))
+      }
+      if (preds.length > 0) {
+        // Newline before `)` so a trailing `-- comment` in stmt can't comment it out.
+        return `SELECT * FROM (\n${stmt}\n) AS __cf WHERE ${preds.join(" AND ")}`
+      }
+    }
+    return stmt
+  })
+  // Lead each separator with a newline so a statement ending in a `-- comment`
+  // can't swallow the `;` (which would merge it with the next statement).
+  return out.join("\n;\n")
+}
+
+/** True if a SELECT writes via `INTO` (CREATE-TABLE-AS): a top-level INTO that
+ *  appears BEFORE the first top-level FROM. Nested INTO (paren subquery) is at
+ *  depth>0 and ignored. `masked` must already be maskSql'd. */
+function isSelectInto(masked: string): boolean {
+  let depth = 0
+  const scan = /\(|\)|\bINTO\b|\bFROM\b/gi
+  let m: RegExpExecArray | null
+  while ((m = scan.exec(masked))) {
+    if (m[0] === "(") depth += 1
+    else if (m[0] === ")") depth -= 1
+    else if (depth === 0) return /into/i.test(m[0]) // INTO before FROM ⇒ SELECT INTO
+  }
+  return false
 }
 
 /** True when the SELECT projects `*` (a pass-through preview), so its output

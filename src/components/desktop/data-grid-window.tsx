@@ -37,7 +37,7 @@ import { ChartView } from "./chart-view"
 import { ControlView } from "./control-view"
 import { ModelField } from "./operator-inspector"
 import { ResultGrid } from "./result-grid"
-import { ResultTranscript } from "./result-transcript"
+import { ResultTranscript, statementKeys } from "./result-transcript"
 import { ArrangeGrid } from "./arrange-grid"
 import { ContextMenu, type ContextMenuState } from "./context-menu"
 import { listQueryHistory, pushQueryHistory } from "@/lib/desktop/query-history"
@@ -77,18 +77,22 @@ import {
   inferJsonbColumns,
   columnsFromServerSchema,
   extractSynthIntent,
+  splitStatements,
 } from "@/lib/sql/then-rewrite"
 import type { JsonbProjectionColumn } from "@/lib/desktop/types"
 import {
   buildDesktopRuntimeGraph,
+  injectStatementFilters,
   paramKey,
   quoteSqlIdent,
   resolveParamPlacement,
+  sameParamValue,
   shortParamValue,
   slugifyBlockName,
   sourceSqlForPayload,
   stripTrailingSqlTerminator,
   uniqueBlockName,
+  type CrossFilter,
 } from "@/lib/desktop/reactive-sql"
 import { setActiveBlockDragSource, writeBlockDragPayload } from "@/lib/desktop/block-drag"
 import { usePresentMode } from "@/lib/desktop/present-mode"
@@ -123,6 +127,9 @@ interface DataGridWindowProps {
     cascade?: boolean
     dataTypeId?: number
     type?: string
+    sourceSchema?: string
+    sourceTable?: string
+    sourceColumn?: string
   }) => void
   onSubscribeParam: (key: string, targetField?: string, target?: ParamTarget) => void
   /**
@@ -175,6 +182,17 @@ const SQL_RAIL_DEFAULT_WIDTH = 380
 const SQL_RAIL_MIN_WIDTH = 280
 const SQL_RESULTS_MIN_WIDTH = 360
 const SQL_RAIL_MAX_FRACTION = 0.5
+
+/** Normalize compiled SQL for the per-statement-columns cache gate: strip block AND
+ *  line comments (the inlined {ref} `version=N` marker, as_of, user notes) — none
+ *  change a statement's OUTPUT columns, so this keeps mechanism-2 cross-filtering alive
+ *  for {ref} tiles after a referenced block re-runs (the marker → a fixed space; the
+ *  rest of the compiled SQL is deterministic). We do NOT collapse whitespace — that
+ *  would equate two distinct quoted identifiers (`"My  State"` vs `"My State"`) and
+ *  let mechanism-2 wrap a tile with the prior run's column name (42703). */
+function colsKey(sql: string): string {
+  return sql.replace(/\/\*[\s\S]*?\*\//g, " ").replace(/--[^\n]*/g, " ").trim()
+}
 
 function loadAskModel(): string {
   try { return (typeof window !== "undefined" && window.localStorage.getItem(ASK_MODEL_KEY)) || "" } catch { return "" }
@@ -246,6 +264,18 @@ export function DataGridWindow({
   // to remount per run (resetting expand + child-grid state) without reading a ref
   // during render.
   const [runEpoch, setRunEpoch] = useState(0)
+  // Block-local cross-filters (multi-statement dashboard): clicking a tile cell
+  // filters sibling statements that read the same source table. Held in a ref too
+  // so runSql reads the latest without being in its deps.
+  const [crossFilters, setCrossFilters] = useState<CrossFilter[]>([])
+  const crossFiltersRef = useRef<CrossFilter[]>([])
+  // Per-statement output columns from the last multi-statement run, so the cross-
+  // filter injector can wrap a {ref}/subquery/JOIN tile by the OUTPUT column whose
+  // provenance matches the filter (mechanism 2 in injectStatementFilters). Keyed by
+  // the EXACT compiled SQL they were measured on: an edit changes compiledRun, so the
+  // columns stop matching and the injector falls back to the surgical path — never
+  // wrapping a statement with another (stale) statement's columns.
+  const lastStmtColsRef = useRef<{ sql: string; cols: (QueryResultColumn[] | undefined)[] } | null>(null)
   // Abort controller + cancel token for the in-flight run, so a Stop button can
   // both abort the client fetch and pg_cancel_backend the server query.
   const runControlRef = useRef<{ controller: AbortController; token: string } | null>(null)
@@ -338,7 +368,7 @@ export function DataGridWindow({
   const probeBounds = useCallback(
     async (field: string): Promise<{ min: unknown; max: unknown } | null> => {
       if (!activeConnectionId) return null
-      const graph = buildDesktopRuntimeGraph(allWindows, params)
+      const graph = buildDesktopRuntimeGraph(allWindows, params, schema)
       const compiled = graph.blocks.get(w.id)?.compiledSql
       if (!compiled || hasTopLevelThen(compiled) || isSynthQuery(compiled)) return null
       const c = quoteSqlIdent(field)
@@ -382,10 +412,10 @@ export function DataGridWindow({
   // Compile this window's SQL through the runtime graph so block.X and
   // param.X.Y references rewrite, and subscriptions become WHERE clauses.
   const compiledSql = useMemo(() => {
-    const graph = buildDesktopRuntimeGraph(allWindows, params)
+    const graph = buildDesktopRuntimeGraph(allWindows, params, schema)
     const block = graph.blocks.get(w.id)
     return block?.compiledSql ?? payload.sql
-  }, [allWindows, params, payload.sql, w.id])
+  }, [allWindows, params, payload.sql, w.id, schema])
 
   const subscriptions = payload.reactive?.paramSubscriptions ?? []
 
@@ -495,6 +525,12 @@ export function DataGridWindow({
     if (txnSessionId && !userInitiated) return
     const myNonce = ++runNonceRef.current
     setRunEpoch(myNonce)
+    // DEV instrumentation: record every runSql so a test harness can detect a
+    // re-run storm (a block whose count climbs without user action). No-op in prod.
+    if (process.env.NODE_ENV !== "production") {
+      const g = globalThis as unknown as { __rvbbitRunLog?: { id: string; name: string; t: number }[] }
+      ;(g.__rvbbitRunLog ??= []).push({ id: w.id, name: blockName, t: Date.now() })
+    }
     // Compile *this draft* against the runtime graph by patching the
     // window's source SQL into the graph build. The simpler path: build
     // the graph against the live windows array, swap the active window's
@@ -516,13 +552,31 @@ export function DataGridWindow({
           : win,
       ),
       params,
+      schema,
     )
     const compiled = graph.blocks.get(w.id)?.compiledSql ?? trimmedSource
     // Pipeline cascade sugar: a bare `select … then op(…)` is wrapped as
     // rvbbit.flow($$…$$) so the THENs never hit the PG parser. Detection mirrors
     // the engine splitter (CASE…THEN / strings / comments are left untouched).
     const isPipeline = hasTopLevelThen(compiled)
-    const toRun = isPipeline ? wrapFlow(compiled) : compiled
+    const compiledRun = isPipeline ? wrapFlow(compiled) : compiled
+    // Cross-filter: push active block-local filters into each safe single-table
+    // SELECT statement (multi-statement dashboard). No-op when no filters / not
+    // multi-statement; only mutates statements proven safe (see injectStatementFilters).
+    // Only trust the captured per-statement columns when they were measured on the
+    // SAME compiled SQL we are about to run — otherwise mechanism 2 could wrap a tile
+    // with a prior run's columns (wrong column / 42703). Mismatch → surgical-only.
+    // Block comments (the inlined {ref} `version=N` marker, as_of, user notes) don't
+    // change a statement's OUTPUT columns, so normalize them out — else a referenced
+    // block re-running (version bump) would silently disable mechanism-2 for {ref} tiles.
+    const stmtCols =
+      lastStmtColsRef.current && colsKey(lastStmtColsRef.current.sql) === colsKey(compiledRun)
+        ? lastStmtColsRef.current.cols
+        : undefined
+    const toRun =
+      crossFiltersRef.current.length > 0
+        ? injectStatementFilters(compiledRun, crossFiltersRef.current, schema, stmtCols)
+        : compiledRun
     // rvbbit.synth(…) is a text-to-SQL source returning one jsonb column per row;
     // expand those into real grid columns like a pipeline (but it isn't wrapped and
     // has no Steps tab).
@@ -636,6 +690,14 @@ export function DataGridWindow({
             : undefined
         setIsPipelineRun(isPipeline)
         setRunState({ kind: "done", result: finalResult })
+        // Remember this run's per-statement columns (with pg provenance) so the
+        // next cross-filter re-run can wrap {ref}/subquery/JOIN tiles by their
+        // output column — keyed by the compiled SQL they belong to (see stmtCols
+        // gate above). Only meaningful for a true multi-statement run.
+        lastStmtColsRef.current =
+          !isPipeline && finalResult.results && finalResult.results.length > 1
+            ? { sql: compiledRun, cols: finalResult.results.map((r) => r.columns) }
+            : null
         // Record the compiled SQL that just succeeded, so the auto-rerun
         // effect treats *this* as the baseline (not the unfiltered first
         // render).
@@ -675,7 +737,68 @@ export function DataGridWindow({
     } finally {
       if (runControlRef.current?.token === cancelToken) runControlRef.current = null
     }
-  }, [activeConnectionId, activeTab, allWindows, blockName, onChangePayload, params, subscriptions, w.id, targetDb, txnSessionId])
+  }, [activeConnectionId, activeTab, allWindows, blockName, onChangePayload, params, subscriptions, w.id, targetDb, txnSessionId, schema])
+
+  // Keep the ref in sync so runSql reads the latest cross-filters without a dep.
+  useEffect(() => {
+    crossFiltersRef.current = crossFilters
+  }, [crossFilters])
+
+
+  // Click a tile cell → toggle a block-local cross-filter on that column's REAL
+  // source table (pg provenance). An expression column (no provenance) is a no-op.
+  const crossFilterKey = (x: CrossFilter) => `${x.sourceSchema ?? ""}.${x.sourceTable}.${x.column}`.toLowerCase()
+  const onCellFilter = useCallback((column: QueryResultColumn, value: unknown, stmtIndex: number) => {
+    if (!column.sourceTable || !column.sourceColumn) return
+    // Equality on a jsonb/array cell isn't meaningful — skip non-scalars (null is OK → IS NULL).
+    if (value !== null && typeof value === "object") return
+    const next: CrossFilter = {
+      sourceSchema: column.sourceSchema,
+      sourceTable: column.sourceTable,
+      column: column.sourceColumn,
+      value,
+      operator: "eq",
+      // The clicked statement is excluded from this filter (no self-filter).
+      sourceStmtIndex: stmtIndex,
+    }
+    const k = `${next.sourceSchema ?? ""}.${next.sourceTable}.${next.column}`.toLowerCase()
+    setCrossFilters((prev) => {
+      const existing = prev.find((p) => `${p.sourceSchema ?? ""}.${p.sourceTable}.${p.column}`.toLowerCase() === k)
+      // Re-click the same value → toggle off; else set/replace this column's filter.
+      if (existing && sameParamValue(existing.value, value)) {
+        return prev.filter((p) => `${p.sourceSchema ?? ""}.${p.sourceTable}.${p.column}`.toLowerCase() !== k)
+      }
+      return [...prev.filter((p) => `${p.sourceSchema ?? ""}.${p.sourceTable}.${p.column}`.toLowerCase() !== k), next]
+    })
+  }, [])
+
+  // Click a chart mark (bar/point) in a tile → cross-filter, mirroring the chart's
+  // point-selection set (SET semantics, not the grid's toggle): the selection is the
+  // source of truth, so we REPLACE this column's filter with it — empty selection
+  // clears. Same parity as the single-block chart → global-param path.
+  const onChartFilter = useCallback((column: QueryResultColumn, values: unknown[], stmtIndex: number) => {
+    const sourceTable = column.sourceTable
+    const sourceColumn = column.sourceColumn
+    if (!sourceTable || !sourceColumn) return
+    const sourceSchema = column.sourceSchema
+    const scalars = values.filter((v) => v === null || typeof v !== "object")
+    const k = `${sourceSchema ?? ""}.${sourceTable}.${sourceColumn}`.toLowerCase()
+    setCrossFilters((prev) => {
+      const without = prev.filter((p) => `${p.sourceSchema ?? ""}.${p.sourceTable}.${p.column}`.toLowerCase() !== k)
+      if (scalars.length === 0) return without
+      return [
+        ...without,
+        {
+          sourceSchema,
+          sourceTable,
+          column: sourceColumn,
+          value: scalars.length === 1 ? scalars[0] : scalars,
+          operator: scalars.length === 1 ? "eq" : "in",
+          sourceStmtIndex: stmtIndex,
+        },
+      ]
+    })
+  }, [])
 
   // Commit or roll back the open manual transaction.
   const endTxn = useCallback(
@@ -845,8 +968,16 @@ export function DataGridWindow({
   }, [activeConnectionId, askModel, runSql])
 
   const onRun = useCallback(() => {
-    if (queryMode === "ask") void runAsk(askDraft)
-    else void runSql(draftSql || payload.sql, true)
+    if (queryMode === "ask") return void runAsk(askDraft)
+    // A manual run of EDITED SQL invalidates the block-local cross-filters: their
+    // POSITIONAL sourceStmtIndex is tied to the previous statement order, so after an
+    // edit that inserts/removes/reorders statements they would spare/filter the wrong
+    // sibling. Drop them (ref first, so THIS run executes unfiltered, no stale flash).
+    if (crossFiltersRef.current.length > 0 && (draftSql || payload.sql).trim() !== (payload.sql ?? "").trim()) {
+      crossFiltersRef.current = []
+      setCrossFilters([])
+    }
+    void runSql(draftSql || payload.sql, true)
   }, [queryMode, askDraft, draftSql, payload.sql, runAsk, runSql])
 
   // Lazily load per-step rowsets for the Steps inspector when that tab opens.
@@ -958,10 +1089,11 @@ export function DataGridWindow({
             : win,
         ),
         params,
+        schema,
       )
       return graph.blocks.get(w.id)?.compiledSql ?? trimmed
     },
-    [allWindows, blockName, params, subscriptions, w.id],
+    [allWindows, blockName, params, subscriptions, w.id, schema],
   )
 
   // `silent` keeps the current graph on screen while re-planning (used
@@ -1193,6 +1325,17 @@ export function DataGridWindow({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [targetDb])
 
+  // Re-run with the new cross-filters injected when they change (skips mount).
+  const prevCrossRef = useRef(crossFilters)
+  useEffect(() => {
+    if (prevCrossRef.current === crossFilters) return
+    prevCrossRef.current = crossFilters
+    if (queryMode === "sql" && (runState.kind === "done" || runState.kind === "error")) {
+      void runSql(draftSql || payload.sql)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [crossFilters])
+
   // Databases on this server, for the per-window target-db switcher.
   useEffect(() => {
     if (!activeConnectionId) return
@@ -1263,6 +1406,53 @@ export function DataGridWindow({
   const arrangeMode = !!multiResults && payload.statementLayout?.mode === "arrange"
   const error = runState.kind === "error" ? runState : null
   const isRunning = runState.kind === "running"
+  // The RAW (pre-filter) statement texts, by index, so the transcript/arrange key
+  // per-statement views + tile layout on the SOURCE statement — stable while a
+  // cross-filter/broadcast rewrites the executed SQL (else the layout would reset
+  // on every filter). Content-bearing fragments only, to align with PG's results.
+  const sourceStatements = useMemo(
+    () => splitStatements(payload.sql ?? "").filter((sgmt) => sgmt.replace(/--[^\n]*|\/\*[\s\S]*?\*\//g, "").trim().length > 0),
+    [payload.sql],
+  )
+
+  // DEV test handle: register this block so a Playwright harness can drive a
+  // cross-filter without a real cell click (drag/click are hard to automate). No-op
+  // in prod. `xfilterByName` finds the named output column (with provenance) on the
+  // requested statement and calls onCellFilter exactly as a cell click would.
+  useEffect(() => {
+    if (process.env.NODE_ENV === "production") return
+    const g = globalThis as unknown as { __rvbbitBlocks?: Record<string, unknown> }
+    const reg = (g.__rvbbitBlocks ??= {})
+    reg[w.id] = {
+      name: blockName,
+      runKind: () => runState.kind,
+      compiledSql: () => compiledSql,
+      keys: () => (result?.results ? statementKeys(result.results, sourceStatements) : null),
+      statements: () => result?.results?.map((r) => ({ cols: r.columns.map((c) => c.name), rows: r.rows.length })) ?? null,
+      crossFilters: () => crossFiltersRef.current,
+      xfilterByName: (colName: string, value: unknown, stmtIdx = 0) => {
+        const cols = result?.results?.[stmtIdx]?.columns ?? result?.columns ?? []
+        const col = cols.find((c) => c.name === colName)
+        if (!col) return `no column ${colName}`
+        onCellFilter(col, value, stmtIdx)
+        return `ok: ${col.sourceTable ?? "?"}.${col.sourceColumn ?? "?"}`
+      },
+      chartFilter: (colName: string, values: unknown[], stmtIdx = 0) => {
+        const cols = result?.results?.[stmtIdx]?.columns ?? result?.columns ?? []
+        const col = cols.find((c) => c.name === colName)
+        if (!col) return `no column ${colName}`
+        onChartFilter(col, values, stmtIdx)
+        return `ok: ${col.sourceTable ?? "?"}.${col.sourceColumn ?? "?"}`
+      },
+      setView: (stmtIdx: number, kind: string) => {
+        const ks = result?.results ? statementKeys(result.results, sourceStatements) : null
+        if (!ks?.[stmtIdx]) return "no key"
+        onChangePayload((p) => ({ ...p, statementViews: { ...(p.statementViews ?? {}), [ks[stmtIdx]]: kind as never } }))
+        return "ok"
+      },
+    }
+    return () => { delete reg[w.id] }
+  }, [w.id, blockName, result, runState.kind, onCellFilter, onChartFilter, onChangePayload, sourceStatements, compiledSql])
 
   // Live progress while a query runs — polled from a SEPARATE connection so we
   // can see it (the main connection is blocked). pg_stat_activity gives
@@ -1631,39 +1821,79 @@ export function DataGridWindow({
         <div className="min-h-0 flex-1 overflow-hidden">
           {bodyTab === "rows" && result ? (
             multiResults ? (
-              // key by run nonce → remount each run so a prior expand/collapse and
-              // any child-grid sort/filter don't bleed onto the next run's rows.
-              // Per-card view picks + the arrange layout live in the payload, so
-              // they survive the remount.
-              arrangeMode ? (
-                <ArrangeGrid
-                  key={runEpoch}
-                  results={multiResults}
-                  views={payload.statementViews}
-                  onSetView={(viewKey, kind) =>
-                    onChangePayload((p) => ({
-                      ...p,
-                      statementViews: { ...(p.statementViews ?? {}), [viewKey]: kind },
-                    }))
-                  }
-                  layout={payload.statementLayout}
-                  onChangeLayout={(mut) =>
-                    onChangePayload((p) => ({ ...p, statementLayout: mut(p.statementLayout ?? {}) }))
-                  }
-                />
-              ) : (
-                <ResultTranscript
-                  key={runEpoch}
-                  results={multiResults}
-                  views={payload.statementViews}
-                  onSetView={(viewKey, kind) =>
-                    onChangePayload((p) => ({
-                      ...p,
-                      statementViews: { ...(p.statementViews ?? {}), [viewKey]: kind },
-                    }))
-                  }
-                />
-              )
+              <div className="flex h-full flex-col">
+                {crossFilters.length > 0 ? (
+                  <div className="flex shrink-0 flex-wrap items-center gap-1.5 border-b border-chrome-border/60 bg-chrome-bg/40 px-2 py-1 text-[10px]">
+                    <span className="shrink-0 text-chrome-text/50">Filtering</span>
+                    {crossFilters.map((f) => (
+                      <span
+                        key={crossFilterKey(f)}
+                        className="inline-flex items-center gap-1 rounded-full border border-rvbbit-accent/40 bg-rvbbit-accent/10 px-1.5 py-0.5 text-rvbbit-accent"
+                      >
+                        <span className="font-mono">{`${f.sourceTable}.${f.column} = ${shortParamValue(f.value)}`}</span>
+                        <button
+                          type="button"
+                          title="Remove filter"
+                          onClick={() =>
+                            setCrossFilters((prev) => prev.filter((p) => crossFilterKey(p) !== crossFilterKey(f)))
+                          }
+                          className="hover:text-foreground"
+                        >
+                          ×
+                        </button>
+                      </span>
+                    ))}
+                    <button
+                      type="button"
+                      onClick={() => setCrossFilters([])}
+                      className="shrink-0 text-chrome-text/45 hover:text-foreground"
+                    >
+                      clear all
+                    </button>
+                  </div>
+                ) : null}
+                {/* key by run nonce → remount each run; per-card views + layout live
+                    in the payload, so they survive the remount. */}
+                <div className="min-h-0 flex-1">
+                  {arrangeMode ? (
+                    <ArrangeGrid
+                      key={runEpoch}
+                      results={multiResults}
+                      views={payload.statementViews}
+                      onSetView={(viewKey, kind) =>
+                        onChangePayload((p) => ({
+                          ...p,
+                          statementViews: { ...(p.statementViews ?? {}), [viewKey]: kind },
+                        }))
+                      }
+                      layout={payload.statementLayout}
+                      onChangeLayout={(mut) =>
+                        onChangePayload((p) => ({ ...p, statementLayout: mut(p.statementLayout ?? {}) }))
+                      }
+                      onCellFilter={onCellFilter}
+                      onChartFilter={onChartFilter}
+                      crossFilters={crossFilters}
+                      sourceStatements={sourceStatements}
+                    />
+                  ) : (
+                    <ResultTranscript
+                      key={runEpoch}
+                      results={multiResults}
+                      sourceStatements={sourceStatements}
+                      views={payload.statementViews}
+                      onSetView={(viewKey, kind) =>
+                        onChangePayload((p) => ({
+                          ...p,
+                          statementViews: { ...(p.statementViews ?? {}), [viewKey]: kind },
+                        }))
+                      }
+                      onCellFilter={onCellFilter}
+                      onChartFilter={onChartFilter}
+                      crossFilters={crossFilters}
+                    />
+                  )}
+                </div>
+              </div>
             ) : result.rows.length === 1 && result.columns.length === 1 ? (
               <SingleCellCallout
                 column={result.columns[0]}
@@ -1685,7 +1915,7 @@ export function DataGridWindow({
                     selectedColumn: column.name,
                   })
                 }}
-                onEmitCellParam={(field, value, dataTypeId, operator, cascade) => {
+                onEmitCellParam={(field, value, dataTypeId, operator, cascade, source) => {
                   onEmitParam({
                     sourceWindowId: w.id,
                     sourceBlockName: blockName,
@@ -1695,6 +1925,9 @@ export function DataGridWindow({
                     operator: operator ?? "eq",
                     cascade,
                     dataTypeId,
+                    sourceSchema: source?.schema,
+                    sourceTable: source?.table,
+                    sourceColumn: source?.column,
                   })
                 }}
               />

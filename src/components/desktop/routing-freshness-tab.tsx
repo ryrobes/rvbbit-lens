@@ -1,6 +1,6 @@
 "use client"
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import { useCallback, useEffect, useMemo, useState } from "react"
 import {
   Activity,
   AlertTriangle,
@@ -42,11 +42,21 @@ interface Props {
   activeConnectionId: string | null
 }
 
+type LaneState = "fresh" | "dirty" | "catching-up" | "backoff"
+
+function isFinalLockBackoff(row: AccelFreshnessRow): boolean {
+  const error = (row.lastOperationError ?? "").toLowerCase()
+  return (
+    row.dirty &&
+    row.lastOperationStatus === "noop" &&
+    (row.lastOperationSwap === "skipped_final_lock_busy" || error.includes("final lock busy"))
+  )
+}
+
 /**
- * Freshness cockpit — the accelerator-management view of Adaptive Routing.
- * Because a stale table degrades to a correct-but-slow heap scan, this is a
- * value-vs-cost surface: see which tables are worth keeping fresh, set a
- * per-table policy, preview what the executor would do, and act.
+ * OLAP autopilot cockpit — the accelerator-management view of Adaptive Routing.
+ * A lagging accelerator is correctness-safe; this surface is about keeping the
+ * file layer useful without forcing writers to wait for maintenance.
  */
 export function RoutingFreshnessTab({ activeConnectionId }: Props) {
   const [rows, setRows] = useState<AccelFreshnessRow[]>([])
@@ -102,22 +112,25 @@ export function RoutingFreshnessTab({ activeConnectionId }: Props) {
     setBusyTable("__tick__")
     setToast(null)
     const res = await execAccel(activeConnectionId, runAccelTickSql(8))
-    setToast(res.ok ? { ok: true, msg: "ran accel_tick" } : { ok: false, msg: res.error ?? "failed" })
+    setToast(res.ok ? { ok: true, msg: "ran OLAP autopilot" } : { ok: false, msg: res.error ?? "failed" })
     setBusyTable(null)
     await load()
   }, [activeConnectionId, load])
 
   const stats = useMemo(() => {
     const dirty = rows.filter((r) => r.dirty).length
-    const wouldAct = [...plan.values()].filter((p) => p.status === "planned").length
+    const running = rows.filter((r) => r.opRunning).length
+    const backedOff = rows.filter(isFinalLockBackoff).length
+    const planned = [...plan.values()].filter((p) => p.status === "planned")
+    const wouldAct = planned.length
+    const wouldFold = planned.filter((p) => p.action === "full").length
     const automated = rows.filter((r) => r.explicit && r.strategy !== "manual" && r.active).length
-    return { total: rows.length, dirty, wouldAct, automated }
+    return { total: rows.length, dirty, running, backedOff, wouldAct, wouldFold, automated }
   }, [rows, plan])
 
   // ── Schema grouping + search (navigate schemas with 100s–1000s of tables) ──
   const [search, setSearch] = useState("")
-  const [collapsed, setCollapsed] = useState<Set<string>>(new Set())
-  const initRef = useRef(false)
+  const [collapsedOverride, setCollapsedOverride] = useState<Set<string> | null>(null)
 
   const groups = useMemo(() => {
     const q = search.trim().toLowerCase()
@@ -138,6 +151,7 @@ export function RoutingFreshnessTab({ activeConnectionId }: Props) {
       dirty: list.filter((r) => r.dirty).length,
       automated: list.filter((r) => r.explicit && r.strategy !== "manual" && r.active).length,
       running: list.filter((r) => r.opRunning).length,
+      backedOff: list.filter(isFinalLockBackoff).length,
       totalRows: list.reduce((n, r) => n + (r.parquetRows || 0), 0),
     }))
   }, [rows, search])
@@ -146,28 +160,35 @@ export function RoutingFreshnessTab({ activeConnectionId }: Props) {
 
   // Default-collapse all schemas on first load when there are many tables, so the
   // landing view is the schema list (a navigable overview) rather than a huge scroll.
-  useEffect(() => {
-    if (!loaded || initRef.current || rows.length === 0) return
-    initRef.current = true
-    if (rows.length > 40) setCollapsed(new Set(rows.map((r) => r.schema || "(none)")))
-  }, [loaded, rows])
+  const collapsed = useMemo(
+    () =>
+      collapsedOverride ??
+      (loaded && rows.length > 40
+        ? new Set(rows.map((r) => r.schema || "(none)"))
+        : new Set<string>()),
+    [collapsedOverride, loaded, rows],
+  )
 
   const toggleSchema = useCallback((schema: string) => {
-    setCollapsed((prev) => {
-      const next = new Set(prev)
-      if (next.has(schema)) next.delete(schema)
+    setCollapsedOverride((prev) => {
+      const base = prev ?? collapsed
+      const next = new Set(base)
+      if (base.has(schema)) next.delete(schema)
       else next.add(schema)
       return next
     })
-  }, [])
-  const collapseAll = useCallback(() => setCollapsed(new Set(rows.map((r) => r.schema || "(none)"))), [rows])
-  const expandAll = useCallback(() => setCollapsed(new Set()), [])
+  }, [collapsed])
+  const collapseAll = useCallback(
+    () => setCollapsedOverride(new Set(rows.map((r) => r.schema || "(none)"))),
+    [rows],
+  )
+  const expandAll = useCallback(() => setCollapsedOverride(new Set()), [])
 
   if (!loaded) {
     return (
       <div className="grid h-full place-items-center text-[12px] text-chrome-text/60">
         <span className="inline-flex items-center gap-2">
-          <RefreshCw className="h-3.5 w-3.5 animate-spin" /> loading freshness…
+          <RefreshCw className="h-3.5 w-3.5 animate-spin" /> loading OLAP maintenance…
         </span>
       </div>
     )
@@ -178,8 +199,7 @@ export function RoutingFreshnessTab({ activeConnectionId }: Props) {
       <div className="grid h-full place-items-center p-6 text-center text-[12px] text-chrome-text/60">
         <div>
           <Database className="mx-auto mb-2 h-6 w-6 text-chrome-text/30" />
-          No accelerated rvbbit tables yet. Run <span className="font-mono">rvbbit.compact()</span> on a
-          table to start.
+          No accelerated rvbbit tables yet. Create or refresh an accelerator from a table to start.
         </div>
       </div>
     )
@@ -190,16 +210,19 @@ export function RoutingFreshnessTab({ activeConnectionId }: Props) {
       {/* toolbar */}
       <div className="flex flex-wrap items-center gap-2 border-b border-chrome-border bg-chrome-bg/30 px-3 py-1.5 text-[11px]">
         <span className="inline-flex items-center gap-1.5 text-foreground">
-          <Activity className="h-3.5 w-3.5 text-rvbbit-accent" /> Freshness
+          <Activity className="h-3.5 w-3.5 text-rvbbit-accent" /> OLAP Autopilot
         </span>
         <span className="text-chrome-text/40">·</span>
         <span className="tabular-nums text-chrome-text/80">
           {stats.total} accelerated · <span className={stats.dirty ? "text-warning" : ""}>{stats.dirty} dirty</span> ·{" "}
           {stats.automated} automated
         </span>
+        {stats.running > 0 ? <span className="text-rvbbit-accent">{stats.running} catching up</span> : null}
+        {stats.backedOff > 0 ? <span className="text-warning">{stats.backedOff} backing off</span> : null}
         {stats.wouldAct > 0 ? (
           <span className="rounded-full bg-rvbbit-accent/15 px-2 py-0.5 text-rvbbit-accent">
-            tick would refresh {stats.wouldAct}
+            next tick: {stats.wouldAct}
+            {stats.wouldFold > 0 ? ` · fold ${stats.wouldFold}` : ""}
           </span>
         ) : null}
         <div className="ml-auto flex items-center gap-1.5">
@@ -207,10 +230,10 @@ export function RoutingFreshnessTab({ activeConnectionId }: Props) {
             type="button"
             disabled={busyTable === "__tick__"}
             onClick={() => void runTick()}
-            title="Run the policy-driven executor now (budget 8)"
+            title="Run the policy-driven OLAP maintenance executor now (budget 8)"
             className="inline-flex items-center gap-1 rounded bg-rvbbit-accent/15 px-2 py-1 font-medium text-rvbbit-accent hover:bg-rvbbit-accent/25 disabled:opacity-40"
           >
-            <Zap className="h-3 w-3" /> Run tick
+            <Zap className="h-3 w-3" /> Run autopilot
           </button>
           <button
             type="button"
@@ -283,6 +306,7 @@ export function RoutingFreshnessTab({ activeConnectionId }: Props) {
                     <span className="text-[10px] text-chrome-text/45">{g.count} table{g.count === 1 ? "" : "s"}</span>
                     <span className="ml-auto flex items-center gap-2.5 text-[10px] tabular-nums">
                       {g.dirty > 0 ? <span className="text-warning">{g.dirty} dirty</span> : null}
+                      {g.backedOff > 0 ? <span className="text-warning">{g.backedOff} backoff</span> : null}
                       {g.running > 0 ? (
                         <span className="inline-flex items-center gap-0.5 text-rvbbit-accent">
                           <RefreshCw className="h-2.5 w-2.5 animate-spin" />
@@ -305,15 +329,22 @@ export function RoutingFreshnessTab({ activeConnectionId }: Props) {
                             void act(
                               r.tableName,
                               kind === "full" ? accelRebuildSql(r.tableName) : accelRefreshSql(r.tableName),
-                              kind === "full" ? "full rebuild" : "delta refresh",
+                              kind === "full" ? "fold" : "refresh",
                             )
                           }
-                          onSetPolicy={(strategy, target) =>
+                          onSetPolicy={(strategy, target, maxRowGroups, maxTombstones) =>
                             void act(
                               r.tableName,
                               strategy === "manual"
                                 ? clearAccelPolicySql(r.tableName)
-                                : setAccelPolicySql(r.tableName, strategy, target),
+                                : setAccelPolicySql(
+                                    r.tableName,
+                                    strategy,
+                                    target,
+                                    maxRowGroups,
+                                    maxTombstones,
+                                    r.minIntervalSecs,
+                                  ),
                               `policy → ${strategy}`,
                             )
                           }
@@ -352,13 +383,20 @@ function FreshnessLane({
   plan: AccelTickPlanRow | null
   busy: boolean
   onRefresh: (kind: "delta" | "full") => void
-  onSetPolicy: (strategy: AccelStrategy, target: number | null) => void
+  onSetPolicy: (
+    strategy: AccelStrategy,
+    target: number | null,
+    maxRowGroups: number | null,
+    maxTombstones: number | null,
+  ) => void
   onToggleEngine: (target: string, enabled: boolean) => void
 }) {
   const rec = recommendPolicy(row)
   const recDiffers = rec.strategy !== row.strategy
   const driftPct = row.driftRatio == null ? null : Math.round(row.driftRatio * 100)
-  const state = row.opRunning ? "building" : row.dirty ? "dirty" : "fresh"
+  const state: LaneState = row.opRunning ? "catching-up" : isFinalLockBackoff(row) ? "backoff" : row.dirty ? "dirty" : "fresh"
+  const operationSummary = summarizeOperation(row)
+  const operationTitle = describeOperation(row)
   // shown under a schema group header, so drop the redundant "schema." prefix
   const displayName =
     row.schema && row.tableName.startsWith(`${row.schema}.`)
@@ -384,37 +422,43 @@ function FreshnessLane({
 
         {/* actions */}
         <div className="ml-auto flex items-center gap-1.5">
-          {plan && plan.status === "planned" ? (
+          {plan && plan.status !== "skip" ? (
             <span
               title={plan.reason}
-              className="inline-flex items-center gap-1 rounded bg-rvbbit-accent/10 px-1.5 py-0.5 text-[10px] text-rvbbit-accent"
+              className={cn(
+                "inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px]",
+                plan.status === "planned"
+                  ? "bg-rvbbit-accent/10 text-rvbbit-accent"
+                  : "bg-warning/10 text-warning",
+              )}
             >
-              <TrendingUp className="h-2.5 w-2.5" /> tick → {plan.action}
+              <TrendingUp className="h-2.5 w-2.5" /> {plan.status === "planned" ? "next" : "defer"} →{" "}
+              {plan.action === "full" ? "fold" : plan.action === "delta" ? "refresh" : plan.action}
             </span>
           ) : null}
           <button
             type="button"
             disabled={busy}
             onClick={() => onRefresh("delta")}
-            title="Incremental delta refresh (cheap — appends new row groups)"
+            title="Refresh: append the safe heap delta as new accelerator row groups"
             className="inline-flex items-center gap-1 rounded border border-chrome-border px-2 py-0.5 text-[11px] text-chrome-text/85 hover:bg-foreground/[0.06] hover:text-foreground disabled:opacity-40"
           >
-            <Zap className="h-3 w-3" /> Delta
+            <Zap className="h-3 w-3" /> Refresh
           </button>
           <button
             type="button"
             disabled={busy}
             onClick={() => onRefresh("full")}
-            title="Full rebuild from the heap (expensive — wipes & re-exports)"
+            title="Fold: consolidate accelerator files with a lagged catch-up and a polite final handoff"
             className="inline-flex items-center gap-1 rounded border border-chrome-border px-2 py-0.5 text-[11px] text-chrome-text/85 hover:bg-foreground/[0.06] hover:text-foreground disabled:opacity-40"
           >
-            <Hammer className="h-3 w-3" /> Full
+            <Hammer className="h-3 w-3" /> Fold
           </button>
         </div>
       </div>
 
       {/* metrics row */}
-      <div className="mt-2 grid grid-cols-2 gap-x-4 gap-y-1.5 sm:grid-cols-4">
+      <div className="mt-2 grid grid-cols-[repeat(auto-fit,minmax(8rem,1fr))] gap-x-4 gap-y-1.5">
         <Stat label="drift">
           <div className="flex items-center gap-1.5">
             <div className="h-1.5 w-14 overflow-hidden rounded-full bg-foreground/10">
@@ -437,10 +481,35 @@ function FreshnessLane({
             {fmtCount(row.heapSeqScans)} slow scans
           </span>
         </Stat>
+        <Stat label="fragmentation">
+          <span
+            className="tabular-nums text-chrome-text/85"
+            title="Row-group fanout and tombstones are consolidation pressure; accel_tick can fold them into a clean accelerator."
+          >
+            {fmtCount(row.rowGroups)} rg
+            {row.tombstones > 0 ? <span className="text-warning"> · {fmtCount(row.tombstones)} tomb</span> : null}
+          </span>
+        </Stat>
         <Stat label="last refresh">
           <span className="inline-flex items-center gap-1 text-chrome-text/85">
             <Clock className="h-2.5 w-2.5 text-chrome-text/45" />
             {row.lastRefreshAt ? fmtAgo(row.lastRefreshAt) : "never"}
+          </span>
+        </Stat>
+        <Stat label="last action">
+          <span
+            className={cn(
+              "inline-flex max-w-[11rem] items-center gap-1 text-chrome-text/85",
+              isFinalLockBackoff(row) && "text-warning",
+              row.lastOperationStatus === "failed" && "text-danger",
+              row.lastOperationStatus === "running" && "text-rvbbit-accent",
+            )}
+            title={operationTitle}
+          >
+            <span className="truncate">{operationSummary}</span>
+            {row.lastOperationAt ? (
+              <span className="shrink-0 text-chrome-text/45">· {fmtAgo(row.lastOperationAt)}</span>
+            ) : null}
           </span>
         </Stat>
         <Stat label="rebuild cost">
@@ -464,6 +533,8 @@ function FreshnessLane({
             onSetPolicy(
               e.target.value as AccelStrategy,
               e.target.value === "target" ? (row.targetSecs ?? 300) : null,
+              row.maxRowGroupsBeforeRebuild,
+              row.maxTombstonesBeforeRebuild,
             )
           }
           className="h-6 rounded border border-chrome-border bg-secondary-background px-1.5 text-[11px] text-foreground outline-none focus:ring-2 focus:ring-ring disabled:opacity-40"
@@ -479,16 +550,65 @@ function FreshnessLane({
             key={row.targetSecs ?? 300}
             seconds={row.targetSecs ?? 300}
             disabled={busy}
-            onCommit={(secs) => onSetPolicy("target", secs)}
+            onCommit={(secs) =>
+              onSetPolicy(
+                "target",
+                secs,
+                row.maxRowGroupsBeforeRebuild,
+                row.maxTombstonesBeforeRebuild,
+              )
+            }
           />
         ) : null}
         {!row.explicit ? <span className="text-[10px] text-chrome-text/40">(default)</span> : null}
+
+        {row.strategy !== "manual" ? (
+          <span className="inline-flex flex-wrap items-center gap-1 text-[10px] text-chrome-text/55">
+            fold at
+            <ThresholdEditor
+              key={`rg-${row.maxRowGroupsBeforeRebuild ?? "off"}`}
+              label="row groups"
+              value={row.maxRowGroupsBeforeRebuild}
+              disabled={busy}
+              onCommit={(value) =>
+                onSetPolicy(
+                  row.strategy,
+                  row.strategy === "target" ? row.targetSecs : null,
+                  value,
+                  row.maxTombstonesBeforeRebuild,
+                )
+              }
+            />
+            or
+            <ThresholdEditor
+              key={`tomb-${row.maxTombstonesBeforeRebuild ?? "off"}`}
+              label="tombstones"
+              value={row.maxTombstonesBeforeRebuild}
+              disabled={busy}
+              onCommit={(value) =>
+                onSetPolicy(
+                  row.strategy,
+                  row.strategy === "target" ? row.targetSecs : null,
+                  row.maxRowGroupsBeforeRebuild,
+                  value,
+                )
+              }
+            />
+          </span>
+        ) : null}
 
         {recDiffers ? (
           <button
             type="button"
             disabled={busy}
-            onClick={() => onSetPolicy(rec.strategy, rec.targetSecs)}
+            onClick={() =>
+              onSetPolicy(
+                rec.strategy,
+                rec.targetSecs,
+                row.maxRowGroupsBeforeRebuild,
+                row.maxTombstonesBeforeRebuild,
+              )
+            }
             title={rec.why}
             className="ml-auto inline-flex items-center gap-1 rounded bg-rvbbit-accent/10 px-2 py-0.5 text-[10px] text-rvbbit-accent hover:bg-rvbbit-accent/20 disabled:opacity-40"
           >
@@ -563,10 +683,58 @@ function EngineChip({
   )
 }
 
-function StateChip({ state, secondsDirty }: { state: string; secondsDirty: number | null }) {
+function operationName(op: string | null): string {
+  switch (op) {
+    case "refresh_acceleration":
+      return "refresh"
+    case "rebuild_acceleration":
+      return "fold"
+    case "compact_acceleration":
+      return "compact"
+    case "legacy_compact":
+      return "legacy compact"
+    default:
+      return op ? op.replace(/_/g, " ") : "none"
+  }
+}
+
+function summarizeOperation(row: AccelFreshnessRow): string {
+  if (!row.lastOperation) return "none"
+  const op = operationName(row.lastOperation)
+  if (isFinalLockBackoff(row)) return `${op} backed off`
+  if (row.lastOperationStatus === "running") return `${op} running`
+  if (row.lastOperationStatus === "failed") return `${op} failed`
+  if (row.lastOperationStatus === "noop") return `${op} no-op`
+  if (row.lastOperationStatus === "ok" && row.lastOperation === "rebuild_acceleration" && (row.lastCatchupRows ?? 0) > 0) {
+    return `${op} + ${fmtCount(row.lastCatchupRows ?? 0)} catch-up`
+  }
+  return row.lastOperationStatus ? `${op} ${row.lastOperationStatus}` : op
+}
+
+function describeOperation(row: AccelFreshnessRow): string {
+  if (!row.lastOperation) return "No accelerator operation history"
+  const parts = [operationName(row.lastOperation)]
+  if (row.lastOperationStatus) parts.push(`status ${row.lastOperationStatus}`)
+  if (row.lastOperationSwap) parts.push(`swap ${row.lastOperationSwap}`)
+  if (row.lastRowsWritten != null) parts.push(`${fmtCount(row.lastRowsWritten)} rows written`)
+  if (row.lastCatchupRows != null && row.lastCatchupRows > 0) parts.push(`${fmtCount(row.lastCatchupRows)} catch-up rows`)
+  if (row.lastRemappedTombstones != null && row.lastRemappedTombstones > 0) {
+    parts.push(`${fmtCount(row.lastRemappedTombstones)} tombstones remapped`)
+  }
+  if (row.lastFinalLockAttempts != null) parts.push(`${fmtCount(row.lastFinalLockAttempts)} final-lock attempts`)
+  if (row.lastQueuedOrphanFiles != null && row.lastQueuedOrphanFiles > 0) {
+    parts.push(`${fmtCount(row.lastQueuedOrphanFiles)} files queued for cleanup`)
+  }
+  if (row.lastOperationError) parts.push(row.lastOperationError)
+  return parts.join(" · ")
+}
+
+function StateChip({ state, secondsDirty }: { state: LaneState; secondsDirty: number | null }) {
   const cfg =
-    state === "building"
-      ? { cls: "bg-info/15 text-info", dot: "animate-pulse bg-info", label: "building" }
+    state === "catching-up"
+      ? { cls: "bg-info/15 text-info", dot: "animate-pulse bg-info", label: "catching up" }
+      : state === "backoff"
+        ? { cls: "bg-warning/15 text-warning", dot: "animate-pulse bg-warning", label: "lagging" }
       : state === "dirty"
         ? { cls: "bg-warning/15 text-warning", dot: "bg-warning", label: "dirty" }
         : { cls: "bg-success/15 text-success", dot: "bg-success", label: "fresh" }
@@ -574,7 +742,7 @@ function StateChip({ state, secondsDirty }: { state: string; secondsDirty: numbe
     <span className={cn("inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-[10px]", cfg.cls)}>
       <span className={cn("h-1.5 w-1.5 rounded-full", cfg.dot)} />
       {cfg.label}
-      {state === "dirty" && secondsDirty != null && secondsDirty >= 1 ? (
+      {(state === "dirty" || state === "backoff") && secondsDirty != null && secondsDirty >= 1 ? (
         <span className="text-warning/70"> {fmtDur(secondsDirty)}</span>
       ) : null}
     </span>
@@ -616,6 +784,41 @@ function TargetEditor({
         className="h-6 w-14 rounded border border-chrome-border bg-secondary-background px-1.5 text-right text-[11px] tabular-nums text-foreground outline-none focus:ring-2 focus:ring-ring disabled:opacity-40"
       />
       s
+    </span>
+  )
+}
+
+function ThresholdEditor({
+  label,
+  value,
+  disabled,
+  onCommit,
+}: {
+  label: string
+  value: number | null
+  disabled: boolean
+  onCommit: (value: number | null) => void
+}) {
+  const [val, setVal] = useState(value == null ? "" : String(value))
+  return (
+    <span className="inline-flex items-center gap-1 rounded border border-chrome-border/70 bg-secondary-background/60 px-1.5 py-0.5">
+      <input
+        value={val}
+        disabled={disabled}
+        inputMode="numeric"
+        aria-label={`fold threshold ${label}`}
+        placeholder="off"
+        onChange={(e) => setVal(e.target.value.replace(/[^\d]/g, ""))}
+        onBlur={() => {
+          const next = val.trim() === "" ? null : Math.max(1, Math.floor(Number(val)))
+          if (next !== value) onCommit(next)
+        }}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") e.currentTarget.blur()
+        }}
+        className="h-5 w-12 bg-transparent text-right text-[10px] tabular-nums text-foreground outline-none placeholder:text-chrome-text/35 disabled:opacity-40"
+      />
+      <span>{label}</span>
     </span>
   )
 }

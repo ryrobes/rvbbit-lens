@@ -5,6 +5,7 @@ import { useVirtualizer } from "@tanstack/react-virtual"
 import { ClipboardCopy, Eye, GripVertical, Search, Table2 } from "@/lib/icons"
 import type { QueryResultColumn } from "@/lib/db/types"
 import type { DesktopColumnDragPayload, DesktopColumnRef, DesktopParamValue } from "@/lib/desktop/types"
+import type { CrossFilter } from "@/lib/desktop/reactive-sql"
 import { cn } from "@/lib/utils"
 import { formatCellValue } from "@/lib/sql/format"
 import { setActiveColumnDragSource, writeColumnDragPayload } from "@/lib/desktop/column-drag"
@@ -36,6 +37,9 @@ interface ResultGridProps {
     dataTypeId: number,
     operator?: "eq" | "in",
     cascade?: boolean,
+    /** The clicked column's real source table+column (pg provenance), so the
+     *  emitted param can broadcast to other blocks that read the same table. */
+    source?: { schema?: string; table?: string; column?: string },
   ) => void
   /** Params sourced from THIS block — used to highlight the cells that are the
    *  live filter (cascade) or a published pick value. */
@@ -45,6 +49,14 @@ interface ResultGridProps {
     rowIndex: number
     column: QueryResultColumn
   }) => void
+  /** Cross-filter: a plain cell click hands back the whole COLUMN (with its
+   *  source-table provenance) + value, so a multi-statement dashboard can filter
+   *  sibling tiles by the real table. Takes precedence over onEmitCellParam. */
+  onCellFilter?: (column: QueryResultColumn, value: unknown) => void
+  /** Active cross-filters that ORIGINATED in this tile — highlight the cells whose
+   *  value is selected (the tile isn't filtered by its own filter, so this is the
+   *  visible "you clicked this" indicator, mirroring single-block param highlighting). */
+  highlightFilters?: CrossFilter[]
 }
 
 const ROW_HEIGHT = 24
@@ -58,6 +70,8 @@ export function ResultGrid({
   onEmitCellParam,
   activeParams,
   onOpenRow,
+  onCellFilter,
+  highlightFilters,
 }: ResultGridProps) {
   const parentRef = useRef<HTMLDivElement>(null)
   const [colWidths, setColWidths] = useState<Record<string, number>>({})
@@ -89,6 +103,27 @@ export function ResultGrid({
     }
     return map
   }, [activeParams])
+
+  // Cross-filter highlights, keyed by grid-column NAME, matched to a filter by pg
+  // provenance (the filter carries the REAL source column, the grid column may be
+  // aliased). The originating tile isn't filtered by its own filter, so this marks
+  // what was clicked — the visible selection that survives the re-run remount.
+  const crossHighlights = useMemo(() => {
+    const map = new Map<string, Set<string>>()
+    if (!highlightFilters?.length) return map
+    for (const c of columns) {
+      if (!c.sourceColumn) continue
+      const f = highlightFilters.find(
+        (hf) =>
+          hf.column.toLowerCase() === c.sourceColumn!.toLowerCase() &&
+          (!hf.sourceTable || !c.sourceTable || hf.sourceTable.toLowerCase() === c.sourceTable.toLowerCase()),
+      )
+      if (!f) continue
+      const vals = (Array.isArray(f.value) ? f.value : [f.value]).map((v) => String(v))
+      map.set(c.name, new Set(vals))
+    }
+    return map
+  }, [highlightFilters, columns])
 
   function onHeaderDragStart(e: React.DragEvent<HTMLDivElement>, name: string) {
     if (!columnDragSource || present) return
@@ -342,10 +377,19 @@ export function ResultGrid({
                 const isNumeric = isNumericType(c)
                 const hl = paramHighlights.get(c.name)
                 const picked = hl ? hl.values.has(String(value)) : false
+                const crossPicked = crossHighlights.get(c.name)?.has(String(value)) ?? false
                 return (
                   <div
                     key={c.name}
                     onClick={(e) => {
+                      // Cross-filter (multi-statement dashboard): a click filters
+                      // sibling tiles by this column's real source table.
+                      if (onCellFilter) {
+                        e.preventDefault()
+                        e.stopPropagation()
+                        onCellFilter(c, value)
+                        return
+                      }
                       // Left-click → "pick": toggle this value into a multi-select
                       // IN set. It highlights + publishes to the shelf but does
                       // NOT filter this grid — drag the chip onto a target to bind.
@@ -355,24 +399,31 @@ export function ResultGrid({
                       e.preventDefault()
                       e.stopPropagation()
                       const cascade = e.metaKey || e.ctrlKey
-                      onEmitCellParam(c.name, value, c.dataTypeId, "in", cascade)
+                      onEmitCellParam(c.name, value, c.dataTypeId, "in", cascade, {
+                        schema: c.sourceSchema,
+                        table: c.sourceTable,
+                        column: c.sourceColumn,
+                      })
                     }}
                     onContextMenu={(e) => openCellContextMenu(e, row, rows.indexOf(row), c)}
                     className={cn(
                       "truncate border-r border-chrome-border/30 px-2 py-0.5 text-[12px]",
                       isNumeric ? "text-right tabular-nums" : "text-left",
                       value == null ? "text-chrome-text/40 italic" : "text-foreground",
-                      onEmitCellParam && "cursor-pointer hover:bg-main/10",
+                      (onEmitCellParam || onCellFilter) && "cursor-pointer hover:bg-main/10",
                       picked &&
                         (hl!.cascade
                           ? "bg-main/25 text-foreground"
                           : "bg-main/15 text-foreground ring-1 ring-inset ring-main/55"),
+                      crossPicked && "bg-rvbbit-accent/20 text-foreground ring-1 ring-inset ring-rvbbit-accent/60",
                     )}
                     style={{ width: columnWidths[ci] }}
                     title={
-                      onEmitCellParam
-                        ? `${value == null ? "null" : String(formatCellValue(value))} — click to select · ⌘ filter`
-                        : value == null ? "null" : String(formatCellValue(value))
+                      onCellFilter
+                        ? `${value == null ? "null" : String(formatCellValue(value))} — click to filter the dashboard`
+                        : onEmitCellParam
+                          ? `${value == null ? "null" : String(formatCellValue(value))} — click to select · ⌘ filter`
+                          : value == null ? "null" : String(formatCellValue(value))
                     }
                   >
                     {value == null ? "∅" : formatCellValue(value)}

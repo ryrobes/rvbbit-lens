@@ -329,6 +329,15 @@ export interface DesktopParamValue {
   value: unknown
   dataTypeId?: number
   type?: string
+  /** When true, the compiler auto-applies this param to EVERY block that safely
+   *  references its source table (Tier-2 broadcast) — not just the source/explicit
+   *  subscribers. OFF by default; needs sourceTable/sourceColumn (pg provenance). */
+  broadcast?: boolean
+  /** The clicked value's REAL source table+column (pg field tableID/columnID),
+   *  so broadcast can target the right table. Absent for expression columns. */
+  sourceSchema?: string
+  sourceTable?: string
+  sourceColumn?: string
   updatedAt: string
 }
 

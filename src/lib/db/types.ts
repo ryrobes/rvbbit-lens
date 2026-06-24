@@ -89,6 +89,13 @@ export interface QueryResultColumn {
   name: string
   dataTypeId: number
   dataTypeName?: string
+  /** Provenance from the driver's per-field tableID/columnID (the real base
+   *  table+column this output column came from), resolved to names. Absent for
+   *  computed/expression columns (no single source). Powers cross-filtering:
+   *  clicking a value filters sibling queries that read the SAME table. */
+  sourceSchema?: string
+  sourceTable?: string
+  sourceColumn?: string
 }
 
 export interface QueryResult {

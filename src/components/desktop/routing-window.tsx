@@ -62,7 +62,7 @@ const REFRESH_OPTIONS_MS = [
 type TabKey = "flow" | "freshness" | "overlay" | "explain" | "autotrain"
 const TABS: { key: TabKey; label: string }[] = [
   { key: "flow", label: "Flow" },
-  { key: "freshness", label: "Freshness" },
+  { key: "freshness", label: "OLAP Maint" },
   { key: "overlay", label: "Overlay" },
   { key: "explain", label: "Explain" },
   { key: "autotrain", label: "Auto-Train" },

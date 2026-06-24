@@ -1,10 +1,12 @@
 "use client"
 
-import { useMemo, useState } from "react"
+import { useCallback, useMemo, useState } from "react"
 import { VegaEmbed } from "react-vega"
+import type { Result as VegaEmbedResult } from "vega-embed"
 import { BarChart3, ChevronDown, ChevronRight, Hash, LineChart, Table2 } from "@/lib/icons"
 import type { QueryResultColumn, StatementResult } from "@/lib/db/types"
 import type { StatementViewKind } from "@/lib/desktop/types"
+import type { CrossFilter } from "@/lib/desktop/reactive-sql"
 import { classifyColumn, inferChartSpec } from "@/lib/desktop/chart-infer"
 import { vegaConfigFromTheme } from "@/lib/desktop/chart-theme"
 import { formatCellValue } from "@/lib/sql/format"
@@ -34,11 +36,14 @@ const VIEW_BUTTONS: { kind: StatementViewKind; icon: React.ComponentType<{ class
 ]
 
 /** Stable key for a statement's view override — a hash of its normalized text, so
- *  an override follows the statement across reorder and resets if it's rewritten.
- *  Falls back to position when the statement couldn't be labeled. */
-export function statementViewKey(s: StatementResult): string {
-  if (!s.sql) return `idx:${s.index}`
-  const norm = s.sql.toLowerCase().replace(/\s+/g, " ").trim()
+ *  an override follows the statement across reorder. We hash the SOURCE statement
+ *  (pre-filter) when available so the key is STABLE while a cross-filter/broadcast
+ *  rewrites the executed SQL — otherwise the view + tile layout would reset on every
+ *  filter. Falls back to the executed text, then position. */
+export function statementViewKey(s: StatementResult, sourceText?: string): string {
+  const text = sourceText ?? s.sql
+  if (!text) return `idx:${s.index}`
+  const norm = text.toLowerCase().replace(/\s+/g, " ").trim()
   let h = 5381
   for (let i = 0; i < norm.length; i++) h = ((h << 5) + h + norm.charCodeAt(i)) | 0
   return (h >>> 0).toString(36)
@@ -48,10 +53,10 @@ export function statementViewKey(s: StatementResult): string {
  *  and statementLayout, so a tile's view + slot + span always appear/disappear
  *  together. Identical statements get an occurrence suffix (#N) so they stay
  *  distinct. keys[i] corresponds to results[i]. */
-export function statementKeys(results: StatementResult[]): string[] {
+export function statementKeys(results: StatementResult[], sourceStatements?: string[]): string[] {
   const seen = new Map<string, number>()
   return results.map((s) => {
-    const base = statementViewKey(s)
+    const base = statementViewKey(s, sourceStatements?.[s.index])
     const n = seen.get(base) ?? 0
     seen.set(base, n + 1)
     return n === 0 ? base : `${base}#${n}`
@@ -127,11 +132,26 @@ export function ResultTranscript({
   results,
   views,
   onSetView,
+  onCellFilter,
+  onChartFilter,
+  crossFilters,
+  sourceStatements,
 }: {
   results: StatementResult[]
   /** Per-statement view overrides, keyed by statementKeys. */
   views?: Record<string, StatementViewKind>
   onSetView?: (key: string, kind: StatementViewKind) => void
+  /** Click a grid cell to cross-filter sibling statements by its source table.
+   *  `stmtIndex` is the clicked statement so it can be excluded (no self-filter). */
+  onCellFilter?: (column: QueryResultColumn, value: unknown, stmtIndex: number) => void
+  /** Click a chart mark → cross-filter, mirroring the point-selection SET. */
+  onChartFilter?: (column: QueryResultColumn, values: unknown[], stmtIndex: number) => void
+  /** Active block-local cross-filters — each tile highlights the value(s) clicked IN
+   *  it (so the selection stays visible after the re-run remount). */
+  crossFilters?: CrossFilter[]
+  /** Pre-filter statement texts (by index) for STABLE view/layout keys across a
+   *  cross-filter/broadcast rewrite. */
+  sourceStatements?: string[]
 }) {
   // Expand/collapse is a delta on the per-card default (has-grid → open). View
   // kind lives in `views` (the payload) so it survives the per-run remount.
@@ -144,7 +164,7 @@ export function ResultTranscript({
       return next
     })
 
-  const keys = useMemo(() => statementKeys(results), [results])
+  const keys = useMemo(() => statementKeys(results, sourceStatements), [results, sourceStatements])
 
   return (
     <div className="flex h-full flex-col gap-1.5 overflow-y-auto bg-doc-bg p-1.5">
@@ -189,7 +209,15 @@ export function ResultTranscript({
                     {s.sql}
                   </pre>
                 ) : null}
-                <CardBody s={s} kind={hasGrid ? kind : "table"} hasGrid={hasGrid} emptySelect={emptySelect} />
+                <CardBody
+                  s={s}
+                  kind={hasGrid ? kind : "table"}
+                  hasGrid={hasGrid}
+                  emptySelect={emptySelect}
+                  onCellFilter={onCellFilter ? (c, v) => onCellFilter(c, v, s.index) : undefined}
+                  onChartFilter={onChartFilter ? (c, v) => onChartFilter(c, v, s.index) : undefined}
+                  highlightFilters={crossFilters?.filter((f) => f.sourceStmtIndex === s.index)}
+                />
               </div>
             ) : null}
           </div>
@@ -207,12 +235,19 @@ export function CardBody({
   hasGrid,
   emptySelect,
   fill,
+  onCellFilter,
+  onChartFilter,
+  highlightFilters,
 }: {
   s: StatementResult
   kind: StatementViewKind
   hasGrid: boolean
   emptySelect: boolean
   fill?: boolean
+  onCellFilter?: (column: QueryResultColumn, value: unknown) => void
+  onChartFilter?: (column: QueryResultColumn, values: unknown[]) => void
+  /** Cross-filters that ORIGINATED in this tile — highlight their value(s). */
+  highlightFilters?: CrossFilter[]
 }) {
   if (!hasGrid) {
     return emptySelect ? (
@@ -227,11 +262,13 @@ export function CardBody({
     )
   }
   if (kind === "bar" || kind === "line") {
-    return <MiniChart columns={s.columns} rows={s.rows} kind={kind} fill={fill} />
+    return (
+      <MiniChart columns={s.columns} rows={s.rows} kind={kind} fill={fill} onChartFilter={onChartFilter} highlightFilters={highlightFilters} />
+    )
   }
   return (
     <div className={fill ? "h-full" : "h-56"}>
-      <ResultGrid columns={s.columns} rows={s.rows} />
+      <ResultGrid columns={s.columns} rows={s.rows} onCellFilter={onCellFilter} highlightFilters={highlightFilters} />
     </div>
   )
 }
@@ -268,20 +305,53 @@ function MiniChart({
   rows,
   kind,
   fill,
+  onChartFilter,
+  highlightFilters,
 }: {
   columns: QueryResultColumn[]
   rows: Record<string, unknown>[]
   kind: "bar" | "line"
   fill?: boolean
+  onChartFilter?: (column: QueryResultColumn, values: unknown[]) => void
+  highlightFilters?: CrossFilter[]
 }) {
+  const inferred = useMemo(() => inferChartSpec(columns, rows), [columns, rows])
+  const xField = inferred?.xField ?? null
+
+  // Value(s) of a cross-filter that ORIGINATED in this tile, matched to the chart's x
+  // field by pg provenance — used to keep the clicked mark highlighted AFTER the
+  // re-run remount (data-driven, so it survives Vega losing its transient selection).
+  const highlightValues = useMemo(() => {
+    if (!xField || !highlightFilters?.length) return null
+    const col = columns.find((c) => c.name === xField)
+    if (!col?.sourceColumn) return null
+    const f = highlightFilters.find(
+      (hf) =>
+        hf.column.toLowerCase() === col.sourceColumn!.toLowerCase() &&
+        (!hf.sourceTable || !col.sourceTable || hf.sourceTable.toLowerCase() === col.sourceTable.toLowerCase()),
+    )
+    if (!f) return null
+    const vals = (Array.isArray(f.value) ? f.value : [f.value]).filter((v) => v !== null && v !== undefined)
+    return vals.length ? vals : null
+  }, [xField, highlightFilters, columns])
+
   const spec = useMemo(() => {
-    const inferred = inferChartSpec(columns, rows)
     if (!inferred) return null
     const base: Record<string, unknown> = { ...inferred.spec }
     // Keep the inferred axes; just swap the mark to the user's pick. Axes come
     // from column types (inferChartSpec) so there's no axis UI to author.
     base.mark =
       kind === "line" ? { type: "line", point: true, interpolate: "monotone" } : { type: "bar" }
+    // Persistent selection highlight: when a value clicked in THIS tile is active, dim
+    // non-matching marks via a data-driven opacity (Vega's own click-selection resets
+    // on the re-run re-render, so we drive it from the cross-filter instead).
+    if (highlightValues && xField && base.encoding && typeof base.encoding === "object") {
+      const fld = JSON.stringify(xField)
+      const test = highlightValues
+        .map((v) => `datum[${fld}] === ${typeof v === "number" || typeof v === "boolean" ? String(v) : JSON.stringify(String(v))}`)
+        .join(" || ")
+      base.encoding = { ...(base.encoding as Record<string, unknown>), opacity: { condition: { test, value: 1 }, value: 0.3 } }
+    }
     return {
       ...base,
       config: vegaConfigFromTheme(),
@@ -290,7 +360,48 @@ function MiniChart({
       height: fill ? "container" : 200,
       autosize: { type: "fit", contains: "padding", resize: true },
     }
-  }, [columns, rows, kind, fill])
+  }, [inferred, kind, fill, rows, highlightValues, xField])
+
+  // Wire the chart's point-selection "click" signal → cross-filter (mirrors the
+  // single-block chart → global-param path, so multi-statement charts filter too).
+  const handleEmbed = useCallback(
+    (res: VegaEmbedResult) => {
+      if (!onChartFilter) return
+      const handler = (_name: string, value: unknown) => {
+        let field: string | null = null
+        let values: unknown[] = []
+        if (value && typeof value === "object") {
+          const entries = Object.entries(value as Record<string, unknown>).filter(
+            ([k]) => k !== "_vgsid_" && k !== "vlPoint",
+          )
+          if (entries.length > 0) {
+            const [f, raw] = entries[0] as [string, unknown]
+            field = f
+            values = (Array.isArray(raw) ? raw : [raw]).filter((v) => v !== undefined && v !== null)
+          }
+        }
+        const fld = field ?? xField // empty selection carries no field → use the x field to clear
+        if (!fld) return
+        const col = columns.find((c) => c.name === fld)
+        if (!col) return
+        // Vega parses a temporal axis into epoch-ms / Date — convert back to an ISO
+        // string so the predicate (`order_date = '2024-01-15…'`) matches the pg
+        // date/timestamp column instead of `= 1705276800000` (zero rows). Defensively
+        // ISO-stringify ANY Date so it never reaches quoteSqlLiteral as a JS object.
+        const temporal = classifyColumn(col) === "temporal"
+        const norm = values.map((v) =>
+          v instanceof Date ? v.toISOString() : temporal && typeof v === "number" ? new Date(v).toISOString() : v,
+        )
+        onChartFilter(col, norm)
+      }
+      try {
+        res.view.addSignalListener("click", handler)
+      } catch {
+        /* spec has no "click" selection (non-selectable chart) — ignore */
+      }
+    },
+    [columns, onChartFilter, xField],
+  )
 
   if (!spec) {
     return (
@@ -304,6 +415,7 @@ function MiniChart({
       <VegaEmbed
         spec={spec as unknown as Parameters<typeof VegaEmbed>[0]["spec"]}
         options={{ actions: false, renderer: "svg", tooltip: { theme: "dark" } }}
+        onEmbed={handleEmbed}
         className={fill ? "h-full w-full" : "w-full"}
       />
     </div>

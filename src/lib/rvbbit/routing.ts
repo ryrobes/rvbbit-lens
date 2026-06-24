@@ -362,6 +362,9 @@ function num(v: unknown): number {
 function numOrNull(v: unknown): number | null {
   return v == null ? null : Number(v)
 }
+function strOrNull(v: unknown): string | null {
+  return v == null || v === "" ? null : String(v)
+}
 function bool(v: unknown): boolean {
   return v === true || v === "t"
 }
@@ -747,15 +750,28 @@ export interface AccelFreshnessRow {
   lastRefreshAt: number
   parquetRows: number
   rowGroups: number
+  tombstones: number
   driftRows: number
   driftRatio: number | null
   heapSeqScans: number
   lastRebuildMs: number | null
   lastRebuildRows: number | null
+  lastOperation: string | null
+  lastOperationStatus: string | null
+  lastOperationAt: number | null
+  lastOperationError: string | null
+  lastOperationSwap: string | null
+  lastFinalLockAttempts: number | null
+  lastQueuedOrphanFiles: number | null
+  lastCatchupRows: number | null
+  lastRemappedTombstones: number | null
+  lastRowsWritten: number | null
   // policy
   strategy: AccelStrategy
   targetSecs: number | null
   minIntervalSecs: number
+  maxRowGroupsBeforeRebuild: number | null
+  maxTombstonesBeforeRebuild: number | null
   explicit: boolean
   active: boolean
   deniedEngines: string[]
@@ -792,13 +808,27 @@ export interface AccelTickPlanRow {
 const ACCEL_FRESHNESS_SQL =
   "SELECT f.table_name, n.nspname AS schema, f.shadow_heap_dirty, f.parquet_authoritative, f.op_running, " +
   "f.lance_accelerated, f.seconds_dirty, f.seconds_since_refresh, f.last_refresh_at, " +
-  "f.parquet_rows, f.row_groups, f.drift_rows, f.drift_ratio, f.heap_seq_scans, " +
+  "f.parquet_rows, f.row_groups, f.tombstones, f.drift_rows, f.drift_ratio, f.heap_seq_scans, " +
   "f.last_rebuild_ms, f.last_rebuild_rows, e.strategy, e.freshness_target_secs, " +
-  "e.min_interval_secs, e.explicit, e.active, e.denied_engines, e.denied_layouts " +
+  "e.min_interval_secs, e.max_row_groups_before_rebuild, e.max_tombstones_before_rebuild, " +
+  "e.explicit, e.active, e.denied_engines, e.denied_layouts, " +
+  "op.operation AS last_operation, op.status AS last_operation_status, op.started_at AS last_operation_at, " +
+  "op.error AS last_operation_error, op.rows_written AS last_rows_written, " +
+  "op.settings->>'metadata_swap' AS last_operation_swap, " +
+  "(op.settings->>'final_lock_attempts')::bigint AS last_final_lock_attempts, " +
+  "(op.settings->>'queued_orphan_files')::bigint AS last_queued_orphan_files, " +
+  "(op.settings->>'catchup_rows')::bigint AS last_catchup_rows, " +
+  "(op.settings->>'remapped_tombstones')::bigint AS last_remapped_tombstones " +
   "FROM rvbbit.accel_freshness f " +
   "JOIN rvbbit.accel_policy_effective e ON e.table_oid = f.table_oid " +
   "LEFT JOIN pg_class c ON c.oid = f.table_oid " +
   "LEFT JOIN pg_namespace n ON n.oid = c.relnamespace " +
+  "LEFT JOIN LATERAL ( " +
+  "SELECT o.operation, o.status, o.started_at, o.error, o.rows_written, o.settings " +
+  "FROM rvbbit.acceleration_operations o " +
+  "WHERE o.table_oid = f.table_oid " +
+  "ORDER BY o.started_at DESC, o.id DESC LIMIT 1 " +
+  ") op ON true " +
   "ORDER BY n.nspname, (f.drift_rows * (1 + f.heap_seq_scans)) DESC, f.table_name"
 
 export async function fetchAccelFreshness(
@@ -819,14 +849,27 @@ export async function fetchAccelFreshness(
       lastRefreshAt: epoch(r.last_refresh_at),
       parquetRows: num(r.parquet_rows),
       rowGroups: num(r.row_groups),
+      tombstones: num(r.tombstones),
       driftRows: num(r.drift_rows),
       driftRatio: numOrNull(r.drift_ratio),
       heapSeqScans: num(r.heap_seq_scans),
       lastRebuildMs: numOrNull(r.last_rebuild_ms),
       lastRebuildRows: numOrNull(r.last_rebuild_rows),
+      lastOperation: strOrNull(r.last_operation),
+      lastOperationStatus: strOrNull(r.last_operation_status),
+      lastOperationAt: r.last_operation_at ? epoch(r.last_operation_at) : null,
+      lastOperationError: strOrNull(r.last_operation_error),
+      lastOperationSwap: strOrNull(r.last_operation_swap),
+      lastFinalLockAttempts: numOrNull(r.last_final_lock_attempts),
+      lastQueuedOrphanFiles: numOrNull(r.last_queued_orphan_files),
+      lastCatchupRows: numOrNull(r.last_catchup_rows),
+      lastRemappedTombstones: numOrNull(r.last_remapped_tombstones),
+      lastRowsWritten: numOrNull(r.last_rows_written),
       strategy: (String(r.strategy ?? "manual") as AccelStrategy) ?? "manual",
       targetSecs: numOrNull(r.freshness_target_secs),
       minIntervalSecs: num(r.min_interval_secs),
+      maxRowGroupsBeforeRebuild: numOrNull(r.max_row_groups_before_rebuild),
+      maxTombstonesBeforeRebuild: numOrNull(r.max_tombstones_before_rebuild),
       explicit: bool(r.explicit),
       active: bool(r.active),
       deniedEngines: pgArray(r.denied_engines),
@@ -881,9 +924,24 @@ export function setAccelPolicySql(
   table: string,
   strategy: AccelStrategy,
   targetSecs: number | null,
+  maxRowGroupsBeforeRebuild: number | null = null,
+  maxTombstonesBeforeRebuild: number | null = null,
+  minIntervalSecs = 60,
 ): string {
   const t = targetSecs == null ? "NULL" : String(Math.max(1, Math.floor(targetSecs)))
-  return `SELECT rvbbit.set_accel_policy(${qIdent(table)}, ${sqlStr(strategy)}, ${t})`
+  const minInterval = String(Math.max(0, Math.floor(minIntervalSecs)))
+  const maxRgs =
+    maxRowGroupsBeforeRebuild == null ? "NULL" : String(Math.max(1, Math.floor(maxRowGroupsBeforeRebuild)))
+  const maxTombs =
+    maxTombstonesBeforeRebuild == null ? "NULL" : String(Math.max(1, Math.floor(maxTombstonesBeforeRebuild)))
+  return (
+    `SELECT rvbbit.set_accel_policy(${qIdent(table)}, ` +
+    `strategy => ${sqlStr(strategy)}, ` +
+    `freshness_target_secs => ${t}, ` +
+    `min_interval_secs => ${minInterval}, ` +
+    `max_row_groups_before_rebuild => ${maxRgs}, ` +
+    `max_tombstones_before_rebuild => ${maxTombs})`
+  )
 }
 /** Run the executor for real (budgeted). */
 export const runAccelTickSql = (budget: number) =>
@@ -914,7 +972,7 @@ export function recommendPolicy(r: AccelFreshnessRow): PolicyRecommendation {
   const hot = r.heapSeqScans >= 5
   const cheapDelta = (r.driftRatio ?? 1) < 0.5
   if (hot && cheapDelta) {
-    return { strategy: "target", targetSecs: 300, why: "queried on the slow path and cheap to delta — keep within ~5 min" }
+    return { strategy: "target", targetSecs: 300, why: "queried on the slow path and cheap to minor-refresh — keep within ~5 min" }
   }
   if (hot) {
     return { strategy: "scheduled", targetSecs: null, why: "queried on the slow path — refresh whenever dirty" }

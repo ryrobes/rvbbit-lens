@@ -257,7 +257,7 @@ import { fetchObjectDdl } from "@/lib/db/object-ddl"
 import { invalidateSemanticOps, loadSemanticOps } from "@/lib/desktop/semantic-ops"
 import { detectDagsterStorage } from "@/lib/dagster/metadata"
 import { fetchKgEvidenceBySource, fetchPrimaryKeyColumn } from "@/lib/rvbbit/kg"
-import { buildDesktopRuntimeGraph, paramKey, resolveParamTableTarget, sameParamValue, sourceSqlForPayload, uniqueBlockName } from "@/lib/desktop/reactive-sql"
+import { broadcastTargetWindowIds, buildDesktopRuntimeGraph, paramKey, resolveParamTableTarget, sameParamValue, sourceSqlForPayload, uniqueBlockName } from "@/lib/desktop/reactive-sql"
 import {
   hasColumnDragPayload,
   readColumnDragPayload,
@@ -1336,6 +1336,15 @@ export function DesktopShell() {
     clearParamSubscriptions(key)
   }, [clearParamSubscriptions])
 
+  // Tier-2 broadcast: flip a filter's broadcast flag; the count is its blast radius.
+  const setParamBroadcast = useCallback((key: string, on: boolean) => {
+    setDesktopParams((prev) => prev.map((p) => (p.key === key ? { ...p, broadcast: on } : p)))
+  }, [])
+  const broadcastCountFor = useCallback(
+    (param: DesktopParamValue) => broadcastTargetWindowIds(param, windows, activeSchema).length,
+    [windows, activeSchema],
+  )
+
   const emitParam = useCallback((input: {
     sourceWindowId: string
     sourceBlockName: string
@@ -1347,6 +1356,9 @@ export function DesktopShell() {
     cascade?: boolean
     dataTypeId?: number
     type?: string
+    sourceSchema?: string
+    sourceTable?: string
+    sourceColumn?: string
   }) => {
     const key = paramKey(input.sourceBlockName, input.field)
     const operator = input.operator ?? "eq"
@@ -1401,11 +1413,66 @@ export function DesktopShell() {
         value,
         dataTypeId: input.dataTypeId,
         type: input.type,
+        // Provenance is a stable property of the (block, field) key. Fall back to
+        // the existing value when a re-emit lacks it — once the source block
+        // self-filters (its result is a derived subquery), pg reports tableID=0, so
+        // a second click / chart / control emit carries no provenance; without this
+        // fallback the broadcast (and its shelf toggle, gated on sourceTable) would
+        // silently die and become unrecoverable.
+        sourceSchema: input.sourceSchema ?? existing?.sourceSchema,
+        sourceTable: input.sourceTable ?? existing?.sourceTable,
+        sourceColumn: input.sourceColumn ?? existing?.sourceColumn,
+        // Preserve the broadcast toggle across re-emits.
+        broadcast: existing?.broadcast,
         updatedAt: new Date().toISOString(),
       }
       return [np, ...prev.filter((p) => p.key !== key)]
     })
   }, [])
+
+  // DEV test hook: lets a Playwright harness create auto-running data blocks,
+  // emit params, and toggle broadcast deterministically (no CodeMirror typing /
+  // drag-drop) so we can reproduce and verify cross-filter / broadcast behavior.
+  // Placed after emitParam so all callbacks it calls are defined. No-op in prod.
+  useEffect(() => {
+    if (process.env.NODE_ENV === "production") return
+    const g = globalThis as unknown as Record<string, unknown>
+    g.__rvbbitTest = {
+      addBlock: (sql: string, opts?: { title?: string; x?: number; y?: number }) => {
+        const id = randomUUID()
+        openWindow({
+          id,
+          kind: "data",
+          title: opts?.title ?? "Test Block",
+          x: opts?.x ?? 140,
+          y: opts?.y ?? 90,
+          width: 720,
+          height: 460,
+          payload: {
+            kind: "data",
+            title: opts?.title ?? "Test Block",
+            sql,
+            origin: "derived", // auto-runs on mount without a table origin
+            view: { activeTab: "rows", sqlRailOpen: true, sqlRailWidthPx: 360 },
+          } satisfies DataPayload,
+        })
+        return id
+      },
+      emitParam: (input: Parameters<typeof emitParam>[0]) => emitParam(input),
+      params: () => workspacesRef.current[activeWorkspaceRef.current]?.params ?? [],
+      runLog: () => (g.__rvbbitRunLog as unknown[]) ?? [],
+      clearRunLog: () => { g.__rvbbitRunLog = [] },
+      blocks: () => g.__rvbbitBlocks ?? {},
+      setBroadcast: (key: string, on: boolean) => setParamBroadcast(key, on),
+      reset: () => { setWindows((ws) => ws.filter((w) => w.kind !== "data")); setDesktopParams(() => []) },
+      broadcastCount: (key: string) => {
+        const p = workspacesRef.current[activeWorkspaceRef.current]?.params?.find((x) => x.key === key)
+        return p ? broadcastCountFor(p) : -1
+      },
+      schemaTables: () => activeSchema?.tables?.length ?? null,
+    }
+    return () => { delete g.__rvbbitTest }
+  }, [openWindow, setParamBroadcast, emitParam, broadcastCountFor, activeSchema])
 
   const subscribeParam = useCallback((targetWindowId: string, key: string, targetField?: string, target?: ParamTarget) => {
     const param = liveParams().find((p) => p.key === key)
@@ -4001,7 +4068,7 @@ export function DesktopShell() {
         onSceneNameExists={sceneNameExists}
       />
 
-      <DesktopParamsSurface params={desktopParams} onClear={removeParam} />
+      <DesktopParamsSurface params={desktopParams} onClear={removeParam} onSetBroadcast={setParamBroadcast} broadcastCountFor={broadcastCountFor} />
 
       {lineageVisible && !wsTransition ? (
         <LineageOverlay windows={windows} params={desktopParams} />

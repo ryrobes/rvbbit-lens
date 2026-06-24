@@ -78,14 +78,15 @@ interface EditState {
 // so a long scheduled crawl survives interruption with partial results, rather
 // than the all-or-nothing SELECT rvbbit.catalog_crawl() function.
 const CRAWL_COMMAND = "CALL rvbbit.catalog_crawl_run();"
-// The accelerator freshness heartbeat. Runs every minute; the policy-aware
-// rvbbit.accel_tick() decides which dirty, high-value tables to refresh.
+// The OLAP autopilot heartbeat. Runs every minute; the policy-aware
+// rvbbit.accel_tick() decides which tables need refreshes or folds.
 const ACCEL_TICK_COMMAND = "SELECT rvbbit.accel_tick(4);"
 // The temporal-mirror sync. CALL (it's a procedure that commits per table).
 const RUN_SYNC_COMMAND = "CALL rvbbit.run_sync();"
 // Snapshot every defined metric into metric_observations at one timestamp.
 const MATERIALIZE_ALL_COMMAND = "SELECT rvbbit.materialize_all_metrics();"
-// Reload every cube + rebuild its parquet/vortex acceleration files (per-cube COMMIT).
+// Policy-managed cube refresh. Per-cube policy decides query/write resources and
+// whether layout variants stay off the critical path.
 const REFRESH_CUBES_COMMAND = "CALL rvbbit.refresh_all_cubes();"
 
 export function SchedulerTray({ activeConnectionId, hasRvbbit, onOpenSql, onOpenDrift }: SchedulerTrayProps) {
@@ -324,14 +325,14 @@ export function SchedulerTray({ activeConnectionId, hasRvbbit, onOpenSql, onOpen
                   />
                 ) : null}
 
-                {/* accelerator freshness heartbeat preset */}
+                {/* OLAP autopilot heartbeat preset */}
                 {hasRvbbit ? (
                   <div className="mt-1">
                     <AccelTickPreset
                       job={accelTickJob}
                       busy={busy}
                       onSchedule={() =>
-                        void mutate(scheduleSql("rvbbit_accel_tick", "* * * * *", ACCEL_TICK_COMMAND, targetDb))
+                        void mutate(scheduleSql("rvbbit_olap_autopilot", "* * * * *", ACCEL_TICK_COMMAND, targetDb))
                       }
                     />
                   </div>
@@ -363,7 +364,7 @@ export function SchedulerTray({ activeConnectionId, hasRvbbit, onOpenSql, onOpen
                   </div>
                 ) : null}
 
-                {/* cubes: refresh all cubes + rebuild acceleration (every 2h) */}
+                {/* cubes: policy-managed refresh (every 2h) */}
                 {hasRvbbit ? (
                   <div className="mt-1">
                     <CubesPreset
@@ -552,7 +553,7 @@ function CrawlPreset({ job, busy, onSchedule }: { job?: CronJob; busy: boolean; 
   )
 }
 
-// ── Accelerator freshness heartbeat preset ──────────────────────────
+// ── OLAP autopilot heartbeat preset ─────────────────────────────────
 
 function AccelTickPreset({ job, busy, onSchedule }: { job?: CronJob; busy: boolean; onSchedule: () => void }) {
   if (job) {
@@ -560,7 +561,7 @@ function AccelTickPreset({ job, busy, onSchedule }: { job?: CronJob; busy: boole
       <div className="flex items-center gap-2 rounded-md border border-rvbbit-accent/30 bg-rvbbit-bg/30 px-2.5 py-1.5">
         <Zap className="h-3.5 w-3.5 shrink-0 text-rvbbit-accent" />
         <span className="text-[11px] text-chrome-text/80">
-          Accelerator heartbeat — <span className="text-foreground">{describeCron(job.schedule)}</span>
+          OLAP autopilot — <span className="text-foreground">{describeCron(job.schedule)}</span>
         </span>
         <span className={cn("ml-auto h-1.5 w-1.5 rounded-full", job.active ? "bg-success" : "bg-chrome-text/40")} />
       </div>
@@ -570,7 +571,7 @@ function AccelTickPreset({ job, busy, onSchedule }: { job?: CronJob; busy: boole
     <div className="flex items-center gap-2 rounded-md border border-chrome-border bg-secondary-background/40 px-2.5 py-1.5">
       <Zap className="h-3.5 w-3.5 shrink-0 text-chrome-text/60" />
       <span className="text-[11px] text-chrome-text/70">
-        Keep accelerators fresh — policy-driven delta/full refresh of dirty tables.
+        Keep accelerator files current — policy-driven refreshes and lagged folds.
       </span>
       <button
         type="button"
@@ -578,7 +579,7 @@ function AccelTickPreset({ job, busy, onSchedule }: { job?: CronJob; busy: boole
         onClick={onSchedule}
         className="ml-auto rounded bg-rvbbit-accent/15 px-2 py-0.5 text-[11px] font-medium text-rvbbit-accent hover:bg-rvbbit-accent/25 disabled:opacity-40"
       >
-        Schedule heartbeat
+        Schedule autopilot
       </button>
     </div>
   )
@@ -624,7 +625,7 @@ function CubesPreset({ job, busy, onSchedule }: { job?: CronJob; busy: boolean; 
       <div className="flex items-center gap-2 rounded-md border border-rvbbit-accent/30 bg-rvbbit-bg/30 px-2.5 py-1.5">
         <Box className="h-3.5 w-3.5 shrink-0 text-rvbbit-accent" />
         <span className="text-[11px] text-chrome-text/80">
-          Cube refresh — <span className="text-foreground">{describeCron(job.schedule)}</span>
+          Cube maintenance — <span className="text-foreground">{describeCron(job.schedule)}</span>
         </span>
         <span className={cn("ml-auto h-1.5 w-1.5 rounded-full", job.active ? "bg-success" : "bg-chrome-text/40")} />
       </div>
@@ -634,7 +635,7 @@ function CubesPreset({ job, busy, onSchedule }: { job?: CronJob; busy: boolean; 
     <div className="flex items-center gap-2 rounded-md border border-chrome-border bg-secondary-background/40 px-2.5 py-1.5">
       <Box className="h-3.5 w-3.5 shrink-0 text-chrome-text/60" />
       <span className="text-[11px] text-chrome-text/70">
-        Refresh all cubes — reload each + rebuild its parquet/vortex acceleration files.
+        Cube maintenance — refresh eligible cubes with their policy profile.
       </span>
       <button
         type="button"

@@ -9,6 +9,82 @@ const DEFAULT_ROW_LIMIT = 5_000
 
 const TYPE_NAME_CACHE = new Map<string, Map<number, string>>()
 
+// Column provenance: the driver gives a tableID (pg_class oid) + columnID (attnum)
+// per result field; resolve those to schema.table.column names so the UI can
+// cross-filter by the REAL source table. Cached per connection+database (keyed
+// `oid:attnum`). DDL (rename/drop a column) can stale this cache, but it's
+// fail-safe: injectStatementFilters re-validates the column against the LIVE schema
+// before injecting, so a stale name simply doesn't match and the filter no-ops.
+interface ColumnSource {
+  schema: string
+  table: string
+  column: string
+}
+const COLUMN_SOURCE_CACHE = new Map<string, Map<string, ColumnSource>>()
+
+interface PgFieldLike {
+  name: string
+  dataTypeID: number
+  tableID?: number
+  columnID?: number
+}
+
+async function loadColumnSources(
+  client: PoolClient,
+  key: string,
+  fields: ReadonlyArray<PgFieldLike>,
+): Promise<Map<string, ColumnSource>> {
+  let cache = COLUMN_SOURCE_CACHE.get(key)
+  if (!cache) {
+    cache = new Map<string, ColumnSource>()
+    COLUMN_SOURCE_CACHE.set(key, cache)
+  }
+  const oids = new Set<number>()
+  const attnums = new Set<number>()
+  for (const f of fields) {
+    const oid = f.tableID ?? 0
+    const attnum = f.columnID ?? 0
+    if (!oid || !attnum || cache.has(`${oid}:${attnum}`)) continue
+    oids.add(oid)
+    attnums.add(attnum)
+  }
+  if (oids.size > 0) {
+    try {
+      const res = await client.query<{ toid: number; anum: number; sch: string; tbl: string; col: string }>(
+        `SELECT c.oid::int4 AS toid, a.attnum::int4 AS anum, n.nspname AS sch, c.relname AS tbl, a.attname AS col
+         FROM pg_class c
+         JOIN pg_namespace n ON n.oid = c.relnamespace
+         JOIN pg_attribute a ON a.attrelid = c.oid
+         WHERE c.oid = ANY($1::oid[]) AND a.attnum = ANY($2::int2[])
+           AND a.attnum > 0 AND NOT a.attisdropped`,
+        [[...oids], [...attnums]],
+      )
+      for (const r of res.rows) cache.set(`${r.toid}:${r.anum}`, { schema: r.sch, table: r.tbl, column: r.col })
+    } catch {
+      /* best-effort: cross-filter simply won't engage for unresolved columns */
+    }
+  }
+  return cache
+}
+
+function buildColumns(
+  fields: ReadonlyArray<PgFieldLike>,
+  typeNames: Map<number, string>,
+  sources?: Map<string, ColumnSource>,
+): QueryResultColumn[] {
+  return fields.map((f) => {
+    const src = sources && f.tableID && f.columnID ? sources.get(`${f.tableID}:${f.columnID}`) : undefined
+    return {
+      name: f.name,
+      dataTypeId: f.dataTypeID,
+      dataTypeName: typeNames.get(f.dataTypeID),
+      sourceSchema: src?.schema,
+      sourceTable: src?.table,
+      sourceColumn: src?.column,
+    }
+  })
+}
+
 /** Build one transcript entry per statement from the driver's multi-statement
  *  result array. The statement TEXT is attached only when the split count matches
  *  the result count 1:1 (else cards stay unlabeled rather than mislabeled). */
@@ -17,6 +93,7 @@ function buildStatementResults(
   sqlText: string,
   typeNames: Map<number, string>,
   limit: number,
+  sources?: Map<string, ColumnSource>,
 ): StatementResult[] {
   const statements = splitStatements(sqlText)
   const labeled = statements.length === rawArr.length ? statements : null
@@ -24,13 +101,7 @@ function buildStatementResults(
     const safeRows = r.rows ?? []
     const truncated = safeRows.length > limit
     const rows = truncated ? safeRows.slice(0, limit) : safeRows
-    const columns: QueryResultColumn[] = (r.fields || []).map(
-      (f: { name: string; dataTypeID: number }) => ({
-        name: f.name,
-        dataTypeId: f.dataTypeID,
-        dataTypeName: typeNames.get(f.dataTypeID),
-      }),
-    )
+    const columns = buildColumns((r.fields ?? []) as PgFieldLike[], typeNames, sources)
     return {
       index: i,
       sql: labeled ? labeled[i] : undefined,
@@ -202,17 +273,17 @@ export async function txnQuery(
   const truncated = safeRows.length > limit
   const rows = truncated ? safeRows.slice(0, limit) : safeRows
   const typeNames = await loadTypeNames(client, session.recordId)
-  const columns: QueryResultColumn[] = (result.fields || []).map(
-    (f: { name: string; dataTypeID: number }) => ({
-      name: f.name,
-      dataTypeId: f.dataTypeID,
-      dataTypeName: typeNames.get(f.dataTypeID),
-    }),
+  const allRaw = Array.isArray(raw) ? raw : [raw]
+  const sources = await loadColumnSources(
+    client,
+    `${session.recordId}:${session.database ?? ""}`,
+    allRaw.flatMap((r) => (r.fields ?? []) as PgFieldLike[]),
   )
-  const results =
-    Array.isArray(raw) && raw.length > 1
-      ? buildStatementResults(raw, sql, typeNames, limit)
-      : undefined
+  const columns = buildColumns((result.fields ?? []) as PgFieldLike[], typeNames, sources)
+  let results: StatementResult[] | undefined
+  if (Array.isArray(raw) && raw.length > 1) {
+    results = buildStatementResults(raw, sql, typeNames, limit, sources)
+  }
   return {
     sql,
     connectionId,
@@ -322,13 +393,16 @@ export async function executeQuery(
     const rows = truncated ? safeRows.slice(0, limit) : safeRows
 
     const typeNames = await loadTypeNames(client, record.id)
-    const columns: QueryResultColumn[] = (result.fields || []).map(
-      (f: { name: string; dataTypeID: number }) => ({
-        name: f.name,
-        dataTypeId: f.dataTypeID,
-        dataTypeName: typeNames.get(f.dataTypeID),
-      }),
+    // Resolve column provenance once for ALL fields (primary + every statement) so
+    // a clicked cell can cross-filter / broadcast by its real source table. Cached
+    // by connection+database (pg_class OIDs are per-database).
+    const allRaw = Array.isArray(raw) ? raw : [raw]
+    const sources = await loadColumnSources(
+      client,
+      `${record.id}:${opts.database ?? ""}`,
+      allRaw.flatMap((r) => (r.fields ?? []) as PgFieldLike[]),
     )
+    const columns = buildColumns((result.fields ?? []) as PgFieldLike[], typeNames, sources)
 
     if (opts.readOnly) {
       await client.query("COMMIT")
@@ -336,10 +410,10 @@ export async function executeQuery(
 
     // Multi-statement runs carry a per-statement breakdown so the transcript can
     // show every output; single-statement runs leave `results` absent (unchanged).
-    const results =
-      Array.isArray(raw) && raw.length > 1
-        ? buildStatementResults(raw, sql, typeNames, limit)
-        : undefined
+    let results: StatementResult[] | undefined
+    if (Array.isArray(raw) && raw.length > 1) {
+      results = buildStatementResults(raw, sql, typeNames, limit, sources)
+    }
 
     return {
       sql,

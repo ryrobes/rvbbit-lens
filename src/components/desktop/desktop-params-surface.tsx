@@ -1,6 +1,6 @@
 "use client"
 
-import { X } from "@/lib/icons"
+import { Globe, X } from "@/lib/icons"
 import type { DesktopParamValue } from "@/lib/desktop/types"
 import { shortParamValue } from "@/lib/desktop/reactive-sql"
 import { writeParamDragPayload } from "@/lib/desktop/param-drag"
@@ -10,6 +10,10 @@ import { cn } from "@/lib/utils"
 interface DesktopParamsSurfaceProps {
   params: DesktopParamValue[]
   onClear: (key: string) => void
+  /** Flip a filter's broadcast (auto-apply to all blocks reading its table). */
+  onSetBroadcast: (key: string, on: boolean) => void
+  /** How many OTHER blocks a broadcast filter would touch (its blast radius). */
+  broadcastCountFor: (param: DesktopParamValue) => number
 }
 
 /** Short label for a param's comparison operator. */
@@ -22,7 +26,7 @@ function opLabel(op: DesktopParamValue["operator"]): string {
  * is draggable — drop one onto a data window header to make that window
  * subscribe to it (the engine rewrites the SQL as a WHERE clause).
  */
-export function DesktopParamsSurface({ params, onClear }: DesktopParamsSurfaceProps) {
+export function DesktopParamsSurface({ params, onClear, onSetBroadcast, broadcastCountFor }: DesktopParamsSurfaceProps) {
   if (params.length === 0) return null
   return (
     <div className="pointer-events-auto fixed left-1/2 top-10 z-30 flex max-w-[calc(100vw-4rem)] -translate-x-1/2 flex-wrap items-center gap-1.5 rounded-md border border-chrome-border bg-chrome-bg/90 px-2 py-1.5 shadow-xl backdrop-blur">
@@ -59,6 +63,29 @@ export function DesktopParamsSurface({ params, onClear }: DesktopParamsSurfacePr
           <span className="truncate text-chrome-text">{p.sourceBlockName}.{p.field}</span>
           <span className="text-chrome-text/60">{opLabel(p.operator)}</span>
           <span className="truncate text-foreground">{shortParamValue(p.value)}</span>
+          {/* Broadcast toggle — only when we have the source table (pg provenance).
+              OFF = local; ON = filters every block reading that table (shows count). */}
+          {p.sourceTable ? (
+            <span
+              onClick={(e) => { e.stopPropagation(); e.preventDefault(); onSetBroadcast(p.key, !p.broadcast) }}
+              role="button"
+              aria-pressed={!!p.broadcast}
+              title={
+                p.broadcast
+                  ? `Broadcasting to ${broadcastCountFor(p)} block(s) that read ${p.sourceTable} — click to make local`
+                  : `Broadcast: also filter every block that reads ${p.sourceTable}`
+              }
+              className={cn(
+                "ml-0.5 inline-flex items-center gap-0.5 rounded-full px-1 py-0.5 text-[9px] tabular-nums transition-colors",
+                p.broadcast
+                  ? "bg-rvbbit-accent/20 text-rvbbit-accent"
+                  : "text-chrome-text/40 hover:bg-foreground/[0.08] hover:text-foreground",
+              )}
+            >
+              <Globe className="h-2.5 w-2.5" />
+              {p.broadcast ? broadcastCountFor(p) : null}
+            </span>
+          ) : null}
           <span
             onClick={(e) => { e.stopPropagation(); e.preventDefault(); onClear(p.key) }}
             className="ml-0.5 inline-grid h-4 w-4 place-items-center rounded-full text-chrome-text opacity-60 hover:bg-danger/20 hover:text-danger hover:opacity-100"

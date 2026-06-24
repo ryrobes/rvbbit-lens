@@ -3,11 +3,16 @@
 // Data layer for the Cube Studio apps (Catalog, Creator, Inspector). All queries run through
 // /api/db/query against the active (rvbbit) connection. Mirrors lib/rvbbit/metrics.ts.
 //
-// A cube is a wide, reasoned-about, documented join MATERIALIZED as an accelerated rvbbit table
+// A cube is a wide, reasoned-about, documented join materialized as an accelerated rvbbit table
 // (cubes.<name>) — the curated middle of a metrics → cubes → raw discovery gradient. Backend
-// surface: cubes() / describe_cube / define_cube / refresh_cube / enrich_cube / set_cube_column_doc
-// / cube_health / propose_cube / promote_cube_to_metric / cube_packs_latest / fuzzy_suggest_bindings
-// / apply_cube_pack / define_cube_from_pack / drop_cube. See docs/CUBES_PLAN.md.
+// surface: cubes() / describe_cube / define_cube / refresh_cube / cube_refresh_policy /
+// enrich_cube / set_cube_column_doc / cube_health / propose_cube / promote_cube_to_metric /
+// cube_packs_latest / fuzzy_suggest_bindings / apply_cube_pack / define_cube_from_pack /
+// drop_cube. See docs/CUBES_PLAN.md.
+
+export type CubeRefreshMode = "auto" | "conservative" | "bulk" | "manual"
+export type CubeMetadataProfile = "minimal" | "rich"
+export type CubeRefreshVariants = "deferred" | "sync"
 
 export interface CubeSummary {
   name: string
@@ -30,6 +35,34 @@ export interface CubeColumn {
   editedBy: string | null
 }
 
+export interface CubeRefreshPolicy {
+  mode: CubeRefreshMode | string
+  queryThreads: number | null
+  writerThreads: number | null
+  scanChunkRows: number | null
+  metadataProfile: CubeMetadataProfile | string | null
+  refreshVariants: CubeRefreshVariants | string | null
+  refreshIntervalSeconds: number | null
+}
+
+export interface CubeAutopilotStatus extends CubeRefreshPolicy {
+  recommendedAction: string | null
+  rowGroups: number | null
+  variantFiles: number | null
+  variantsPending: boolean
+  dirty: boolean
+  cubeDirty: boolean
+  sourceAccelDirty: boolean
+  sourceDirty: boolean
+  sourceCount: number | null
+  trackedSourceCount: number | null
+  dirtySourceCount: number | null
+  sourceSecondsDirty: number | null
+  sourceLastWriteAt: string | null
+  lastRefreshSeconds: number | null
+  secondsSinceRefresh: number | null
+}
+
 export interface CubeHealth {
   status: string // fresh | dirty | stale | error | missing | unknown
   secondsSinceRefresh: number | null
@@ -39,6 +72,8 @@ export interface CubeHealth {
   lastRefreshRows: number | null
   currentRows: number | null
   lastError: string | null
+  refreshPolicy: CubeRefreshPolicy | null
+  autopilot: CubeAutopilotStatus | null
   raw: Record<string, unknown>
 }
 
@@ -143,6 +178,12 @@ function num(v: unknown): number | null {
 function str(v: unknown): string | null {
   return v == null ? null : String(v)
 }
+function bool(v: unknown): boolean {
+  if (typeof v === "boolean") return v
+  if (typeof v === "number") return v !== 0
+  if (typeof v === "string") return ["true", "t", "1", "yes", "on"].includes(v.toLowerCase())
+  return false
+}
 function asObject(v: unknown): Record<string, unknown> {
   if (v == null) return {}
   if (typeof v === "string") {
@@ -165,6 +206,49 @@ function asArray(v: unknown): unknown[] {
     }
   }
   return []
+}
+
+function asPolicy(v: unknown): CubeRefreshPolicy | null {
+  const p = asObject(v)
+  if (Object.keys(p).length === 0) return null
+  return {
+    mode: String(p.mode ?? p.refresh_mode ?? "auto"),
+    queryThreads: num(p.query_threads),
+    writerThreads: num(p.writer_threads),
+    scanChunkRows: num(p.scan_chunk_rows),
+    metadataProfile: str(p.metadata_profile),
+    refreshVariants: str(p.refresh_variants),
+    refreshIntervalSeconds: num(p.refresh_interval_seconds),
+  }
+}
+
+function asAutopilot(v: unknown): CubeAutopilotStatus | null {
+  const p = asObject(v)
+  if (Object.keys(p).length === 0) return null
+  return {
+    mode: String(p.refresh_mode ?? p.mode ?? "auto"),
+    queryThreads: num(p.query_threads),
+    writerThreads: num(p.writer_threads),
+    scanChunkRows: num(p.scan_chunk_rows),
+    metadataProfile: str(p.metadata_profile),
+    refreshVariants: str(p.refresh_variants),
+    refreshIntervalSeconds: num(p.refresh_interval_seconds),
+    recommendedAction: str(p.recommended_action),
+    rowGroups: num(p.row_groups),
+    variantFiles: num(p.variant_files),
+    variantsPending: bool(p.variants_pending),
+    dirty: bool(p.dirty),
+    cubeDirty: bool(p.cube_dirty),
+    sourceAccelDirty: bool(p.source_accel_dirty),
+    sourceDirty: bool(p.source_dirty),
+    sourceCount: num(p.source_count),
+    trackedSourceCount: num(p.tracked_source_count),
+    dirtySourceCount: num(p.dirty_source_count),
+    sourceSecondsDirty: num(p.source_seconds_dirty),
+    sourceLastWriteAt: str(p.source_last_write_at),
+    lastRefreshSeconds: num(p.last_refresh_seconds),
+    secondsSinceRefresh: num(p.seconds_since_refresh),
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -199,15 +283,18 @@ function asHealth(v: unknown): CubeHealth | null {
   if (Object.keys(h).length === 0) return null
   const fr = asObject(h.freshness)
   const dr = asObject(h.drift)
+  const autopilot = asAutopilot(h.autopilot)
   return {
     status: String(fr.status ?? h.status ?? "unknown"),
-    secondsSinceRefresh: num(fr.seconds_since_refresh),
+    secondsSinceRefresh: num(fr.seconds_since_refresh) ?? autopilot?.secondsSinceRefresh ?? null,
     rowDelta: num(fr.row_delta),
     driftRatio: num(dr.drift_ratio),
     driftRecommendation: str(dr.recommendation),
     lastRefreshRows: num(fr.last_refresh_rows),
     currentRows: num(fr.current_parquet_rows),
     lastError: str(h.last_error),
+    refreshPolicy: asPolicy(h.refresh_policy),
+    autopilot,
     raw: h,
   }
 }
@@ -372,6 +459,44 @@ export async function refreshCube(
   const r = await run(connectionId, `SELECT rvbbit.refresh_cube(${q(name)}) AS rows`)
   if (!r.ok) return { rows: null, error: r.error }
   return { rows: num(r.rows[0]?.rows), error: null }
+}
+
+export interface CubeRefreshPolicyInput {
+  mode: CubeRefreshMode | string
+  queryThreads?: number | null
+  writerThreads?: number | null
+  scanChunkRows?: number | null
+  metadataProfile?: CubeMetadataProfile | string | null
+  refreshVariants?: CubeRefreshVariants | string | null
+  refreshIntervalSeconds?: number | null
+  note?: string | null
+}
+
+function intArg(v: number | null | undefined): string {
+  return v != null && Number.isFinite(v) ? String(Math.floor(v)) : "NULL"
+}
+
+export async function setCubeRefreshPolicy(
+  connectionId: string,
+  name: string,
+  input: CubeRefreshPolicyInput,
+): Promise<{ policy: CubeRefreshPolicy | null; error: string | null }> {
+  const r = await run(
+    connectionId,
+    `SELECT rvbbit.set_cube_refresh_policy(
+        ${q(name)},
+        p_mode => ${q(input.mode || "auto")},
+        p_query_threads => ${intArg(input.queryThreads)},
+        p_writer_threads => ${intArg(input.writerThreads)},
+        p_scan_chunk_rows => ${intArg(input.scanChunkRows)},
+        p_metadata_profile => ${input.metadataProfile ? q(input.metadataProfile) : "NULL"},
+        p_refresh_variants => ${input.refreshVariants ? q(input.refreshVariants) : "NULL"},
+        p_note => ${input.note ? q(input.note) : "NULL"},
+        p_refresh_interval_seconds => ${intArg(input.refreshIntervalSeconds)}
+      ) AS policy`,
+  )
+  if (!r.ok) return { policy: null, error: r.error }
+  return { policy: asPolicy(r.rows[0]?.policy), error: null }
 }
 
 export async function enrichCube(

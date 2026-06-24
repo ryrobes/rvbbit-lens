@@ -2,8 +2,9 @@
 
 import { Fragment, useEffect, useMemo, useRef, useState } from "react"
 import { GripVertical } from "@/lib/icons"
-import type { StatementResult } from "@/lib/db/types"
+import type { QueryResultColumn, StatementResult } from "@/lib/db/types"
 import type { ArrangeRow, ArrangeTile, DataPayload, StatementViewKind } from "@/lib/desktop/types"
+import type { CrossFilter } from "@/lib/desktop/reactive-sql"
 import { cn } from "@/lib/utils"
 import { CardBody, CardMeta, ViewSwitcher, defaultKind, statementKeys } from "./result-transcript"
 
@@ -83,14 +84,23 @@ export function ArrangeGrid({
   onSetView,
   layout,
   onChangeLayout,
+  onCellFilter,
+  onChartFilter,
+  crossFilters,
+  sourceStatements,
 }: {
   results: StatementResult[]
   views?: Record<string, StatementViewKind>
   onSetView: (key: string, kind: StatementViewKind) => void
   layout?: Layout
   onChangeLayout: (mut: (prev: Layout) => Layout) => void
+  onCellFilter?: (column: QueryResultColumn, value: unknown, stmtIndex: number) => void
+  onChartFilter?: (column: QueryResultColumn, values: unknown[], stmtIndex: number) => void
+  crossFilters?: CrossFilter[]
+  /** Pre-filter statement texts (by index) for STABLE tile keys across a rewrite. */
+  sourceStatements?: string[]
 }) {
-  const keys = useMemo(() => statementKeys(results), [results])
+  const keys = useMemo(() => statementKeys(results, sourceStatements), [results, sourceStatements])
   const keyToStmt = useMemo(() => {
     const m = new Map<string, StatementResult>()
     keys.forEach((k, i) => m.set(k, results[i]))
@@ -385,7 +395,16 @@ export function ArrangeGrid({
                         {hasGrid ? <ViewSwitcher viewKey={t.key} kind={kind} onSetView={onSetView} /> : null}
                       </div>
                       <div className="min-h-0 flex-1 overflow-hidden">
-                        <CardBody s={s} kind={hasGrid ? kind : "table"} hasGrid={hasGrid} emptySelect={emptySelect} fill />
+                        <CardBody
+                          s={s}
+                          kind={hasGrid ? kind : "table"}
+                          hasGrid={hasGrid}
+                          emptySelect={emptySelect}
+                          fill
+                          onCellFilter={onCellFilter ? (c, v) => onCellFilter(c, v, s.index) : undefined}
+                          onChartFilter={onChartFilter ? (c, v) => onChartFilter(c, v, s.index) : undefined}
+                          highlightFilters={crossFilters?.filter((f) => f.sourceStmtIndex === s.index)}
+                        />
                       </div>
                     </div>
                   </Fragment>

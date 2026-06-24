@@ -1,12 +1,12 @@
 "use client"
 
 // ⊞ Cube Inspector — master-detail over the curated cubes. A left rail of cubes (listCubes) and a
-// right pane that grounds ONE cube: Overview (def + sample + actions), Columns (the semantic layer,
-// inline-editable), Health (freshness/staleness/drift/usage), Lineage (source tables). Actions:
-// Refresh (snapshot reload), Enrich (LLM column docs), Promote to Metric, Edit (→ Creator).
+// right pane that grounds ONE cube: Overview (def + sample + actions), Maintenance (refresh policy),
+// Columns (the semantic layer, inline-editable), Health (freshness/staleness/drift/usage), Lineage
+// (source tables). Actions: Refresh (policy-managed snapshot), Enrich, Promote to Metric, Edit.
 
 import { useCallback, useEffect, useMemo, useState } from "react"
-import { Boxes, RefreshCw, Sparkles, Pencil, Loader2, TrendingUp, GitBranch, Layers, ChevronRight } from "@/lib/icons"
+import { Boxes, RefreshCw, Sparkles, Pencil, Loader2, TrendingUp, GitBranch, Layers, ChevronRight, Settings2, Zap } from "@/lib/icons"
 import {
   cubeVersions,
   describeCube,
@@ -15,7 +15,10 @@ import {
   promoteCubeToMetric,
   refreshCube,
   revertCube,
+  setCubeRefreshPolicy,
   type CubeDetail,
+  type CubeRefreshMode,
+  type CubeRefreshPolicyInput,
   type CubeSummary,
   type CubeVersion,
 } from "@/lib/rvbbit/cubes"
@@ -28,6 +31,7 @@ import {
   formatSqlSafe,
   HealthBadge,
   HealthStat,
+  inputCls,
   ProvenanceTag,
   Section,
   StatusNote,
@@ -41,8 +45,15 @@ interface Props {
   onOpenMetricInspector?: (name: string) => void
 }
 
-type Tab = "overview" | "columns" | "health" | "lineage" | "versions"
-const TAB_LABEL: Record<Tab, string> = { overview: "Overview", columns: "Columns", health: "Health", lineage: "Lineage", versions: "Versions" }
+type Tab = "overview" | "maintenance" | "columns" | "health" | "lineage" | "versions"
+const TAB_LABEL: Record<Tab, string> = {
+  overview: "Overview",
+  maintenance: "Maintenance",
+  columns: "Columns",
+  health: "Health",
+  lineage: "Lineage",
+  versions: "Versions",
+}
 
 export function CubeInspectorWindow({
   payload,
@@ -228,7 +239,7 @@ function CubeDetailPane({
         <span className="text-[10px] text-chrome-text/45">v{detail.version}</span>
         {health ? <HealthBadge status={health.status} /> : null}
         <div className="flex-1" />
-        <ActionBtn icon={RefreshCw} label="Refresh" busy={busy === "refresh"} onClick={() => void doRefresh()} />
+        <ActionBtn icon={RefreshCw} label="Refresh" title="Refresh snapshot now" busy={busy === "refresh"} onClick={() => void doRefresh()} />
         <ActionBtn icon={Sparkles} label="Enrich" busy={busy === "enrich"} onClick={() => void doEnrich()} />
         <PromoteButton
           connectionId={connectionId}
@@ -279,6 +290,8 @@ function CubeDetailPane({
                 <Meta label="Rows" value={detail.rows?.toLocaleString() ?? null} />
                 <Meta label="Refreshed" value={detail.refreshedAt ? fmtTime(Date.parse(detail.refreshedAt)) : null} />
                 <Meta label="Enriched" value={detail.enrichedAt ? fmtTime(Date.parse(detail.enrichedAt)) : null} />
+                <Meta label="Policy" value={modeLabel(health?.autopilot?.mode ?? health?.refreshPolicy?.mode ?? null)} />
+                <Meta label="Action" value={health?.autopilot?.recommendedAction ?? null} />
               </div>
             </Section>
             <Section title="Definition SQL">
@@ -290,6 +303,18 @@ function CubeDetailPane({
               <SampleGrid rows={detail.sample} />
             </Section>
           </div>
+        ) : tab === "maintenance" ? (
+          <MaintenanceTab
+            connectionId={connectionId}
+            cube={name}
+            health={health}
+            refreshBusy={busy === "refresh"}
+            onRefresh={() => void doRefresh()}
+            onSaved={() => {
+              reload()
+              onChanged()
+            }}
+          />
         ) : tab === "columns" ? (
           <ColumnsTab connectionId={connectionId} cube={name} detail={detail} onSaved={reload} />
         ) : tab === "health" ? (
@@ -307,11 +332,13 @@ function CubeDetailPane({
 function ActionBtn({
   icon: Icon,
   label,
+  title,
   busy,
   onClick,
 }: {
   icon: typeof RefreshCw
   label: string
+  title?: string
   busy: boolean
   onClick: () => void
 }) {
@@ -319,6 +346,7 @@ function ActionBtn({
     <button
       type="button"
       onClick={onClick}
+      title={title ?? label}
       disabled={busy}
       className="inline-flex h-7 items-center gap-1 rounded-[3px] border border-chrome-border/60 px-2 text-[11px] text-chrome-text/70 hover:bg-foreground/[0.05] hover:text-foreground disabled:opacity-50"
     >
@@ -448,6 +476,231 @@ function ColumnsTab({
   )
 }
 
+function MaintenanceTab({
+  connectionId,
+  cube,
+  health,
+  refreshBusy,
+  onRefresh,
+  onSaved,
+}: {
+  connectionId: string
+  cube: string
+  health: CubeDetail["health"]
+  refreshBusy: boolean
+  onRefresh: () => void
+  onSaved: () => void
+}) {
+  const current = health?.refreshPolicy ?? health?.autopilot ?? null
+  const status = health?.autopilot ?? null
+  const [mode, setMode] = useState<CubeRefreshMode | string>(current?.mode ?? "auto")
+  const [queryThreads, setQueryThreads] = useState(numText(current?.queryThreads))
+  const [writerThreads, setWriterThreads] = useState(numText(current?.writerThreads))
+  const [scanChunkRows, setScanChunkRows] = useState(numText(current?.scanChunkRows))
+  const [metadataProfile, setMetadataProfile] = useState(current?.metadataProfile ?? "minimal")
+  const [refreshVariants, setRefreshVariants] = useState(current?.refreshVariants ?? "deferred")
+  const [refreshIntervalSeconds, setRefreshIntervalSeconds] = useState(numText(current?.refreshIntervalSeconds))
+  const [saving, setSaving] = useState(false)
+  const [msg, setMsg] = useState<string | null>(null)
+
+  useEffect(() => {
+    const id = setTimeout(() => {
+      setMode(current?.mode ?? "auto")
+      setQueryThreads(numText(current?.queryThreads))
+      setWriterThreads(numText(current?.writerThreads))
+      setScanChunkRows(numText(current?.scanChunkRows))
+      setMetadataProfile(current?.metadataProfile ?? "minimal")
+      setRefreshVariants(current?.refreshVariants ?? "deferred")
+      setRefreshIntervalSeconds(numText(current?.refreshIntervalSeconds))
+    }, 0)
+    return () => clearTimeout(id)
+  }, [
+    current?.mode,
+    current?.queryThreads,
+    current?.writerThreads,
+    current?.scanChunkRows,
+    current?.metadataProfile,
+    current?.refreshVariants,
+    current?.refreshIntervalSeconds,
+  ])
+
+  async function save() {
+    setSaving(true)
+    setMsg(null)
+    const policy: CubeRefreshPolicyInput = {
+      mode,
+      queryThreads: parseOptionalInt(queryThreads),
+      writerThreads: parseOptionalInt(writerThreads),
+      scanChunkRows: parseOptionalInt(scanChunkRows),
+      metadataProfile: metadataProfile || null,
+      refreshVariants: refreshVariants || null,
+      refreshIntervalSeconds: parseOptionalInt(refreshIntervalSeconds),
+      note: "lens",
+    }
+    const { error } = await setCubeRefreshPolicy(connectionId, cube, policy)
+    setSaving(false)
+    if (error) {
+      setMsg(`Policy failed: ${error}`)
+      return
+    }
+    setMsg("Policy saved.")
+    onSaved()
+  }
+
+  if (!health) return <StatusNote state="empty" message="No cube maintenance data." />
+
+  return (
+    <div className="space-y-3 p-3">
+      <div className="grid grid-cols-2 gap-2 lg:grid-cols-4">
+        <HealthStat label="Action" value={status?.recommendedAction ?? "—"} />
+        <HealthStat label="Refresh path" value="snapshot" />
+        <HealthStat label="Source dirty" value={status?.sourceDirty ? "yes" : "no"} />
+        <HealthStat label="Row groups" value={status?.rowGroups?.toLocaleString() ?? "—"} />
+        <HealthStat
+          label="Variants"
+          value={
+            <span className={status?.variantsPending ? "text-warning" : undefined}>
+              {status?.variantFiles?.toLocaleString() ?? "—"}
+              {status?.variantsPending ? " pending" : ""}
+            </span>
+          }
+        />
+      </div>
+
+      <Section
+        title="Refresh Policy"
+        right={
+          <button
+            type="button"
+            disabled={saving}
+            onClick={() => void save()}
+            className="inline-flex h-6 items-center gap-1 rounded-[3px] border border-main/40 bg-main/15 px-2 text-[10px] text-main hover:bg-main/25 disabled:opacity-50"
+          >
+            {saving ? <Loader2 className="h-3 w-3 animate-spin" /> : <Settings2 className="h-3 w-3" />} Apply
+          </button>
+        }
+      >
+        <div className="space-y-2">
+          <div className="grid grid-cols-4 gap-1">
+            {(["auto", "conservative", "bulk", "manual"] as const).map((m) => (
+              <button
+                key={m}
+                type="button"
+                onClick={() => setMode(m)}
+                title={modeTitle(m)}
+                className={`h-7 rounded-[3px] border px-2 text-[11px] capitalize ${
+                  mode === m
+                    ? "border-main/50 bg-main/15 text-main"
+                    : "border-chrome-border/50 text-chrome-text/65 hover:bg-foreground/[0.05] hover:text-foreground"
+                }`}
+              >
+                {modeLabel(m)}
+              </button>
+            ))}
+          </div>
+
+          <div className="grid grid-cols-2 gap-2 lg:grid-cols-3">
+            <FieldLite label="Query threads">
+              <input className={inputCls} inputMode="numeric" value={queryThreads} onChange={(e) => setQueryThreads(e.target.value)} />
+            </FieldLite>
+            <FieldLite label="Writer threads">
+              <input className={inputCls} inputMode="numeric" value={writerThreads} onChange={(e) => setWriterThreads(e.target.value)} />
+            </FieldLite>
+            <FieldLite label="Chunk rows">
+              <input className={inputCls} inputMode="numeric" value={scanChunkRows} onChange={(e) => setScanChunkRows(e.target.value)} />
+            </FieldLite>
+            <FieldLite label="Interval sec">
+              <input className={inputCls} inputMode="numeric" value={refreshIntervalSeconds} onChange={(e) => setRefreshIntervalSeconds(e.target.value)} />
+            </FieldLite>
+            <FieldLite label="Metadata">
+              <select className={inputCls} value={metadataProfile ?? ""} onChange={(e) => setMetadataProfile(e.target.value)}>
+                <option value="minimal">minimal</option>
+                <option value="rich">rich</option>
+              </select>
+            </FieldLite>
+            <FieldLite label="Variants">
+              <select className={inputCls} value={refreshVariants ?? ""} onChange={(e) => setRefreshVariants(e.target.value)}>
+                <option value="deferred">deferred</option>
+                <option value="sync">sync</option>
+              </select>
+            </FieldLite>
+            <div className="flex items-end">
+              <button
+                type="button"
+                disabled={refreshBusy}
+                onClick={onRefresh}
+                title="Run this cube refresh now"
+                className="inline-flex h-7 w-full items-center justify-center gap-1 rounded-[3px] border border-chrome-border/60 px-2 text-[11px] text-chrome-text/70 hover:bg-foreground/[0.05] hover:text-foreground disabled:opacity-50"
+              >
+                {refreshBusy ? <Loader2 className="h-3 w-3 animate-spin" /> : <Zap className="h-3 w-3" />} Run now
+              </button>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-2 gap-2 lg:grid-cols-4">
+            <HealthStat label="Last run" value={status?.lastRefreshSeconds == null ? "—" : `${status.lastRefreshSeconds.toFixed(2)}s`} />
+            <HealthStat label="Age" value={fmtAgo(health.secondsSinceRefresh)} />
+            <HealthStat label="Dirty" value={status?.dirty ? "yes" : "no"} />
+            <HealthStat label="Sources" value={`${status?.trackedSourceCount ?? 0}/${status?.sourceCount ?? 0}`} />
+            <HealthStat label="Rows" value={health.lastRefreshRows?.toLocaleString() ?? "—"} />
+          </div>
+          {msg ? <div className={`text-[11px] ${msg.startsWith("Policy failed") ? "text-danger" : "text-chrome-text/70"}`}>{msg}</div> : null}
+        </div>
+      </Section>
+    </div>
+  )
+}
+
+function FieldLite({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <label className="block">
+      <span className="mb-0.5 block text-[10px] uppercase tracking-wider text-chrome-text/45">{label}</span>
+      {children}
+    </label>
+  )
+}
+
+function numText(v: number | null | undefined): string {
+  return v == null || !Number.isFinite(v) ? "" : String(v)
+}
+
+function parseOptionalInt(v: string): number | null {
+  const trimmed = v.trim()
+  if (!trimmed) return null
+  const n = Number(trimmed)
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : null
+}
+
+function modeLabel(mode: string | null | undefined): string {
+  switch (mode) {
+    case "auto":
+      return "Sweep"
+    case "conservative":
+      return "Conservative"
+    case "bulk":
+      return "Bulk"
+    case "manual":
+      return "Manual"
+    default:
+      return mode ?? "—"
+  }
+}
+
+function modeTitle(mode: string): string {
+  switch (mode) {
+    case "auto":
+      return "Eligible for selective refresh_all_cubes sweeps"
+    case "conservative":
+      return "Lower query and writer concurrency"
+    case "bulk":
+      return "Higher query concurrency for catch-up windows"
+    case "manual":
+      return "Excluded from refresh_all_cubes sweeps"
+    default:
+      return mode
+  }
+}
+
 function HealthTab({ health }: { health: CubeDetail["health"] }) {
   if (!health) return <StatusNote state="empty" message="No health data." />
   return (
@@ -460,6 +713,11 @@ function HealthTab({ health }: { health: CubeDetail["health"] }) {
         <HealthStat label="Last refresh" value={fmtAgo(health.secondsSinceRefresh)} />
         <HealthStat label="Current rows" value={health.currentRows?.toLocaleString() ?? "—"} />
         <HealthStat label="Row Δ since refresh" value={health.rowDelta == null ? "—" : health.rowDelta.toLocaleString()} />
+        <HealthStat label="Policy" value={modeLabel(health.autopilot?.mode ?? health.refreshPolicy?.mode ?? null)} />
+        <HealthStat label="Variants" value={health.autopilot?.refreshVariants ?? "—"} />
+        <HealthStat label="Action" value={health.autopilot?.recommendedAction ?? "—"} />
+        <HealthStat label="Source dirty" value={health.autopilot?.sourceDirty ? "yes" : "no"} />
+        <HealthStat label="Sources tracked" value={`${health.autopilot?.trackedSourceCount ?? 0}/${health.autopilot?.sourceCount ?? 0}`} />
       </div>
       <div>
         <div className="mb-1 text-[10px] uppercase tracking-wider text-chrome-text/45">Drift</div>
