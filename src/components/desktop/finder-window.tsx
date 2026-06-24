@@ -87,7 +87,7 @@ export function FinderWindow({
           <Input
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            placeholder="Search tables..."
+            placeholder="Search objects..."
             className="h-7 pl-7 text-xs"
           />
         </div>
@@ -107,7 +107,7 @@ export function FinderWindow({
         ) : null}
         <div className="flex-1" />
         <span>
-          {(schema?.tables?.length ?? 0)} tables ·{" "}
+          {(schema?.tables?.length ?? 0)} objects ·{" "}
           {(schema?.schemas?.length ?? 0)} schemas
         </span>
       </div>
@@ -119,7 +119,7 @@ export function FinderWindow({
           </div>
         ) : null}
         {schema && grouped.length === 0 ? (
-          <div className="px-4 py-3 text-xs text-chrome-text/70">No tables match &quot;{search}&quot;.</div>
+          <div className="px-4 py-3 text-xs text-chrome-text/70">No objects match &quot;{search}&quot;.</div>
         ) : null}
         {grouped.map(({ schema: ns, tables }) => {
           const isOpen = openSchemas.has(ns)
@@ -200,6 +200,7 @@ function TableRow({
     const cols = table.columns ?? []
     const isViewish = table.kind === "view" || table.kind === "matview"
     const dropVerb = table.kind === "matview" ? "MATERIALIZED VIEW" : table.kind === "view" ? "VIEW" : "TABLE"
+    const dropLabelKind = table.kind === "matview" ? "materialized view" : table.kind === "view" ? "view" : "table"
     const items: ContextMenuItem[] = [
       { id: "open", label: "Open (200 rows)", icon: Play, onSelect: onOpen },
       {
@@ -258,7 +259,7 @@ function TableRow({
     }
     items.push({
       id: "drop",
-      label: `Drop ${isViewish ? table.kind : "table"}…`,
+      label: `Drop ${dropLabelKind}…`,
       icon: Trash2,
       danger: true,
       separatorBefore: isViewish,

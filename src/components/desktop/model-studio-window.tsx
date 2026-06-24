@@ -373,7 +373,7 @@ function EvalResult({ evaluation, task }: { evaluation: MlEvaluation; task: stri
 
 function ConfusionMatrix({ labels, cells }: { labels: string[]; cells: Array<{ actual: string; predicted: string; n: number }> }) {
   if (labels.length === 0) return <p className="text-[10px] text-chrome-text/40">no predictions</p>
-  const key = (a: string, p: string) => `${a} ${p}`
+  const key = (a: string, p: string) => `${a}\u001f${p}`
   const map = new Map(cells.map((c) => [key(c.actual, c.predicted), c.n]))
   const max = Math.max(1, ...cells.map((c) => c.n))
   return (

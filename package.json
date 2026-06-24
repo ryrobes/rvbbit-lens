@@ -1,12 +1,14 @@
 {
   "name": "rvbbit-lens",
-  "version": "2.4.1",
+  "version": "2.5.0",
   "private": true,
   "description": "A focused, local-first SQL desktop client for Postgres — with optional rvbbit semantic SQL layer.",
   "scripts": {
     "dev": "next dev",
     "build": "next build",
+    "postbuild": "node scripts/sync-standalone-assets.mjs",
     "start": "next start",
+    "start:standalone": "node .next/standalone/server.js",
     "lint": "eslint",
     "typecheck": "tsc --noEmit"
   },

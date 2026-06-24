@@ -321,7 +321,7 @@ export function MetricBoardWindow({
     const byKey = new Map<string, MetricBoardCell>()
     for (const c of cells) {
       colSet.add(c.bucketMs)
-      byKey.set(`${c.metric} ${c.bucketMs}`, c)
+      byKey.set(`${c.metric}\u001f${c.bucketMs}`, c)
     }
     return { columns: [...colSet].sort((a, b) => a - b), byKey }
   }, [cells])
@@ -349,7 +349,7 @@ export function MetricBoardWindow({
     const cats = [...new Set(rows.map((n) => metaOf(n)?.category ?? null))].sort(cmpNull)
     const out: RR[] = []
     for (const cat of cats) {
-      const catKey = cat ?? " uncat"
+      const catKey = cat ?? "\u001funcat"
       const catMembers = rows.filter((n) => (metaOf(n)?.category ?? null) === cat)
       out.push({ type: "group", depth: 0, key: catKey, label: cat ?? "(uncategorized)", members: catMembers })
       if (collapsed.has(catKey)) continue
@@ -359,7 +359,7 @@ export function MetricBoardWindow({
         if (sub == null) {
           for (const n of subMembers) out.push({ type: "metric", name: n, depth: 1 })
         } else {
-          const subKey = `${catKey} ${sub}`
+          const subKey = `${catKey}\u001f${sub}`
           out.push({ type: "group", depth: 1, key: subKey, label: sub, members: subMembers })
           if (collapsed.has(subKey)) continue
           for (const n of subMembers) out.push({ type: "metric", name: n, depth: 2 })
@@ -374,7 +374,7 @@ export function MetricBoardWindow({
     let passing = 0
     let total = 0
     for (const name of members) {
-      const c = byKey.get(`${name} ${col}`) // byKey keys use a NUL separator
+      const c = byKey.get(`${name}\u001f${col}`) // byKey keys use a unit separator
       if (c?.verdict && c.verdict.ok != null) {
         total++
         if (c.verdict.ok) passing++
@@ -674,7 +674,7 @@ export function MetricBoardWindow({
                 const meta = metrics.find((m) => m.name === name)
                 const isKpi = !!meta?.checkSql
                 const series = columns.map((col) => {
-                  const c = byKey.get(`${name} ${col}`)
+                  const c = byKey.get(`${name}\u001f${col}`)
                   return c ? boardCellHeadline(c) : null
                 })
                 return (
@@ -697,7 +697,7 @@ export function MetricBoardWindow({
                       </span>
                     </th>
                     {columns.map((col) => {
-                      const c = byKey.get(`${name} ${col}`)
+                      const c = byKey.get(`${name}\u001f${col}`)
                       const disp = cellDisp(c)
                       return (
                         <td

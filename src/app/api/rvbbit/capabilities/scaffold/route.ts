@@ -70,11 +70,12 @@ function repoRoot(): string {
 function capabilityRoot(): string {
   if (process.env.RVBBIT_CAPABILITY_ROOT) return process.env.RVBBIT_CAPABILITY_ROOT
   const root = repoRoot()
-  return root ? path.join(root, "capabilities") : DEFAULT_CAPABILITY_ROOT
+  return root ? path.join(/*turbopackIgnore: true*/ root, "capabilities") : DEFAULT_CAPABILITY_ROOT
 }
 
 function localWorkRoot(): string {
   return path.resolve(
+    /*turbopackIgnore: true*/
     process.env.RVBBIT_LOCAL_WORK_ROOT?.trim() ||
       process.env.RVBBIT_LENS_HOME?.trim() ||
       os.homedir(),
@@ -87,7 +88,9 @@ function resolveOutDir(raw: string): { ok: true; path: string } | { ok: false; e
     return { ok: false, error: "outDir is required" }
   }
   const root = localWorkRoot()
-  const resolved = path.isAbsolute(raw) ? path.resolve(raw) : path.resolve(root, raw)
+  const resolved = path.isAbsolute(raw)
+    ? path.resolve(/*turbopackIgnore: true*/ raw)
+    : path.resolve(/*turbopackIgnore: true*/ root, raw)
   // Refuse traversal outside the local work root. In packaged Lens this is the
   // /data volume; in direct dev runs it falls back to the user home.
   if (!resolved.startsWith(root + path.sep) && resolved !== root) {
@@ -103,9 +106,9 @@ function locateCli(): string {
   const explicit = process.env.RVBBIT_CAPABILITY_CLI
   if (explicit) return explicit
   const root = repoRoot()
-  if (root) return path.join(root, "capabilities", "tools", "rvbbit-capability")
+  if (root) return path.join(/*turbopackIgnore: true*/ root, "capabilities", "tools", "rvbbit-capability")
   const caps = capabilityRoot()
-  if (caps) return path.join(caps, "tools", "rvbbit-capability")
+  if (caps) return path.join(/*turbopackIgnore: true*/ caps, "tools", "rvbbit-capability")
   return "rvbbit-capability"
 }
 
@@ -113,12 +116,12 @@ function resolveManifestPath(raw: string): string {
   if (path.isAbsolute(raw)) return raw
   const caps = capabilityRoot()
   const stripped = raw.replace(/^capabilities\//, "").replace(/^\/+/, "")
-  return path.resolve(caps, stripped)
+  return path.resolve(/*turbopackIgnore: true*/ caps, stripped)
 }
 
 async function fileExists(p: string): Promise<boolean> {
   try {
-    await fs.access(p, fsConstants.F_OK)
+    await fs.access(/*turbopackIgnore: true*/ p, fsConstants.F_OK)
     return true
   } catch {
     return false
@@ -134,7 +137,7 @@ async function runScaffoldCli(
   return new Promise((resolve) => {
     const args = ["scaffold", manifestAbs, outAbs]
     if (force) args.push("--force")
-    const child = spawn(cli, args, { stdio: ["ignore", "pipe", "pipe"] })
+    const child = spawn(/*turbopackIgnore: true*/ cli, args, { stdio: ["ignore", "pipe", "pipe"] })
     let stdout = ""
     let stderr = ""
     child.stdout.on("data", (d) => (stdout += d.toString()))
@@ -165,9 +168,9 @@ export async function POST(req: Request) {
   let manifestAbs: string
   if (body.manifestYaml && body.manifestYaml.trim().length > 0) {
     try {
-      const dir = await fs.mkdtemp(path.join(os.tmpdir(), "rvbbit-hf-"))
-      manifestAbs = path.join(dir, "capability.yaml")
-      await fs.writeFile(manifestAbs, body.manifestYaml, "utf8")
+      const dir = await fs.mkdtemp(/*turbopackIgnore: true*/ path.join(/*turbopackIgnore: true*/ os.tmpdir(), "rvbbit-hf-"))
+      manifestAbs = path.join(/*turbopackIgnore: true*/ dir, "capability.yaml")
+      await fs.writeFile(/*turbopackIgnore: true*/ manifestAbs, body.manifestYaml, "utf8")
     } catch (e) {
       return NextResponse.json(
         { ok: false, error: `failed to stage inline manifest: ${e instanceof Error ? e.message : String(e)}` },
@@ -218,9 +221,9 @@ export async function POST(req: Request) {
     for (const [name, content] of Object.entries(body.overrides)) {
       if (!ALLOWED_OVERRIDES.has(name)) continue
       if (typeof content !== "string") continue
-      const target = path.join(out.path, name)
+      const target = path.join(/*turbopackIgnore: true*/ out.path, name)
       try {
-        await fs.writeFile(target, content, "utf8")
+        await fs.writeFile(/*turbopackIgnore: true*/ target, content, "utf8")
         overridesApplied.push(name)
       } catch (e) {
         return NextResponse.json(
@@ -238,10 +241,10 @@ export async function POST(req: Request) {
   // List the resulting directory so the UI can show what got written.
   let files: ScaffoldedFile[] = []
   try {
-    const entries = await fs.readdir(out.path)
+    const entries = await fs.readdir(/*turbopackIgnore: true*/ out.path)
     files = await Promise.all(
       entries.map(async (name) => {
-        const stat = await fs.stat(path.join(out.path, name))
+        const stat = await fs.stat(/*turbopackIgnore: true*/ path.join(/*turbopackIgnore: true*/ out.path, name))
         return {
           name,
           size: stat.size,

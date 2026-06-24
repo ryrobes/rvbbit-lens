@@ -83,6 +83,7 @@ export interface RvbbitStatus {
   hasRvbbit: boolean
   rvbbitVersion: string | null
   durationMs: number
+  error?: string
 }
 
 export interface QueryResultColumn {
@@ -235,6 +236,7 @@ export interface SchemaSnapshot {
   extensions: ExtensionInfo[]
   hasRvbbit: boolean
   rvbbitVersion: string | null
+  error?: string
 }
 
 export interface ExtensionInfo {

@@ -328,9 +328,13 @@ function TimelinePanel({ byBucket, filter, onBrush }: TimelinePanelProps) {
   }, [themeStamp])
 
   const values = useMemo(
-    () => byBucket.map((r) => ({ bucket: r.bucket, cost: r.total_cost_usd })),
+    () =>
+      byBucket
+        .map((r) => ({ bucket: r.bucket, cost: r.total_cost_usd }))
+        .filter((r) => Number.isFinite(Date.parse(r.bucket)) && Number.isFinite(r.cost)),
     [byBucket],
   )
+  const hasTimelineData = values.length > 0
 
   // Axis configuration — adapts to the chosen window so labels never
   // collapse into "May 24" repeating. The labelExpr inspects each
@@ -454,6 +458,19 @@ function TimelinePanel({ byBucket, filter, onBrush }: TimelinePanelProps) {
     observer.observe(el)
   }, [])
 
+  if (!hasTimelineData) {
+    return (
+      <div className="border-b border-chrome-border bg-doc-bg px-2 pt-1">
+        <div className="flex items-center justify-between px-1 pb-0.5 text-[10px] uppercase tracking-wider text-chrome-text">
+          <span>30-day cost timeline · no buckets in this range</span>
+        </div>
+        <div className="grid h-[100px] place-items-center text-[11px] text-chrome-text/70">
+          no cost timeline data in this range
+        </div>
+      </div>
+    )
+  }
+
   return (
     <div className="border-b border-chrome-border bg-doc-bg px-2 pt-1">
       <div className="flex items-center justify-between px-1 pb-0.5 text-[10px] uppercase tracking-wider text-chrome-text">
@@ -567,7 +584,7 @@ function BackendPanel({
   const grouped = useMemo(() => {
     const m = new Map<string, Group>()
     for (const r of rows) {
-      const key = `${r.backend} ${r.model_or_tool}`
+      const key = `${r.backend}\u001f${r.model_or_tool}`
       let g = m.get(key)
       if (!g) {
         g = { backend: r.backend, model: r.model_or_tool, total: 0, statuses: new Map() }

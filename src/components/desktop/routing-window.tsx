@@ -44,6 +44,7 @@ import {
 } from "@/lib/rvbbit/routing"
 import { RoutingOverlayTab } from "./routing-overlay-tab"
 import { RoutingExplainTab } from "./routing-explain-tab"
+import { RoutingTrainTab } from "./routing-train-tab"
 import { RoutingAutoTrainTab } from "./routing-auto-train-tab"
 import { RoutingFreshnessTab } from "./routing-freshness-tab"
 
@@ -59,12 +60,13 @@ const REFRESH_OPTIONS_MS = [
   { ms: 30_000, label: "30s" },
 ]
 
-type TabKey = "flow" | "freshness" | "overlay" | "explain" | "autotrain"
+type TabKey = "flow" | "freshness" | "overlay" | "explain" | "train" | "autotrain"
 const TABS: { key: TabKey; label: string }[] = [
   { key: "flow", label: "Flow" },
   { key: "freshness", label: "OLAP Maint" },
   { key: "overlay", label: "Overlay" },
   { key: "explain", label: "Explain" },
+  { key: "train", label: "Train" },
   { key: "autotrain", label: "Auto-Train" },
 ]
 
@@ -288,6 +290,8 @@ export function RoutingWindow({ activeConnectionId, hasRvbbit }: RoutingWindowPr
             activeConnectionId={activeConnectionId}
             columnarTables={columnarTables}
           />
+        ) : tab === "train" ? (
+          <RoutingTrainTab activeConnectionId={activeConnectionId} />
         ) : (
           <RoutingAutoTrainTab activeConnectionId={activeConnectionId} />
         )}
@@ -352,7 +356,7 @@ function FlowTab({
     for (const d of flow?.decisionSummary ?? []) {
       if (d.decisions <= 0) continue
       const target = engineFlowTarget(d.candidate, d.physicalPath)
-      const key = `${d.routeSource} ${target}`
+      const key = `${d.routeSource}\u001f${target}`
       const ex = agg.get(key)
       if (ex) ex.value += d.decisions
       else agg.set(key, { source: d.routeSource, target, value: d.decisions })

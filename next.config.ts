@@ -1,7 +1,36 @@
 import type { NextConfig } from "next"
+import path from "path"
+import { fileURLToPath } from "url"
+
+const appRoot = path.dirname(fileURLToPath(import.meta.url))
 
 const nextConfig: NextConfig = {
   output: "standalone",
+  outputFileTracingRoot: appRoot,
+  outputFileTracingExcludes: {
+    "/api/rvbbit/capabilities/scaffold": [
+      "src/**/*",
+      "docs/**/*",
+      "public/**/*",
+      "*.jpeg",
+      "*.jpg",
+      "*.png",
+      "*.mjs",
+      "Dockerfile",
+      "README.md",
+      "docker-entrypoint.sh",
+      "eslint.config.mjs",
+      "next.config.ts",
+      "package-lock.json",
+      "package.json",
+      "postcss.config.mjs",
+      "tsconfig.json",
+      "tsconfig.tsbuildinfo",
+    ],
+  },
+  turbopack: {
+    root: appRoot,
+  },
   experimental: {
     // Raised so the CSV importer can stream multi-GB uploads to
     // /api/db/import/run. The route consumes the body as a stream (never

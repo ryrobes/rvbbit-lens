@@ -144,9 +144,9 @@ export function ConnectionsWindow({ onChanged }: ConnectionsWindowProps) {
           sshPassword: draft.sshPassword.length > 0 ? draft.sshPassword : undefined,
         }),
       })
-      const body = await res.json()
-      if (!res.ok) throw new Error(body?.error ?? "save failed")
-      setSelectedId(body.connection.id)
+      const body = (await res.json()) as { connection?: SanitizedConnection; error?: string }
+      if (!res.ok || !body.connection) throw new Error(body?.error ?? "save failed")
+      loadIntoDraft(body.connection)
       await reload()
       await onChanged()
     } catch (e) {
@@ -395,7 +395,7 @@ export function ConnectionsWindow({ onChanged }: ConnectionsWindowProps) {
 
         {testResult ? <TestResultPanel result={testResult} /> : null}
 
-        <div className="mt-4 flex items-center gap-2">
+        <div className="sticky bottom-0 -mx-4 mt-4 flex items-center gap-2 border-t border-chrome-border bg-block-bg/95 px-4 py-3 backdrop-blur">
           <Button onClick={save} disabled={saving || !draft.label}>
             {saving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
             {draft.id ? "Save" : "Create"}

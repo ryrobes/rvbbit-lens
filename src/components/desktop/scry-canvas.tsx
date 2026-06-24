@@ -70,6 +70,27 @@ interface ScryCanvasProps {
 type LabelMode = "smart" | "dense" | "off"
 type EdgeMode = "normal" | "dim" | "faint" | "off"
 
+function hasWebGlSupport(): boolean {
+  if (typeof document === "undefined") return false
+  const canvas = document.createElement("canvas")
+  const gl = (
+    canvas.getContext("webgl2") ??
+    canvas.getContext("webgl") ??
+    canvas.getContext("experimental-webgl")
+  ) as WebGLRenderingContext | WebGL2RenderingContext | null
+  if (!gl) return false
+  gl.getExtension("WEBGL_lose_context")?.loseContext()
+  return true
+}
+
+function rendererErrorMessage(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error)
+  if (/webgl|context|blendFunc/i.test(message)) {
+    return "WebGL is unavailable in this browser; graph canvas is disabled."
+  }
+  return `Graph renderer failed to start: ${message}`
+}
+
 interface ScryGraphNode {
   key: string
   nodeId: number
@@ -268,6 +289,7 @@ export function ScryCanvas({
   const [neighborhood, setNeighborhood] = useState<KgNeighborhood>({ nodes: [], edges: [] })
   const [neighborhoodLoading, setNeighborhoodLoading] = useState(false)
   const [neighborhoodError, setNeighborhoodError] = useState<string | null>(null)
+  const [rendererError, setRendererError] = useState<string | null>(null)
   const [selectedKey, setSelectedKey] = useState<string | null>(null)
   const [selectedEdgeKey, setSelectedEdgeKey] = useState<string | null>(null)
   const [hoveredKey, setHoveredKey] = useState<string | null>(null)
@@ -538,33 +560,47 @@ export function ScryCanvas({
     let renderer: SigmaRenderer<ScrySigmaNodeAttributes, ScrySigmaEdgeAttributes> | null = null
 
     const run = async () => {
+      setRendererError(null)
+      if (!hasWebGlSupport()) {
+        setRendererError("WebGL is unavailable in this browser; graph canvas is disabled.")
+        return
+      }
+
       const { default: Sigma } = await import("sigma")
       if (cancelled || !containerRef.current) return
       const initialLabelMode = interactionRef.current.labelMode
-      renderer = new Sigma<ScrySigmaNodeAttributes, ScrySigmaEdgeAttributes>(bundle.graphology, containerRef.current, {
-        allowInvalidContainer: true,
-        autoCenter: true,
-        autoRescale: true,
-        enableEdgeEvents: true,
-        hideEdgesOnMove: bundle.graphology.size > 1200,
-        hideLabelsOnMove: true,
-        itemSizesReference: "screen",
-        labelColor: { color: "rgba(238, 244, 255, 0.92)" },
-        labelDensity: 0.14,
-        labelFont: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
-        labelRenderedSizeThreshold: initialLabelMode === "dense" ? 0 : initialLabelMode === "off" ? 99 : 8,
-        labelSize: 11,
-        maxCameraRatio: 14,
-        minCameraRatio: 0.025,
-        minEdgeThickness: 0.55,
-        defaultDrawNodeHover: drawDarkNodeHover,
-        renderEdgeLabels: false,
-        renderLabels: true,
-        stagePadding: 54,
-        zIndex: true,
-        nodeReducer: (key, data) => reduceNode(key, data, interactionRef.current),
-        edgeReducer: (key, data) => reduceEdge(key, data, bundle, interactionRef.current),
-      })
+      try {
+        renderer = new Sigma<ScrySigmaNodeAttributes, ScrySigmaEdgeAttributes>(bundle.graphology, containerRef.current, {
+          allowInvalidContainer: true,
+          autoCenter: true,
+          autoRescale: true,
+          enableEdgeEvents: true,
+          hideEdgesOnMove: bundle.graphology.size > 1200,
+          hideLabelsOnMove: true,
+          itemSizesReference: "screen",
+          labelColor: { color: "rgba(238, 244, 255, 0.92)" },
+          labelDensity: 0.14,
+          labelFont: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+          labelRenderedSizeThreshold: initialLabelMode === "dense" ? 0 : initialLabelMode === "off" ? 99 : 8,
+          labelSize: 11,
+          maxCameraRatio: 14,
+          minCameraRatio: 0.025,
+          minEdgeThickness: 0.55,
+          defaultDrawNodeHover: drawDarkNodeHover,
+          renderEdgeLabels: false,
+          renderLabels: true,
+          stagePadding: 54,
+          zIndex: true,
+          nodeReducer: (key, data) => reduceNode(key, data, interactionRef.current),
+          edgeReducer: (key, data) => reduceEdge(key, data, bundle, interactionRef.current),
+        })
+      } catch (error) {
+        if (!cancelled) setRendererError(rendererErrorMessage(error))
+        renderer?.kill()
+        renderer = null
+        rendererRef.current = null
+        return
+      }
       rendererRef.current = renderer
       const cloudCanvas = renderer.createCanvas("clouds", {
         beforeLayer: "edges",
@@ -668,7 +704,7 @@ export function ScryCanvas({
           nodeCount={graphNodeCount}
           edgeCount={graphEdgeCount}
           loading={neighborhoodLoading || cascade.stages.some((s) => s.loading)}
-          error={neighborhoodError}
+          error={rendererError ?? neighborhoodError}
           selectedNode={selectedNode}
           hoveredNode={hoveredKey ? bundle.nodes.get(hoveredKey) ?? null : null}
         />

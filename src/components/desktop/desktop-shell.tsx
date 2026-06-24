@@ -4246,8 +4246,8 @@ export function DesktopShell() {
       {/* Incoming NOTIFY toasts */}
       <NotificationToasts toasts={toasts} onDismiss={dismissToast} />
 
-      {/* Empty-state overlay when no connection */}
-      {connections.length === 0 ? (
+      {/* Empty-state overlay when no connection and no active window */}
+      {connections.length === 0 && windows.length === 0 ? (
         <EmptyStateOverlay onAddConnection={openConnections} />
       ) : null}
 

@@ -15,17 +15,32 @@ interface Err {
   error: string
 }
 
-async function run(connectionId: string, sql: string, rowLimit = 5000, statementTimeout?: number): Promise<Ok | Err> {
+interface RunOptions {
+  readOnly?: boolean
+  statementTimeout?: number
+}
+
+async function run(connectionId: string, sql: string, rowLimit = 5000, opts: RunOptions = {}): Promise<Ok | Err> {
   try {
     const res = await fetch("/api/db/query", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ connectionId, sql, rowLimit, ...(statementTimeout != null ? { statementTimeout } : {}) }),
+      body: JSON.stringify({
+        connectionId,
+        sql,
+        rowLimit,
+        ...(opts.statementTimeout != null ? { statementTimeout: opts.statementTimeout } : {}),
+        ...(opts.readOnly ? { readOnly: true, poolLane: "meta" } : {}),
+      }),
     })
     return (await res.json()) as Ok | Err
   } catch (e) {
     return { ok: false, error: e instanceof Error ? e.message : String(e) }
   }
+}
+
+function runRead(connectionId: string, sql: string, rowLimit = 5000, statementTimeout?: number): Promise<Ok | Err> {
+  return run(connectionId, sql, rowLimit, { readOnly: true, statementTimeout })
 }
 
 /** Postgres single-quoted literal (the query API has no bind params). */
@@ -94,7 +109,7 @@ export interface BrainFacets {
 /** Discover what the identity can filter by: doc types + sources (with counts), ACL-aware. */
 export async function fetchFacets(connectionId: string, email: string): Promise<BrainFacets> {
   if (!email) return { types: [], sources: [] }
-  const r = await run(connectionId, `SELECT facet, value, docs FROM rvbbit.brain_facets(${q(email)})`)
+  const r = await runRead(connectionId, `SELECT facet, value, docs FROM rvbbit.brain_facets(${q(email)})`)
   if (!r.ok) return { types: [], sources: [] }
   const types: { value: string; docs: number }[] = []
   const sources: { value: string; docs: number }[] = []
@@ -121,7 +136,7 @@ export interface BrainDocDetail {
 
 /** Distinct principals that hold any role — the "View as" candidates. */
 export async function fetchPrincipals(connectionId: string): Promise<string[]> {
-  const r = await run(connectionId, `SELECT DISTINCT principal FROM rvbbit.brain_role_members ORDER BY principal`)
+  const r = await runRead(connectionId, `SELECT DISTINCT principal FROM rvbbit.brain_role_members ORDER BY principal`)
   if (!r.ok) return []
   return r.rows.map((row) => String(row.principal))
 }
@@ -132,7 +147,7 @@ export async function fetchBrainTree(
   email: string,
 ): Promise<{ docs: BrainDoc[]; error: string | null }> {
   if (!email) return { docs: [], error: null }
-  const r = await run(
+  const r = await runRead(
     connectionId,
     `SELECT folder_path, doc_id, title, source, mime, author,
             extract(epoch FROM occurred_at) * 1000 AS occurred_ms,
@@ -158,7 +173,7 @@ export async function fetchBrainTree(
 
 /** ADMIN: every doc (unfiltered) + its roles + unassigned flag — the triage surface. */
 export async function fetchAllDocs(connectionId: string): Promise<{ docs: BrainDoc[]; error: string | null }> {
-  const r = await run(
+  const r = await runRead(
     connectionId,
     `SELECT folder_path, doc_id, title, source, mime, author,
             extract(epoch FROM occurred_at) * 1000 AS occurred_ms,
@@ -192,7 +207,7 @@ export async function setDocRoles(connectionId: string, docId: number, roles: st
 
 /** Known roles anywhere + member/doc counts (role pickers + access overview). */
 export async function fetchKnownRoles(connectionId: string): Promise<{ role: string; members: number; docs: number }[]> {
-  const r = await run(connectionId, `SELECT role, members, docs FROM rvbbit.brain_list_roles()`)
+  const r = await runRead(connectionId, `SELECT role, members, docs FROM rvbbit.brain_list_roles()`)
   if (!r.ok) return []
   return r.rows.map((row) => ({ role: String(row.role), members: Number(row.members ?? 0), docs: Number(row.docs ?? 0) }))
 }
@@ -200,7 +215,7 @@ export async function fetchKnownRoles(connectionId: string): Promise<{ role: str
 /** Members (emails) of the given roles. */
 export async function fetchRoleMembers(connectionId: string, roles: string[]): Promise<{ role: string; principal: string }[]> {
   if (!roles.length) return []
-  const r = await run(connectionId, `SELECT role, principal FROM rvbbit.brain_role_member_list(${arr(roles)})`)
+  const r = await runRead(connectionId, `SELECT role, principal FROM rvbbit.brain_role_member_list(${arr(roles)})`)
   if (!r.ok) return []
   return r.rows.map((row) => ({ role: String(row.role), principal: String(row.principal) }))
 }
@@ -217,7 +232,7 @@ export async function fetchDocAdmin(
   connectionId: string,
   docId: number,
 ): Promise<{ doc: BrainDocDetail | null; error: string | null }> {
-  const r = await run(
+  const r = await runRead(
     connectionId,
     `SELECT d.doc_id, d.title, d.folder_path, s.label AS source, d.author, d.mime,
             d.occurred_at::text AS occurred_at, d.ingested_at::text AS ingested_at, d.body,
@@ -251,7 +266,7 @@ export async function fetchBrainDoc(
   email: string,
   docId: number,
 ): Promise<{ doc: BrainDocDetail | null; error: string | null }> {
-  const r = await run(connectionId, `SELECT rvbbit.brain_get_doc(${q(email)}, ${Math.floor(docId)}) AS d`)
+  const r = await runRead(connectionId, `SELECT rvbbit.brain_get_doc(${q(email)}, ${Math.floor(docId)}) AS d`)
   if (!r.ok) return { doc: null, error: r.error }
   const d = r.rows[0]?.d as Record<string, unknown> | null | undefined
   if (!d) return { doc: null, error: null }
@@ -308,7 +323,7 @@ export interface BrainSource {
 
 /** All configured sources + their live doc counts + remote config. */
 export async function fetchSources(connectionId: string): Promise<{ sources: BrainSource[]; error: string | null }> {
-  const r = await run(
+  const r = await runRead(
     connectionId,
     `SELECT s.source_id, s.label, s.kind, s.enabled, s.creds_ref,
             s.config->>'endpoint' AS endpoint, s.config->'folders' AS folders,
@@ -354,7 +369,7 @@ export interface BrainProvider {
 
 /** All registered document-type providers (the reusable "scrape is SQL" definitions). */
 export async function fetchProviders(connectionId: string): Promise<{ providers: BrainProvider[]; error: string | null }> {
-  const r = await run(
+  const r = await runRead(
     connectionId,
     `SELECT p.provider, p.label, p.list_sql, p.item_sql, p.icon, p.description, p.doc_type,
             p.edge_map::text AS edge_map, jsonb_array_length(coalesce(p.edge_map,'[]'::jsonb)) AS edge_count,
@@ -479,7 +494,7 @@ export async function fetchSyncRuns(
   sourceId?: number,
 ): Promise<{ runs: BrainSyncRun[]; error: string | null }> {
   const where = sourceId ? `WHERE source_id = ${Math.floor(sourceId)}` : ""
-  const r = await run(
+  const r = await runRead(
     connectionId,
     `SELECT run_id, source_id, extract(epoch FROM started_at)*1000 AS started_ms,
             extract(epoch FROM finished_at)*1000 AS finished_ms, trigger, added, changed, removed, skipped, errors, elapsed_sec
@@ -514,7 +529,7 @@ export interface BrainPendingGrant {
 
 /** Group/domain/anyone shares awaiting admin approval (strict ACL). */
 export async function fetchPendingGrants(connectionId: string): Promise<{ grants: BrainPendingGrant[]; error: string | null }> {
-  const r = await run(
+  const r = await runRead(
     connectionId,
     `SELECT source_id, folder_id, grant_kind, grant_value, approved
        FROM rvbbit.brain_pending_grants WHERE NOT approved ORDER BY source_id, folder_id`,
@@ -560,7 +575,7 @@ export async function fetchDocGraph(
   docId: number,
 ): Promise<{ rows: BrainGraphRow[]; error: string | null }> {
   if (!email) return { rows: [], error: null }
-  const r = await run(
+  const r = await runRead(
     connectionId,
     `SELECT rel_type, kind, label, doc_id, weight FROM rvbbit.brain_doc_graph(${q(email)}, ${Math.floor(docId)})`,
   )
@@ -587,7 +602,7 @@ export interface NerStatus {
 
 /** Whether the GLiNER NER capability is installed (enrichment uses it if so). */
 export async function fetchNerStatus(connectionId: string): Promise<NerStatus> {
-  const r = await run(
+  const r = await runRead(
     connectionId,
     `SELECT EXISTS(SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
                    WHERE n.nspname='rvbbit' AND p.proname='extract_entities') AS installed,
@@ -636,7 +651,7 @@ export async function fetchDocRelations(
   docId: number,
 ): Promise<{ rels: BrainRelation[]; error: string | null }> {
   if (!email) return { rels: [], error: null }
-  const r = await run(
+  const r = await runRead(
     connectionId,
     `SELECT subject_kind, subject, predicate, object_kind, object, confidence
        FROM rvbbit.brain_doc_relations(${q(email)}, ${Math.floor(docId)}, 40)`,
@@ -677,7 +692,7 @@ export async function enrichSource(
     connectionId,
     `SELECT rvbbit.brain_enrich_source(${Math.floor(sourceId)}, ${opts?.force ? "true" : "false"}) AS r`,
     1,
-    0,
+    { statementTimeout: 0 },
   )
   if (!r.ok) return { result: null, error: r.error }
   return { result: (r.rows[0]?.r as Record<string, unknown>) ?? null, error: null }

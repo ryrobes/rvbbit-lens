@@ -2233,6 +2233,34 @@ function Toolbar({
         {ask ? <Sparkles className="h-3 w-3" /> : <Play className="h-3 w-3" />}
         {ask ? "Ask" : "Run"}
       </Button>
+      {!ask && onToggleAutocommit ? (
+        <button
+          type="button"
+          onClick={onToggleAutocommit}
+          title={
+            txnMode
+              ? "Manual transaction (autocommit off) — click to return to autocommit"
+              : "Autocommit on — click to start a manual transaction"
+          }
+          className={cn(
+            "inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-[10px]",
+            txnMode ? "border-warning/60 text-warning" : "border-chrome-border/60 text-chrome-text/60 hover:bg-foreground/[0.05]",
+          )}
+        >
+          {txnActive ? <span className="h-1.5 w-1.5 rounded-full bg-warning" /> : null}
+          {txnMode ? "txn" : "auto"}
+        </button>
+      ) : null}
+      {!ask && txnMode && txnActive && onCommit && onRollback ? (
+        <>
+          <Button size="sm" variant="neutral" onClick={onCommit} title="COMMIT the transaction">
+            Commit
+          </Button>
+          <Button size="sm" variant="ghost" onClick={onRollback} title="ROLLBACK the transaction">
+            Rollback
+          </Button>
+        </>
+      ) : null}
       {!ask ? (
         <Button size="sm" variant="neutral" onClick={onFormat} title="Format">
           Aa
@@ -2286,34 +2314,6 @@ function Toolbar({
             </option>
           ))}
         </select>
-      ) : null}
-      {!ask && onToggleAutocommit ? (
-        <button
-          type="button"
-          onClick={onToggleAutocommit}
-          title={
-            txnMode
-              ? "Manual transaction (autocommit off) — click to return to autocommit"
-              : "Autocommit on — click to start a manual transaction"
-          }
-          className={cn(
-            "inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-[10px]",
-            txnMode ? "border-warning/60 text-warning" : "border-chrome-border/60 text-chrome-text/60 hover:bg-foreground/[0.05]",
-          )}
-        >
-          {txnActive ? <span className="h-1.5 w-1.5 rounded-full bg-warning" /> : null}
-          {txnMode ? "txn" : "auto"}
-        </button>
-      ) : null}
-      {!ask && txnMode && txnActive && onCommit && onRollback ? (
-        <>
-          <Button size="sm" variant="neutral" onClick={onCommit} title="COMMIT the transaction">
-            Commit
-          </Button>
-          <Button size="sm" variant="ghost" onClick={onRollback} title="ROLLBACK the transaction">
-            Rollback
-          </Button>
-        </>
       ) : null}
       {ask ? (
         <span

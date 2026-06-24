@@ -562,7 +562,7 @@ async function fetchAutomations(connectionId: string, d: DagsterDetection): Prom
                   ${tickTypeExpr} AS tick_type,
                   jt.timestamp AS tick_ts,
                   ${tickUpdatedExpr} AS tick_updated_at
-           FROM ${qt(ticks)}
+           FROM ${qt(ticks)} jt
            WHERE ${tickPredicate}
            ORDER BY jt.timestamp DESC NULLS LAST
            LIMIT 24

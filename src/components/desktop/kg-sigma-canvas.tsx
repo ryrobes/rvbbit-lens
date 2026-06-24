@@ -273,6 +273,7 @@ export function KnowledgeGraphCanvas({
   const [focusedNodeId, setFocusedNodeId] = useState<number | null>(null)
   const [selectedNodeKey, setSelectedNodeKey] = useState<string | null>(null)
   const [ready, setReady] = useState(false)
+  const [renderError, setRenderError] = useState<string | null>(null)
   const [hoverCard, setHoverCard] = useState<HoverCard | null>(null)
   const [clouds, setClouds] = useState<ClusterCloud[]>([])
   const [cameraHistory, setCameraHistory] = useState<CanvasHistoryState>({ signature: "", entries: [], index: -1 })
@@ -473,32 +474,45 @@ export function KnowledgeGraphCanvas({
     }
 
     const run = async () => {
-      const { default: Sigma } = await import("sigma")
-      if (cancelled || !containerRef.current) return
-      renderer = new Sigma<KgSigmaNodeAttributes, KgSigmaEdgeAttributes>(displayBundle.graphology, containerRef.current, {
-        allowInvalidContainer: true,
-        autoCenter: true,
-        autoRescale: true,
-        enableEdgeEvents: true,
-        hideEdgesOnMove: displayBundle.graphology.size > 1200,
-        hideLabelsOnMove: true,
-        itemSizesReference: "screen",
-        labelColor: { color: "rgba(238, 244, 255, 0.92)" },
-        labelDensity: 0.12,
-        labelFont: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
-        labelRenderedSizeThreshold: interactionRef.current.labelMode === "dense" ? 0 : 7,
-        labelSize: 11,
-        maxCameraRatio: 12,
-        minCameraRatio: 0.03,
-        minEdgeThickness: 0.6,
-        defaultDrawNodeHover: drawDarkNodeHover,
-        renderEdgeLabels: false,
-        renderLabels: true,
-        stagePadding: 36,
-        zIndex: true,
-        nodeReducer: (key, data) => reduceNode(key, data, interactionRef.current, displayBundle),
-        edgeReducer: (_key, data) => reduceEdge(data, interactionRef.current, displayBundle),
-      })
+      try {
+        setRenderError(null)
+        const { default: Sigma } = await import("sigma")
+        if (cancelled || !containerRef.current) return
+        renderer = new Sigma<KgSigmaNodeAttributes, KgSigmaEdgeAttributes>(displayBundle.graphology, containerRef.current, {
+          allowInvalidContainer: true,
+          autoCenter: true,
+          autoRescale: true,
+          enableEdgeEvents: true,
+          hideEdgesOnMove: displayBundle.graphology.size > 1200,
+          hideLabelsOnMove: true,
+          itemSizesReference: "screen",
+          labelColor: { color: "rgba(238, 244, 255, 0.92)" },
+          labelDensity: 0.12,
+          labelFont: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+          labelRenderedSizeThreshold: interactionRef.current.labelMode === "dense" ? 0 : 7,
+          labelSize: 11,
+          maxCameraRatio: 12,
+          minCameraRatio: 0.03,
+          minEdgeThickness: 0.6,
+          defaultDrawNodeHover: drawDarkNodeHover,
+          renderEdgeLabels: false,
+          renderLabels: true,
+          stagePadding: 36,
+          zIndex: true,
+          nodeReducer: (key, data) => reduceNode(key, data, interactionRef.current, displayBundle),
+          edgeReducer: (_key, data) => reduceEdge(data, interactionRef.current, displayBundle),
+        })
+      } catch (error) {
+        if (!cancelled) {
+          renderer?.kill()
+          renderer = null
+          rendererRef.current = null
+          setReady(false)
+          setClouds([])
+          setRenderError(error instanceof Error ? error.message : String(error))
+        }
+        return
+      }
       rendererRef.current = renderer
       handleCameraUpdated = (state) => {
         if (suppressHistoryRef.current) return
@@ -653,6 +667,19 @@ export function KnowledgeGraphCanvas({
       renderer?.kill()
     }
   }, [applyHistorySnapshot, displayBundle, detailBundle, pushHistorySnapshot, viewLayer])
+
+  if (renderError) {
+    return (
+      <KgCanvasFallback
+        graph={graph}
+        mode={mode}
+        error={renderError}
+        onClickNode={onClickNode}
+        onClickEdge={onClickEdge}
+        onOpenNodeDetail={onOpenNodeDetail}
+      />
+    )
+  }
 
   return (
     <div className="relative h-full w-full overflow-hidden bg-[#070a0f]">
@@ -841,6 +868,113 @@ export function KnowledgeGraphCanvas({
           }}
         />
       ) : null}
+    </div>
+  )
+}
+
+function KgCanvasFallback({
+  graph,
+  mode,
+  error,
+  onClickNode,
+  onClickEdge,
+  onOpenNodeDetail,
+}: {
+  graph: KgGraph
+  mode: SigmaMode
+  error: string
+  onClickNode: (n: KgGraphNode) => void
+  onClickEdge: (e: KgGraphEdge) => void
+  onOpenNodeDetail: (n: KgGraphNode) => void
+}) {
+  const nodeById = new Map(graph.nodes.map((node) => [node.nodeId, node]))
+  const nodes = graph.nodes
+    .slice()
+    .sort((a, b) => a.depth - b.depth || a.kind.localeCompare(b.kind) || a.label.localeCompare(b.label))
+    .slice(0, 80)
+  const edges = graph.edges.slice(0, 120)
+
+  return (
+    <div className="flex h-full min-h-0 flex-col overflow-hidden bg-[#070a0f] text-white/80">
+      <div className="shrink-0 border-b border-white/10 bg-black/35 px-3 py-2">
+        <div className="flex flex-wrap items-center gap-2 text-[10px] uppercase tracking-wider text-white/60">
+          <SigmaIcon className="h-3.5 w-3.5 text-cyan-200" />
+          <span>WebGL unavailable</span>
+          <span className="font-mono normal-case tracking-normal text-white/45">
+            {modeLabel(mode)} / {graph.nodes.length}n {graph.edges.length}e
+          </span>
+        </div>
+        <p className="mt-1 text-[11px] text-white/45">
+          Using a list fallback because the graph renderer could not start: {error}
+        </p>
+      </div>
+      <div className="grid min-h-0 flex-1 grid-cols-2 gap-3 overflow-hidden p-3">
+        <section className="min-h-0 overflow-hidden rounded-md border border-white/10 bg-black/20">
+          <div className="border-b border-white/10 px-3 py-2 text-[10px] uppercase tracking-wider text-white/50">
+            Nodes
+          </div>
+          <div className="max-h-full overflow-auto p-2">
+            {nodes.map((node) => (
+              <div key={node.nodeId} className="mb-1 flex items-center gap-2 rounded border border-white/10 bg-white/[0.03] px-2 py-1.5 text-[11px]">
+                <span
+                  className="shrink-0 rounded-full px-1.5 py-0.5 text-[9px] uppercase tracking-wider"
+                  style={{ background: colorForString(node.kind, KIND_PALETTE), color: "#071018" }}
+                >
+                  {node.kind}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => onClickNode(node)}
+                  className="min-w-0 flex-1 truncate text-left font-mono text-white hover:text-cyan-100"
+                  title="Focus this node"
+                >
+                  {node.label}
+                </button>
+                <span className="font-mono text-[10px] text-white/35">d{node.depth}</span>
+                <button
+                  type="button"
+                  onClick={() => onOpenNodeDetail(node)}
+                  className="rounded border border-white/10 px-1.5 py-0.5 text-[10px] text-cyan-100 hover:bg-white/10"
+                >
+                  open
+                </button>
+              </div>
+            ))}
+          </div>
+        </section>
+
+        <section className="min-h-0 overflow-hidden rounded-md border border-white/10 bg-black/20">
+          <div className="border-b border-white/10 px-3 py-2 text-[10px] uppercase tracking-wider text-white/50">
+            Edges
+          </div>
+          <div className="max-h-full overflow-auto p-2">
+            {edges.map((edge) => {
+              const from = nodeById.get(edge.fromNodeId)
+              const to = nodeById.get(edge.toNodeId)
+              return (
+                <button
+                  key={edge.edgeId}
+                  type="button"
+                  onClick={() => onClickEdge(edge)}
+                  className="mb-1 block w-full rounded border border-white/10 bg-white/[0.03] px-2 py-1.5 text-left text-[11px] hover:bg-white/[0.07]"
+                  title="Open edge evidence"
+                >
+                  <div className="flex items-center gap-2">
+                    <span className="truncate font-mono text-white">{from?.label ?? edge.fromNodeId}</span>
+                    <span className="shrink-0 rounded-full bg-cyan-300/15 px-1.5 py-0.5 text-[9px] uppercase tracking-wider text-cyan-100">
+                      {edge.predicate}
+                    </span>
+                    <span className="truncate font-mono text-white">{to?.label ?? edge.toNodeId}</span>
+                  </div>
+                  <div className="mt-1 font-mono text-[10px] text-white/35">
+                    edge #{edge.edgeId} / score {edge.score.toFixed(2)} / depth {edge.depth}
+                  </div>
+                </button>
+              )
+            })}
+          </div>
+        </section>
+      </div>
     </div>
   )
 }

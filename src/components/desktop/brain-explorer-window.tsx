@@ -269,8 +269,12 @@ export function BrainExplorerWindow({ payload, activeConnectionId, hasRvbbit, on
   }, [conn, viewAs, adminMode])
 
   useEffect(() => {
+    setDetail(null)
+    setHits(null)
+    setSelectedFolder("/")
+    setExpanded(new Set(["/"]))
     void reload()
-    onChangePayload((p) => ({ ...p, viewAs }))
+    onChangePayload((p) => ({ ...p, viewAs, selectedFolder: "/", selectedDocId: undefined }))
   }, [reload, viewAs]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // known roles for the pickers
