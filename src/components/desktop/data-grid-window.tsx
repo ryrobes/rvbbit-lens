@@ -39,7 +39,7 @@ import { ModelField } from "./operator-inspector"
 import { ResultGrid } from "./result-grid"
 import { ResultTranscript, statementKeys } from "./result-transcript"
 import { ArrangeGrid } from "./arrange-grid"
-import { extractUiArtifacts, UiArtifactView, type UiArtifactParamInput } from "./ui-artifact-view"
+import { extractUiArtifacts, UiArtifactView, type UiArtifactParamInput, type UiArtifactRow } from "./ui-artifact-view"
 import { ContextMenu, type ContextMenuState } from "./context-menu"
 import { listQueryHistory, pushQueryHistory } from "@/lib/desktop/query-history"
 import { SingleCellCallout } from "./single-cell-callout"
@@ -315,6 +315,102 @@ function injectPipelineHeadFilters(sql: string, filters: CrossFilter[], schema: 
       return `${head}\n${split.tail}`
     })
     .join(";\n")
+}
+
+function statementLayoutArtifacts(results: StatementResult[] | null): UiArtifactRow[] {
+  if (!results) return []
+  return results.flatMap((statement) => {
+    const artifacts = extractUiArtifacts(statement.rows) ?? []
+    return artifacts.filter((artifact) => artifact.artifact_kind === "meta" && artifact.renderer === "statement_layout")
+  })
+}
+
+function isStatementLayoutResult(statement: StatementResult): boolean {
+  const artifacts = extractUiArtifacts(statement.rows)
+  return !!artifacts?.length && artifacts.every((artifact) => artifact.artifact_kind === "meta" && artifact.renderer === "statement_layout")
+}
+
+function layoutTileKey(ref: unknown, keys: string[]): { key: string; w: number } | null {
+  let raw: unknown = ref
+  let weight = 1
+  if (ref && typeof ref === "object" && !Array.isArray(ref)) {
+    const obj = ref as Record<string, unknown>
+    raw = obj.key ?? obj.statement ?? obj.index ?? obj.tile
+    const w = Number(obj.w ?? obj.width ?? 1)
+    weight = Number.isFinite(w) && w > 0 ? w : 1
+  }
+  if (typeof raw === "string" && keys.includes(raw)) return { key: raw, w: weight }
+  const n = typeof raw === "number" ? raw : typeof raw === "string" ? Number(raw.trim()) : NaN
+  if (!Number.isFinite(n)) return null
+  const key = keys[n - 1] ?? keys[n]
+  return key ? { key, w: weight } : null
+}
+
+function parseLayoutRows(raw: unknown, keys: string[]): NonNullable<DataPayload["statementLayout"]>["rows"] | undefined {
+  if (typeof raw === "string") {
+    const text = raw.trim()
+    if (!text) return undefined
+    if (text.startsWith("[")) {
+      try {
+        return parseLayoutRows(JSON.parse(text), keys)
+      } catch {
+        return undefined
+      }
+    }
+    const rows = text
+      .split(/[\/;\n]+/)
+      .map((row) => row.trim())
+      .filter(Boolean)
+      .map((row) => ({
+        h: 1,
+        tiles: row
+          .split(/[,+\s]+/)
+          .map((token) => layoutTileKey(token, keys))
+          .filter((tile): tile is { key: string; w: number } => !!tile),
+      }))
+      .filter((row) => row.tiles.length > 0)
+    return rows.length > 0 ? rows : undefined
+  }
+  if (!Array.isArray(raw)) return undefined
+  const rows = raw
+    .map((row) => {
+      if (Array.isArray(row)) {
+        return {
+          h: 1,
+          tiles: row
+            .map((tile) => layoutTileKey(tile, keys))
+            .filter((tile): tile is { key: string; w: number } => !!tile),
+        }
+      }
+      if (row && typeof row === "object") {
+        const obj = row as Record<string, unknown>
+        const h = Number(obj.h ?? obj.height ?? 1)
+        const tilesRaw = Array.isArray(obj.tiles) ? obj.tiles : []
+        return {
+          h: Number.isFinite(h) && h > 0 ? h : 1,
+          tiles: tilesRaw
+            .map((tile) => layoutTileKey(tile, keys))
+            .filter((tile): tile is { key: string; w: number } => !!tile),
+        }
+      }
+      const tile = layoutTileKey(row, keys)
+      return tile ? { h: 1, tiles: [tile] } : { h: 1, tiles: [] }
+    })
+    .filter((row) => row.tiles.length > 0)
+  return rows.length > 0 ? rows : undefined
+}
+
+function layoutFromArtifact(
+  artifact: UiArtifactRow | undefined,
+  results: StatementResult[] | null,
+  sourceStatements: string[],
+): NonNullable<DataPayload["statementLayout"]> | null {
+  if (!artifact || !results?.length) return null
+  const spec = artifact.spec ?? {}
+  const mode = spec.mode === "transcript" ? "transcript" : "arrange"
+  const keys = statementKeys(results, sourceStatements)
+  const rows = parseLayoutRows(spec.rows ?? spec.layout, keys)
+  return rows ? { mode, rows } : { mode }
 }
 
 function loadAskModel(): string {
@@ -1525,14 +1621,6 @@ export function DataGridWindow({
   }, [draftSql])
 
   const result = runState.kind === "done" ? runState.result : null
-  // A multi-statement run carries a per-statement breakdown — render the transcript
-  // (nothing swallowed) instead of the single grid. Statement-aware pipeline wrapping
-  // lets visual component blocks participate here too.
-  const multiResults = result && result.results && result.results.length > 1
-    ? result.results
-    : null
-  const uiArtifacts = result && !multiResults ? extractUiArtifacts(result.rows) : null
-  const arrangeMode = !!multiResults && payload.statementLayout?.mode === "arrange"
   const error = runState.kind === "error" ? runState : null
   const isRunning = runState.kind === "running"
   // The RAW (pre-filter) statement texts, by index, so the transcript/arrange key
@@ -1543,6 +1631,21 @@ export function DataGridWindow({
     () => splitStatements(payload.sql ?? "").filter((sgmt) => sgmt.replace(/--[^\n]*|\/\*[\s\S]*?\*\//g, "").trim().length > 0),
     [payload.sql],
   )
+  // A multi-statement run carries a per-statement breakdown — render the transcript
+  // (nothing swallowed) instead of the single grid. Statement-aware pipeline wrapping
+  // lets visual component blocks participate here too. Meta layout statements are
+  // consumed here and hidden from the visible tile set.
+  const rawMultiResults = result && result.results && result.results.length > 1
+    ? result.results
+    : null
+  const visibleMultiResults = rawMultiResults?.filter((statement) => !isStatementLayoutResult(statement)) ?? null
+  const multiResults = visibleMultiResults && visibleMultiResults.length > 1 ? visibleMultiResults : null
+  const layoutArtifacts = statementLayoutArtifacts(rawMultiResults)
+  const layoutArtifact = layoutArtifacts.length > 0 ? layoutArtifacts[layoutArtifacts.length - 1] : undefined
+  const sqlStatementLayout = layoutFromArtifact(layoutArtifact, visibleMultiResults, sourceStatements)
+  const effectiveStatementLayout = payload.statementLayout ?? sqlStatementLayout ?? undefined
+  const uiArtifacts = result && !rawMultiResults ? extractUiArtifacts(result.rows) : null
+  const arrangeMode = !!multiResults && effectiveStatementLayout?.mode === "arrange"
   const emitUiArtifactParam = useCallback((input: UiArtifactParamInput) => {
     const resolved =
       input.sourceStmtIndex === undefined
@@ -1922,7 +2025,7 @@ export function DataGridWindow({
               {multiResults ? (
                 <span className="inline-flex shrink-0 items-center overflow-hidden rounded border border-chrome-border/60 text-[10px]">
                   {(["transcript", "arrange"] as const).map((m) => {
-                    const active = (payload.statementLayout?.mode ?? "transcript") === m
+                    const active = (effectiveStatementLayout?.mode ?? "transcript") === m
                     return (
                       <button
                         key={m}
@@ -1978,7 +2081,7 @@ export function DataGridWindow({
                               label: "Reset arrange layout",
                               icon: RotateCcw,
                               separatorBefore: true,
-                              onSelect: () => onChangePayload((p) => ({ ...p, statementLayout: { mode: "arrange" } })),
+                              onSelect: () => onChangePayload((p) => ({ ...p, statementLayout: sqlStatementLayout ?? { mode: "arrange" } })),
                             },
                           ]
                         : []),
@@ -2060,9 +2163,9 @@ export function DataGridWindow({
                           statementViews: { ...(p.statementViews ?? {}), [viewKey]: kind },
                         }))
                       }
-                      layout={payload.statementLayout}
+                      layout={effectiveStatementLayout}
                       onChangeLayout={(mut) =>
-                        onChangePayload((p) => ({ ...p, statementLayout: mut(p.statementLayout ?? {}) }))
+                        onChangePayload((p) => ({ ...p, statementLayout: mut(effectiveStatementLayout ?? {}) }))
                       }
                       onCellFilter={onCellFilter}
                       onChartFilter={onChartFilter}
