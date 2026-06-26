@@ -63,6 +63,33 @@ export interface CubeAutopilotStatus extends CubeRefreshPolicy {
   secondsSinceRefresh: number | null
 }
 
+export interface MaintenanceStatus {
+  targetKind: string
+  targetName: string
+  lifecycleState: string
+  maintenanceAction: string
+  needsMaintenance: boolean
+  reason: string | null
+  rowGroups: number | null
+  variantFiles: number | null
+  variantsPending: boolean
+  secondsLag: number | null
+  lastMaintainedAt: string | null
+  policy: Record<string, unknown>
+}
+
+export interface MaintenanceRun {
+  targetKind: string
+  targetName: string
+  lifecycleState: string
+  maintenanceAction: string
+  executed: boolean
+  status: string
+  rowsWritten: number | null
+  details: Record<string, unknown>
+  error: string | null
+}
+
 export interface CubeHealth {
   status: string // fresh | dirty | stale | error | missing | unknown
   secondsSinceRefresh: number | null
@@ -74,6 +101,7 @@ export interface CubeHealth {
   lastError: string | null
   refreshPolicy: CubeRefreshPolicy | null
   autopilot: CubeAutopilotStatus | null
+  maintenance: MaintenanceStatus | null
   raw: Record<string, unknown>
 }
 
@@ -251,6 +279,39 @@ function asAutopilot(v: unknown): CubeAutopilotStatus | null {
   }
 }
 
+function asMaintenance(v: unknown): MaintenanceStatus | null {
+  const m = asObject(v)
+  if (Object.keys(m).length === 0) return null
+  return {
+    targetKind: String(m.target_kind ?? ""),
+    targetName: String(m.target_name ?? ""),
+    lifecycleState: String(m.lifecycle_state ?? "unknown"),
+    maintenanceAction: String(m.maintenance_action ?? "none"),
+    needsMaintenance: bool(m.needs_maintenance),
+    reason: str(m.reason),
+    rowGroups: num(m.row_groups),
+    variantFiles: num(m.variant_files),
+    variantsPending: bool(m.variants_pending),
+    secondsLag: num(m.seconds_lag),
+    lastMaintainedAt: str(m.last_maintained_at),
+    policy: asObject(m.policy),
+  }
+}
+
+function asMaintenanceRun(v: Record<string, unknown>): MaintenanceRun {
+  return {
+    targetKind: String(v.target_kind ?? ""),
+    targetName: String(v.target_name ?? ""),
+    lifecycleState: String(v.lifecycle_state ?? "unknown"),
+    maintenanceAction: String(v.maintenance_action ?? "none"),
+    executed: bool(v.executed),
+    status: String(v.status ?? "unknown"),
+    rowsWritten: num(v.rows_written),
+    details: asObject(v.details),
+    error: str(v.error),
+  }
+}
+
 // ─────────────────────────────────────────────────────────────────────────
 // Catalog
 // ─────────────────────────────────────────────────────────────────────────
@@ -284,6 +345,7 @@ function asHealth(v: unknown): CubeHealth | null {
   const fr = asObject(h.freshness)
   const dr = asObject(h.drift)
   const autopilot = asAutopilot(h.autopilot)
+  const maintenance = asMaintenance(h.maintenance)
   return {
     status: String(fr.status ?? h.status ?? "unknown"),
     secondsSinceRefresh: num(fr.seconds_since_refresh) ?? autopilot?.secondsSinceRefresh ?? null,
@@ -295,6 +357,7 @@ function asHealth(v: unknown): CubeHealth | null {
     lastError: str(h.last_error),
     refreshPolicy: asPolicy(h.refresh_policy),
     autopilot,
+    maintenance,
     raw: h,
   }
 }
@@ -459,6 +522,25 @@ export async function refreshCube(
   const r = await run(connectionId, `SELECT rvbbit.refresh_cube(${q(name)}) AS rows`)
   if (!r.ok) return { rows: null, error: r.error }
   return { rows: num(r.rows[0]?.rows), error: null }
+}
+
+export async function maintainCube(
+  connectionId: string,
+  name: string,
+  opts: { dryRun?: boolean; force?: boolean } = {},
+): Promise<{ runs: MaintenanceRun[]; error: string | null }> {
+  const r = await run(
+    connectionId,
+    `SELECT *
+     FROM rvbbit.maintain_cube(
+       ${q(name)},
+       p_dry_run => ${opts.dryRun ? "true" : "false"},
+       p_force => ${opts.force ? "true" : "false"}
+     )`,
+    50,
+  )
+  if (!r.ok) return { runs: [], error: r.error }
+  return { runs: r.rows.map(asMaintenanceRun), error: null }
 }
 
 export interface CubeRefreshPolicyInput {

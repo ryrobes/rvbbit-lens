@@ -808,6 +808,8 @@ export interface MetricBoardPayload {
   defDate?: string
   /** Show every materialization as its own column (no date_trunc rollup). */
   showAll?: boolean
+  /** Include non-KPI metrics in the board. Defaults to false for the KPI Board. */
+  includeMetrics?: boolean
 }
 
 /**

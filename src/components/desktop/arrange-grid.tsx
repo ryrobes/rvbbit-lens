@@ -3,10 +3,11 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from "react"
 import { GripVertical } from "@/lib/icons"
 import type { QueryResultColumn, StatementResult } from "@/lib/db/types"
-import type { ArrangeRow, ArrangeTile, DataPayload, StatementViewKind } from "@/lib/desktop/types"
+import type { ArrangeRow, ArrangeTile, DataPayload, DesktopParamValue, StatementViewKind } from "@/lib/desktop/types"
 import type { CrossFilter } from "@/lib/desktop/reactive-sql"
 import { cn } from "@/lib/utils"
 import { CardBody, CardMeta, ViewSwitcher, defaultKind, statementKeys } from "./result-transcript"
+import type { UiArtifactParamInput } from "./ui-artifact-view"
 
 // "Arrange" mode as a tiling window manager INSIDE the block: rows top→bottom,
 // tiles left→right within each row, every boundary a draggable gutter, the block
@@ -88,6 +89,8 @@ export function ArrangeGrid({
   onChartFilter,
   crossFilters,
   sourceStatements,
+  activeParams,
+  onEmitParam,
 }: {
   results: StatementResult[]
   views?: Record<string, StatementViewKind>
@@ -99,6 +102,8 @@ export function ArrangeGrid({
   crossFilters?: CrossFilter[]
   /** Pre-filter statement texts (by index) for STABLE tile keys across a rewrite. */
   sourceStatements?: string[]
+  activeParams?: DesktopParamValue[]
+  onEmitParam?: (input: UiArtifactParamInput) => void
 }) {
   const keys = useMemo(() => statementKeys(results, sourceStatements), [results, sourceStatements])
   const keyToStmt = useMemo(() => {
@@ -404,6 +409,9 @@ export function ArrangeGrid({
                           onCellFilter={onCellFilter ? (c, v) => onCellFilter(c, v, s.index) : undefined}
                           onChartFilter={onChartFilter ? (c, v) => onChartFilter(c, v, s.index) : undefined}
                           highlightFilters={crossFilters?.filter((f) => f.sourceStmtIndex === s.index)}
+                          activeParams={activeParams}
+                          onEmitParam={onEmitParam}
+                          sourceStmtIndex={s.index}
                         />
                       </div>
                     </div>

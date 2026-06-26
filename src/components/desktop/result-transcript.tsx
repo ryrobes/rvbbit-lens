@@ -5,13 +5,14 @@ import { VegaEmbed } from "react-vega"
 import type { Result as VegaEmbedResult } from "vega-embed"
 import { BarChart3, ChevronDown, ChevronRight, Hash, LineChart, Table2 } from "@/lib/icons"
 import type { QueryResultColumn, StatementResult } from "@/lib/db/types"
-import type { StatementViewKind } from "@/lib/desktop/types"
+import type { DesktopParamValue, StatementViewKind } from "@/lib/desktop/types"
 import type { CrossFilter } from "@/lib/desktop/reactive-sql"
 import { classifyColumn, inferChartSpec } from "@/lib/desktop/chart-infer"
 import { vegaConfigFromTheme } from "@/lib/desktop/chart-theme"
 import { formatCellValue } from "@/lib/sql/format"
 import { cn } from "@/lib/utils"
 import { ResultGrid } from "./result-grid"
+import { extractUiArtifacts, UiArtifactView, type UiArtifactParamInput } from "./ui-artifact-view"
 
 // A vertical "transcript" of every statement's result in a multi-statement block —
 // nothing swallowed. Each statement is a compact card: a header (#, command,
@@ -136,6 +137,8 @@ export function ResultTranscript({
   onChartFilter,
   crossFilters,
   sourceStatements,
+  activeParams,
+  onEmitParam,
 }: {
   results: StatementResult[]
   /** Per-statement view overrides, keyed by statementKeys. */
@@ -152,6 +155,8 @@ export function ResultTranscript({
   /** Pre-filter statement texts (by index) for STABLE view/layout keys across a
    *  cross-filter/broadcast rewrite. */
   sourceStatements?: string[]
+  activeParams?: DesktopParamValue[]
+  onEmitParam?: (input: UiArtifactParamInput) => void
 }) {
   // Expand/collapse is a delta on the per-card default (has-grid → open). View
   // kind lives in `views` (the payload) so it survives the per-run remount.
@@ -217,6 +222,9 @@ export function ResultTranscript({
                   onCellFilter={onCellFilter ? (c, v) => onCellFilter(c, v, s.index) : undefined}
                   onChartFilter={onChartFilter ? (c, v) => onChartFilter(c, v, s.index) : undefined}
                   highlightFilters={crossFilters?.filter((f) => f.sourceStmtIndex === s.index)}
+                  activeParams={activeParams}
+                  onEmitParam={onEmitParam}
+                  sourceStmtIndex={s.index}
                 />
               </div>
             ) : null}
@@ -238,6 +246,9 @@ export function CardBody({
   onCellFilter,
   onChartFilter,
   highlightFilters,
+  activeParams,
+  onEmitParam,
+  sourceStmtIndex,
 }: {
   s: StatementResult
   kind: StatementViewKind
@@ -248,11 +259,28 @@ export function CardBody({
   onChartFilter?: (column: QueryResultColumn, values: unknown[]) => void
   /** Cross-filters that ORIGINATED in this tile — highlight their value(s). */
   highlightFilters?: CrossFilter[]
+  activeParams?: DesktopParamValue[]
+  onEmitParam?: (input: UiArtifactParamInput) => void
+  sourceStmtIndex?: number
 }) {
   if (!hasGrid) {
     return emptySelect ? (
       <div className="px-2 py-3 text-center text-[11px] text-chrome-text/45">No rows returned.</div>
     ) : null
+  }
+  const uiArtifacts = extractUiArtifacts(s.rows)
+  if (uiArtifacts) {
+    return (
+      <div className={fill ? "h-full" : "h-72"}>
+        <UiArtifactView
+          artifacts={uiArtifacts}
+          fill
+          activeParams={activeParams}
+          onEmitParam={onEmitParam}
+          sourceStmtIndex={sourceStmtIndex}
+        />
+      </div>
+    )
   }
   if (kind === "number") {
     return (
@@ -324,11 +352,16 @@ function MiniChart({
   const highlightValues = useMemo(() => {
     if (!xField || !highlightFilters?.length) return null
     const col = columns.find((c) => c.name === xField)
-    if (!col?.sourceColumn) return null
     const f = highlightFilters.find(
-      (hf) =>
-        hf.column.toLowerCase() === col.sourceColumn!.toLowerCase() &&
-        (!hf.sourceTable || !col.sourceTable || hf.sourceTable.toLowerCase() === col.sourceTable.toLowerCase()),
+      (hf) => {
+        if (!col) return false
+        if (!hf.sourceTable) return hf.column.toLowerCase() === col.name.toLowerCase()
+        return (
+          !!col.sourceColumn &&
+          hf.column.toLowerCase() === col.sourceColumn.toLowerCase() &&
+          (!col.sourceTable || hf.sourceTable.toLowerCase() === col.sourceTable.toLowerCase())
+        )
+      },
     )
     if (!f) return null
     const vals = (Array.isArray(f.value) ? f.value : [f.value]).filter((v) => v !== null && v !== undefined)
@@ -357,10 +390,10 @@ function MiniChart({
       config: vegaConfigFromTheme(),
       data: { values: rows },
       width: "container",
-      height: fill ? "container" : 200,
+      height: "container",
       autosize: { type: "fit", contains: "padding", resize: true },
     }
-  }, [inferred, kind, fill, rows, highlightValues, xField])
+  }, [inferred, kind, rows, highlightValues, xField])
 
   // Wire the chart's point-selection "click" signal → cross-filter (mirrors the
   // single-block chart → global-param path, so multi-statement charts filter too).
@@ -411,12 +444,12 @@ function MiniChart({
     )
   }
   return (
-    <div className={cn("p-1", fill ? "h-full w-full" : "w-full")}>
+    <div className={cn("min-h-0 p-1", fill ? "h-full w-full" : "h-56 w-full")}>
       <VegaEmbed
         spec={spec as unknown as Parameters<typeof VegaEmbed>[0]["spec"]}
         options={{ actions: false, renderer: "svg", tooltip: { theme: "dark" } }}
         onEmbed={handleEmbed}
-        className={fill ? "h-full w-full" : "w-full"}
+        className="h-full w-full"
       />
     </div>
   )

@@ -108,6 +108,164 @@ export function hasTopLevelThen(sql: string): boolean {
 }
 
 /**
+ * Return the base SQL before the first statement-level pipeline THEN. This uses
+ * the same scanner as hasTopLevelThen so CASE ... THEN and strings/comments are
+ * ignored. Returns null when the statement is not a pipeline.
+ */
+export function pipelineHead(sql: string): string | null {
+  const n = sql.length
+  let i = 0
+  let paren = 0
+  let caseDepth = 0
+  while (i < n) {
+    const c = sql[i]
+    if (c === "-" && sql[i + 1] === "-") {
+      i += 2
+      while (i < n && sql[i] !== "\n") i++
+      continue
+    }
+    if (c === "/" && sql[i + 1] === "*") {
+      i += 2
+      while (i + 1 < n && !(sql[i] === "*" && sql[i + 1] === "/")) i++
+      i += 2
+      continue
+    }
+    if (c === "'") {
+      i++
+      while (i < n) {
+        if (sql[i] === "'") {
+          if (sql[i + 1] === "'") { i += 2; continue }
+          i++
+          break
+        }
+        i++
+      }
+      continue
+    }
+    if (c === '"') {
+      i++
+      while (i < n) {
+        if (sql[i] === '"') {
+          if (sql[i + 1] === '"') { i += 2; continue }
+          i++
+          break
+        }
+        i++
+      }
+      continue
+    }
+    if (c === "$") {
+      const tagEnd = dollarTagEnd(sql, i)
+      if (tagEnd !== null) {
+        const tag = sql.slice(i, tagEnd)
+        let j = tagEnd
+        let closed = false
+        while (j + tag.length <= n) {
+          if (sql.slice(j, j + tag.length) === tag) { j += tag.length; closed = true; break }
+          j++
+        }
+        i = closed ? j : n
+        continue
+      }
+    }
+    if (isWordStart(c)) {
+      const start = i
+      i++
+      while (i < n && isWordChar(sql[i])) i++
+      const word = sql.slice(start, i).toUpperCase()
+      if (word === "CASE") caseDepth++
+      else if (word === "END") { if (caseDepth > 0) caseDepth-- }
+      else if (word === "THEN" && paren === 0 && caseDepth === 0) return sql.slice(0, start).trim()
+      continue
+    }
+    if (c === "(") paren++
+    else if (c === ")") { if (paren > 0) paren-- }
+    i++
+  }
+  return null
+}
+
+/**
+ * Split a pipeline statement into its base SQL and the trailing THEN pipeline.
+ * The tail starts at the statement-level THEN keyword. Returns null when the
+ * statement is not a pipeline.
+ */
+export function splitPipelineHead(sql: string): { head: string; tail: string } | null {
+  const n = sql.length
+  let i = 0
+  let paren = 0
+  let caseDepth = 0
+  while (i < n) {
+    const c = sql[i]
+    if (c === "-" && sql[i + 1] === "-") {
+      i += 2
+      while (i < n && sql[i] !== "\n") i++
+      continue
+    }
+    if (c === "/" && sql[i + 1] === "*") {
+      i += 2
+      while (i + 1 < n && !(sql[i] === "*" && sql[i + 1] === "/")) i++
+      i += 2
+      continue
+    }
+    if (c === "'") {
+      i++
+      while (i < n) {
+        if (sql[i] === "'") {
+          if (sql[i + 1] === "'") { i += 2; continue }
+          i++
+          break
+        }
+        i++
+      }
+      continue
+    }
+    if (c === '"') {
+      i++
+      while (i < n) {
+        if (sql[i] === '"') {
+          if (sql[i + 1] === '"') { i += 2; continue }
+          i++
+          break
+        }
+        i++
+      }
+      continue
+    }
+    if (c === "$") {
+      const tagEnd = dollarTagEnd(sql, i)
+      if (tagEnd !== null) {
+        const tag = sql.slice(i, tagEnd)
+        let j = tagEnd
+        let closed = false
+        while (j + tag.length <= n) {
+          if (sql.slice(j, j + tag.length) === tag) { j += tag.length; closed = true; break }
+          j++
+        }
+        i = closed ? j : n
+        continue
+      }
+    }
+    if (isWordStart(c)) {
+      const start = i
+      i++
+      while (i < n && isWordChar(sql[i])) i++
+      const word = sql.slice(start, i).toUpperCase()
+      if (word === "CASE") caseDepth++
+      else if (word === "END") { if (caseDepth > 0) caseDepth-- }
+      else if (word === "THEN" && paren === 0 && caseDepth === 0) {
+        return { head: sql.slice(0, start).trim(), tail: sql.slice(start).trimStart() }
+      }
+      continue
+    }
+    if (c === "(") paren++
+    else if (c === ")") { if (paren > 0) paren-- }
+    i++
+  }
+  return null
+}
+
+/**
  * Split `sql` into its top-level statements, separating on semicolons that sit
  * outside strings, comments, dollar-quoted bodies, and parentheses. Uses the same
  * scanner as hasTopLevelThen, so a `;` inside `'…'`, `$$…$$`, a `(…)`, or a
@@ -237,6 +395,24 @@ export function wrapFlow(sql: string): string {
   const body = sql.trim().replace(/;\s*$/, "")
   const tag = FLOW_TAGS.find((t) => !body.includes(t)) ?? "$rvbbitflowx$"
   return `SELECT * FROM rvbbit.flow(${tag}${body}${tag})`
+}
+
+/**
+ * Wrap every top-level statement that uses bare THEN. This keeps multi-statement
+ * blocks composable: each visual/data pipeline stays one SQL statement, and
+ * ordinary neighboring statements remain ordinary SQL.
+ */
+export function wrapFlowStatements(sql: string): { sql: string; hasPipeline: boolean; pipelineStatements: number } {
+  const statements = splitStatements(sql)
+  if (statements.length === 0) return { sql, hasPipeline: false, pipelineStatements: 0 }
+  let pipelineStatements = 0
+  const wrapped = statements.map((stmt) => {
+    if (!hasTopLevelThen(stmt)) return stmt
+    pipelineStatements += 1
+    return wrapFlow(stmt)
+  })
+  if (pipelineStatements === 0) return { sql, hasPipeline: false, pipelineStatements: 0 }
+  return { sql: wrapped.join(";\n"), hasPipeline: true, pipelineStatements }
 }
 
 /**

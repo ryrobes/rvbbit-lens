@@ -8,8 +8,9 @@
 //   * DEF-TIME  — which definition version (created_at filter), p_def_as_of
 //   * DATA-TIME — rvbbit AS OF over the underlying tables, p_data_as_of
 // Backend surface: define_metric / metric_catalog / metric_versions /
-// metric_sql / preview_metric_sql / metric(SETOF jsonb). Tokens in a metric's
-// SQL: {param} (safe literal), {param!} (raw), {metric:NAME} (subquery).
+// metric_sql / preview_metric_sql / metric_scalar / metric(SETOF jsonb).
+// Tokens in a metric's SQL: {param} (safe literal), {param!} (raw),
+// {metric:NAME} (subquery).
 
 export interface MetricSummary {
   name: string
@@ -25,6 +26,14 @@ export interface MetricSummary {
   checkSql: string | null
   category: string | null
   subcategory: string | null
+}
+
+export interface MetricDependencyFreshness {
+  metric: string
+  table: string
+  freshnessColumn: string | null
+  maxFreshness: string | null
+  stale: boolean | null
 }
 
 export interface MetricVersion {
@@ -169,6 +178,36 @@ export async function listMetrics(
   }
 }
 
+export async function fetchMetricDependencyFreshness(
+  connectionId: string,
+  metrics?: string[],
+): Promise<{ rows: MetricDependencyFreshness[]; error: string | null }> {
+  const metricsArg =
+    metrics && metrics.length
+      ? `ARRAY[${metrics.map((m) => q(m)).join(",")}]::text[]`
+      : "NULL::text[]"
+  const r = await run(
+    connectionId,
+    `SELECT metric_name,
+            table_schema || '.' || table_name AS dep_table,
+            freshness_column,
+            max_freshness::text AS max_freshness,
+            stale
+       FROM rvbbit.metric_dependency_freshness(${metricsArg}, interval '2 days')`,
+  )
+  if (!r.ok) return { rows: [], error: r.error }
+  return {
+    error: null,
+    rows: r.rows.map((row) => ({
+      metric: String(row.metric_name),
+      table: String(row.dep_table),
+      freshnessColumn: str(row.freshness_column),
+      maxFreshness: str(row.max_freshness),
+      stale: row.stale == null ? null : Boolean(row.stale),
+    })),
+  }
+}
+
 export async function fetchMetricVersions(
   connectionId: string,
   name: string,
@@ -239,8 +278,9 @@ export async function resolveMetricSql(
 
 /**
  * Run a metric. defAsOf pins the definition (def-time); dataAsOf pins the
- * underlying rvbbit data (data-time). rvbbit.metric returns SETOF jsonb (one
- * object per result row); we expand each into a flat row + ordered column union.
+ * underlying rvbbit data (data-time). The Inspector uses rvbbit.metric's
+ * lower-level rowset runner for preview/debugging; persisted observations use
+ * rvbbit.metric_scalar.
  */
 export async function runMetric(
   connectionId: string,
@@ -353,7 +393,7 @@ export interface MetricObservation {
   dataAsOf: number | null // epoch ms
   dataAsOfIso: string | null
   observedAt: number | null // epoch ms
-  value: unknown // jsonb (array of row objects)
+  value: unknown // jsonb scalar payload; older observations may be arrays of row objects
   verdict: MetricVerdict | null
   status: string | null
   trigger: string
@@ -416,7 +456,7 @@ function safeJson(s: string): unknown {
 }
 
 /** Pull a single headline number out of a (value, verdict) pair: verdict.value
- *  first, else the first numeric field of the first result row. */
+ *  first, then scalar observation value, then legacy row-array payloads. */
 /** Generic row-count column names — used only as a last resort for the headline,
  *  so e.g. `{n, region, revenue}` surfaces `revenue`, not the `n` counter. */
 const COUNTER_KEYS = new Set(["n", "count", "cnt", "rows", "num", "row_count", "total_count"])
@@ -430,6 +470,10 @@ function asNumber(x: unknown): number | null {
 function headlineOf(value: unknown, verdict: MetricVerdict | null): number | null {
   const v = asNumber(verdict?.value)
   if (v != null) return v
+  if (value && typeof value === "object" && !Array.isArray(value) && "value" in value) {
+    const scalar = asNumber((value as { value?: unknown }).value)
+    if (scalar != null) return scalar
+  }
   const rows = Array.isArray(value) ? (value as Array<Record<string, unknown>>) : []
   const first = rows[0]
   if (first) {
@@ -477,18 +521,80 @@ export interface MetricBoardCell {
 
 // "raw" = no date_trunc rollup: every distinct materialization (per metric ×
 // exact data-instant) becomes its own column.
-export type BoardBucket = "hour" | "day" | "week" | "month" | "raw"
+export type BoardBucket = "hour" | "day" | "week" | "month" | "quarter" | "raw"
+
+export function metricSeriesSql(
+  name: string,
+  opts: { days?: number; bucket?: BoardBucket; params?: Record<string, unknown>; domainPadPct?: number } = {},
+): string {
+  const days = Math.max(1, Math.min(opts.days ?? 90, 3650))
+  const bucket = opts.bucket === "raw" ? "day" : (opts.bucket ?? "day")
+  const padPct = Math.max(0, Math.min(opts.domainPadPct ?? 0.08, 1))
+  return `WITH series AS (
+  SELECT bucket,
+       value,
+       status,
+       ok,
+       target,
+       metric_version,
+       data_as_of,
+       observed_at,
+       trigger,
+       stale_source_count,
+       source_freshness
+  FROM rvbbit.metric_series(
+    ${q(name)},
+    now() - make_interval(days => ${days}),
+    now(),
+    ${q(bucket)},
+    ${jb(opts.params ?? {})}
+  )
+),
+bounds AS (
+  SELECT
+    min(value) FILTER (WHERE value IS NOT NULL) AS min_value,
+    max(value) FILTER (WHERE value IS NOT NULL) AS max_value
+  FROM series
+),
+padded AS (
+  SELECT
+    s.*,
+    CASE
+      WHEN b.min_value IS NULL THEN NULL
+      WHEN b.max_value = b.min_value THEN
+        b.min_value - CASE WHEN b.min_value = 0 THEN 1.0 ELSE abs(b.min_value) * ${padPct} END
+      ELSE b.min_value - abs(b.max_value - b.min_value) * ${padPct}
+    END AS axis_floor,
+    CASE
+      WHEN b.max_value IS NULL THEN NULL
+      WHEN b.max_value = b.min_value THEN
+        b.max_value + CASE WHEN b.max_value = 0 THEN 1.0 ELSE abs(b.max_value) * ${padPct} END
+      ELSE b.max_value + abs(b.max_value - b.min_value) * ${padPct}
+    END AS axis_ceiling
+  FROM series s
+  CROSS JOIN bounds b
+)
+SELECT *
+FROM padded
+ORDER BY bucket;`
+}
+
+export function metricProvenanceSql(name: string): string {
+  return `SELECT rvbbit.metric_provenance(${q(name)}) AS provenance;`
+}
 
 /** Fetch the (metric × data-time) board grid from the observation log. */
 export async function fetchMetricBoard(
   connectionId: string,
-  opts: { days?: number; bucket?: BoardBucket; metrics?: string[] } = {},
+  opts: { days?: number; bucket?: BoardBucket; metrics?: string[]; kpisOnly?: boolean } = {},
 ): Promise<{ cells: MetricBoardCell[]; error: string | null }> {
   const days = Math.max(1, Math.min(opts.days ?? 90, 3650))
   const bucket = opts.bucket ?? "day"
   const metricsArg =
     opts.metrics && opts.metrics.length
       ? `ARRAY[${opts.metrics.map((m) => q(m)).join(",")}]::text[]`
+      : opts.kpisOnly
+        ? `(SELECT array_agg(name ORDER BY name) FROM rvbbit.metric_catalog WHERE check_sql IS NOT NULL)::text[]`
       : "NULL::text[]"
   // Raw mode reads the observation log directly, keying each column by the
   // exact data-instant (no date_trunc). DISTINCT ON the instant still folds

@@ -1,7 +1,7 @@
 "use client"
 
 // ⊞ Cube Inspector — master-detail over the curated cubes. A left rail of cubes (listCubes) and a
-// right pane that grounds ONE cube: Overview (def + sample + actions), Maintenance (refresh policy),
+// right pane that grounds ONE cube: Overview (def + sample + actions), Maintenance (managed lifecycle),
 // Columns (the semantic layer, inline-editable), Health (freshness/staleness/drift/usage), Lineage
 // (source tables). Actions: Refresh (policy-managed snapshot), Enrich, Promote to Metric, Edit.
 
@@ -12,6 +12,7 @@ import {
   describeCube,
   enrichCube,
   listCubes,
+  maintainCube,
   promoteCubeToMetric,
   refreshCube,
   revertCube,
@@ -214,6 +215,28 @@ function CubeDetailPane({
     }
   }
 
+  async function doMaintain(force = false) {
+    setBusy("maintain")
+    setActionMsg(null)
+    const { runs, error: err } = await maintainCube(connectionId, name, { force })
+    setBusy(null)
+    if (err) {
+      setActionMsg(`Maintain failed: ${err}`)
+      return
+    }
+    const failed = runs.find((r) => r.error || r.status === "failed")
+    if (failed) {
+      setActionMsg(`Maintain failed: ${failed.error ?? failed.status}`)
+      return
+    }
+    const summary = runs.length
+      ? runs.map((r) => `${actionLabel(r.maintenanceAction)} ${r.status}${r.rowsWritten != null ? ` (${r.rowsWritten.toLocaleString()} rows)` : ""}`).join("; ")
+      : "Nothing to maintain."
+    setActionMsg(summary)
+    reload()
+    onChanged()
+  }
+
   async function doEnrich() {
     setBusy("enrich")
     setActionMsg(null)
@@ -239,7 +262,7 @@ function CubeDetailPane({
         <span className="text-[10px] text-chrome-text/45">v{detail.version}</span>
         {health ? <HealthBadge status={health.status} /> : null}
         <div className="flex-1" />
-        <ActionBtn icon={RefreshCw} label="Refresh" title="Refresh snapshot now" busy={busy === "refresh"} onClick={() => void doRefresh()} />
+        <ActionBtn icon={RefreshCw} label="Maintain" title="Run needed cube maintenance" busy={busy === "maintain"} onClick={() => void doMaintain()} />
         <ActionBtn icon={Sparkles} label="Enrich" busy={busy === "enrich"} onClick={() => void doEnrich()} />
         <PromoteButton
           connectionId={connectionId}
@@ -290,8 +313,8 @@ function CubeDetailPane({
                 <Meta label="Rows" value={detail.rows?.toLocaleString() ?? null} />
                 <Meta label="Refreshed" value={detail.refreshedAt ? fmtTime(Date.parse(detail.refreshedAt)) : null} />
                 <Meta label="Enriched" value={detail.enrichedAt ? fmtTime(Date.parse(detail.enrichedAt)) : null} />
-                <Meta label="Policy" value={modeLabel(health?.autopilot?.mode ?? health?.refreshPolicy?.mode ?? null)} />
-                <Meta label="Action" value={health?.autopilot?.recommendedAction ?? null} />
+                <Meta label="State" value={stateLabel(health?.maintenance?.lifecycleState ?? null)} />
+                <Meta label="Next step" value={actionLabel(health?.maintenance?.maintenanceAction ?? health?.autopilot?.recommendedAction ?? null)} />
               </div>
             </Section>
             <Section title="Definition SQL">
@@ -308,7 +331,9 @@ function CubeDetailPane({
             connectionId={connectionId}
             cube={name}
             health={health}
+            maintainBusy={busy === "maintain"}
             refreshBusy={busy === "refresh"}
+            onMaintain={() => void doMaintain()}
             onRefresh={() => void doRefresh()}
             onSaved={() => {
               reload()
@@ -480,19 +505,24 @@ function MaintenanceTab({
   connectionId,
   cube,
   health,
+  maintainBusy,
   refreshBusy,
+  onMaintain,
   onRefresh,
   onSaved,
 }: {
   connectionId: string
   cube: string
   health: CubeDetail["health"]
+  maintainBusy: boolean
   refreshBusy: boolean
+  onMaintain: () => void
   onRefresh: () => void
   onSaved: () => void
 }) {
   const current = health?.refreshPolicy ?? health?.autopilot ?? null
   const status = health?.autopilot ?? null
+  const maintenance = health?.maintenance ?? null
   const [mode, setMode] = useState<CubeRefreshMode | string>(current?.mode ?? "auto")
   const [queryThreads, setQueryThreads] = useState(numText(current?.queryThreads))
   const [writerThreads, setWriterThreads] = useState(numText(current?.writerThreads))
@@ -502,6 +532,7 @@ function MaintenanceTab({
   const [refreshIntervalSeconds, setRefreshIntervalSeconds] = useState(numText(current?.refreshIntervalSeconds))
   const [saving, setSaving] = useState(false)
   const [msg, setMsg] = useState<string | null>(null)
+  const [advancedOpen, setAdvancedOpen] = useState(false)
 
   useEffect(() => {
     const id = setTimeout(() => {
@@ -552,12 +583,12 @@ function MaintenanceTab({
   return (
     <div className="space-y-3 p-3">
       <div className="grid grid-cols-2 gap-2 lg:grid-cols-4">
-        <HealthStat label="Action" value={status?.recommendedAction ?? "—"} />
-        <HealthStat label="Refresh path" value="snapshot" />
-        <HealthStat label="Source dirty" value={status?.sourceDirty ? "yes" : "no"} />
+        <HealthStat label="State" value={stateLabel(maintenance?.lifecycleState ?? null)} />
+        <HealthStat label="Next step" value={actionLabel(maintenance?.maintenanceAction ?? status?.recommendedAction ?? null)} />
+        <HealthStat label="Reason" value={maintenance?.reason ?? "—"} />
         <HealthStat label="Row groups" value={status?.rowGroups?.toLocaleString() ?? "—"} />
         <HealthStat
-          label="Variants"
+          label="Layouts"
           value={
             <span className={status?.variantsPending ? "text-warning" : undefined}>
               {status?.variantFiles?.toLocaleString() ?? "—"}
@@ -568,19 +599,54 @@ function MaintenanceTab({
       </div>
 
       <Section
-        title="Refresh Policy"
+        title="Autopilot"
         right={
           <button
             type="button"
-            disabled={saving}
-            onClick={() => void save()}
+            disabled={maintainBusy || maintenance?.maintenanceAction === "none"}
+            onClick={onMaintain}
             className="inline-flex h-6 items-center gap-1 rounded-[3px] border border-main/40 bg-main/15 px-2 text-[10px] text-main hover:bg-main/25 disabled:opacity-50"
           >
-            {saving ? <Loader2 className="h-3 w-3 animate-spin" /> : <Settings2 className="h-3 w-3" />} Apply
+            {maintainBusy ? <Loader2 className="h-3 w-3 animate-spin" /> : <RefreshCw className="h-3 w-3" />} Maintain now
           </button>
         }
       >
-        <div className="space-y-2">
+        <div className="grid grid-cols-2 gap-2 lg:grid-cols-4">
+          <HealthStat label="Snapshot rows" value={health.lastRefreshRows?.toLocaleString() ?? "—"} />
+          <HealthStat label="Snapshot age" value={fmtAgo(health.secondsSinceRefresh)} />
+          <HealthStat label="Source lag" value={maintenance?.secondsLag == null ? "—" : fmtAgo(maintenance.secondsLag)} />
+          <HealthStat label="Sources tracked" value={`${status?.trackedSourceCount ?? 0}/${status?.sourceCount ?? 0}`} />
+        </div>
+      </Section>
+
+      <Section
+        title="Advanced policy"
+        right={
+          <div className="flex items-center gap-2">
+            {!advancedOpen ? <span className="text-[10px] text-chrome-text/45">{modeLabel(mode)}</span> : null}
+            {advancedOpen ? (
+              <button
+                type="button"
+                disabled={saving}
+                onClick={() => void save()}
+                className="inline-flex h-6 items-center gap-1 rounded-[3px] border border-main/40 bg-main/15 px-2 text-[10px] text-main hover:bg-main/25 disabled:opacity-50"
+              >
+                {saving ? <Loader2 className="h-3 w-3 animate-spin" /> : <Settings2 className="h-3 w-3" />} Apply
+              </button>
+            ) : null}
+            <button
+              type="button"
+              onClick={() => setAdvancedOpen((v) => !v)}
+              className="inline-flex h-6 items-center gap-1 rounded-[3px] border border-chrome-border/50 px-2 text-[10px] text-chrome-text/60 hover:bg-foreground/[0.05] hover:text-foreground"
+            >
+              <ChevronRight className={`h-3 w-3 transition-transform ${advancedOpen ? "rotate-90" : ""}`} />
+              {advancedOpen ? "Hide" : "Show"}
+            </button>
+          </div>
+        }
+      >
+        {advancedOpen ? (
+          <div className="space-y-2">
           <div className="grid grid-cols-4 gap-1">
             {(["auto", "conservative", "bulk", "manual"] as const).map((m) => (
               <button
@@ -618,7 +684,7 @@ function MaintenanceTab({
                 <option value="rich">rich</option>
               </select>
             </FieldLite>
-            <FieldLite label="Variants">
+            <FieldLite label="Layout build">
               <select className={inputCls} value={refreshVariants ?? ""} onChange={(e) => setRefreshVariants(e.target.value)}>
                 <option value="deferred">deferred</option>
                 <option value="sync">sync</option>
@@ -629,23 +695,30 @@ function MaintenanceTab({
                 type="button"
                 disabled={refreshBusy}
                 onClick={onRefresh}
-                title="Run this cube refresh now"
+                title="Recompute this cube snapshot now"
                 className="inline-flex h-7 w-full items-center justify-center gap-1 rounded-[3px] border border-chrome-border/60 px-2 text-[11px] text-chrome-text/70 hover:bg-foreground/[0.05] hover:text-foreground disabled:opacity-50"
               >
-                {refreshBusy ? <Loader2 className="h-3 w-3 animate-spin" /> : <Zap className="h-3 w-3" />} Run now
+                {refreshBusy ? <Loader2 className="h-3 w-3 animate-spin" /> : <Zap className="h-3 w-3" />} Refresh snapshot
               </button>
             </div>
           </div>
 
           <div className="grid grid-cols-2 gap-2 lg:grid-cols-4">
             <HealthStat label="Last run" value={status?.lastRefreshSeconds == null ? "—" : `${status.lastRefreshSeconds.toFixed(2)}s`} />
-            <HealthStat label="Age" value={fmtAgo(health.secondsSinceRefresh)} />
+            <HealthStat label="Policy" value={modeLabel(mode)} />
+            <HealthStat label="Layouts" value={layoutBuildLabel(refreshVariants)} />
             <HealthStat label="Dirty" value={status?.dirty ? "yes" : "no"} />
-            <HealthStat label="Sources" value={`${status?.trackedSourceCount ?? 0}/${status?.sourceCount ?? 0}`} />
-            <HealthStat label="Rows" value={health.lastRefreshRows?.toLocaleString() ?? "—"} />
           </div>
           {msg ? <div className={`text-[11px] ${msg.startsWith("Policy failed") ? "text-danger" : "text-chrome-text/70"}`}>{msg}</div> : null}
-        </div>
+          </div>
+        ) : (
+          <div className="grid grid-cols-2 gap-2 lg:grid-cols-4">
+            <HealthStat label="Policy" value={modeLabel(mode)} />
+            <HealthStat label="Interval" value={refreshIntervalSeconds ? `${Number(refreshIntervalSeconds).toLocaleString()}s` : "—"} />
+            <HealthStat label="Layouts" value={layoutBuildLabel(refreshVariants)} />
+            <HealthStat label="Last run" value={status?.lastRefreshSeconds == null ? "—" : `${status.lastRefreshSeconds.toFixed(2)}s`} />
+          </div>
+        )}
       </Section>
     </div>
   )
@@ -671,10 +744,74 @@ function parseOptionalInt(v: string): number | null {
   return Number.isFinite(n) && n > 0 ? Math.floor(n) : null
 }
 
+function stateLabel(state: string | null | undefined): string {
+  switch (state) {
+    case "current":
+      return "Current"
+    case "lagging":
+      return "Lagging"
+    case "refresh_due":
+      return "Refresh due"
+    case "layouts_pending":
+      return "Layouts pending"
+    case "needs_compaction":
+      return "Needs compaction"
+    case "manual":
+      return "Manual"
+    case "broken":
+      return "Broken"
+    case "disabled":
+      return "Disabled"
+    case "running":
+      return "Running"
+    default:
+      return state ?? "—"
+  }
+}
+
+function actionLabel(action: string | null | undefined): string {
+  switch (action) {
+    case "refresh_snapshot":
+    case "refresh_cube":
+      return "Refresh snapshot"
+    case "build_layouts":
+    case "maintain_storage":
+      return "Build layouts"
+    case "catch_up":
+    case "delta":
+      return "Catch up"
+    case "compact":
+    case "full":
+      return "Compact"
+    case "wait":
+      return "Wait"
+    case "none":
+    case "ok":
+      return "None"
+    case "fix_error":
+      return "Repair"
+    default:
+      return action ?? "—"
+  }
+}
+
+function layoutBuildLabel(value: string | null | undefined): string {
+  switch (value) {
+    case "sync":
+      return "With snapshot"
+    case "deferred":
+      return "Managed later"
+    case "skip":
+      return "Off"
+    default:
+      return value ?? "—"
+  }
+}
+
 function modeLabel(mode: string | null | undefined): string {
   switch (mode) {
     case "auto":
-      return "Sweep"
+      return "Managed"
     case "conservative":
       return "Conservative"
     case "bulk":
@@ -689,13 +826,13 @@ function modeLabel(mode: string | null | undefined): string {
 function modeTitle(mode: string): string {
   switch (mode) {
     case "auto":
-      return "Eligible for selective refresh_all_cubes sweeps"
+      return "Eligible for managed maintenance sweeps"
     case "conservative":
       return "Lower query and writer concurrency"
     case "bulk":
       return "Higher query concurrency for catch-up windows"
     case "manual":
-      return "Excluded from refresh_all_cubes sweeps"
+      return "Excluded from managed sweeps"
     default:
       return mode
   }
@@ -713,9 +850,9 @@ function HealthTab({ health }: { health: CubeDetail["health"] }) {
         <HealthStat label="Last refresh" value={fmtAgo(health.secondsSinceRefresh)} />
         <HealthStat label="Current rows" value={health.currentRows?.toLocaleString() ?? "—"} />
         <HealthStat label="Row Δ since refresh" value={health.rowDelta == null ? "—" : health.rowDelta.toLocaleString()} />
-        <HealthStat label="Policy" value={modeLabel(health.autopilot?.mode ?? health.refreshPolicy?.mode ?? null)} />
-        <HealthStat label="Variants" value={health.autopilot?.refreshVariants ?? "—"} />
-        <HealthStat label="Action" value={health.autopilot?.recommendedAction ?? "—"} />
+        <HealthStat label="State" value={stateLabel(health.maintenance?.lifecycleState ?? null)} />
+        <HealthStat label="Layouts" value={layoutBuildLabel(health.autopilot?.refreshVariants)} />
+        <HealthStat label="Next step" value={actionLabel(health.maintenance?.maintenanceAction ?? health.autopilot?.recommendedAction ?? null)} />
         <HealthStat label="Source dirty" value={health.autopilot?.sourceDirty ? "yes" : "no"} />
         <HealthStat label="Sources tracked" value={`${health.autopilot?.trackedSourceCount ?? 0}/${health.autopilot?.sourceCount ?? 0}`} />
       </div>

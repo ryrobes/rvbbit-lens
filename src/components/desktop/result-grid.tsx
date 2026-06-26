@@ -112,11 +112,15 @@ export function ResultGrid({
     const map = new Map<string, Set<string>>()
     if (!highlightFilters?.length) return map
     for (const c of columns) {
-      if (!c.sourceColumn) continue
       const f = highlightFilters.find(
-        (hf) =>
-          hf.column.toLowerCase() === c.sourceColumn!.toLowerCase() &&
-          (!hf.sourceTable || !c.sourceTable || hf.sourceTable.toLowerCase() === c.sourceTable.toLowerCase()),
+        (hf) => {
+          if (!hf.sourceTable) return hf.column.toLowerCase() === c.name.toLowerCase()
+          return (
+            !!c.sourceColumn &&
+            hf.column.toLowerCase() === c.sourceColumn.toLowerCase() &&
+            (!c.sourceTable || hf.sourceTable.toLowerCase() === c.sourceTable.toLowerCase())
+          )
+        },
       )
       if (!f) continue
       const vals = (Array.isArray(f.value) ? f.value : [f.value]).map((v) => String(v))

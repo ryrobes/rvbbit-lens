@@ -39,6 +39,7 @@ import { ModelField } from "./operator-inspector"
 import { ResultGrid } from "./result-grid"
 import { ResultTranscript, statementKeys } from "./result-transcript"
 import { ArrangeGrid } from "./arrange-grid"
+import { extractUiArtifacts, UiArtifactView, type UiArtifactParamInput } from "./ui-artifact-view"
 import { ContextMenu, type ContextMenuState } from "./context-menu"
 import { listQueryHistory, pushQueryHistory } from "@/lib/desktop/query-history"
 import { SingleCellCallout } from "./single-cell-callout"
@@ -64,14 +65,16 @@ import { reconcileRollupLineage } from "@/lib/desktop/rollup-sql-parse"
 import { rollupChartSpec } from "@/lib/desktop/rollup-chart"
 import { classifyColumn } from "@/lib/desktop/chart-infer"
 import { RollupShelf, type FilterKind } from "./rollup-shelf"
-import type { QueryResult, QueryResultColumn, SchemaSnapshot } from "@/lib/db/types"
+import type { QueryResult, QueryResultColumn, SchemaSnapshot, StatementResult } from "@/lib/db/types"
 import { buildSqlCompletionSchema } from "@/lib/desktop/sql-completion"
 import type { BlockReferenceMap } from "@/lib/desktop/sql-block-refs"
 import { cn } from "@/lib/utils"
 import { rowsToCsv } from "@/lib/sql/format"
 import {
   hasTopLevelThen,
-  wrapFlow,
+  pipelineHead,
+  splitPipelineHead,
+  wrapFlowStatements,
   expandFlowResult,
   isSynthQuery,
   inferJsonbColumns,
@@ -84,9 +87,11 @@ import {
   buildDesktopRuntimeGraph,
   injectStatementFilters,
   paramKey,
+  predicateForParam,
   quoteSqlIdent,
   resolveParamPlacement,
   sameParamValue,
+  singleFromItem,
   shortParamValue,
   slugifyBlockName,
   sourceSqlForPayload,
@@ -170,6 +175,29 @@ type FlowStepRow = {
   rows: Record<string, unknown>[]
 }
 
+function expandPipelineStatementResult(stmt: StatementResult): StatementResult {
+  const expanded = expandFlowResult({
+    sql: stmt.sql ?? "",
+    connectionId: "",
+    columns: stmt.columns,
+    rows: stmt.rows,
+    rowCount: stmt.rowCount,
+    truncated: stmt.truncated,
+    durationMs: 0,
+    command: stmt.command,
+  })
+  return { ...stmt, columns: expanded.columns, rows: expanded.rows }
+}
+
+function expandPipelineResult(result: QueryResult, cols?: JsonbProjectionColumn[]): QueryResult {
+  const expanded = expandFlowResult(result, cols)
+  if (!result.results?.length) return expanded
+  return {
+    ...expanded,
+    results: result.results.map(expandPipelineStatementResult),
+  }
+}
+
 const FLOW_STEPS_SQL =
   "SELECT step_idx, stage, spec, generated_sql, n_rows, rows FROM rvbbit.flow_steps " +
   "WHERE run_id = (SELECT run_id FROM rvbbit.flow_steps ORDER BY created_at DESC LIMIT 1) " +
@@ -192,6 +220,101 @@ const SQL_RAIL_MAX_FRACTION = 0.5
  *  let mechanism-2 wrap a tile with the prior run's column name (42703). */
 function colsKey(sql: string): string {
   return sql.replace(/\/\*[\s\S]*?\*\//g, " ").replace(/--[^\n]*/g, " ").trim()
+}
+
+function splitSqlRelation(relation: string): string[] {
+  const parts: string[] = []
+  let buf = ""
+  let quoted = false
+  for (let i = 0; i < relation.length; i += 1) {
+    const c = relation[i]
+    if (quoted) {
+      if (c === '"') {
+        if (relation[i + 1] === '"') {
+          buf += '"'
+          i += 1
+        } else {
+          quoted = false
+        }
+      } else {
+        buf += c
+      }
+      continue
+    }
+    if (c === '"') {
+      quoted = true
+      continue
+    }
+    if (c === ".") {
+      parts.push(buf.trim())
+      buf = ""
+      continue
+    }
+    buf += c
+  }
+  parts.push(buf.trim())
+  return parts.filter(Boolean)
+}
+
+function resolveControlFilterSource(
+  statement: string | undefined,
+  field: string,
+  schema: SchemaSnapshot | null,
+): Pick<CrossFilter, "sourceSchema" | "sourceTable" | "column"> | null {
+  if (!statement || !field || !schema) return null
+  const head = pipelineHead(statement) ?? statement
+  const item = singleFromItem(head)
+  if (!item || item.type !== "table") return null
+  const parts = splitSqlRelation(item.relation)
+  const tableName = parts[parts.length - 1]?.toLowerCase()
+  const schemaName = parts.length > 1 ? parts[parts.length - 2]?.toLowerCase() : null
+  if (!tableName) return null
+  const matches = schema.tables.filter(
+    (t) =>
+      t.name.toLowerCase() === tableName &&
+      (!schemaName || t.schema.toLowerCase() === schemaName),
+  )
+  if (matches.length !== 1) return null
+  const table = matches[0]
+  const column = table.columns.find((c) => c.name.toLowerCase() === field.toLowerCase())
+  if (!column) return null
+  return { sourceSchema: table.schema, sourceTable: table.name, column: column.name }
+}
+
+function crossFilterKey(x: Pick<CrossFilter, "sourceSchema" | "sourceTable" | "column">): string {
+  return `${x.sourceSchema ?? ""}.${x.sourceTable ?? ""}.${x.column}`.toLowerCase()
+}
+
+function crossFilterLabel(x: CrossFilter): string {
+  return x.sourceTable ? `${x.sourceTable}.${x.column}` : x.column
+}
+
+function injectFieldOnlyFilters(sql: string, filters: CrossFilter[]): string {
+  const fieldFilters = filters.filter((f) => !f.sourceTable)
+  if (fieldFilters.length === 0) return sql
+  const preds = fieldFilters.map((f) => predicateForParam(f.column, f.value, f.operator))
+  return `SELECT * FROM (\n${stripTrailingSqlTerminator(sql)}\n) AS __rvbbit_pf WHERE ${preds.join(" AND ")}`
+}
+
+function injectPipelineHeadFilters(sql: string, filters: CrossFilter[], schema: SchemaSnapshot | null): string {
+  if (filters.length === 0) return sql
+  const statements = splitStatements(sql)
+  if (statements.length === 0) return sql
+  return statements
+    .map((statement, index) => {
+      const split = splitPipelineHead(statement)
+      if (!split) return statement
+      const applicable = filters.filter((f) => f.sourceStmtIndex !== index)
+      if (applicable.length === 0) return statement
+
+      const tableFilters = applicable.filter((f) => !!f.sourceTable)
+      let head = tableFilters.length > 0
+        ? injectStatementFilters(split.head, tableFilters, schema)
+        : split.head
+      head = injectFieldOnlyFilters(head, applicable)
+      return `${head}\n${split.tail}`
+    })
+    .join(";\n")
 }
 
 function loadAskModel(): string {
@@ -319,6 +442,8 @@ export function DataGridWindow({
   const [flowSteps, setFlowSteps] = useState<FlowStepRow[] | null>(null)
   const [activeStep, setActiveStep] = useState(0)
   const [flowStepsError, setFlowStepsError] = useState<string | null>(null)
+  const [loadingMore, setLoadingMore] = useState(false)
+  const [lastRunExpanded, setLastRunExpanded] = useState(false)
 
   const blockName = useMemo(() => {
     if (payload.reactive?.blockName) return payload.reactive.blockName
@@ -498,23 +623,6 @@ export function DataGridWindow({
     return () => { cancelled = true }
   }, [queryMode, activeConnectionId, llmModels.length])
 
-  // First mount: auto-run for windows that already have a real SQL body
-  // (table previews, drag-out aggregations, block-ref spawns). Skip the
-  // hand-typed "SELECT 1" scratch start.
-  useEffect(() => {
-    if (runState.kind !== "idle" || !activeConnectionId) return
-    // Semantic projections are per-row LLM ops — never auto-materialize; the
-    // Explain tab estimates cost and the user runs explicitly.
-    if (isSemanticProjection) return
-    // Pipeline cascades (… then op('…')) run rowset LLM stages — don't fire
-    // them on spawn; the user reviews the SQL and runs explicitly.
-    if (hasTopLevelThen(payload.sql)) return
-    const isAutoRunOrigin = payload.origin === "table" || payload.origin === "derived"
-    if (!isAutoRunOrigin) return
-    void runSql(payload.sql)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
-
   const runSql = useCallback(async (sourceSql: string, userInitiated = false) => {
     if (!activeConnectionId) return
     const trimmedSource = sourceSql.trim()
@@ -555,11 +663,16 @@ export function DataGridWindow({
       schema,
     )
     const compiled = graph.blocks.get(w.id)?.compiledSql ?? trimmedSource
-    // Pipeline cascade sugar: a bare `select … then op(…)` is wrapped as
-    // rvbbit.flow($$…$$) so the THENs never hit the PG parser. Detection mirrors
-    // the engine splitter (CASE…THEN / strings / comments are left untouched).
-    const isPipeline = hasTopLevelThen(compiled)
-    const compiledRun = isPipeline ? wrapFlow(compiled) : compiled
+    const compiledForPipelines =
+      crossFiltersRef.current.length > 0
+        ? injectPipelineHeadFilters(compiled, crossFiltersRef.current, schema)
+        : compiled
+    // Pipeline cascade sugar: each bare `select ... then op(...)` statement is
+    // wrapped as rvbbit.flow($$...$$) so THEN never reaches the PG parser. Per-
+    // statement wrapping keeps multi-component SQL blocks composable.
+    const flowWrap = wrapFlowStatements(compiledForPipelines)
+    const isPipeline = flowWrap.hasPipeline
+    const compiledRun = flowWrap.sql
     // Cross-filter: push active block-local filters into each safe single-table
     // SELECT statement (multi-statement dashboard). No-op when no filters / not
     // multi-statement; only mutates statements proven safe (see injectStatementFilters).
@@ -676,8 +789,9 @@ export function DataGridWindow({
           }
         }
         // flow() / synth() return a single jsonb column per row; expand into columns
-        // (using the authoritative synth schema when we have it).
-        const finalResult = isPipeline || isSynth ? expandFlowResult(body, synthCols) : body
+        // (using the authoritative synth schema when we have it). Statement-aware
+        // pipeline wrapping can also produce transcript entries, so expand those too.
+        const finalResult = isPipeline || isSynth ? expandPipelineResult(body, synthCols) : body
         // Record the column shape so the reactive graph can wrap *references* to this
         // block in a typed projection (drag-out rollups / block.<name> refs see real
         // columns, not jsonb). Synth-only: a bare-`then` pipeline's compiledSql is not
@@ -695,7 +809,7 @@ export function DataGridWindow({
         // output column — keyed by the compiled SQL they belong to (see stmtCols
         // gate above). Only meaningful for a true multi-statement run.
         lastStmtColsRef.current =
-          !isPipeline && finalResult.results && finalResult.results.length > 1
+          finalResult.results && finalResult.results.length > 1
             ? { sql: compiledRun, cols: finalResult.results.map((r) => r.columns) }
             : null
         // Record the compiled SQL that just succeeded, so the auto-rerun
@@ -739,6 +853,23 @@ export function DataGridWindow({
     }
   }, [activeConnectionId, activeTab, allWindows, blockName, onChangePayload, params, subscriptions, w.id, targetDb, txnSessionId, schema])
 
+  // First mount: auto-run for windows that already have a real SQL body
+  // (table previews, drag-out aggregations, block-ref spawns). Skip the
+  // hand-typed "SELECT 1" scratch start.
+  useEffect(() => {
+    if (runState.kind !== "idle" || !activeConnectionId) return
+    // Semantic projections are per-row LLM ops — never auto-materialize; the
+    // Explain tab estimates cost and the user runs explicitly.
+    if (isSemanticProjection) return
+    // Pipeline cascades (… then op('…')) run rowset LLM stages — don't fire
+    // them on spawn; the user reviews the SQL and runs explicitly.
+    if (hasTopLevelThen(payload.sql)) return
+    const isAutoRunOrigin = payload.origin === "table" || payload.origin === "derived"
+    if (!isAutoRunOrigin) return
+    void runSql(payload.sql)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
   // Keep the ref in sync so runSql reads the latest cross-filters without a dep.
   useEffect(() => {
     crossFiltersRef.current = crossFilters
@@ -747,7 +878,6 @@ export function DataGridWindow({
 
   // Click a tile cell → toggle a block-local cross-filter on that column's REAL
   // source table (pg provenance). An expression column (no provenance) is a no-op.
-  const crossFilterKey = (x: CrossFilter) => `${x.sourceSchema ?? ""}.${x.sourceTable}.${x.column}`.toLowerCase()
   const onCellFilter = useCallback((column: QueryResultColumn, value: unknown, stmtIndex: number) => {
     if (!column.sourceTable || !column.sourceColumn) return
     // Equality on a jsonb/array cell isn't meaningful — skip non-scalars (null is OK → IS NULL).
@@ -761,14 +891,14 @@ export function DataGridWindow({
       // The clicked statement is excluded from this filter (no self-filter).
       sourceStmtIndex: stmtIndex,
     }
-    const k = `${next.sourceSchema ?? ""}.${next.sourceTable}.${next.column}`.toLowerCase()
+    const k = crossFilterKey(next)
     setCrossFilters((prev) => {
-      const existing = prev.find((p) => `${p.sourceSchema ?? ""}.${p.sourceTable}.${p.column}`.toLowerCase() === k)
+      const existing = prev.find((p) => crossFilterKey(p) === k)
       // Re-click the same value → toggle off; else set/replace this column's filter.
       if (existing && sameParamValue(existing.value, value)) {
-        return prev.filter((p) => `${p.sourceSchema ?? ""}.${p.sourceTable}.${p.column}`.toLowerCase() !== k)
+        return prev.filter((p) => crossFilterKey(p) !== k)
       }
-      return [...prev.filter((p) => `${p.sourceSchema ?? ""}.${p.sourceTable}.${p.column}`.toLowerCase() !== k), next]
+      return [...prev.filter((p) => crossFilterKey(p) !== k), next]
     })
   }, [])
 
@@ -782,9 +912,9 @@ export function DataGridWindow({
     if (!sourceTable || !sourceColumn) return
     const sourceSchema = column.sourceSchema
     const scalars = values.filter((v) => v === null || typeof v !== "object")
-    const k = `${sourceSchema ?? ""}.${sourceTable}.${sourceColumn}`.toLowerCase()
+    const k = crossFilterKey({ sourceSchema, sourceTable, column: sourceColumn })
     setCrossFilters((prev) => {
-      const without = prev.filter((p) => `${p.sourceSchema ?? ""}.${p.sourceTable}.${p.column}`.toLowerCase() !== k)
+      const without = prev.filter((p) => crossFilterKey(p) !== k)
       if (scalars.length === 0) return without
       return [
         ...without,
@@ -879,8 +1009,6 @@ export function DataGridWindow({
   // returns more of the same query. Run read-only so a re-fetch can never re-fire
   // a side-effecting statement, and nonce-guard so a concurrent run isn't clobbered.
   // Only offered for plain non-expanded SELECTs (see the button gate).
-  const [loadingMore, setLoadingMore] = useState(false)
-  const [lastRunExpanded, setLastRunExpanded] = useState(false)
   const loadMore = useCallback(async () => {
     if (runState.kind !== "done" || !activeConnectionId) return
     // While a manual transaction is open, "Load more" must not run — it re-fetches
@@ -1398,11 +1526,12 @@ export function DataGridWindow({
 
   const result = runState.kind === "done" ? runState.result : null
   // A multi-statement run carries a per-statement breakdown — render the transcript
-  // (nothing swallowed) instead of the single grid. Pipelines/synth always compile
-  // to ONE statement so they never set `results`; gate defensively anyway.
-  const multiResults = result && !isPipelineRun && result.results && result.results.length > 1
+  // (nothing swallowed) instead of the single grid. Statement-aware pipeline wrapping
+  // lets visual component blocks participate here too.
+  const multiResults = result && result.results && result.results.length > 1
     ? result.results
     : null
+  const uiArtifacts = result && !multiResults ? extractUiArtifacts(result.rows) : null
   const arrangeMode = !!multiResults && payload.statementLayout?.mode === "arrange"
   const error = runState.kind === "error" ? runState : null
   const isRunning = runState.kind === "running"
@@ -1414,6 +1543,71 @@ export function DataGridWindow({
     () => splitStatements(payload.sql ?? "").filter((sgmt) => sgmt.replace(/--[^\n]*|\/\*[\s\S]*?\*\//g, "").trim().length > 0),
     [payload.sql],
   )
+  const emitUiArtifactParam = useCallback((input: UiArtifactParamInput) => {
+    const resolved =
+      input.sourceStmtIndex === undefined
+        ? null
+        : resolveControlFilterSource(sourceStatements[input.sourceStmtIndex], input.field, schema)
+    onEmitParam({
+      sourceWindowId: w.id,
+      sourceBlockName: blockName,
+      sourceTitle: payload.title || w.title || blockName,
+      field: input.field,
+      value: input.value,
+      operator: input.operator,
+      multiValueAction: input.multiValueAction,
+      cascade: input.cascade ?? false,
+      type: input.type,
+      sourceSchema: resolved?.sourceSchema,
+      sourceTable: resolved?.sourceTable,
+      sourceColumn: resolved?.column,
+    })
+    if (!multiResults || input.sourceStmtIndex === undefined) return
+
+    const target: Pick<CrossFilter, "sourceSchema" | "sourceTable" | "column"> = resolved ?? { column: input.field }
+    const key = crossFilterKey(target)
+    const clear =
+      input.multiValueAction === "remove" ||
+      ((input.operator === "gte" || input.operator === "lte") && (input.value === null || input.value === undefined))
+    setCrossFilters((prev) => {
+      const existing = prev.find((p) => crossFilterKey(p) === key)
+      const without = prev.filter((p) => crossFilterKey(p) !== key)
+      if (clear) return without
+
+      const base: CrossFilter = {
+        ...target,
+        value: input.value,
+        operator: input.operator ?? "eq",
+        sourceStmtIndex: input.sourceStmtIndex,
+      }
+
+      if (input.multiValueAction === "toggle" || input.multiValueAction === "add") {
+        const existingValues = existing
+          ? Array.isArray(existing.value)
+            ? existing.value
+            : [existing.value]
+          : []
+        const already = existingValues.some((v) => sameParamValue(v, input.value))
+        const nextValues =
+          input.multiValueAction === "toggle" && already
+            ? existingValues.filter((v) => !sameParamValue(v, input.value))
+            : already
+              ? existingValues
+              : [...existingValues, input.value]
+        if (nextValues.length === 0) return without
+        return [
+          ...without,
+          {
+            ...base,
+            value: nextValues.length === 1 ? nextValues[0] : nextValues,
+            operator: "in",
+          },
+        ]
+      }
+
+      return [...without, base]
+    })
+  }, [blockName, multiResults, onEmitParam, payload.title, schema, sourceStatements, w.id, w.title])
 
   // DEV test handle: register this block so a Playwright harness can drive a
   // cross-filter without a real cell click (drag/click are hard to automate). No-op
@@ -1830,7 +2024,7 @@ export function DataGridWindow({
                         key={crossFilterKey(f)}
                         className="inline-flex items-center gap-1 rounded-full border border-rvbbit-accent/40 bg-rvbbit-accent/10 px-1.5 py-0.5 text-rvbbit-accent"
                       >
-                        <span className="font-mono">{`${f.sourceTable}.${f.column} = ${shortParamValue(f.value)}`}</span>
+                        <span className="font-mono">{`${crossFilterLabel(f)} = ${shortParamValue(f.value)}`}</span>
                         <button
                           type="button"
                           title="Remove filter"
@@ -1874,6 +2068,8 @@ export function DataGridWindow({
                       onChartFilter={onChartFilter}
                       crossFilters={crossFilters}
                       sourceStatements={sourceStatements}
+                      activeParams={blockParams}
+                      onEmitParam={emitUiArtifactParam}
                     />
                   ) : (
                     <ResultTranscript
@@ -1890,10 +2086,14 @@ export function DataGridWindow({
                       onCellFilter={onCellFilter}
                       onChartFilter={onChartFilter}
                       crossFilters={crossFilters}
+                      activeParams={blockParams}
+                      onEmitParam={emitUiArtifactParam}
                     />
                   )}
                 </div>
               </div>
+            ) : uiArtifacts ? (
+              <UiArtifactView artifacts={uiArtifacts} fill activeParams={blockParams} onEmitParam={emitUiArtifactParam} />
             ) : result.rows.length === 1 && result.columns.length === 1 ? (
               <SingleCellCallout
                 column={result.columns[0]}
@@ -2341,10 +2541,6 @@ function NotifyChannelControl({
   const active = !!channel
 
   useEffect(() => {
-    setDraft(channel ?? "")
-  }, [channel])
-
-  useEffect(() => {
     if (!open) return
     function onDown(e: MouseEvent) {
       if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false)
@@ -2357,7 +2553,12 @@ function NotifyChannelControl({
     <div className="relative" ref={ref}>
       <button
         type="button"
-        onClick={() => setOpen((o) => !o)}
+        onClick={() => {
+          setOpen((o) => {
+            if (!o) setDraft(channel ?? "")
+            return !o
+          })
+        }}
         title={
           active
             ? `Re-runs when a NOTIFY arrives on "${channel}" — click to change`

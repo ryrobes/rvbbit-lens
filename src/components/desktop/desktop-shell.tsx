@@ -220,6 +220,11 @@ interface WorkspaceTransition {
   dir: "forward" | "backward"
 }
 
+interface OpenSqlDataOptions {
+  activeTab?: NonNullable<DataPayload["view"]>["activeTab"]
+  chartSpec?: Record<string, unknown> | null
+}
+
 /** Deep clone of a canvas — payloads are JSON-serializable by construction
  *  (the File-store keeps non-serializable blobs out of window payloads). */
 function cloneCanvas(c: WorkspaceCanvas): WorkspaceCanvas {
@@ -2827,7 +2832,8 @@ export function DesktopShell() {
   // Open arbitrary SQL as a live, auto-running data window (editor + ResultGrid).
   // `origin: "derived"` makes the grid run on open — used by the KPI board drill
   // to materialize the exact reproducible query behind a historical cell.
-  const openSqlData = useCallback((sql: string, title: string) => {
+  const openSqlData = useCallback((sql: string, title: string, options?: OpenSqlDataOptions) => {
+    const activeTab = options?.activeTab ?? "rows"
     openWindow({
       id: randomUUID(),
       kind: "data",
@@ -2841,7 +2847,8 @@ export function DesktopShell() {
         title,
         sql,
         origin: "derived",
-        view: { activeTab: "rows", sqlRailOpen: true, sqlRailWidthPx: 360 },
+        chartSpec: options?.chartSpec ?? null,
+        view: { activeTab, sqlRailOpen: true, sqlRailWidthPx: 360 },
       } satisfies DataPayload,
     })
   }, [openWindow])
@@ -4321,7 +4328,7 @@ interface WindowContext {
   openViewApp: (appId: string) => void
   openArtifact: (artifactId: string) => void
   openQueryDocument: (payload: QueryDocumentPayload) => void
-  openSqlData: (sql: string, title: string) => void
+  openSqlData: (sql: string, title: string, options?: OpenSqlDataOptions) => void
   openRowInspector: (payload: RowInspectorPayload) => void
   openCsvImport: (file: File) => void
   openExtensions: () => void

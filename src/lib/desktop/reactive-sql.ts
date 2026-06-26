@@ -457,7 +457,7 @@ function quoteSqlLiteral(value: unknown): string {
   return `'${String(value).replace(/'/g, "''")}'`
 }
 
-function predicateForParam(field: string, value: unknown, operator?: string): string {
+export function predicateForParam(field: string, value: unknown, operator?: string): string {
   const q = quoteSqlIdent(field)
   // Range/threshold comparison (datepicker / slider). `col >= v` matches whole
   // timestamps correctly (no exact-midnight problem of `col = date`).
@@ -886,7 +886,9 @@ export function broadcastTargetWindowIds(
  *  value's REAL source table (from pg provenance). */
 export interface CrossFilter {
   sourceSchema?: string
-  sourceTable: string
+  /** Real source table when pg provenance exists. Absent for synthetic rowsets
+   *  such as VALUES/subquery demos; those fall back to output-field matching. */
+  sourceTable?: string
   column: string
   value: unknown
   operator?: "eq" | "in" | "gte" | "lte"
@@ -953,6 +955,7 @@ export function injectStatementFilters(
         const cols = new Set(table.columns.map((c) => c.name.toLowerCase()))
         const matching = applicable.filter(
           (f) =>
+            !!f.sourceTable &&
             f.sourceTable.toLowerCase() === table.name.toLowerCase() &&
             (!f.sourceSchema || f.sourceSchema.toLowerCase() === table.schema.toLowerCase()) &&
             cols.has(f.column.toLowerCase()),
@@ -978,12 +981,16 @@ export function injectStatementFilters(
       const preds: string[] = []
       for (const f of applicable) {
         const match = outCols.find(
-          (c) =>
-            !!c.sourceTable &&
-            !!c.sourceColumn &&
-            c.sourceTable.toLowerCase() === f.sourceTable.toLowerCase() &&
-            c.sourceColumn.toLowerCase() === f.column.toLowerCase() &&
-            (!f.sourceSchema || !c.sourceSchema || c.sourceSchema.toLowerCase() === f.sourceSchema.toLowerCase()),
+          (c) => {
+            if (!f.sourceTable) return c.name.toLowerCase() === f.column.toLowerCase()
+            return (
+              !!c.sourceTable &&
+              !!c.sourceColumn &&
+              c.sourceTable.toLowerCase() === f.sourceTable.toLowerCase() &&
+              c.sourceColumn.toLowerCase() === f.column.toLowerCase() &&
+              (!f.sourceSchema || !c.sourceSchema || c.sourceSchema.toLowerCase() === f.sourceSchema.toLowerCase())
+            )
+          },
         )
         if (!match) continue
         const n = match.name.toLowerCase()

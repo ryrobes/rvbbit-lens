@@ -11,6 +11,9 @@ import { Search, RefreshCw, Table2, X, ChevronRight, Clock } from "@/lib/icons"
 import { cn } from "@/lib/utils"
 import {
   fetchMetricBoard,
+  fetchMetricDependencyFreshness,
+  metricProvenanceSql,
+  metricSeriesSql,
   listMetrics,
   resolveMetricSql,
   recomputeCell,
@@ -18,13 +21,19 @@ import {
   boardCellHeadline,
   type MetricBoardCell,
   type MetricSummary,
+  type MetricDependencyFreshness,
   type MetricVerdict,
   type BoardBucket,
 } from "@/lib/rvbbit/metrics"
 import { inputCls, VerdictBadge, fmtTime } from "./metric-shared"
 import { useWorkspaceActive } from "./workspace-active-context"
 import { usePresentMode } from "@/lib/desktop/present-mode"
-import type { MetricBoardPayload } from "@/lib/desktop/types"
+import type { DataPayload, MetricBoardPayload } from "@/lib/desktop/types"
+
+type OpenSqlDataOptions = {
+  activeTab?: NonNullable<DataPayload["view"]>["activeTab"]
+  chartSpec?: Record<string, unknown> | null
+}
 
 type EmitParamInput = {
   sourceWindowId: string
@@ -44,7 +53,7 @@ interface MetricBoardWindowProps {
   hasRvbbit: boolean
   windowId: string
   onOpenInspector?: (name: string) => void
-  onOpenSqlData?: (sql: string, title: string) => void
+  onOpenSqlData?: (sql: string, title: string, options?: OpenSqlDataOptions) => void
   onEmitParam?: (input: EmitParamInput) => void
   onChangePayload?: (mut: (p: MetricBoardPayload) => MetricBoardPayload) => void
 }
@@ -63,6 +72,7 @@ const RANGES: { label: string; days: number; bucket: BoardBucket }[] = [
   { label: "90d", days: 90, bucket: "day" },
   { label: "26w", days: 182, bucket: "week" },
   { label: "12mo", days: 365, bucket: "month" },
+  { label: "8q", days: 730, bucket: "quarter" },
 ]
 
 function compactNum(n: number): string {
@@ -77,6 +87,7 @@ function compactNum(n: number): string {
 function fmtCol(ms: number, bucket: BoardBucket): string {
   const d = new Date(ms)
   if (bucket === "month") return d.toLocaleDateString(undefined, { month: "short", year: "2-digit" })
+  if (bucket === "quarter") return `Q${Math.floor(d.getMonth() / 3) + 1} '${String(d.getFullYear()).slice(-2)}`
   if (bucket === "hour") return d.toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric" })
   if (bucket === "raw")
     return d.toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", hour12: false })
@@ -103,10 +114,67 @@ function heatColor(pct: number | null): { bg: string; fg: string } | null {
   return { bg: `color-mix(in oklch, ${stop} 28%, transparent)`, fg: `color-mix(in oklch, ${stop} 70%, var(--foreground))` }
 }
 
+function metricLineChartSpec(metric: string): Record<string, unknown> {
+  const yScale = { zero: false, nice: true }
+  const x = { field: "bucket", type: "temporal", title: "time" }
+  return {
+    $schema: "https://vega.github.io/schema/vega-lite/v5.json",
+    title: metric,
+    layer: [
+      {
+        mark: { type: "line", point: true, tooltip: true },
+        encoding: {
+          x,
+          y: { field: "value", type: "quantitative", title: "value", scale: yScale },
+          color: { field: "status", type: "nominal", title: "status" },
+          tooltip: [
+            { field: "bucket", type: "temporal", title: "bucket" },
+            { field: "value", type: "quantitative", title: "value" },
+            { field: "status", type: "nominal", title: "status" },
+            { field: "metric_version", type: "ordinal", title: "version" },
+            { field: "trigger", type: "nominal", title: "trigger" },
+            { field: "stale_source_count", type: "quantitative", title: "stale sources" },
+          ],
+        },
+      },
+      {
+        mark: { type: "point", opacity: 0, size: 0, tooltip: false },
+        encoding: {
+          x,
+          y: { field: "axis_floor", type: "quantitative", scale: yScale },
+        },
+      },
+      {
+        mark: { type: "point", opacity: 0, size: 0, tooltip: false },
+        encoding: {
+          x,
+          y: { field: "axis_ceiling", type: "quantitative", scale: yScale },
+        },
+      },
+    ],
+    resolve: { scale: { y: "shared" } },
+  }
+}
+
 /** Tiny inline sparkline of a row's headline series. */
-function Sparkline({ points }: { points: (number | null)[] }) {
+function Sparkline({
+  points,
+  onClick,
+  title,
+}: {
+  points: (number | null)[]
+  onClick?: () => void
+  title?: string
+}) {
   const vals = points.filter((p): p is number => p != null)
-  if (vals.length < 2) return <span className="text-chrome-text/25">—</span>
+  if (vals.length < 2) {
+    const empty = <span className="text-chrome-text/25">—</span>
+    return onClick ? (
+      <button onClick={onClick} title={title} className="block h-4 w-16 text-left">
+        {empty}
+      </button>
+    ) : empty
+  }
   const min = Math.min(...vals)
   const max = Math.max(...vals)
   const span = max - min || 1
@@ -117,11 +185,16 @@ function Sparkline({ points }: { points: (number | null)[] }) {
     .map((p, i) => (p == null ? null : `${(i * step).toFixed(1)},${(h - ((p - min) / span) * (h - 2) - 1).toFixed(1)}`))
     .filter(Boolean)
     .join(" ")
-  return (
+  const svg = (
     <svg width={w} height={h} className="text-amber-300/70">
       <polyline points={pts} fill="none" stroke="currentColor" strokeWidth="1" />
     </svg>
   )
+  return onClick ? (
+    <button onClick={onClick} title={title} className="block h-4 w-16 hover:brightness-125">
+      {svg}
+    </button>
+  ) : svg
 }
 
 export function MetricBoardWindow({
@@ -140,6 +213,7 @@ export function MetricBoardWindow({
   // cell drill popovers, and what-if slider all stay live.
   const present = usePresentMode()
   const [metrics, setMetrics] = useState<MetricSummary[]>([])
+  const [freshness, setFreshness] = useState<MetricDependencyFreshness[]>([])
   const [cells, setCells] = useState<MetricBoardCell[]>([])
   const [loaded, setLoaded] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -147,6 +221,7 @@ export function MetricBoardWindow({
   const [rangeIdx, setRangeIdx] = useState(payload.rangeIdx ?? 1)
   const range = RANGES[Math.min(rangeIdx, RANGES.length - 1)]
   const [showAll, setShowAll] = useState(payload.showAll ?? false)
+  const [includeMetrics, setIncludeMetrics] = useState(payload.includeMetrics ?? false)
   // Effective column grain: "raw" shows every materialization; otherwise the
   // range's date_trunc bucket.
   const bucket: BoardBucket = showAll ? "raw" : range.bucket
@@ -179,6 +254,13 @@ export function MetricBoardWindow({
     setShowAll((v) => {
       const next = !v
       onChangePayload?.((p) => ({ ...p, showAll: next }))
+      return next
+    })
+  }, [onChangePayload])
+  const toggleIncludeMetrics = useCallback(() => {
+    setIncludeMetrics((v) => {
+      const next = !v
+      onChangePayload?.((p) => ({ ...p, includeMetrics: next }))
       return next
     })
   }, [onChangePayload])
@@ -219,6 +301,26 @@ export function MetricBoardWindow({
     [activeConnectionId, onOpenSqlData, bucket],
   )
 
+  const openTrend = useCallback(
+    (metric: string, params: Record<string, unknown> = {}) => {
+      const sql = metricSeriesSql(metric, { days: range.days, bucket, params })
+      onOpenSqlData?.(sql, `${metric} trend`, {
+        activeTab: "chart",
+        chartSpec: metricLineChartSpec(metric),
+      })
+      setSel(null)
+    },
+    [bucket, onOpenSqlData, range.days],
+  )
+
+  const openProvenance = useCallback(
+    (metric: string) => {
+      onOpenSqlData?.(metricProvenanceSql(metric), `${metric} provenance`, { activeTab: "rows" })
+      setSel(null)
+    },
+    [onOpenSqlData],
+  )
+
   const emit = useCallback(
     (cell: MetricBoardCell) => {
       onEmitParam?.({
@@ -236,15 +338,17 @@ export function MetricBoardWindow({
 
   const load = useCallback(async () => {
     if (!activeConnectionId || !hasRvbbit) return
-    const [m, b] = await Promise.all([
+    const [m, b, f] = await Promise.all([
       listMetrics(activeConnectionId),
-      fetchMetricBoard(activeConnectionId, { days: range.days, bucket }),
+      fetchMetricBoard(activeConnectionId, { days: range.days, bucket, kpisOnly: !includeMetrics }),
+      fetchMetricDependencyFreshness(activeConnectionId),
     ])
     setMetrics(m.metrics)
     setCells(b.cells)
+    setFreshness(f.rows)
     setError(m.error ?? b.error)
     setLoaded(true)
-  }, [activeConnectionId, hasRvbbit, range.days, bucket])
+  }, [activeConnectionId, hasRvbbit, range.days, bucket, includeMetrics])
 
   // Load on mount / connection / range, and refresh when the desktop is shown.
   useEffect(() => {
@@ -328,13 +432,23 @@ export function MetricBoardWindow({
 
   const rows = useMemo(() => {
     const q = search.trim().toLowerCase()
-    const fromCatalog = metrics.map((m) => m.name)
+    const fromCatalog = metrics.filter((m) => includeMetrics || m.checkSql).map((m) => m.name)
     const fromCells = [...new Set(cells.map((c) => c.metric))]
     const all = [...new Set([...fromCatalog, ...fromCells])].sort()
     return all.filter((n) => !q || n.toLowerCase().includes(q))
-  }, [metrics, cells, search])
+  }, [metrics, cells, search, includeMetrics])
 
   const anyCategorized = useMemo(() => metrics.some((m) => m.category), [metrics])
+  const staleSources = useMemo(() => {
+    const byMetric = new Map<string, MetricDependencyFreshness[]>()
+    for (const f of freshness) {
+      if (!f.stale) continue
+      const list = byMetric.get(f.metric) ?? []
+      list.push(f)
+      byMetric.set(f.metric, list)
+    }
+    return byMetric
+  }, [freshness])
 
   // Ordered render list: category/subcategory group headers interleaved with their
   // metric rows. A null category sorts last as "(uncategorized)"; a category-only
@@ -445,6 +559,7 @@ export function MetricBoardWindow({
   // Popover-scoped derivations for the selected cell (explain + what-if).
   const selMeta = sel ? metrics.find((m) => m.name === sel.cell.metric) ?? null : null
   const selIsKpi = !!selMeta?.checkSql
+  const selDeps = sel ? freshness.filter((f) => f.metric === sel.cell.metric) : []
   const selRowCells = sel ? cells.filter((c) => c.metric === sel.cell.metric) : []
   const selTarget = sel?.cell.verdict?.target != null ? Number(sel.cell.verdict.target) : 0
   const whatIfOnSel = !!(whatIf && sel && whatIf.metric === sel.cell.metric)
@@ -508,6 +623,22 @@ export function MetricBoardWindow({
           )}
         >
           {showAll ? "All materializations" : "Roll up"}
+        </button>
+        <button
+          onClick={toggleIncludeMetrics}
+          title={
+            includeMetrics
+              ? "Showing all metrics. Click to show KPI metrics only."
+              : "Showing KPI metrics only. Click to include non-KPI metrics."
+          }
+          className={cn(
+            "rounded border px-2 py-1 text-[11px] transition-colors",
+            includeMetrics
+              ? "border-amber-400/50 bg-amber-400/20 text-amber-100"
+              : "border-chrome-border text-chrome-text/70 hover:bg-chrome-bg/60",
+          )}
+        >
+          {includeMetrics ? "All metrics" : "KPIs only"}
         </button>
         {/* mode: stored value/def-scrub vs restatement */}
         <div className="flex items-center overflow-hidden rounded border border-chrome-border">
@@ -673,6 +804,8 @@ export function MetricBoardWindow({
                 const name = rr.name
                 const meta = metrics.find((m) => m.name === name)
                 const isKpi = !!meta?.checkSql
+                const staleDeps = staleSources.get(name) ?? []
+                const trendParams = cells.find((c) => c.metric === name)?.params ?? {}
                 const series = columns.map((col) => {
                   const c = byKey.get(`${name}\u001f${col}`)
                   return c ? boardCellHeadline(c) : null
@@ -694,6 +827,16 @@ export function MetricBoardWindow({
                           title={isKpi ? "KPI (has a check)" : "metric"}
                         />
                         <span className="truncate">{name}</span>
+                        {staleDeps.length ? (
+                          <span
+                            className="shrink-0 rounded border border-amber-400/40 bg-amber-400/10 px-1 text-[9px] uppercase tracking-wide text-amber-100"
+                            title={`stale source: ${staleDeps
+                              .map((d) => `${d.table}${d.maxFreshness ? ` @ ${d.maxFreshness}` : ""}`)
+                              .join(", ")}`}
+                          >
+                            stale
+                          </span>
+                        ) : null}
                       </span>
                     </th>
                     {columns.map((col) => {
@@ -722,7 +865,11 @@ export function MetricBoardWindow({
                       )
                     })}
                     <td className="border-b border-l border-chrome-border/60 px-2 py-1">
-                      <Sparkline points={series} />
+                      <Sparkline
+                        points={series}
+                        onClick={() => openTrend(name, trendParams)}
+                        title={`Open ${name} as a SQL line chart`}
+                      />
                     </td>
                   </tr>
                 )
@@ -737,8 +884,8 @@ export function MetricBoardWindow({
         <>
           <div className="fixed inset-0 z-40" onClick={() => setSel(null)} />
           <div
-            className="fixed z-50 w-60 overflow-hidden rounded-md border border-chrome-border bg-chrome-bg shadow-2xl"
-            style={{ left: Math.max(8, Math.min(sel.x, window.innerWidth - 248)), top: sel.y + 4 }}
+            className="fixed z-50 w-72 overflow-hidden rounded-md border border-chrome-border bg-chrome-bg shadow-2xl"
+            style={{ left: Math.max(8, Math.min(sel.x, window.innerWidth - 296)), top: sel.y + 4 }}
           >
             <div className="flex items-center justify-between border-b border-chrome-border px-2.5 py-1.5">
               <span className="truncate text-[11px] font-medium">{sel.cell.metric}</span>
@@ -757,7 +904,38 @@ export function MetricBoardWindow({
               <Row k="data-time" v={fmtTime(sel.cell.dataAsOf)} />
               {sel.cell.dataGeneration != null ? <Row k="generation" v={`#${sel.cell.dataGeneration}`} /> : null}
               <Row k="def version" v={sel.cell.metricVersion != null ? `v${sel.cell.metricVersion}` : "—"} />
+              {selMeta?.grain ? <Row k="grain" v={selMeta.grain} /> : null}
               <Row k="trigger" v={sel.cell.trigger} />
+              {selMeta?.description ? (
+                <div className="pt-1 text-[10px] leading-snug text-chrome-text/55">{selMeta.description}</div>
+              ) : null}
+              {selDeps.length ? (
+                <div className="space-y-1 pt-1">
+                  <div className="text-chrome-text/50">sources</div>
+                  {selDeps.slice(0, 4).map((dep) => (
+                    <div
+                      key={`${dep.metric}:${dep.table}`}
+                      className="flex items-center justify-between gap-2 rounded border border-chrome-border/70 bg-black/15 px-1.5 py-1 text-[10px]"
+                    >
+                      <span className="truncate" title={dep.table}>{dep.table}</span>
+                      <span
+                        className={cn(
+                          "shrink-0 rounded px-1 tabular-nums",
+                          dep.stale === true
+                            ? "bg-amber-400/15 text-amber-100"
+                            : dep.stale === false
+                              ? "bg-emerald-500/10 text-emerald-200"
+                              : "bg-chrome-bg text-chrome-text/45",
+                        )}
+                        title={dep.maxFreshness ? `${dep.freshnessColumn ?? "freshness"}: ${dep.maxFreshness}` : dep.freshnessColumn ?? "no freshness value"}
+                      >
+                        {dep.stale === true ? "stale" : dep.stale === false ? "fresh" : "unknown"}
+                      </span>
+                    </div>
+                  ))}
+                  {selDeps.length > 4 ? <div className="text-[10px] text-chrome-text/40">+{selDeps.length - 4} more source(s)</div> : null}
+                </div>
+              ) : null}
             </div>
             {/* explain-the-red + threshold what-if (KPI cells only) */}
             {selIsKpi ? (
@@ -811,11 +989,25 @@ export function MetricBoardWindow({
             ) : null}
             <div className="flex flex-col border-t border-chrome-border text-[11px]">
               <button
-                onClick={() => void drill(sel.cell)}
+                onClick={() => openTrend(sel.cell.metric, sel.cell.params ?? {})}
                 className="flex items-center justify-between px-2.5 py-1.5 text-left hover:bg-amber-400/10"
               >
-                <span className="text-amber-100">{drilling ? "Resolving…" : "Open SQL & data"}</span>
+                <span className="text-amber-100">Open trend chart</span>
                 <ChevronRight className="h-3.5 w-3.5 text-amber-300/70" />
+              </button>
+              <button
+                onClick={() => void drill(sel.cell)}
+                className="flex items-center justify-between px-2.5 py-1.5 text-left hover:bg-chrome-bg/60"
+              >
+                <span>{drilling ? "Resolving…" : "Open exact SQL"}</span>
+                <ChevronRight className="h-3.5 w-3.5 text-chrome-text/45" />
+              </button>
+              <button
+                onClick={() => openProvenance(sel.cell.metric)}
+                className="flex items-center justify-between px-2.5 py-1.5 text-left hover:bg-chrome-bg/60"
+              >
+                <span>Open provenance</span>
+                <ChevronRight className="h-3.5 w-3.5 text-chrome-text/45" />
               </button>
               {onEmitParam ? (
                 <button onClick={() => emit(sel.cell)} className="px-2.5 py-1.5 text-left hover:bg-chrome-bg/60">
@@ -840,7 +1032,7 @@ export function MetricBoardWindow({
       {/* footer */}
       {present ? null : (
       <div className="flex items-center gap-3 border-t border-chrome-border bg-chrome-bg/40 px-3 py-1 text-[10px] text-chrome-text/50">
-        <span>{rows.length} metrics</span>
+        <span>{rows.length} {includeMetrics ? "metrics" : "KPIs"}</span>
         <span>
           {columns.length} {bucket === "raw" ? "materializations" : `${bucket} buckets`}
         </span>
