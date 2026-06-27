@@ -1,6 +1,6 @@
 "use client"
 
-import { useMemo } from "react"
+import { useEffect, useMemo, useState } from "react"
 import { VegaEmbed } from "react-vega"
 import type { VisualizationSpec } from "vega-embed"
 import { Check } from "@/lib/icons"
@@ -36,6 +36,20 @@ export type UiArtifactParamInput = {
   cascade?: boolean
   type?: string
   sourceStmtIndex?: number
+  defaultSeedKey?: string
+}
+
+export type UiArtifactActionInput = {
+  title: string
+  sql: string
+  refresh?: boolean
+  artifact: UiArtifactRow
+}
+
+export type UiArtifactActionResult = {
+  ok: boolean
+  message?: string
+  error?: string
 }
 
 export function UiArtifactView({
@@ -43,23 +57,28 @@ export function UiArtifactView({
   fill,
   activeParams,
   onEmitParam,
+  onRunAction,
   sourceStmtIndex,
 }: {
   artifacts: UiArtifactRow[]
   fill?: boolean
   activeParams?: DesktopParamValue[]
   onEmitParam?: (input: UiArtifactParamInput) => void
+  onRunAction?: (input: UiArtifactActionInput) => Promise<UiArtifactActionResult>
   sourceStmtIndex?: number
 }) {
+  const visibleArtifacts = artifacts.filter((artifact) => artifact.artifact_kind !== "meta")
+  if (visibleArtifacts.length === 0) return null
   return (
     <div className={cn("grid gap-2 overflow-auto bg-doc-bg p-2", fill ? "h-full auto-rows-fr" : "h-full auto-rows-min")}>
-      {artifacts.map((artifact, index) => (
+      {visibleArtifacts.map((artifact, index) => (
         <UiArtifactCard
           key={artifact.artifact_id ?? `${artifact.renderer ?? "artifact"}-${index}`}
           artifact={artifact}
           fill={fill}
           activeParams={activeParams}
           onEmitParam={onEmitParam}
+          onRunAction={onRunAction}
           sourceStmtIndex={sourceStmtIndex}
         />
       ))}
@@ -72,12 +91,14 @@ function UiArtifactCard({
   fill,
   activeParams,
   onEmitParam,
+  onRunAction,
   sourceStmtIndex,
 }: {
   artifact: UiArtifactRow
   fill?: boolean
   activeParams?: DesktopParamValue[]
   onEmitParam?: (input: UiArtifactParamInput) => void
+  onRunAction?: (input: UiArtifactActionInput) => Promise<UiArtifactActionResult>
   sourceStmtIndex?: number
 }) {
   return (
@@ -102,6 +123,8 @@ function UiArtifactCard({
             onEmitParam={onEmitParam}
             sourceStmtIndex={sourceStmtIndex}
           />
+        ) : artifact.renderer === "action_button" ? (
+          <ActionButtonArtifact artifact={artifact} fill={fill} onRunAction={onRunAction} />
         ) : (
           <pre className="max-h-80 overflow-auto p-3 text-[11px] text-chrome-text">
             {JSON.stringify(artifact, null, 2)}
@@ -125,6 +148,27 @@ function rowsForArtifact(artifact: UiArtifactRow): Record<string, unknown>[] {
 function artifactString(spec: Record<string, unknown>, key: string): string {
   const value = spec[key]
   return typeof value === "string" ? value.trim() : ""
+}
+
+function artifactBool(spec: Record<string, unknown>, key: string, fallback: boolean): boolean {
+  const value = spec[key]
+  if (typeof value === "boolean") return value
+  if (typeof value !== "string") return fallback
+  const normalized = value.trim().toLowerCase()
+  if (["0", "false", "no", "off"].includes(normalized)) return false
+  if (["1", "true", "yes", "on"].includes(normalized)) return true
+  return fallback
+}
+
+function actionConfirmMessage(spec: Record<string, unknown>, label: string): string | null {
+  const value = spec.confirm
+  if (typeof value === "boolean") return value ? `Run ${label}?` : null
+  if (typeof value !== "string") return `Run ${label}?`
+  const trimmed = value.trim()
+  if (!trimmed) return `Run ${label}?`
+  if (["0", "false", "no", "off"].includes(trimmed.toLowerCase())) return null
+  if (["1", "true", "yes", "on"].includes(trimmed.toLowerCase())) return `Run ${label}?`
+  return trimmed
 }
 
 function controlKind(spec: Record<string, unknown>): "dropdown" | "multiselect" | "datepicker" | "slider" {
@@ -181,6 +225,54 @@ function selectedValues(activeParams: DesktopParamValue[] | undefined, field: st
   return Array.isArray(param.value) ? param.value : [param.value]
 }
 
+function rawDefaultValue(spec: Record<string, unknown>): unknown {
+  for (const key of ["default_value", "default", "value", "selected"]) {
+    if (!Object.prototype.hasOwnProperty.call(spec, key)) continue
+    const value = spec[key]
+    if (typeof value === "string" && value.trim() === "") continue
+    return value
+  }
+  return undefined
+}
+
+function matchOptionValue(value: unknown, options: unknown[]): unknown {
+  const wanted = keyOf(value)
+  return options.find((option) => keyOf(option) === wanted) ?? value
+}
+
+function parseDefaultList(value: unknown): unknown[] {
+  if (Array.isArray(value)) return value
+  if (typeof value !== "string") return [value]
+  const trimmed = value.trim()
+  if (!trimmed) return []
+  if (trimmed.startsWith("[")) {
+    try {
+      const parsed = JSON.parse(trimmed)
+      if (Array.isArray(parsed)) return parsed
+    } catch {
+      // fall through to comma splitting
+    }
+  }
+  return trimmed.includes(",")
+    ? trimmed.split(",").map((part) => part.trim()).filter(Boolean)
+    : [value]
+}
+
+function defaultControlValue(spec: Record<string, unknown>, kind: string, options: unknown[]): unknown {
+  const raw = rawDefaultValue(spec)
+  if (raw === undefined) return undefined
+  if (kind === "multiselect") return parseDefaultList(raw).map((value) => matchOptionValue(value, options))
+  return matchOptionValue(raw, options)
+}
+
+function stableDefaultKey(value: unknown): string {
+  try {
+    return JSON.stringify(value) ?? String(value)
+  } catch {
+    return String(value)
+  }
+}
+
 function FilterControlArtifact({
   artifact,
   fill,
@@ -201,7 +293,26 @@ function FilterControlArtifact({
   const rows = rowsForArtifact(artifact)
   const selected = selectedValues(activeParams, field)
   const selectedKeys = new Set(selected.map(keyOf))
+  const options = field ? distinctFieldValues(rows, field) : []
+  const defaultValue = defaultControlValue(spec, kind, options)
+  const defaultKey = defaultValue === undefined ? "" : stableDefaultKey(defaultValue)
+  const defaultSeedKey = defaultKey
+    ? [sourceStmtIndex ?? "root", artifact.artifact_id ?? artifact.renderer ?? "filter_control", field, operator, defaultKey].join(":")
+    : ""
   const disabled = !field || !onEmitParam
+  useEffect(() => {
+    if (!defaultSeedKey || disabled || selected.length > 0 || defaultValue === undefined) return
+    onEmitParam?.({
+      field,
+      value: defaultValue,
+      operator: kind === "multiselect" ? "in" : operator,
+      multiValueAction: kind === "multiselect" ? "replace" : "set",
+      cascade: false,
+      sourceStmtIndex,
+      defaultSeedKey,
+    })
+  }, [defaultSeedKey, defaultValue, disabled, field, kind, onEmitParam, operator, selected.length, sourceStmtIndex])
+
   if (!field) {
     return <div className="p-3 text-xs text-chrome-text/50">No field.</div>
   }
@@ -259,7 +370,6 @@ function FilterControlArtifact({
     )
   }
 
-  const options = distinctFieldValues(rows, field)
   if (kind === "dropdown") {
     const current = selected.length > 0 ? keyOf(selected[0]) : ""
     return (
@@ -312,6 +422,69 @@ function FilterControlArtifact({
           </button>
         )
       })}
+    </div>
+  )
+}
+
+function ActionButtonArtifact({
+  artifact,
+  fill,
+  onRunAction,
+}: {
+  artifact: UiArtifactRow
+  fill?: boolean
+  onRunAction?: (input: UiArtifactActionInput) => Promise<UiArtifactActionResult>
+}) {
+  const spec = artifact.spec ?? {}
+  const label = artifactString(spec, "label") || artifact.title || "Run"
+  const sql = artifactString(spec, "sql")
+  const variant = artifactString(spec, "variant").toLowerCase()
+  const refresh = artifactBool(spec, "refresh", true)
+  const confirmMessage = actionConfirmMessage(spec, label)
+  const [state, setState] = useState<{ kind: "idle" | "running" | "done" | "error"; message?: string }>({ kind: "idle" })
+  const disabled = !sql || !onRunAction || state.kind === "running"
+
+  async function run() {
+    if (!sql || !onRunAction) return
+    if (confirmMessage && !window.confirm(confirmMessage)) return
+    setState({ kind: "running" })
+    try {
+      const result = await onRunAction({
+        title: artifact.title || label,
+        sql,
+        refresh,
+        artifact,
+      })
+      if (result.ok) {
+        setState({ kind: "done", message: result.message || "Done" })
+      } else {
+        setState({ kind: "error", message: result.error || "Action failed" })
+      }
+    } catch (error) {
+      setState({ kind: "error", message: error instanceof Error ? error.message : String(error) })
+    }
+  }
+
+  return (
+    <div className={cn("flex min-w-0 flex-col justify-center gap-2 p-3", fill ? "h-full" : "min-h-28")}>
+      <button
+        type="button"
+        disabled={disabled}
+        onClick={() => void run()}
+        className={cn(
+          "inline-flex min-h-8 items-center justify-center rounded border px-3 py-1.5 text-sm font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-55",
+          variant === "danger"
+            ? "border-danger/45 bg-danger/15 text-danger hover:bg-danger/25"
+            : "border-main/45 bg-main/15 text-main hover:bg-main/25",
+        )}
+      >
+        {state.kind === "running" ? "Running..." : label}
+      </button>
+      {state.kind === "done" ? (
+        <div className="truncate text-[11px] text-success">{state.message}</div>
+      ) : state.kind === "error" ? (
+        <div className="line-clamp-2 text-[11px] text-danger">{state.message}</div>
+      ) : null}
     </div>
   )
 }

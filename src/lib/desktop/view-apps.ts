@@ -2,7 +2,7 @@
 
 import { randomUUID } from "@/lib/uuid"
 import { shadowViews } from "./server-sync"
-import type { ScryViewState, ViewApp } from "./types"
+import type { DataPayload, ScryViewState, StatementViewKind, ViewApp } from "./types"
 
 /**
  * Saved Views registry (saved SQL queries + Scry explorations, promoted to
@@ -71,6 +71,10 @@ export interface ViewAppInput {
   iconColor?: string
   connectionId?: string | null
   chartSpec?: Record<string, unknown> | null
+  statementViews?: Record<string, StatementViewKind>
+  statementLayout?: DataPayload["statementLayout"]
+  viewKind?: DataPayload["viewKind"]
+  controlField?: string
   scry?: ScryViewState | null
 }
 
@@ -89,6 +93,10 @@ export function upsertViewApp(input: ViewAppInput): ViewApp {
     iconColor: input.iconColor ?? existing?.iconColor ?? "oklch(76% 0.14 195)",
     connectionId: input.connectionId ?? existing?.connectionId ?? null,
     chartSpec: input.chartSpec ?? existing?.chartSpec ?? null,
+    statementViews: input.statementViews ?? existing?.statementViews,
+    statementLayout: input.statementLayout ?? existing?.statementLayout,
+    viewKind: input.viewKind ?? existing?.viewKind,
+    controlField: input.controlField ?? existing?.controlField,
     scry: input.scry ?? existing?.scry ?? null,
     createdAt: existing?.createdAt ?? now,
     updatedAt: now,

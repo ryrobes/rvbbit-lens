@@ -209,6 +209,13 @@ export interface DataPayload {
    * not the connected working db, or the cron.* schema lookup fails.
    */
   database?: string
+  /** Optional per-window connection override. Saved/published SQL views carry
+   *  the connection they were authored against so reopening them does not depend
+   *  on the currently selected desktop connection. */
+  connectionId?: string | null
+  /** Force this window to run once on open, including top-level THEN workflows.
+   *  Ordinary editor-created THEN pipelines still require an explicit Run. */
+  autoRun?: boolean
   /**
    * Per-statement view overrides for the multi-statement transcript, keyed by a
    * hash of the statement text (so an override follows its statement across
@@ -643,6 +650,12 @@ export interface ViewAppBuilderPayload {
   kind?: "view-app-builder"
   appId?: string
   initialSql?: string
+  initialName?: string
+  initialChartSpec?: Record<string, unknown> | null
+  initialStatementViews?: Record<string, StatementViewKind>
+  initialStatementLayout?: DataPayload["statementLayout"]
+  initialViewKind?: DataPayload["viewKind"]
+  initialControlField?: string
 }
 
 export interface ViewAppsPayload {
@@ -1128,6 +1141,11 @@ export interface ViewApp {
   connectionId?: string | null
   /** Optional Vega-Lite spec to render the result (query views). */
   chartSpec?: Record<string, unknown> | null
+  /** Optional SQL-window render state captured from the authoring surface. */
+  statementViews?: Record<string, StatementViewKind>
+  statementLayout?: DataPayload["statementLayout"]
+  viewKind?: DataPayload["viewKind"]
+  controlField?: string
   /** Saved Scry exploration (scry views). */
   scry?: ScryViewState | null
   createdAt: string

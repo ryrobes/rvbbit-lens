@@ -12,7 +12,7 @@ import { vegaConfigFromTheme } from "@/lib/desktop/chart-theme"
 import { formatCellValue } from "@/lib/sql/format"
 import { cn } from "@/lib/utils"
 import { ResultGrid } from "./result-grid"
-import { extractUiArtifacts, UiArtifactView, type UiArtifactParamInput } from "./ui-artifact-view"
+import { extractUiArtifacts, UiArtifactView, type UiArtifactActionInput, type UiArtifactActionResult, type UiArtifactParamInput } from "./ui-artifact-view"
 
 // A vertical "transcript" of every statement's result in a multi-statement block —
 // nothing swallowed. Each statement is a compact card: a header (#, command,
@@ -139,6 +139,7 @@ export function ResultTranscript({
   sourceStatements,
   activeParams,
   onEmitParam,
+  onRunAction,
 }: {
   results: StatementResult[]
   /** Per-statement view overrides, keyed by statementKeys. */
@@ -157,6 +158,7 @@ export function ResultTranscript({
   sourceStatements?: string[]
   activeParams?: DesktopParamValue[]
   onEmitParam?: (input: UiArtifactParamInput) => void
+  onRunAction?: (input: UiArtifactActionInput) => Promise<UiArtifactActionResult>
 }) {
   // Expand/collapse is a delta on the per-card default (has-grid → open). View
   // kind lives in `views` (the payload) so it survives the per-run remount.
@@ -224,6 +226,7 @@ export function ResultTranscript({
                   highlightFilters={crossFilters?.filter((f) => f.sourceStmtIndex === s.index)}
                   activeParams={activeParams}
                   onEmitParam={onEmitParam}
+                  onRunAction={onRunAction}
                   sourceStmtIndex={s.index}
                 />
               </div>
@@ -248,6 +251,7 @@ export function CardBody({
   highlightFilters,
   activeParams,
   onEmitParam,
+  onRunAction,
   sourceStmtIndex,
 }: {
   s: StatementResult
@@ -261,6 +265,7 @@ export function CardBody({
   highlightFilters?: CrossFilter[]
   activeParams?: DesktopParamValue[]
   onEmitParam?: (input: UiArtifactParamInput) => void
+  onRunAction?: (input: UiArtifactActionInput) => Promise<UiArtifactActionResult>
   sourceStmtIndex?: number
 }) {
   if (!hasGrid) {
@@ -277,6 +282,7 @@ export function CardBody({
           fill
           activeParams={activeParams}
           onEmitParam={onEmitParam}
+          onRunAction={onRunAction}
           sourceStmtIndex={sourceStmtIndex}
         />
       </div>

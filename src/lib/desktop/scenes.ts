@@ -155,6 +155,10 @@ export function restoreSceneBundle(bundle?: SceneBundle): void {
       iconColor: a.iconColor,
       connectionId: a.connectionId,
       chartSpec: a.chartSpec,
+      statementViews: a.statementViews,
+      statementLayout: a.statementLayout,
+      viewKind: a.viewKind,
+      controlField: a.controlField,
     })
   }
   for (const a of bundle.artifacts ?? []) {

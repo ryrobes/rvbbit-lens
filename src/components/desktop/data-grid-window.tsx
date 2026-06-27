@@ -39,7 +39,7 @@ import { ModelField } from "./operator-inspector"
 import { ResultGrid } from "./result-grid"
 import { ResultTranscript, statementKeys } from "./result-transcript"
 import { ArrangeGrid } from "./arrange-grid"
-import { extractUiArtifacts, UiArtifactView, type UiArtifactParamInput, type UiArtifactRow } from "./ui-artifact-view"
+import { extractUiArtifacts, UiArtifactView, type UiArtifactActionInput, type UiArtifactActionResult, type UiArtifactParamInput, type UiArtifactRow } from "./ui-artifact-view"
 import { ContextMenu, type ContextMenuState } from "./context-menu"
 import { listQueryHistory, pushQueryHistory } from "@/lib/desktop/query-history"
 import { SingleCellCallout } from "./single-cell-callout"
@@ -85,8 +85,8 @@ import {
 import type { JsonbProjectionColumn } from "@/lib/desktop/types"
 import {
   buildDesktopRuntimeGraph,
+  crossFilterAppliesToStatement,
   injectStatementFilters,
-  paramKey,
   predicateForParam,
   quoteSqlIdent,
   resolveParamPlacement,
@@ -119,7 +119,15 @@ interface DataGridWindowProps {
   params: DesktopParamValue[]
   runSignal: number
   onChangePayload: (mutate: (payload: DataPayload) => DataPayload) => void
-  onSaveAsViewApp: (sql: string, title?: string) => void
+  onSaveAsViewApp: (seed: {
+    sql: string
+    title?: string
+    chartSpec?: Record<string, unknown> | null
+    statementViews?: DataPayload["statementViews"]
+    statementLayout?: DataPayload["statementLayout"]
+    viewKind?: DataPayload["viewKind"]
+    controlField?: string
+  }) => void
   onOpenRow: (payload: RowInspectorPayload) => void
   onEmitParam: (input: {
     sourceWindowId: string
@@ -281,12 +289,13 @@ function resolveControlFilterSource(
   return { sourceSchema: table.schema, sourceTable: table.name, column: column.name }
 }
 
-function crossFilterKey(x: Pick<CrossFilter, "sourceSchema" | "sourceTable" | "column">): string {
-  return `${x.sourceSchema ?? ""}.${x.sourceTable ?? ""}.${x.column}`.toLowerCase()
+function crossFilterKey(x: Pick<CrossFilter, "sourceSchema" | "sourceTable" | "column" | "targetStmtIndex">): string {
+  return `${x.sourceSchema ?? ""}.${x.sourceTable ?? ""}.${x.column}->${x.targetStmtIndex ?? "*"}`.toLowerCase()
 }
 
 function crossFilterLabel(x: CrossFilter): string {
-  return x.sourceTable ? `${x.sourceTable}.${x.column}` : x.column
+  const base = x.sourceTable ? `${x.sourceTable}.${x.column}` : x.column
+  return x.targetStmtIndex === undefined ? base : `${base} -> #${x.targetStmtIndex + 1}`
 }
 
 function injectFieldOnlyFilters(sql: string, filters: CrossFilter[]): string {
@@ -304,7 +313,7 @@ function injectPipelineHeadFilters(sql: string, filters: CrossFilter[], schema: 
     .map((statement, index) => {
       const split = splitPipelineHead(statement)
       if (!split) return statement
-      const applicable = filters.filter((f) => f.sourceStmtIndex !== index)
+      const applicable = filters.filter((f) => crossFilterAppliesToStatement(f, index))
       if (applicable.length === 0) return statement
 
       const tableFilters = applicable.filter((f) => !!f.sourceTable)
@@ -325,34 +334,114 @@ function statementLayoutArtifacts(results: StatementResult[] | null): UiArtifact
   })
 }
 
-function isStatementLayoutResult(statement: StatementResult): boolean {
+function isMetaOnlyResult(statement: StatementResult): boolean {
   const artifacts = extractUiArtifacts(statement.rows)
-  return !!artifacts?.length && artifacts.every((artifact) => artifact.artifact_kind === "meta" && artifact.renderer === "statement_layout")
+  return !!artifacts?.length && artifacts.every((artifact) => artifact.artifact_kind === "meta")
 }
 
-function layoutTileKey(ref: unknown, keys: string[]): { key: string; w: number } | null {
+function artifactStringValue(artifact: UiArtifactRow, key: string): string {
+  const value = artifact.spec?.[key]
+  return typeof value === "string" ? value.trim() : ""
+}
+
+function artifactParamOperator(artifact: UiArtifactRow, key: string): DesktopParamOperator | undefined {
+  const value = artifactStringValue(artifact, key).toLowerCase()
+  return value === "eq" || value === "in" || value === "gte" || value === "lte" ? value : undefined
+}
+
+function statementNameAliases(results: StatementResult[] | null, sourceStatements: string[]): Map<string, string> {
+  const aliases = new Map<string, string>()
+  if (!results?.length) return aliases
+  const keys = statementKeys(results, sourceStatements)
+  results.forEach((statement, index) => {
+    const key = keys[index]
+    if (!key) return
+    const artifacts = extractUiArtifacts(statement.rows) ?? []
+    for (const artifact of artifacts) {
+      if (artifact.artifact_kind !== "meta" || artifact.renderer !== "statement_name") continue
+      for (const value of [artifactStringValue(artifact, "name"), artifactStringValue(artifact, "label"), artifact.title ?? ""]) {
+        const alias = value.trim()
+        if (!alias) continue
+        aliases.set(alias, key)
+        aliases.set(alias.toLowerCase(), key)
+      }
+    }
+  })
+  return aliases
+}
+
+type StatementFilterBinding = {
+  sourceStmtIndex: number
+  targetStmtIndex: number
+  field?: string
+  operator?: DesktopParamOperator
+}
+
+type StatementFilterTarget = {
+  targetStmtIndex?: number
+  field?: string
+  operator?: DesktopParamOperator
+}
+
+function statementFilterBindings(
+  results: StatementResult[] | null,
+  sourceStatements: string[],
+  aliases: Map<string, string>,
+): Map<number, StatementFilterBinding[]> {
+  const bindings = new Map<number, StatementFilterBinding[]>()
+  if (!results?.length) return bindings
+  const keys = statementKeys(results, sourceStatements)
+  const keyToStmtIndex = new Map<string, number>()
+  keys.forEach((key, index) => keyToStmtIndex.set(key, results[index]?.index ?? index))
+  results.forEach((statement) => {
+    const artifacts = extractUiArtifacts(statement.rows) ?? []
+    for (const artifact of artifacts) {
+      if (artifact.artifact_kind !== "meta" || artifact.renderer !== "filter_binding") continue
+      const target = artifactStringValue(artifact, "target")
+      if (!target) continue
+      const targetKey = aliases.get(target) ?? aliases.get(target.toLowerCase()) ?? (keys.includes(target) ? target : undefined)
+      const targetStmtIndex = targetKey ? keyToStmtIndex.get(targetKey) : undefined
+      if (targetStmtIndex === undefined) continue
+      const next: StatementFilterBinding = {
+        sourceStmtIndex: statement.index,
+        targetStmtIndex,
+        field: artifactStringValue(artifact, "field") || undefined,
+        operator: artifactParamOperator(artifact, "operator"),
+      }
+      bindings.set(statement.index, [...(bindings.get(statement.index) ?? []), next])
+    }
+  })
+  return bindings
+}
+
+function layoutTileKey(ref: unknown, keys: string[], aliases: Map<string, string>): { key: string; w: number } | null {
   let raw: unknown = ref
   let weight = 1
   if (ref && typeof ref === "object" && !Array.isArray(ref)) {
     const obj = ref as Record<string, unknown>
-    raw = obj.key ?? obj.statement ?? obj.index ?? obj.tile
+    raw = obj.key ?? obj.name ?? obj.statement ?? obj.index ?? obj.tile
     const w = Number(obj.w ?? obj.width ?? 1)
     weight = Number.isFinite(w) && w > 0 ? w : 1
   }
-  if (typeof raw === "string" && keys.includes(raw)) return { key: raw, w: weight }
+  if (typeof raw === "string") {
+    const token = raw.trim()
+    if (keys.includes(token)) return { key: token, w: weight }
+    const aliased = aliases.get(token) ?? aliases.get(token.toLowerCase())
+    if (aliased) return { key: aliased, w: weight }
+  }
   const n = typeof raw === "number" ? raw : typeof raw === "string" ? Number(raw.trim()) : NaN
   if (!Number.isFinite(n)) return null
   const key = keys[n - 1] ?? keys[n]
   return key ? { key, w: weight } : null
 }
 
-function parseLayoutRows(raw: unknown, keys: string[]): NonNullable<DataPayload["statementLayout"]>["rows"] | undefined {
+function parseLayoutRows(raw: unknown, keys: string[], aliases: Map<string, string>): NonNullable<DataPayload["statementLayout"]>["rows"] | undefined {
   if (typeof raw === "string") {
     const text = raw.trim()
     if (!text) return undefined
-    if (text.startsWith("[")) {
+    if (text.startsWith("[") || text.startsWith("{")) {
       try {
-        return parseLayoutRows(JSON.parse(text), keys)
+        return parseLayoutRows(JSON.parse(text), keys, aliases)
       } catch {
         return undefined
       }
@@ -365,20 +454,28 @@ function parseLayoutRows(raw: unknown, keys: string[]): NonNullable<DataPayload[
         h: 1,
         tiles: row
           .split(/[,+\s]+/)
-          .map((token) => layoutTileKey(token, keys))
+          .map((token) => layoutTileKey(token, keys, aliases))
           .filter((tile): tile is { key: string; w: number } => !!tile),
       }))
       .filter((row) => row.tiles.length > 0)
     return rows.length > 0 ? rows : undefined
   }
-  if (!Array.isArray(raw)) return undefined
+  if (!Array.isArray(raw)) {
+    if (raw && typeof raw === "object") {
+      const obj = raw as Record<string, unknown>
+      if (obj.rows !== undefined) return parseLayoutRows(obj.rows, keys, aliases)
+      if (obj.layout !== undefined) return parseLayoutRows(obj.layout, keys, aliases)
+      if (Array.isArray(obj.tiles)) return parseLayoutRows([obj], keys, aliases)
+    }
+    return undefined
+  }
   const rows = raw
     .map((row) => {
       if (Array.isArray(row)) {
         return {
           h: 1,
           tiles: row
-            .map((tile) => layoutTileKey(tile, keys))
+            .map((tile) => layoutTileKey(tile, keys, aliases))
             .filter((tile): tile is { key: string; w: number } => !!tile),
         }
       }
@@ -389,27 +486,39 @@ function parseLayoutRows(raw: unknown, keys: string[]): NonNullable<DataPayload[
         return {
           h: Number.isFinite(h) && h > 0 ? h : 1,
           tiles: tilesRaw
-            .map((tile) => layoutTileKey(tile, keys))
+            .map((tile) => layoutTileKey(tile, keys, aliases))
             .filter((tile): tile is { key: string; w: number } => !!tile),
         }
       }
-      const tile = layoutTileKey(row, keys)
+      const tile = layoutTileKey(row, keys, aliases)
       return tile ? { h: 1, tiles: [tile] } : { h: 1, tiles: [] }
     })
     .filter((row) => row.tiles.length > 0)
   return rows.length > 0 ? rows : undefined
 }
 
+function layoutModeFromArtifactSpec(spec: Record<string, unknown>): NonNullable<DataPayload["statementLayout"]>["mode"] {
+  const mode = typeof spec.mode === "string" ? spec.mode : undefined
+  if (mode === "transcript") return "transcript"
+  const layout = spec.layout
+  if (layout && typeof layout === "object" && !Array.isArray(layout)) {
+    const nestedMode = (layout as Record<string, unknown>).mode
+    if (nestedMode === "transcript") return "transcript"
+  }
+  return "arrange"
+}
+
 function layoutFromArtifact(
   artifact: UiArtifactRow | undefined,
   results: StatementResult[] | null,
   sourceStatements: string[],
+  aliases: Map<string, string>,
 ): NonNullable<DataPayload["statementLayout"]> | null {
   if (!artifact || !results?.length) return null
   const spec = artifact.spec ?? {}
-  const mode = spec.mode === "transcript" ? "transcript" : "arrange"
+  const mode = layoutModeFromArtifactSpec(spec)
   const keys = statementKeys(results, sourceStatements)
-  const rows = parseLayoutRows(spec.rows ?? spec.layout, keys)
+  const rows = parseLayoutRows(spec.rows ?? spec.layout, keys, aliases)
   return rows ? { mode, rows } : { mode }
 }
 
@@ -488,6 +597,8 @@ export function DataGridWindow({
   // so runSql reads the latest without being in its deps.
   const [crossFilters, setCrossFilters] = useState<CrossFilter[]>([])
   const crossFiltersRef = useRef<CrossFilter[]>([])
+  const seededUiDefaultKeysRef = useRef<Set<string>>(new Set())
+  const seededUiDefaultSqlRef = useRef(payload.sql ?? "")
   // Per-statement output columns from the last multi-statement run, so the cross-
   // filter injector can wrap a {ref}/subquery/JOIN tile by the OUTPUT column whose
   // provenance matches the filter (mechanism 2 in injectStatementFilters). Keyed by
@@ -958,10 +1069,10 @@ export function DataGridWindow({
     // Explain tab estimates cost and the user runs explicitly.
     if (isSemanticProjection) return
     // Pipeline cascades (… then op('…')) run rowset LLM stages — don't fire
-    // them on spawn; the user reviews the SQL and runs explicitly.
-    if (hasTopLevelThen(payload.sql)) return
+    // them on spawn unless this is an explicitly saved/published SQL app.
+    if (hasTopLevelThen(payload.sql) && !payload.autoRun) return
     const isAutoRunOrigin = payload.origin === "table" || payload.origin === "derived"
-    if (!isAutoRunOrigin) return
+    if (!isAutoRunOrigin && !payload.autoRun) return
     void runSql(payload.sql)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
@@ -1272,13 +1383,14 @@ export function DataGridWindow({
     }
     // A newly-chained pipeline stage (… then op('…')) shouldn't fire its LLM
     // stages on edit — flip to Explain for a plan-only calls/cost preview; the
-    // user reviews and runs it explicitly.
-    if (payload.sql && hasTopLevelThen(payload.sql)) {
+    // user reviews and runs it explicitly. Saved/published SQL apps opt into
+    // running their authored workflow on open/update.
+    if (payload.sql && hasTopLevelThen(payload.sql) && !payload.autoRun) {
       setActiveTab("explain")
       return
     }
     if (payload.sql) void runSql(payload.sql)
-  }, [payload.sql, compiledSql, runSql, isSemanticProjection, queryMode])
+  }, [payload.sql, payload.autoRun, compiledSql, runSql, isSemanticProjection, queryMode])
 
   // ── EXPLAIN ───────────────────────────────────────────────────────
   // Plan-only EXPLAIN (FORMAT JSON) never executes the query, so it is
@@ -1635,18 +1747,47 @@ export function DataGridWindow({
   // (nothing swallowed) instead of the single grid. Statement-aware pipeline wrapping
   // lets visual component blocks participate here too. Meta layout statements are
   // consumed here and hidden from the visible tile set.
-  const rawMultiResults = result && result.results && result.results.length > 1
-    ? result.results
-    : null
-  const visibleMultiResults = rawMultiResults?.filter((statement) => !isStatementLayoutResult(statement)) ?? null
-  const multiResults = visibleMultiResults && visibleMultiResults.length > 1 ? visibleMultiResults : null
-  const layoutArtifacts = statementLayoutArtifacts(rawMultiResults)
+  const rawMultiResults = useMemo(
+    () => result && result.results && result.results.length > 1 ? result.results : null,
+    [result],
+  )
+  const visibleMultiResults = useMemo(
+    () => rawMultiResults?.filter((statement) => !isMetaOnlyResult(statement)) ?? null,
+    [rawMultiResults],
+  )
+  const multiResults = useMemo(
+    () => visibleMultiResults && visibleMultiResults.length > 1 ? visibleMultiResults : null,
+    [visibleMultiResults],
+  )
+  const layoutArtifacts = useMemo(() => statementLayoutArtifacts(rawMultiResults), [rawMultiResults])
   const layoutArtifact = layoutArtifacts.length > 0 ? layoutArtifacts[layoutArtifacts.length - 1] : undefined
-  const sqlStatementLayout = layoutFromArtifact(layoutArtifact, visibleMultiResults, sourceStatements)
+  const layoutAliases = useMemo(
+    () => statementNameAliases(visibleMultiResults, sourceStatements),
+    [visibleMultiResults, sourceStatements],
+  )
+  const filterBindings = useMemo(
+    () => statementFilterBindings(visibleMultiResults, sourceStatements, layoutAliases),
+    [visibleMultiResults, sourceStatements, layoutAliases],
+  )
+  const sqlStatementLayout = useMemo(
+    () => layoutFromArtifact(layoutArtifact, visibleMultiResults, sourceStatements, layoutAliases),
+    [layoutArtifact, visibleMultiResults, sourceStatements, layoutAliases],
+  )
+  const hasSqlStatementLayout = !!multiResults && !!sqlStatementLayout
   const effectiveStatementLayout = payload.statementLayout ?? sqlStatementLayout ?? undefined
   const uiArtifacts = result && !rawMultiResults ? extractUiArtifacts(result.rows) : null
   const arrangeMode = !!multiResults && effectiveStatementLayout?.mode === "arrange"
+  useEffect(() => {
+    const sql = payload.sql ?? ""
+    if (seededUiDefaultSqlRef.current === sql) return
+    seededUiDefaultSqlRef.current = sql
+    seededUiDefaultKeysRef.current.clear()
+  }, [payload.sql])
   const emitUiArtifactParam = useCallback((input: UiArtifactParamInput) => {
+    if (input.defaultSeedKey) {
+      if (seededUiDefaultKeysRef.current.has(input.defaultSeedKey)) return
+      seededUiDefaultKeysRef.current.add(input.defaultSeedKey)
+    }
     const resolved =
       input.sourceStmtIndex === undefined
         ? null
@@ -1667,50 +1808,105 @@ export function DataGridWindow({
     })
     if (!multiResults || input.sourceStmtIndex === undefined) return
 
-    const target: Pick<CrossFilter, "sourceSchema" | "sourceTable" | "column"> = resolved ?? { column: input.field }
-    const key = crossFilterKey(target)
+    const bindings = filterBindings.get(input.sourceStmtIndex)
+    const targets: StatementFilterTarget[] = bindings?.length
+      ? bindings
+      : [{ field: input.field }]
     const clear =
       input.multiValueAction === "remove" ||
       ((input.operator === "gte" || input.operator === "lte") && (input.value === null || input.value === undefined))
     setCrossFilters((prev) => {
-      const existing = prev.find((p) => crossFilterKey(p) === key)
-      const without = prev.filter((p) => crossFilterKey(p) !== key)
-      if (clear) return without
+      let next = prev
+      for (const binding of targets) {
+        const column = binding.field || resolved?.column || input.field
+        const target: Pick<CrossFilter, "sourceSchema" | "sourceTable" | "column" | "targetStmtIndex"> = resolved
+          ? { ...resolved, column, targetStmtIndex: binding.targetStmtIndex }
+          : { column, targetStmtIndex: binding.targetStmtIndex }
+        const key = crossFilterKey(target)
+        const existing = next.find((p) => crossFilterKey(p) === key)
+        const without = next.filter((p) => crossFilterKey(p) !== key)
+        if (clear) {
+          next = without
+          continue
+        }
 
-      const base: CrossFilter = {
-        ...target,
-        value: input.value,
-        operator: input.operator ?? "eq",
-        sourceStmtIndex: input.sourceStmtIndex,
+        const base: CrossFilter = {
+          ...target,
+          value: input.value,
+          operator: binding.operator ?? input.operator ?? "eq",
+          sourceStmtIndex: input.sourceStmtIndex,
+        }
+
+        if (input.multiValueAction === "toggle" || input.multiValueAction === "add") {
+          const existingValues = existing
+            ? Array.isArray(existing.value)
+              ? existing.value
+              : [existing.value]
+            : []
+          const already = existingValues.some((v) => sameParamValue(v, input.value))
+          const nextValues =
+            input.multiValueAction === "toggle" && already
+              ? existingValues.filter((v) => !sameParamValue(v, input.value))
+              : already
+                ? existingValues
+                : [...existingValues, input.value]
+          next = nextValues.length === 0
+            ? without
+            : [
+                ...without,
+                {
+                  ...base,
+                  value: nextValues.length === 1 ? nextValues[0] : nextValues,
+                  operator: "in",
+                },
+              ]
+          continue
+        }
+
+        next = [...without, base]
       }
-
-      if (input.multiValueAction === "toggle" || input.multiValueAction === "add") {
-        const existingValues = existing
-          ? Array.isArray(existing.value)
-            ? existing.value
-            : [existing.value]
-          : []
-        const already = existingValues.some((v) => sameParamValue(v, input.value))
-        const nextValues =
-          input.multiValueAction === "toggle" && already
-            ? existingValues.filter((v) => !sameParamValue(v, input.value))
-            : already
-              ? existingValues
-              : [...existingValues, input.value]
-        if (nextValues.length === 0) return without
-        return [
-          ...without,
-          {
-            ...base,
-            value: nextValues.length === 1 ? nextValues[0] : nextValues,
-            operator: "in",
-          },
-        ]
-      }
-
-      return [...without, base]
+      return next
     })
-  }, [blockName, multiResults, onEmitParam, payload.title, schema, sourceStatements, w.id, w.title])
+  }, [blockName, filterBindings, multiResults, onEmitParam, payload.title, schema, sourceStatements, w.id, w.title])
+
+  const runUiArtifactAction = useCallback(async (input: UiArtifactActionInput): Promise<UiArtifactActionResult> => {
+    if (!activeConnectionId) return { ok: false, error: "No connection selected." }
+    try {
+      const res = await fetch("/api/db/query", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          connectionId: activeConnectionId,
+          sql: input.sql,
+          rowLimit: 500,
+          readOnly: false,
+          database: targetDb ?? undefined,
+        }),
+      })
+      const body = (await res.json()) as {
+        ok?: boolean
+        error?: string
+        command?: string
+        rowCount?: number
+        rows?: unknown[]
+      }
+      if (body.ok === false) return { ok: false, error: body.error ?? "Action failed." }
+      if (input.refresh !== false) void runSql(draftSql || payload.sql)
+      const command = body.command || "OK"
+      const rowCount =
+        typeof body.rowCount === "number"
+          ? body.rowCount
+          : Array.isArray(body.rows)
+            ? body.rows.length
+            : undefined
+      return {
+        ok: true,
+        message: rowCount === undefined ? command : `${command} ${rowCount}`,
+      }
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) }
+    }
+  }, [activeConnectionId, draftSql, payload.sql, runSql, targetDb])
 
   // DEV test handle: register this block so a Playwright harness can drive a
   // cross-filter without a real cell click (drag/click are hard to automate). No-op
@@ -1840,6 +2036,8 @@ export function DataGridWindow({
   const bodyTab =
     present && (activeTab === "sql" || activeTab === "explain" || activeTab === "steps")
       ? "rows"
+      : activeTab === "chart" && hasSqlStatementLayout
+        ? "rows"
       : activeTab
 
   return (
@@ -2033,7 +2231,7 @@ export function DataGridWindow({
                         onClick={() =>
                           onChangePayload((p) => ({
                             ...p,
-                            statementLayout: { ...(p.statementLayout ?? {}), mode: m },
+                            statementLayout: { ...(p.statementLayout ?? sqlStatementLayout ?? {}), mode: m },
                           }))
                         }
                         className={cn(
@@ -2094,7 +2292,17 @@ export function DataGridWindow({
               <Button
                 size="sm"
                 variant="ghost"
-                onClick={() => onSaveAsViewApp(payload.sql || draftSql, payload.title)}
+                onClick={() =>
+                  onSaveAsViewApp({
+                    sql: payload.sql || draftSql,
+                    title: payload.title,
+                    chartSpec: payload.chartSpec ?? null,
+                    statementViews: payload.statementViews,
+                    statementLayout: effectiveStatementLayout,
+                    viewKind: payload.viewKind,
+                    controlField: payload.controlField,
+                  })
+                }
                 title="Save as a view (rows + chart)"
               >
                 <Boxes className="h-3.5 w-3.5" />
@@ -2173,6 +2381,7 @@ export function DataGridWindow({
                       sourceStatements={sourceStatements}
                       activeParams={blockParams}
                       onEmitParam={emitUiArtifactParam}
+                      onRunAction={runUiArtifactAction}
                     />
                   ) : (
                     <ResultTranscript
@@ -2191,12 +2400,13 @@ export function DataGridWindow({
                       crossFilters={crossFilters}
                       activeParams={blockParams}
                       onEmitParam={emitUiArtifactParam}
+                      onRunAction={runUiArtifactAction}
                     />
                   )}
                 </div>
               </div>
             ) : uiArtifacts ? (
-              <UiArtifactView artifacts={uiArtifacts} fill activeParams={blockParams} onEmitParam={emitUiArtifactParam} />
+              <UiArtifactView artifacts={uiArtifacts} fill activeParams={blockParams} onEmitParam={emitUiArtifactParam} onRunAction={runUiArtifactAction} />
             ) : result.rows.length === 1 && result.columns.length === 1 ? (
               <SingleCellCallout
                 column={result.columns[0]}

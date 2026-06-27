@@ -441,6 +441,7 @@ export function SchedulerTray({ activeConnectionId, hasRvbbit, onOpenSql, onOpen
                         expanded={expanded === j.jobid}
                         runs={runs}
                         rvbbit={hasRvbbit}
+                        targetDb={targetDb}
                         busy={busy}
                         running={running === j.jobid}
                         result={runResult?.jobid === j.jobid ? runResult : null}
@@ -787,6 +788,7 @@ function JobRow({
   expanded,
   runs,
   rvbbit,
+  targetDb,
   busy,
   running,
   result,
@@ -802,6 +804,7 @@ function JobRow({
   expanded: boolean
   runs: CronRun[]
   rvbbit: boolean
+  targetDb: string
   busy: boolean
   running: boolean
   result: { ok: boolean; msg: string } | null
@@ -815,6 +818,9 @@ function JobRow({
 }) {
   const [confirmDel, setConfirmDel] = useState(false)
   const totalCost = runs.reduce((s, r) => s + (r.costUsd ?? 0), 0)
+  const semantic = isSemanticJob(job)
+  const jobDb = job.database || "?"
+  const targetMismatch = semantic && rvbbit && targetDb !== "" && jobDb !== targetDb
   return (
     <div className={cn("rounded-md border bg-secondary-background/40", expanded ? "border-rvbbit-accent/40" : "border-chrome-border/60")}>
       <div className="flex items-center gap-1.5 px-2 py-1.5">
@@ -825,8 +831,25 @@ function JobRow({
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-1.5">
             <span className="truncate font-mono text-[11px] text-foreground">{job.jobname ?? `job ${job.jobid}`}</span>
-            {isSemanticJob(job) && rvbbit ? (
+            {semantic && rvbbit ? (
               <span className="rounded bg-rvbbit-accent/15 px-1 text-[8.5px] uppercase tracking-wider text-rvbbit-accent">semantic</span>
+            ) : null}
+            {semantic ? (
+              <span
+                title={
+                  targetMismatch
+                    ? `Runs in ${jobDb}, not the current database ${targetDb}. RVBBIT jobs fail if the target database does not have rvbbit installed.`
+                    : `Runs in database ${jobDb}`
+                }
+                className={cn(
+                  "rounded px-1 font-mono text-[8.5px]",
+                  targetMismatch
+                    ? "bg-warning/15 text-warning"
+                    : "bg-foreground/[0.06] text-chrome-text/55",
+                )}
+              >
+                db:{jobDb}
+              </span>
             ) : null}
           </div>
           {result ? (

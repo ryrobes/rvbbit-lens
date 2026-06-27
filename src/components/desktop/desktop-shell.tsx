@@ -1458,6 +1458,7 @@ export function DesktopShell() {
             title: opts?.title ?? "Test Block",
             sql,
             origin: "derived", // auto-runs on mount without a table origin
+            autoRun: true,
             view: { activeTab: "rows", sqlRailOpen: true, sqlRailWidthPx: 360 },
           } satisfies DataPayload,
         })
@@ -1730,23 +1731,41 @@ export function DesktopShell() {
   const openViewApp = useCallback(
     (appId: string) => {
       const app = getViewApp(appId)
+      if (!app) return
       // A scry view reopens the graph explorer; a query view opens the rows/chart window.
-      if (app?.kind === "scry") {
+      if (app.kind === "scry") {
         openScryView(app)
         return
       }
       openWindow({
         id: randomUUID(),
-        kind: "view-app",
-        title: "Saved View",
+        kind: "data",
+        title: app.name || "Saved View",
         x: 180 + Math.random() * 60,
         y: 130 + Math.random() * 60,
-        width: 760,
-        height: 520,
-        payload: { kind: "view-app", appId } satisfies ViewAppPayload,
+        width: 820,
+        height: 560,
+        payload: {
+          kind: "data",
+          title: app.name || "Saved View",
+          sql: app.sql ?? "",
+          origin: "derived",
+          connectionId: app.connectionId ?? activeConnectionId ?? null,
+          autoRun: true,
+          chartSpec: app.chartSpec ?? null,
+          statementViews: app.statementViews,
+          statementLayout: app.statementLayout,
+          viewKind: app.viewKind,
+          controlField: app.controlField,
+          view: {
+            activeTab: app.chartSpec && !app.statementLayout ? "chart" : "rows",
+            sqlRailOpen: false,
+            sqlRailWidthPx: 360,
+          },
+        } satisfies DataPayload,
       })
     },
-    [openWindow, openScryView],
+    [activeConnectionId, openWindow, openScryView],
   )
 
   // Persist the current Scry exploration as a kind:"scry" Saved View.
@@ -4531,20 +4550,33 @@ function renderWindowContent(
           onViewDdl={ctx.viewObjectDdl}
         />
       )
-    case "data":
+    case "data": {
+      const dataPayload = w.payload as DataPayload
+      const windowConnectionId = dataPayload.connectionId ?? ctx.activeConnectionId
+      const usesActiveConnection = !dataPayload.connectionId || dataPayload.connectionId === ctx.activeConnectionId
       return (
         <DataGridWindow
           window={w}
-          payload={w.payload as DataPayload}
-          activeConnectionId={ctx.activeConnectionId}
-          hasRvbbit={ctx.hasRvbbit}
-          schema={ctx.schema}
-          semanticOps={ctx.semanticOps}
+          payload={dataPayload}
+          activeConnectionId={windowConnectionId}
+          hasRvbbit={usesActiveConnection ? ctx.hasRvbbit : false}
+          schema={usesActiveConnection ? ctx.schema : null}
+          semanticOps={usesActiveConnection ? ctx.semanticOps : []}
           allWindows={ctx.windows}
           params={ctx.params}
           runSignal={ctx.runSignal}
           onChangePayload={(mut) => ctx.updatePayload(w.id, (p) => mut(p as DataPayload))}
-          onSaveAsViewApp={(sql) => ctx.openViewAppBuilder({ initialSql: sql })}
+          onSaveAsViewApp={(seed) =>
+            ctx.openViewAppBuilder({
+              initialSql: seed.sql,
+              initialName: seed.title,
+              initialChartSpec: seed.chartSpec,
+              initialStatementViews: seed.statementViews,
+              initialStatementLayout: seed.statementLayout,
+              initialViewKind: seed.viewKind,
+              initialControlField: seed.controlField,
+            })
+          }
           onOpenRow={ctx.openRowInspector}
           onEmitParam={ctx.emitParam}
           onSubscribeParam={(key, field, target) => ctx.subscribeParam(w.id, key, field, target)}
@@ -4554,6 +4586,7 @@ function renderWindowContent(
           onOpenKgForSource={ctx.openKgForSource}
         />
       )
+    }
     case "row-inspector":
       return <RowInspectorWindow payload={w.payload as RowInspectorPayload} />
     case "connections":

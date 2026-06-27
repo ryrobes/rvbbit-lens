@@ -896,6 +896,14 @@ export interface CrossFilter {
    *  filtered by this cross-filter — clicking a value narrows the SIBLINGS, not the
    *  tile you clicked (no self-filter). */
   sourceStmtIndex?: number
+  /** Optional result index to target. When set, only this statement receives the
+   *  filter; otherwise the filter broadcasts to sibling statements. */
+  targetStmtIndex?: number
+}
+
+export function crossFilterAppliesToStatement(filter: CrossFilter, stmtIndex: number): boolean {
+  if (filter.targetStmtIndex !== undefined) return filter.targetStmtIndex === stmtIndex
+  return filter.sourceStmtIndex !== stmtIndex
 }
 
 /**
@@ -943,9 +951,9 @@ export function injectStatementFilters(
     // Only a plain SELECT is safe. Reject DML/DDL/CTE (not SELECT-led) AND
     // `SELECT … INTO …` (a CREATE-TABLE-AS write whose rows we must not change).
     if (!hasContent || !/^\s*SELECT\b/i.test(masked) || isSelectInto(masked)) return stmt
-    // A filter is skipped for the statement it ORIGINATED from — clicking a cell
-    // narrows the siblings, not the tile you clicked (no self-filter).
-    const applicable = filters.filter((f) => f.sourceStmtIndex !== resultIdx)
+    // Untargeted filters skip their source statement; targeted filters apply only
+    // to their declared statement.
+    const applicable = filters.filter((f) => crossFilterAppliesToStatement(f, resultIdx))
     if (applicable.length === 0) return stmt
     // (1) Surgical pre-aggregation wrap for a single base-table FROM.
     const item = singleFromItem(stmt)

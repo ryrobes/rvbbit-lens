@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect, useMemo, useState } from "react"
+import { useMemo, useState } from "react"
 import { Save } from "@/lib/icons"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -16,17 +16,20 @@ interface ViewAppBuilderWindowProps {
   onClose: () => void
 }
 
-export function ViewAppBuilderWindow({ payload, activeConnectionId, onClose }: ViewAppBuilderWindowProps) {
+export function ViewAppBuilderWindow({ payload, activeConnectionId }: ViewAppBuilderWindowProps) {
   const existing = useMemo(() => (payload.appId ? getViewApp(payload.appId) : null), [payload.appId])
 
-  const [name, setName] = useState(existing?.name ?? "")
+  const [name, setName] = useState(existing?.name ?? payload.initialName ?? "")
   const [description, setDescription] = useState(existing?.description ?? "")
   const [sql, setSql] = useState(existing?.sql ?? payload.initialSql ?? "SELECT 1;")
   const [iconKey, setIconKey] = useState(existing?.iconKey ?? "play")
   const [iconColor, setIconColor] = useState(existing?.iconColor ?? ICON_COLOR_OPTIONS[0].value)
+  const chartSpec = existing?.chartSpec ?? payload.initialChartSpec ?? null
+  const statementViews = existing?.statementViews ?? payload.initialStatementViews
+  const statementLayout = existing?.statementLayout ?? payload.initialStatementLayout
+  const viewKind = existing?.viewKind ?? payload.initialViewKind
+  const controlField = existing?.controlField ?? payload.initialControlField
   const [saved, setSaved] = useState(false)
-
-  useEffect(() => { setSaved(false) }, [name, description, sql, iconKey, iconColor])
 
   function save() {
     upsertViewApp({
@@ -37,6 +40,11 @@ export function ViewAppBuilderWindow({ payload, activeConnectionId, onClose }: V
       iconKey,
       iconColor,
       connectionId: existing?.connectionId ?? activeConnectionId ?? null,
+      chartSpec,
+      statementViews,
+      statementLayout,
+      viewKind,
+      controlField,
     })
     setSaved(true)
     window.dispatchEvent(new Event("rvbbit-lens:apps-changed"))
@@ -46,11 +54,11 @@ export function ViewAppBuilderWindow({ payload, activeConnectionId, onClose }: V
     <div className="flex h-full">
       <aside className="flex w-64 flex-col border-r border-chrome-border bg-chrome-bg/30 p-3">
         <Label>Name</Label>
-        <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="Daily orders" />
+        <Input value={name} onChange={(e) => { setName(e.target.value); setSaved(false) }} placeholder="Daily orders" />
         <Label className="mt-3">Description</Label>
         <textarea
           value={description}
-          onChange={(e) => setDescription(e.target.value)}
+          onChange={(e) => { setDescription(e.target.value); setSaved(false) }}
           rows={3}
           className="h-20 w-full resize-none rounded-base border-2 border-border bg-secondary-background p-2 text-xs text-foreground outline-none focus:ring-2 focus:ring-ring"
         />
@@ -63,7 +71,7 @@ export function ViewAppBuilderWindow({ payload, activeConnectionId, onClose }: V
               <button
                 key={g.key}
                 type="button"
-                onClick={() => setIconKey(g.key)}
+                onClick={() => { setIconKey(g.key); setSaved(false) }}
                 title={g.label}
                 className={cn(
                   "grid h-7 w-7 place-items-center rounded border",
@@ -84,7 +92,7 @@ export function ViewAppBuilderWindow({ payload, activeConnectionId, onClose }: V
             <button
               key={c.key}
               type="button"
-              onClick={() => setIconColor(c.value)}
+              onClick={() => { setIconColor(c.value); setSaved(false) }}
               title={c.key}
               className={cn(
                 "h-6 w-6 rounded-md border-2",
@@ -108,7 +116,7 @@ export function ViewAppBuilderWindow({ payload, activeConnectionId, onClose }: V
           SQL · ⌘↩ to test
         </div>
         <div className="flex-1 overflow-hidden">
-          <SqlEditor value={sql} onChange={setSql} />
+          <SqlEditor value={sql} onChange={(next) => { setSql(next); setSaved(false) }} />
         </div>
       </section>
     </div>

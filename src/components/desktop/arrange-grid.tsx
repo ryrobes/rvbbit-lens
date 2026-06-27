@@ -7,7 +7,7 @@ import type { ArrangeRow, ArrangeTile, DataPayload, DesktopParamValue, Statement
 import type { CrossFilter } from "@/lib/desktop/reactive-sql"
 import { cn } from "@/lib/utils"
 import { CardBody, CardMeta, ViewSwitcher, defaultKind, statementKeys } from "./result-transcript"
-import type { UiArtifactParamInput } from "./ui-artifact-view"
+import type { UiArtifactActionInput, UiArtifactActionResult, UiArtifactParamInput } from "./ui-artifact-view"
 
 // "Arrange" mode as a tiling window manager INSIDE the block: rows top→bottom,
 // tiles left→right within each row, every boundary a draggable gutter, the block
@@ -91,6 +91,7 @@ export function ArrangeGrid({
   sourceStatements,
   activeParams,
   onEmitParam,
+  onRunAction,
 }: {
   results: StatementResult[]
   views?: Record<string, StatementViewKind>
@@ -104,6 +105,7 @@ export function ArrangeGrid({
   sourceStatements?: string[]
   activeParams?: DesktopParamValue[]
   onEmitParam?: (input: UiArtifactParamInput) => void
+  onRunAction?: (input: UiArtifactActionInput) => Promise<UiArtifactActionResult>
 }) {
   const keys = useMemo(() => statementKeys(results, sourceStatements), [results, sourceStatements])
   const keyToStmt = useMemo(() => {
@@ -411,6 +413,7 @@ export function ArrangeGrid({
                           highlightFilters={crossFilters?.filter((f) => f.sourceStmtIndex === s.index)}
                           activeParams={activeParams}
                           onEmitParam={onEmitParam}
+                          onRunAction={onRunAction}
                           sourceStmtIndex={s.index}
                         />
                       </div>

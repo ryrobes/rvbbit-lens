@@ -12,7 +12,7 @@ export interface CronState {
   available: boolean
   /** shared_preload_libraries contains pg_cron (bgworker running). */
   preloaded: boolean
-  /** cron.database_name GUC — where pg_cron reads jobs from (null if not loaded). */
+  /** cron.database_name GUC — where pg_cron reads jobs from (defaults to postgres). */
   cronDb: string | null
   thisDb: string
 }
@@ -57,10 +57,11 @@ interface Err {
 // while the user stays connected to their working db.
 async function run(connectionId: string, sql: string, database?: string): Promise<Ok | Err> {
   try {
+    const targetDatabase = cleanDbName(database) ?? undefined
     const res = await fetch("/api/db/query", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ connectionId, sql, rowLimit: 500, database }),
+      body: JSON.stringify({ connectionId, sql, rowLimit: 500, database: targetDatabase }),
     })
     return (await res.json()) as Ok | Err
   } catch (e) {
@@ -83,11 +84,19 @@ function epoch(v: unknown): number | null {
 function bool(v: unknown): boolean {
   return v === true || v === "t" || v === "true"
 }
+function cleanDbName(v: unknown): string | null {
+  if (v == null) return null
+  const s = String(v).trim()
+  return s.length > 0 ? s : null
+}
+function cronHomeDb(v: unknown): string {
+  return cleanDbName(v) ?? "postgres"
+}
 
 const STATE_SQL = `SELECT
   EXISTS(SELECT 1 FROM pg_extension WHERE extname='pg_cron')                AS created,
   EXISTS(SELECT 1 FROM pg_available_extensions WHERE name='pg_cron')        AS available,
-  (current_setting('shared_preload_libraries') ILIKE '%pg_cron%')          AS preloaded,
+  (coalesce(current_setting('shared_preload_libraries', true), '') ILIKE '%pg_cron%') AS preloaded,
   current_setting('cron.database_name', true)                              AS cron_db,
   current_database()                                                       AS this_db`
 
@@ -99,21 +108,23 @@ export async function detectCronState(
   const r = await run(connectionId, STATE_SQL)
   if (!r.ok) return { state: null, error: r.error }
   const row = r.rows[0] ?? {}
-  const cronDb = row.cron_db == null ? null : String(row.cron_db)
-  const thisDb = String(row.this_db ?? "")
+  const cronDb = cronHomeDb(row.cron_db)
+  const thisDb = cronHomeDb(row.this_db)
   // `created` (the extension) lives in pg_cron's HOME db. If that differs from the
   // working db, check there — otherwise the working db would always look "not set up".
   let created = bool(row.created)
-  if (cronDb && cronDb !== thisDb) {
+  let error: string | null = null
+  if (cronDb !== thisDb) {
     const hr = await run(
       connectionId,
       "SELECT EXISTS(SELECT 1 FROM pg_extension WHERE extname='pg_cron') AS created",
       cronDb,
     )
     if (hr.ok) created = bool(hr.rows[0]?.created)
+    else error = `Could not inspect pg_cron home database "${cronDb}": ${hr.error}`
   }
   return {
-    error: null,
+    error,
     state: { created, available: bool(row.available), preloaded: bool(row.preloaded), cronDb, thisDb },
   }
 }
@@ -133,8 +144,9 @@ export async function listCronJobs(
 ): Promise<{ jobs: CronJob[]; error: string | null }> {
   // cron.job lives only in the home db; route there. Each job's `database` column
   // shows the db it actually runs in (its schedule_in_database target).
-  const r = await run(connectionId, JOBS_SQL, homeDb ?? undefined)
-  if (!r.ok) return { jobs: [], error: r.error }
+  const targetDb = cronHomeDb(homeDb)
+  const r = await run(connectionId, JOBS_SQL, targetDb)
+  if (!r.ok) return { jobs: [], error: `Could not read cron.job in "${targetDb}": ${r.error}` }
   return {
     error: null,
     jobs: r.rows.map((row) => ({
@@ -167,8 +179,9 @@ export async function listCronRuns(
 FROM cron.job_run_details d
 WHERE d.jobid = ${jobid}
 ORDER BY d.start_time DESC LIMIT 20`
-  const r = await run(connectionId, sql, homeDb ?? undefined)
-  if (!r.ok) return { runs: [], error: r.error }
+  const targetDb = cronHomeDb(homeDb)
+  const r = await run(connectionId, sql, targetDb)
+  if (!r.ok) return { runs: [], error: `Could not read cron.job_run_details in "${targetDb}": ${r.error}` }
   return {
     error: null,
     runs: r.rows.map((row) => ({
@@ -193,7 +206,7 @@ export async function exec(
   sql: string,
   database?: string,
 ): Promise<{ ok: boolean; error: string | null }> {
-  const r = await run(connectionId, sql, database)
+  const r = await run(connectionId, sql, cronHomeDb(database))
   return r.ok ? { ok: true, error: null } : { ok: false, error: r.error }
 }
 
@@ -207,10 +220,11 @@ export async function runDetached(
   database?: string,
 ): Promise<{ ok: boolean; error: string | null }> {
   try {
+    const targetDatabase = cleanDbName(database) ?? undefined
     const res = await fetch("/api/db/run-detached", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ connectionId, sql, database }),
+      body: JSON.stringify({ connectionId, sql, database: targetDatabase }),
     })
     const j = (await res.json()) as { ok: boolean; error?: string }
     return j.ok ? { ok: true, error: null } : { ok: false, error: j.error ?? "failed to start" }
