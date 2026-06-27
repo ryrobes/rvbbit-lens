@@ -284,6 +284,7 @@ export function CardBody({
           onEmitParam={onEmitParam}
           onRunAction={onRunAction}
           sourceStmtIndex={sourceStmtIndex}
+          highlightFilters={highlightFilters}
         />
       </div>
     )

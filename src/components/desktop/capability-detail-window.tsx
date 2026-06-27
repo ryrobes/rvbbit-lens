@@ -30,6 +30,7 @@ import {
   fetchManifest,
   flagsToStates,
   isExternalBackendManifest,
+  isSqlTestManifest,
   joinCatalogToInstalled,
   probeBackend,
   renderManifest,
@@ -87,6 +88,11 @@ const TABS: { key: TabKey; label: string }[] = [
 const MCP_TABS: { key: TabKey; label: string }[] = [
   { key: "overview", label: "Overview" },
   { key: "install", label: "Install" },
+]
+const SQL_TEST_TABS: { key: TabKey; label: string }[] = [
+  { key: "overview", label: "Overview" },
+  { key: "generated-sql", label: "Generated SQL" },
+  { key: "tests", label: "Tests" },
 ]
 
 export function CapabilityDetailWindow({
@@ -202,6 +208,11 @@ export function CapabilityDetailWindow({
   })
 
   const externalBackend = !!manifest && isExternalBackendManifest(manifest)
+  const isSqlTest = !!manifest && isSqlTestManifest(manifest)
+
+  useEffect(() => {
+    if (isSqlTest && (tab === "probe" || tab === "install")) setTab("tests")
+  }, [isSqlTest, tab])
 
   /** Effective install mode — explicit user choice wins, else availability decides. */
   const effectiveInstallMode: "warren" | "local" =
@@ -332,7 +343,7 @@ export function CapabilityDetailWindow({
 
       {/* tab bar */}
       <div className="flex items-center gap-px border-b border-chrome-border bg-chrome-bg/20 px-2">
-        {(isMcp ? MCP_TABS : TABS).map((t) => (
+        {(isMcp ? MCP_TABS : isSqlTest ? SQL_TEST_TABS : TABS).map((t) => (
           <button
             key={t.key}
             type="button"
@@ -383,14 +394,14 @@ export function CapabilityDetailWindow({
         {tab === "generated-sql" ? (
           <GeneratedSqlTab rendered={rendered!} />
         ) : null}
-        {tab === "probe" ? (
+        {tab === "probe" && !isSqlTest ? (
           <ProbeTab
             activeConnectionId={activeConnectionId}
             manifest={manifest!}
             registered={!!installed}
           />
         ) : null}
-        {tab === "install" ? (
+        {tab === "install" && !isSqlTest ? (
           <InstallTabDispatcher
             mode={effectiveInstallMode}
             warrenAvail={warrenAvail}
@@ -1836,6 +1847,7 @@ function InstallTabDispatcher({
           <CapabilityInstallGraph
             activeConnectionId={activeConnectionId}
             manifestPath={manifestPath}
+            manifestYaml={rendered.manifestYaml}
             manifest={manifest}
             knobs={knobs}
             rendered={rendered}

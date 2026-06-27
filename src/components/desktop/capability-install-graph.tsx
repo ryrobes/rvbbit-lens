@@ -238,7 +238,7 @@ export function CapabilityInstallGraph({
     setStep("scaffold", { status: "running", startedAt: Date.now(), error: undefined })
     const result = await runScaffold({
       manifestPath,
-      manifestYaml,
+      manifestYaml: manifestYaml ?? rendered.manifestYaml,
       outDir: knobs.outputDir,
       force: true,
       overrides: {

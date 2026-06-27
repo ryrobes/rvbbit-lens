@@ -10,8 +10,10 @@ import {
   Clock,
   Database,
   GitBranch,
+  Pause,
   Play,
   RefreshCw,
+  Search,
   Table2,
 } from "@/lib/icons"
 import {
@@ -28,7 +30,8 @@ import {
 import { fmtAgo, fmtCount, fmtMs, Panel } from "./instruments"
 import { cn } from "@/lib/utils"
 
-type Tab = "overview" | "runs" | "assets" | "checks" | "automation" | "events"
+type Tab = "timeline" | "resources" | "runs" | "assets" | "checks" | "automation" | "events"
+type TimelineRangeHours = 1 | 6 | 12 | 24
 
 interface DagsterWindowProps {
   activeConnectionId: string | null
@@ -36,19 +39,29 @@ interface DagsterWindowProps {
 }
 
 const TABS: { key: Tab; label: string }[] = [
-  { key: "overview", label: "Overview" },
+  { key: "timeline", label: "Timeline" },
+  { key: "resources", label: "Resources" },
   { key: "runs", label: "Runs" },
   { key: "assets", label: "Assets" },
   { key: "checks", label: "Checks" },
-  { key: "automation", label: "Automation" },
+  { key: "automation", label: "Automations" },
   { key: "events", label: "Events" },
 ]
 
+const TIMELINE_RANGES: TimelineRangeHours[] = [1, 6, 12, 24]
+const REFRESH_INTERVAL_MS = 30_000
+
 export function DagsterWindow({ activeConnectionId, workspaceActive }: DagsterWindowProps) {
-  const [tab, setTab] = useState<Tab>("overview")
+  const [tab, setTab] = useState<Tab>("timeline")
   const [snapshot, setSnapshot] = useState<DagsterSnapshot | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [rangeHours, setRangeHours] = useState<TimelineRangeHours>(12)
+  const [query, setQuery] = useState("")
+  const [autoRefresh, setAutoRefresh] = useState(true)
+  const [nowMs, setNowMs] = useState(() => Date.now())
+  const [lastRefreshAt, setLastRefreshAt] = useState<number | null>(null)
+  const [selectedLaneId, setSelectedLaneId] = useState<string | null>(null)
 
   const refresh = useCallback(async () => {
     if (!activeConnectionId) {
@@ -65,6 +78,7 @@ export function DagsterWindow({ activeConnectionId, workspaceActive }: DagsterWi
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
     } finally {
+      setLastRefreshAt(Date.now())
       setLoading(false)
     }
   }, [activeConnectionId])
@@ -76,29 +90,45 @@ export function DagsterWindow({ activeConnectionId, workspaceActive }: DagsterWi
     })
   }, [refresh, workspaceActive])
 
+  useEffect(() => {
+    const id = window.setInterval(() => setNowMs(Date.now()), 1000)
+    return () => window.clearInterval(id)
+  }, [])
+
+  useEffect(() => {
+    if (!workspaceActive || !activeConnectionId || !autoRefresh) return
+    const id = window.setInterval(() => {
+      void refresh()
+    }, REFRESH_INTERVAL_MS)
+    return () => window.clearInterval(id)
+  }, [activeConnectionId, autoRefresh, refresh, workspaceActive])
+
   const detected = !!snapshot?.detection.detected
   const schemas = snapshot?.detection.schemas.join(", ") || "-"
+  const refreshCountdown = autoRefresh && lastRefreshAt
+    ? Math.max(0, Math.ceil((lastRefreshAt + REFRESH_INTERVAL_MS - nowMs) / 1000))
+    : null
 
   return (
-    <div className="flex h-full flex-col bg-doc-bg text-foreground group-data-[focused=false]/window:bg-doc-bg/70">
-      <div className="flex h-10 shrink-0 items-center gap-2 border-b border-chrome-border bg-chrome-bg/35 px-2">
-        <div className="grid h-6 w-6 place-items-center rounded border border-chrome-border/60 bg-foreground/[0.04]">
+    <div className="flex h-full flex-col bg-[#070914] text-foreground group-data-[focused=false]/window:bg-[#070914]/75">
+      <div className="flex h-11 shrink-0 items-center gap-2 border-b border-[#1d2235] bg-[#090b18] px-3">
+        <div className="grid h-7 w-7 place-items-center rounded-md border border-[#2b3150] bg-[#151936] shadow-[inset_0_1px_0_rgba(255,255,255,0.05)]">
           <GitBranch className="h-3.5 w-3.5 text-rvbbit-accent" />
         </div>
         <div className="min-w-0">
           <div className="text-[12px] font-semibold leading-tight text-foreground">Dagster</div>
-          <div className="truncate font-mono text-[9px] text-chrome-text/55">
+          <div className="truncate font-mono text-[9px] text-[#8e96b8]">
             {detected ? `schemas: ${schemas}` : loading ? "scanning storage tables" : "not detected"}
           </div>
         </div>
-        <div className="ml-auto flex items-center gap-1">
+        <div className="ml-auto flex items-center gap-1.5">
           {snapshot ? (
             <span
               className={cn(
                 "rounded border px-1.5 py-0.5 font-mono text-[9px]",
                 detected
                   ? "border-success/35 bg-success/10 text-success"
-                  : "border-chrome-border bg-foreground/[0.03] text-chrome-text/60",
+                  : "border-[#2b3150] bg-white/[0.03] text-[#8e96b8]",
               )}
             >
               {snapshot.detection.confidence}%
@@ -106,35 +136,82 @@ export function DagsterWindow({ activeConnectionId, workspaceActive }: DagsterWi
           ) : null}
           <button
             type="button"
+            onClick={() => setAutoRefresh((v) => !v)}
+            title={autoRefresh ? "Pause auto-refresh" : "Resume auto-refresh"}
+            className={cn(
+              "inline-flex h-7 items-center gap-1 rounded-md border px-2 font-mono text-[10px] transition-colors",
+              autoRefresh
+                ? "border-success/25 bg-success/10 text-success hover:bg-success/15"
+                : "border-[#2b3150] bg-white/[0.03] text-[#8e96b8] hover:bg-white/[0.06] hover:text-foreground",
+            )}
+          >
+            {autoRefresh ? <RefreshCw className={cn("h-3 w-3", loading && "animate-spin")} /> : <Pause className="h-3 w-3" />}
+            {autoRefresh ? `${refreshCountdown ?? "--"}s` : "paused"}
+          </button>
+          <button
+            type="button"
             onClick={() => void refresh()}
             disabled={loading || !activeConnectionId}
             title="Refresh"
-            className="grid h-7 w-7 place-items-center rounded text-chrome-text transition-colors hover:bg-foreground/[0.06] hover:text-foreground disabled:opacity-45"
+            className="grid h-7 w-7 place-items-center rounded-md border border-[#2b3150] text-[#8e96b8] transition-colors hover:bg-white/[0.06] hover:text-foreground disabled:opacity-45"
           >
             <RefreshCw className={cn("h-3.5 w-3.5", loading && "animate-spin")} />
           </button>
         </div>
       </div>
 
-      <div className="flex h-8 shrink-0 items-center gap-1 border-b border-chrome-border bg-chrome-bg/20 px-2">
+      <div className="flex min-h-11 shrink-0 items-center gap-2 border-b border-[#1d2235] bg-[#0b0e1d] px-3">
         {TABS.map((t) => (
           <button
             key={t.key}
             type="button"
             onClick={() => setTab(t.key)}
             className={cn(
-              "rounded px-2 py-1 text-[11px] transition-colors",
+              "h-8 rounded-md px-2.5 text-[11px] font-medium transition-colors",
               tab === t.key
-                ? "bg-foreground/[0.10] text-foreground"
-                : "text-chrome-text/70 hover:bg-foreground/[0.06] hover:text-foreground",
+                ? "bg-[#222743] text-foreground shadow-[inset_0_1px_0_rgba(255,255,255,0.06)]"
+                : "text-[#8e96b8] hover:bg-white/[0.05] hover:text-foreground",
             )}
           >
             {t.label}
           </button>
         ))}
+        <div className="ml-auto flex min-w-0 items-center gap-2">
+          <label className="relative hidden min-w-[220px] max-w-[520px] flex-1 md:block">
+            <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[#68708e]" />
+            <input
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Search and filter automations"
+              className="h-8 w-full rounded-md border border-[#242a43] bg-[#070914] pl-8 pr-2 font-mono text-[11px] text-foreground outline-none placeholder:text-[#68708e] focus:border-[#485073]"
+            />
+          </label>
+          <div className="hidden items-center rounded-md border border-[#242a43] bg-[#070914] p-0.5 md:flex">
+            {TIMELINE_RANGES.map((range) => (
+              <button
+                key={range}
+                type="button"
+                onClick={() => setRangeHours(range)}
+                className={cn(
+                  "h-7 rounded px-2 font-mono text-[10px] transition-colors",
+                  rangeHours === range ? "bg-[#30364f] text-foreground" : "text-[#8e96b8] hover:bg-white/[0.05] hover:text-foreground",
+                )}
+              >
+                {range}h
+              </button>
+            ))}
+          </div>
+          <button
+            type="button"
+            onClick={() => setNowMs(Date.now())}
+            className="hidden h-8 rounded-md border border-[#242a43] bg-[#070914] px-2.5 font-mono text-[10px] text-[#c2c7dd] transition-colors hover:bg-white/[0.05] md:inline-flex md:items-center"
+          >
+            Now
+          </button>
+        </div>
       </div>
 
-      <div className="min-h-0 flex-1 overflow-auto p-3">
+      <div className="min-h-0 flex-1 overflow-auto bg-[#070914] p-3">
         {!activeConnectionId ? (
           <Empty icon={Database} title="No active connection" detail="Open a connection to scan for Dagster storage." />
         ) : loading && !snapshot ? (
@@ -147,7 +224,16 @@ export function DagsterWindow({ activeConnectionId, workspaceActive }: DagsterWi
             title="No Dagster storage tables detected"
             detail={snapshot?.detection.missingCore.length ? `Missing: ${snapshot.detection.missingCore.join(", ")}` : "No recognized Dagster table set was found."}
           />
-        ) : tab === "overview" ? (
+        ) : tab === "timeline" ? (
+          <AutomationTimeline
+            snapshot={snapshot}
+            query={query}
+            rangeHours={rangeHours}
+            nowMs={nowMs}
+            selectedLaneId={selectedLaneId}
+            onSelectLane={setSelectedLaneId}
+          />
+        ) : tab === "resources" ? (
           <Overview snapshot={snapshot} />
         ) : tab === "runs" ? (
           <RunsTable rows={snapshot.runs} />
@@ -162,6 +248,347 @@ export function DagsterWindow({ activeConnectionId, workspaceActive }: DagsterWi
         )}
       </div>
     </div>
+  )
+}
+
+interface TimelineBounds {
+  startMs: number
+  endMs: number
+}
+
+interface TimelineRunBlock {
+  run: DagsterRunRow
+  startMs: number
+  endMs: number
+}
+
+interface TimelineLane {
+  id: string
+  name: string
+  type: string
+  status: string
+  updatedAt: number | null
+  lastTickAt: number | null
+  lastTickStatus: string | null
+  lastActivityAt: number | null
+  ticks: DagsterAutomationTick[]
+  runs: TimelineRunBlock[]
+  activityCount: number
+}
+
+function AutomationTimeline({
+  snapshot,
+  query,
+  rangeHours,
+  nowMs,
+  selectedLaneId,
+  onSelectLane,
+}: {
+  snapshot: DagsterSnapshot
+  query: string
+  rangeHours: TimelineRangeHours
+  nowMs: number
+  selectedLaneId: string | null
+  onSelectLane: (id: string) => void
+}) {
+  const bounds = useMemo(() => timelineBounds(nowMs, rangeHours), [nowMs, rangeHours])
+  const axisTicks = useMemo(() => timelineAxisTicks(bounds, rangeHours), [bounds, rangeHours])
+  const lanes = useMemo(
+    () => buildTimelineLanes(snapshot, bounds, nowMs, query),
+    [bounds, nowMs, query, snapshot],
+  )
+  const selectedLane = lanes.find((lane) => lane.id === selectedLaneId) ?? lanes[0] ?? null
+  const nowPct = timePct(nowMs, bounds)
+
+  return (
+    <div className="flex min-h-full flex-col gap-3">
+      <TimelineSummary lanes={lanes} bounds={bounds} />
+
+      <div className="min-h-[500px] flex-1 overflow-hidden rounded-md border border-[#1d2235] bg-[#070914] shadow-[inset_0_1px_0_rgba(255,255,255,0.03)]">
+        {lanes.length === 0 ? (
+          <TinyEmpty label="No recent automation activity" />
+        ) : (
+          <div className="h-full overflow-auto">
+            <div className="min-w-[1080px]">
+              <div className="sticky top-0 z-30 grid grid-cols-[310px_minmax(760px,1fr)] border-b border-[#1d2235] bg-[#0a0d1b]">
+                <div className="flex h-[78px] items-end border-r border-[#1d2235] px-4 pb-3">
+                  <div>
+                    <div className="text-[12px] font-semibold text-foreground">Runs</div>
+                    <div className="mt-1 font-mono text-[9px] text-[#68708e]">
+                      {formatTimelineWindow(bounds)}
+                    </div>
+                  </div>
+                </div>
+                <div className="relative h-[78px]">
+                  <div className="absolute left-0 right-0 top-3 text-center font-mono text-[11px] text-[#68708e]">
+                    {formatTimelineDate(bounds.endMs)}
+                  </div>
+                  <div className="absolute bottom-0 left-0 right-0 top-9">
+                    {axisTicks.map((tick) => {
+                      const left = timePct(tick, bounds)
+                      return (
+                        <div
+                          key={tick}
+                          className="absolute bottom-0 top-0 border-l border-[#1d2235]"
+                          style={{ left: `${left}%` }}
+                        >
+                          <div className="ml-2 mt-1 font-mono text-[10px] text-[#68708e]">
+                            {formatAxisLabel(tick, rangeHours)}
+                          </div>
+                        </div>
+                      )
+                    })}
+                    <div
+                      className="absolute bottom-0 top-0 z-20 border-l border-[#d8dcf4]"
+                      style={{ left: `${nowPct}%` }}
+                    >
+                      <div className="-ml-3 mt-1 rounded-sm bg-[#d8dcf4] px-1 py-0.5 font-mono text-[9px] leading-none text-[#070914]">
+                        Now
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div>
+                {lanes.map((lane) => (
+                  <TimelineLaneRow
+                    key={lane.id}
+                    lane={lane}
+                    bounds={bounds}
+                    axisTicks={axisTicks}
+                    nowPct={nowPct}
+                    selected={lane.id === selectedLane?.id}
+                    onSelect={() => onSelectLane(lane.id)}
+                  />
+                ))}
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {selectedLane ? <TimelineLaneDetail lane={selectedLane} bounds={bounds} /> : null}
+    </div>
+  )
+}
+
+function TimelineSummary({ lanes, bounds }: { lanes: TimelineLane[]; bounds: TimelineBounds }) {
+  const counts = useMemo(() => {
+    let ticks = 0
+    let failedTicks = 0
+    let runs = 0
+    let running = 0
+    let stale = 0
+    for (const lane of lanes) {
+      ticks += lane.ticks.length
+      failedTicks += lane.ticks.filter((tick) => isDangerStatus(tick.status)).length
+      runs += lane.runs.length
+      running += lane.runs.filter((block) => isRunningStatus(block.run.status)).length
+      if (!lane.lastActivityAt || lane.lastActivityAt < bounds.startMs) stale += 1
+    }
+    return { ticks, failedTicks, runs, running, stale }
+  }, [bounds.startMs, lanes])
+
+  return (
+    <div className="grid shrink-0 grid-cols-2 gap-2 md:grid-cols-5">
+      <TimelineStat label="lanes" value={fmtCount(lanes.length)} />
+      <TimelineStat label="ticks in range" value={fmtCount(counts.ticks)} tone={counts.failedTicks > 0 ? "warning" : undefined} />
+      <TimelineStat label="failed ticks" value={fmtCount(counts.failedTicks)} tone={counts.failedTicks > 0 ? "danger" : undefined} />
+      <TimelineStat label="run bars" value={fmtCount(counts.runs)} tone={counts.running > 0 ? "success" : undefined} />
+      <TimelineStat label="quiet lanes" value={fmtCount(counts.stale)} tone={counts.stale > 0 ? "muted" : undefined} />
+    </div>
+  )
+}
+
+function TimelineStat({
+  label,
+  value,
+  tone,
+}: {
+  label: string
+  value: string
+  tone?: "danger" | "warning" | "success" | "muted"
+}) {
+  return (
+    <div className="rounded-md border border-[#1d2235] bg-[#0a0d1b] px-3 py-2 shadow-[inset_0_1px_0_rgba(255,255,255,0.03)]">
+      <div
+        className={cn(
+          "font-mono text-[17px] leading-none tabular-nums",
+          tone === "danger"
+            ? "text-danger"
+            : tone === "warning"
+              ? "text-warning"
+              : tone === "success"
+                ? "text-success"
+                : tone === "muted"
+                  ? "text-[#8e96b8]"
+                  : "text-foreground",
+        )}
+      >
+        {value}
+      </div>
+      <div className="mt-1 text-[9px] uppercase text-[#68708e]">{label}</div>
+    </div>
+  )
+}
+
+function TimelineLaneRow({
+  lane,
+  bounds,
+  axisTicks,
+  nowPct,
+  selected,
+  onSelect,
+}: {
+  lane: TimelineLane
+  bounds: TimelineBounds
+  axisTicks: number[]
+  nowPct: number
+  selected: boolean
+  onSelect: () => void
+}) {
+  const quiet = !lane.lastActivityAt || lane.lastActivityAt < bounds.startMs
+  return (
+    <div
+      role="button"
+      tabIndex={0}
+      onClick={onSelect}
+      onKeyDown={(e) => {
+        if (e.key === "Enter" || e.key === " ") onSelect()
+      }}
+      className={cn(
+        "grid grid-cols-[310px_minmax(760px,1fr)] border-b border-[#151a2b] outline-none transition-colors",
+        selected ? "bg-[#171b35]" : "hover:bg-white/[0.025]",
+        quiet && !selected && "opacity-60",
+      )}
+    >
+      <div className="flex h-[42px] min-w-0 items-center gap-2 border-r border-[#1d2235] px-3">
+        <span className={cn("h-2 w-2 shrink-0 rounded-full", statusDotClass(lane.lastTickStatus ?? lane.status))} />
+        <Clock className="h-3.5 w-3.5 shrink-0 text-[#8e96b8]" />
+        <div className="min-w-0 flex-1">
+          <div className="truncate text-[11px] font-medium text-[#cfd4ea]" title={lane.name}>
+            {lane.name}
+          </div>
+          <div className="truncate font-mono text-[9px] text-[#68708e]">
+            {lane.type} · {lane.lastActivityAt ? fmtAgo(lane.lastActivityAt) : "no activity"}
+          </div>
+        </div>
+        <Pill className={statusClass(lane.lastTickStatus ?? lane.status)}>{short(lane.lastTickStatus ?? lane.status, 14)}</Pill>
+      </div>
+      <div className="relative h-[42px] overflow-hidden">
+        {axisTicks.map((tick) => (
+          <span
+            key={tick}
+            className="absolute bottom-0 top-0 border-l border-[#151a2b]"
+            style={{ left: `${timePct(tick, bounds)}%` }}
+          />
+        ))}
+        <span
+          className="absolute bottom-0 top-0 z-20 border-l border-[#d8dcf4]"
+          style={{ left: `${nowPct}%` }}
+        />
+        {lane.runs.map((block) => {
+          const left = timePct(Math.max(block.startMs, bounds.startMs), bounds)
+          const right = timePct(Math.min(block.endMs, bounds.endMs), bounds)
+          const width = Math.max(0.7, right - left)
+          return (
+            <span
+              key={block.run.runId}
+              title={runBlockTitle(block)}
+              className="absolute top-[12px] z-10 h-[18px] overflow-hidden rounded-[4px] border px-1 font-mono text-[9px] leading-[17px] text-[#07100b] shadow-[0_0_0_1px_rgba(0,0,0,0.18)]"
+              style={{
+                left: `${left}%`,
+                width: `${width}%`,
+                backgroundColor: statusFillColor(block.run.status),
+                borderColor: statusStrokeColor(block.run.status),
+              }}
+            >
+              <span className="block truncate">{short(block.run.jobName, 32)}</span>
+            </span>
+          )
+        })}
+        {lane.ticks.map((tick, index) => {
+          const tickAt = tick.timestamp ?? tick.updatedAt
+          if (!tickAt) return null
+          const left = timePct(tickAt, bounds)
+          const endAt = tick.updatedAt && tick.updatedAt > tickAt ? tick.updatedAt : tickAt + 90_000
+          const widthPct = ((Math.min(endAt, bounds.endMs) - Math.max(tickAt, bounds.startMs)) / (bounds.endMs - bounds.startMs)) * 100
+          const width = tick.updatedAt && tick.updatedAt - tickAt > 60_000 ? `${Math.max(0.3, widthPct)}%` : "4px"
+          return (
+            <span
+              key={`${tick.id ?? tickAt}:${index}`}
+              title={tickTitle(tick)}
+              className={cn("absolute top-[7px] z-30 h-[28px] rounded-[3px] border", tickSquareClass(tick.status))}
+              style={{ left: `${left}%`, width, maxWidth: "28px" }}
+            />
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
+function TimelineLaneDetail({ lane, bounds }: { lane: TimelineLane; bounds: TimelineBounds }) {
+  const latestRuns = lane.runs.slice().sort((a, b) => b.startMs - a.startMs).slice(0, 5)
+  const latestTicks = lane.ticks.slice().sort((a, b) => (b.timestamp ?? b.updatedAt ?? 0) - (a.timestamp ?? a.updatedAt ?? 0)).slice(0, 12)
+
+  return (
+    <Panel
+      icon={Clock}
+      title="Drill-in"
+      right={<span className="font-mono text-[9px] text-[#8e96b8]">{formatTimelineWindow(bounds)}</span>}
+      className="shrink-0 border-[#1d2235] bg-[#0a0d1b]"
+    >
+      <div className="grid gap-3 lg:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)_minmax(0,1fr)]">
+        <div className="min-w-0">
+          <div className="truncate text-[13px] font-semibold text-foreground" title={lane.name}>{lane.name}</div>
+          <div className="mt-1 flex flex-wrap items-center gap-1.5">
+            <Pill className={statusClass(lane.lastTickStatus ?? lane.status)}>{lane.lastTickStatus ?? lane.status}</Pill>
+            <span className="font-mono text-[10px] text-[#8e96b8]">{lane.type}</span>
+            <span className="font-mono text-[10px] text-[#68708e]">
+              last {lane.lastActivityAt ? fmtAgo(lane.lastActivityAt) : "never"}
+            </span>
+          </div>
+        </div>
+
+        <div className="min-w-0">
+          <div className="mb-1 text-[9px] uppercase text-[#68708e]">Latest Runs</div>
+          <div className="space-y-1">
+            {latestRuns.length === 0 ? (
+              <div className="font-mono text-[10px] text-[#68708e]">none in window</div>
+            ) : (
+              latestRuns.map((block) => (
+                <div key={block.run.runId} className="flex min-w-0 items-center gap-2 rounded border border-[#1d2235] bg-white/[0.025] px-2 py-1">
+                  <Pill className={statusClass(block.run.status)}>{short(block.run.status, 12)}</Pill>
+                  <span className="min-w-0 flex-1 truncate text-[11px] text-[#cfd4ea]">{block.run.jobName}</span>
+                  <span className="font-mono text-[10px] text-[#8e96b8]">{formatRunDuration(block)}</span>
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+
+        <div className="min-w-0">
+          <div className="mb-1 text-[9px] uppercase text-[#68708e]">Latest Ticks</div>
+          {latestTicks.length === 0 ? (
+            <div className="font-mono text-[10px] text-[#68708e]">none in window</div>
+          ) : (
+            <div className="flex flex-wrap gap-1.5">
+              {latestTicks.map((tick, i) => (
+                <span
+                  key={`${tick.id ?? "tick"}:${i}`}
+                  title={tickTitle(tick)}
+                  className={cn("inline-flex h-5 items-center rounded border px-1.5 font-mono text-[9px]", statusClass(tick.status))}
+                >
+                  {tick.timestamp ? formatShortClock(tick.timestamp) : short(tick.status, 10)}
+                </span>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+    </Panel>
   )
 }
 
@@ -531,6 +958,242 @@ function useElementSize<T extends HTMLElement>() {
     return () => ro.disconnect()
   }, [])
   return [ref, size] as const
+}
+
+function timelineBounds(nowMs: number, rangeHours: TimelineRangeHours): TimelineBounds {
+  const hour = 60 * 60 * 1000
+  const endMs = Math.ceil(nowMs / hour) * hour
+  return { startMs: endMs - rangeHours * hour, endMs }
+}
+
+function timelineAxisTicks(bounds: TimelineBounds, rangeHours: TimelineRangeHours): number[] {
+  const minute = 60 * 1000
+  const hour = 60 * minute
+  const step = rangeHours === 1 ? 15 * minute : rangeHours === 24 ? 2 * hour : hour
+  const first = Math.ceil(bounds.startMs / step) * step
+  const ticks: number[] = []
+  for (let t = first; t <= bounds.endMs; t += step) ticks.push(t)
+  return ticks
+}
+
+function buildTimelineLanes(
+  snapshot: DagsterSnapshot,
+  bounds: TimelineBounds,
+  nowMs: number,
+  query: string,
+): TimelineLane[] {
+  const normalizedQuery = query.trim().toLowerCase()
+  const lanes = snapshot.automations.length > 0
+    ? snapshot.automations.map((automation) => {
+      const runs = matchingRunBlocks(automation, snapshot.runs, bounds, nowMs)
+      const ticks = automation.ticks
+        .filter((tick) => {
+          const t = tick.timestamp ?? tick.updatedAt
+          return !!t && t >= bounds.startMs && t <= bounds.endMs
+        })
+        .sort((a, b) => (a.timestamp ?? a.updatedAt ?? 0) - (b.timestamp ?? b.updatedAt ?? 0))
+      const runActivity = runs.map((block) => Math.max(block.endMs, block.run.updatedAt ?? 0))
+      const tickActivity = automation.ticks.map((tick) => tick.updatedAt ?? tick.timestamp ?? 0)
+      const lastActivityAt = maxEpoch([
+        automation.lastTickAt,
+        automation.updatedAt,
+        ...runActivity,
+        ...tickActivity,
+      ])
+      return {
+        id: `automation:${automation.id}`,
+        name: automation.name,
+        type: automation.type,
+        status: automation.status,
+        updatedAt: automation.updatedAt,
+        lastTickAt: automation.lastTickAt,
+        lastTickStatus: automation.lastTickStatus,
+        lastActivityAt,
+        ticks,
+        runs,
+        activityCount: ticks.length + runs.length,
+      } satisfies TimelineLane
+    })
+    : buildRunOnlyLanes(snapshot.runs, bounds, nowMs)
+
+  return lanes
+    .filter((lane) => {
+      if (!normalizedQuery) return true
+      const haystack = [
+        lane.name,
+        lane.type,
+        lane.status,
+        lane.lastTickStatus ?? "",
+        ...lane.runs.map((block) => block.run.jobName),
+      ].join(" ").toLowerCase()
+      return haystack.includes(normalizedQuery)
+    })
+    .sort((a, b) => {
+      const aActive = a.activityCount > 0 ? 1 : 0
+      const bActive = b.activityCount > 0 ? 1 : 0
+      if (aActive !== bActive) return bActive - aActive
+      return (b.lastActivityAt ?? 0) - (a.lastActivityAt ?? 0) || a.name.localeCompare(b.name)
+    })
+    .slice(0, 120)
+}
+
+function matchingRunBlocks(
+  automation: DagsterAutomationRow,
+  runs: DagsterRunRow[],
+  bounds: TimelineBounds,
+  nowMs: number,
+): TimelineRunBlock[] {
+  const aliases = automationAliases(automation)
+  return runs
+    .filter((run) => {
+      const jobKey = normalizeTimelineKey(run.jobName)
+      return aliases.some((alias) => alias === jobKey || (alias.length > 4 && jobKey.includes(alias)) || (jobKey.length > 4 && alias.includes(jobKey)))
+    })
+    .map((run) => runToBlock(run, bounds, nowMs))
+    .filter((block): block is TimelineRunBlock => !!block)
+    .sort((a, b) => a.startMs - b.startMs)
+}
+
+function buildRunOnlyLanes(runs: DagsterRunRow[], bounds: TimelineBounds, nowMs: number): TimelineLane[] {
+  const groups = new Map<string, DagsterRunRow[]>()
+  for (const run of runs) {
+    const key = run.jobName || "(unknown)"
+    const list = groups.get(key) ?? []
+    list.push(run)
+    groups.set(key, list)
+  }
+  return [...groups.entries()].map(([jobName, jobRuns]) => {
+    const blocks = jobRuns
+      .map((run) => runToBlock(run, bounds, nowMs))
+      .filter((block): block is TimelineRunBlock => !!block)
+      .sort((a, b) => a.startMs - b.startMs)
+    const latest = jobRuns.slice().sort((a, b) => (b.updatedAt ?? b.endedAt ?? b.startedAt ?? 0) - (a.updatedAt ?? a.endedAt ?? a.startedAt ?? 0))[0]
+    return {
+      id: `job:${normalizeTimelineKey(jobName)}`,
+      name: jobName,
+      type: "job",
+      status: latest?.status ?? "UNKNOWN",
+      updatedAt: latest?.updatedAt ?? null,
+      lastTickAt: null,
+      lastTickStatus: null,
+      lastActivityAt: maxEpoch(jobRuns.map((run) => run.updatedAt ?? run.endedAt ?? run.startedAt ?? run.createdAt ?? 0)),
+      ticks: [],
+      runs: blocks,
+      activityCount: blocks.length,
+    } satisfies TimelineLane
+  })
+}
+
+function runToBlock(run: DagsterRunRow, bounds: TimelineBounds, nowMs: number): TimelineRunBlock | null {
+  const startMs = run.startedAt ?? run.createdAt ?? run.updatedAt
+  if (!startMs) return null
+  const naturalEnd = run.endedAt ?? (isRunningStatus(run.status) ? nowMs : run.updatedAt) ?? startMs
+  const minVisibleEnd = startMs + 4 * 60 * 1000
+  const endMs = Math.max(naturalEnd, minVisibleEnd)
+  if (endMs < bounds.startMs || startMs > bounds.endMs) return null
+  return { run, startMs, endMs }
+}
+
+function automationAliases(automation: DagsterAutomationRow): string[] {
+  const trimmedName = automation.name
+    .replace(/_(job_)?schedule$/i, "")
+    .replace(/_(schedule|sensor)$/i, "")
+    .replace(/_job$/i, "")
+  return [...new Set([automation.name, trimmedName, automation.id].map(normalizeTimelineKey).filter(Boolean))]
+}
+
+function normalizeTimelineKey(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9]+/g, "")
+}
+
+function maxEpoch(values: Array<number | null | undefined>): number | null {
+  const finite = values.filter((value): value is number => typeof value === "number" && Number.isFinite(value) && value > 0)
+  return finite.length ? Math.max(...finite) : null
+}
+
+function timePct(epochMs: number, bounds: TimelineBounds): number {
+  const span = bounds.endMs - bounds.startMs
+  if (span <= 0) return 0
+  return Math.max(0, Math.min(100, ((epochMs - bounds.startMs) / span) * 100))
+}
+
+function formatTimelineDate(epochMs: number): string {
+  return new Date(epochMs).toLocaleDateString([], {
+    month: "numeric",
+    day: "numeric",
+    year: "numeric",
+  })
+}
+
+function formatTimelineWindow(bounds: TimelineBounds): string {
+  return `${formatShortClock(bounds.startMs)}-${formatShortClock(bounds.endMs)}`
+}
+
+function formatAxisLabel(epochMs: number, rangeHours: TimelineRangeHours): string {
+  const opts: Intl.DateTimeFormatOptions = rangeHours === 1
+    ? { hour: "numeric", minute: "2-digit" }
+    : { hour: "numeric" }
+  return new Date(epochMs).toLocaleTimeString([], opts).replace(/\s/g, "")
+}
+
+function formatShortClock(epochMs: number): string {
+  return new Date(epochMs).toLocaleTimeString([], {
+    hour: "numeric",
+    minute: "2-digit",
+  }).replace(/\s/g, "")
+}
+
+function runBlockTitle(block: TimelineRunBlock): string {
+  const lines = [
+    block.run.jobName,
+    `status: ${block.run.status}`,
+    `start: ${new Date(block.startMs).toLocaleString()}`,
+    `duration: ${formatRunDuration(block)}`,
+  ]
+  if (block.run.runId) lines.push(`run: ${block.run.runId}`)
+  if (block.run.partition) lines.push(`partition: ${block.run.partition}`)
+  return lines.join("\n")
+}
+
+function formatRunDuration(block: TimelineRunBlock): string {
+  return fmtMs(Math.max(0, block.endMs - block.startMs))
+}
+
+function isDangerStatus(status: string): boolean {
+  const s = status.toUpperCase()
+  return s.includes("FAIL") || s.includes("ERROR") || s.includes("CANCEL")
+}
+
+function isRunningStatus(status: string): boolean {
+  const s = status.toUpperCase()
+  return s.includes("RUN") || s.includes("START")
+}
+
+function statusFillColor(status: string): string {
+  const s = status.toUpperCase()
+  if (s.includes("FAIL") || s.includes("ERROR") || s.includes("CANCEL")) return "var(--danger)"
+  if (s.includes("SKIP") || s.includes("WARN")) return "var(--warning)"
+  if (s.includes("QUEU") || s.includes("START") || s.includes("RUN")) return "var(--rvbbit-accent)"
+  if (s.includes("SUCCESS")) return "var(--success)"
+  return "oklch(62% 0.045 245)"
+}
+
+function statusStrokeColor(status: string): string {
+  const s = status.toUpperCase()
+  if (s.includes("FAIL") || s.includes("ERROR") || s.includes("CANCEL")) return "color-mix(in oklch, var(--danger) 78%, white)"
+  if (s.includes("SKIP") || s.includes("WARN")) return "color-mix(in oklch, var(--warning) 78%, white)"
+  if (s.includes("QUEU") || s.includes("START") || s.includes("RUN")) return "color-mix(in oklch, var(--rvbbit-accent) 78%, white)"
+  if (s.includes("SUCCESS")) return "color-mix(in oklch, var(--success) 78%, white)"
+  return "oklch(72% 0.05 245)"
+}
+
+function statusDotClass(status: string): string {
+  const s = status.toUpperCase()
+  if (s.includes("FAIL") || s.includes("ERROR") || s.includes("CANCEL")) return "bg-danger shadow-[0_0_10px_var(--danger)]"
+  if (s.includes("SKIP") || s.includes("WARN")) return "bg-warning shadow-[0_0_10px_var(--warning)]"
+  if (s.includes("QUEU") || s.includes("START") || s.includes("RUN")) return "bg-rvbbit-accent shadow-[0_0_10px_var(--rvbbit-accent)]"
+  if (s.includes("SUCCESS")) return "bg-success shadow-[0_0_10px_var(--success)]"
+  return "bg-[#68708e]"
 }
 
 function tickTitle(tick: DagsterAutomationTick): string {

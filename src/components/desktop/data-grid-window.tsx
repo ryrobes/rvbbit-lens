@@ -305,6 +305,36 @@ function injectFieldOnlyFilters(sql: string, filters: CrossFilter[]): string {
   return `SELECT * FROM (\n${stripTrailingSqlTerminator(sql)}\n) AS __rvbbit_pf WHERE ${preds.join(" AND ")}`
 }
 
+function relationColumnSet(schema: SchemaSnapshot | null, relation: string): Set<string> | null {
+  if (!schema) return null
+  const rel = relation.toLowerCase()
+  const qualified = rel.includes(".")
+  const matches = schema.tables.filter((table) => {
+    const fq = `${table.schema}.${table.name}`.toLowerCase()
+    return fq === rel || (!qualified && table.name.toLowerCase() === rel)
+  })
+  if (matches.length !== 1) return null
+  return new Set(matches[0].columns.map((column) => column.name.toLowerCase()))
+}
+
+function injectFieldOnlyBaseTableFilters(
+  sql: string,
+  filters: CrossFilter[],
+  schema: SchemaSnapshot | null,
+): { sql: string; applied: Set<string> } {
+  const applied = new Set<string>()
+  const item = singleFromItem(sql)
+  if (!item || item.type !== "table") return { sql, applied }
+  const columns = relationColumnSet(schema, item.relation)
+  if (!columns) return { sql, applied }
+  const matching = filters.filter((filter) => columns.has(filter.column.toLowerCase()))
+  if (matching.length === 0) return { sql, applied }
+  for (const filter of matching) applied.add(crossFilterKey(filter))
+  const preds = matching.map((filter) => predicateForParam(filter.column, filter.value, filter.operator))
+  const inner = `(SELECT * FROM ${item.relation} WHERE ${preds.join(" AND ")}) ${item.alias}`
+  return { sql: sql.slice(0, item.start) + inner + sql.slice(item.end), applied }
+}
+
 function injectPipelineHeadFilters(sql: string, filters: CrossFilter[], schema: SchemaSnapshot | null): string {
   if (filters.length === 0) return sql
   const statements = splitStatements(sql)
@@ -317,10 +347,14 @@ function injectPipelineHeadFilters(sql: string, filters: CrossFilter[], schema: 
       if (applicable.length === 0) return statement
 
       const tableFilters = applicable.filter((f) => !!f.sourceTable)
+      const fieldFilters = applicable.filter((f) => !f.sourceTable)
       let head = tableFilters.length > 0
         ? injectStatementFilters(split.head, tableFilters, schema)
         : split.head
-      head = injectFieldOnlyFilters(head, applicable)
+      const pushed = injectFieldOnlyBaseTableFilters(head, fieldFilters, schema)
+      head = pushed.sql
+      const remainingFieldFilters = fieldFilters.filter((filter) => !pushed.applied.has(crossFilterKey(filter)))
+      head = injectFieldOnlyFilters(head, remainingFieldFilters)
       return `${head}\n${split.tail}`
     })
     .join(";\n")
@@ -349,6 +383,14 @@ function artifactParamOperator(artifact: UiArtifactRow, key: string): DesktopPar
   return value === "eq" || value === "in" || value === "gte" || value === "lte" ? value : undefined
 }
 
+function addStatementAlias(aliases: Map<string, string>, value: unknown, key: string): void {
+  if (typeof value !== "string") return
+  const alias = value.trim()
+  if (!alias) return
+  aliases.set(alias, key)
+  aliases.set(alias.toLowerCase(), key)
+}
+
 function statementNameAliases(results: StatementResult[] | null, sourceStatements: string[]): Map<string, string> {
   const aliases = new Map<string, string>()
   if (!results?.length) return aliases
@@ -356,14 +398,18 @@ function statementNameAliases(results: StatementResult[] | null, sourceStatement
   results.forEach((statement, index) => {
     const key = keys[index]
     if (!key) return
+    addStatementAlias(aliases, key, key)
+    addStatementAlias(aliases, String(index + 1), key)
+    addStatementAlias(aliases, `#${index + 1}`, key)
+    addStatementAlias(aliases, String(statement.index + 1), key)
+    addStatementAlias(aliases, `#${statement.index + 1}`, key)
     const artifacts = extractUiArtifacts(statement.rows) ?? []
     for (const artifact of artifacts) {
-      if (artifact.artifact_kind !== "meta" || artifact.renderer !== "statement_name") continue
-      for (const value of [artifactStringValue(artifact, "name"), artifactStringValue(artifact, "label"), artifact.title ?? ""]) {
-        const alias = value.trim()
-        if (!alias) continue
-        aliases.set(alias, key)
-        aliases.set(alias.toLowerCase(), key)
+      addStatementAlias(aliases, artifact.title, key)
+      addStatementAlias(aliases, artifact.spec?.title, key)
+      if (artifact.artifact_kind === "meta" && artifact.renderer === "statement_name") {
+        addStatementAlias(aliases, artifactStringValue(artifact, "name"), key)
+        addStatementAlias(aliases, artifactStringValue(artifact, "label"), key)
       }
     }
   })
@@ -606,6 +652,7 @@ export function DataGridWindow({
   // columns stop matching and the injector falls back to the surgical path — never
   // wrapping a statement with another (stale) statement's columns.
   const lastStmtColsRef = useRef<{ sql: string; cols: (QueryResultColumn[] | undefined)[] } | null>(null)
+  const lastExecutedSqlRef = useRef<string>("")
   // Abort controller + cancel token for the in-flight run, so a Stop button can
   // both abort the client fetch and pg_cancel_backend the server query.
   const runControlRef = useRef<{ controller: AbortController; token: string } | null>(null)
@@ -897,6 +944,7 @@ export function DataGridWindow({
       crossFiltersRef.current.length > 0
         ? injectStatementFilters(compiledRun, crossFiltersRef.current, schema, stmtCols)
         : compiledRun
+    lastExecutedSqlRef.current = toRun
     // rvbbit.synth(…) is a text-to-SQL source returning one jsonb column per row;
     // expand those into real grid columns like a pipeline (but it isn't wrapped and
     // has no Steps tab).
@@ -1788,6 +1836,15 @@ export function DataGridWindow({
       if (seededUiDefaultKeysRef.current.has(input.defaultSeedKey)) return
       seededUiDefaultKeysRef.current.add(input.defaultSeedKey)
     }
+    const rawBindings =
+      multiResults && input.sourceStmtIndex !== undefined
+        ? filterBindings.get(input.sourceStmtIndex)
+        : undefined
+    const bindings =
+      input.requiresBinding && input.sourceStmtIndex !== undefined
+        ? rawBindings?.filter((binding) => binding.targetStmtIndex !== input.sourceStmtIndex)
+        : rawBindings
+    if (input.requiresBinding && multiResults && input.sourceStmtIndex !== undefined && !bindings?.length) return
     const resolved =
       input.sourceStmtIndex === undefined
         ? null
@@ -1808,24 +1865,31 @@ export function DataGridWindow({
     })
     if (!multiResults || input.sourceStmtIndex === undefined) return
 
-    const bindings = filterBindings.get(input.sourceStmtIndex)
     const targets: StatementFilterTarget[] = bindings?.length
       ? bindings
       : [{ field: input.field }]
     const clear =
       input.multiValueAction === "remove" ||
+      (input.multiValueAction === "replace" && Array.isArray(input.value) && input.value.length === 0) ||
       ((input.operator === "gte" || input.operator === "lte") && (input.value === null || input.value === undefined))
     setCrossFilters((prev) => {
       let next = prev
       for (const binding of targets) {
         const column = binding.field || resolved?.column || input.field
-        const target: Pick<CrossFilter, "sourceSchema" | "sourceTable" | "column" | "targetStmtIndex"> = resolved
+        const targetIsExplicitBinding = !!bindings?.length
+        const target: Pick<CrossFilter, "sourceSchema" | "sourceTable" | "column" | "targetStmtIndex"> = targetIsExplicitBinding
+          ? { column, targetStmtIndex: binding.targetStmtIndex }
+          : resolved
           ? { ...resolved, column, targetStmtIndex: binding.targetStmtIndex }
           : { column, targetStmtIndex: binding.targetStmtIndex }
         const key = crossFilterKey(target)
         const existing = next.find((p) => crossFilterKey(p) === key)
         const without = next.filter((p) => crossFilterKey(p) !== key)
         if (clear) {
+          next = without
+          continue
+        }
+        if (input.multiValueAction === "replace" && existing && sameParamValue(existing.value, input.value)) {
           next = without
           continue
         }
@@ -1920,9 +1984,33 @@ export function DataGridWindow({
       name: blockName,
       runKind: () => runState.kind,
       compiledSql: () => compiledSql,
+      lastExecutedSql: () => lastExecutedSqlRef.current,
       keys: () => (result?.results ? statementKeys(result.results, sourceStatements) : null),
       statements: () => result?.results?.map((r) => ({ cols: r.columns.map((c) => c.name), rows: r.rows.length })) ?? null,
       crossFilters: () => crossFiltersRef.current,
+      aliases: () => Array.from(layoutAliases.entries()),
+      filterBindings: () => Array.from(filterBindings.entries()),
+      debugFilters: () => ({
+        keys: result?.results ? statementKeys(result.results, sourceStatements) : null,
+        statements: result?.results?.map((r) => ({ index: r.index, cols: r.columns.map((c) => c.name), rows: r.rows.length })) ?? null,
+        aliases: Array.from(layoutAliases.entries()),
+        filterBindings: Array.from(filterBindings.entries()),
+        crossFilters: crossFiltersRef.current,
+        lastExecutedSql: lastExecutedSqlRef.current,
+      }),
+      uiFilter: (field: string, value: unknown, stmtIdx = 0) => {
+        const values = Array.isArray(value) ? value : [value]
+        emitUiArtifactParam({
+          field,
+          value: values,
+          operator: "in",
+          multiValueAction: "replace",
+          cascade: false,
+          sourceStmtIndex: stmtIdx,
+          requiresBinding: true,
+        })
+        return "ok"
+      },
       xfilterByName: (colName: string, value: unknown, stmtIdx = 0) => {
         const cols = result?.results?.[stmtIdx]?.columns ?? result?.columns ?? []
         const col = cols.find((c) => c.name === colName)
@@ -1945,7 +2033,7 @@ export function DataGridWindow({
       },
     }
     return () => { delete reg[w.id] }
-  }, [w.id, blockName, result, runState.kind, onCellFilter, onChartFilter, onChangePayload, sourceStatements, compiledSql])
+  }, [w.id, blockName, result, runState.kind, onCellFilter, onChartFilter, onChangePayload, sourceStatements, compiledSql, layoutAliases, filterBindings, emitUiArtifactParam])
 
   // Live progress while a query runs — polled from a SEPARATE connection so we
   // can see it (the main connection is blocked). pg_stat_activity gives
@@ -2447,10 +2535,26 @@ export function DataGridWindow({
             )
           ) : null}
           {bodyTab === "rows" && !result ? (
-            <EmptyResult error={error} running={isRunning} progress={progress} onRun={onRun} />
+            <EmptyResult
+              error={error}
+              running={isRunning}
+              progress={progress}
+              onRun={onRun}
+              filterCount={crossFilters.length}
+              onClearFilters={() => setCrossFilters([])}
+            />
           ) : null}
           {bodyTab === "profile" && result ? <ProfileView result={result} /> : null}
-          {bodyTab === "profile" && !result ? <EmptyResult error={error} running={isRunning} progress={progress} onRun={onRun} /> : null}
+          {bodyTab === "profile" && !result ? (
+            <EmptyResult
+              error={error}
+              running={isRunning}
+              progress={progress}
+              onRun={onRun}
+              filterCount={crossFilters.length}
+              onClearFilters={() => setCrossFilters([])}
+            />
+          ) : null}
           {bodyTab === "chart" && result ? (
             <div className="flex h-full flex-col">
               {present ? null : <ViewKindBar kind={viewKind} onChange={setViewKind} />}
@@ -2507,7 +2611,14 @@ export function DataGridWindow({
             </div>
           ) : null}
           {bodyTab === "chart" && !result ? (
-            <EmptyResult error={error} running={isRunning} progress={progress} onRun={onRun} />
+            <EmptyResult
+              error={error}
+              running={isRunning}
+              progress={progress}
+              onRun={onRun}
+              filterCount={crossFilters.length}
+              onClearFilters={() => setCrossFilters([])}
+            />
           ) : null}
           {bodyTab === "sql" ? (
             <div className="h-full bg-doc-bg group-data-[focused=false]/window:bg-doc-bg/70">
@@ -3115,11 +3226,15 @@ function EmptyResult({
   running,
   progress,
   onRun,
+  filterCount,
+  onClearFilters,
 }: {
   error: { error: string; code?: string; detail?: string; hint?: string; position?: number | null } | null
   running: boolean
   progress?: QueryProgress | null
   onRun: () => void
+  filterCount?: number
+  onClearFilters?: () => void
 }) {
   if (running) {
     return (
@@ -3151,7 +3266,14 @@ function EmptyResult({
         </div>
         {error.detail ? <div className="text-chrome-text">{error.detail}</div> : null}
         {error.hint ? <div className="text-rvbbit-accent">Hint: {error.hint}</div> : null}
-        <Button size="sm" variant="neutral" onClick={onRun}>Run again</Button>
+        <div className="flex flex-wrap gap-2">
+          <Button size="sm" variant="neutral" onClick={onRun}>Run again</Button>
+          {filterCount && onClearFilters ? (
+            <Button size="sm" variant="neutral" onClick={onClearFilters}>
+              Clear {filterCount} filter{filterCount === 1 ? "" : "s"}
+            </Button>
+          ) : null}
+        </div>
       </div>
     )
   }

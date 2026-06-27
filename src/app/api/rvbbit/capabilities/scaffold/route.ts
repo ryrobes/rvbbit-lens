@@ -9,9 +9,11 @@ export const runtime = "nodejs"
 const DEFAULT_CAPABILITY_ROOT = "/usr/share/rvbbit/capabilities"
 
 /**
- * Run the `rvbbit-capability scaffold` CLI against a manifest, then
- * write the client's knob-rendered overrides on top of the generated
- * register.sql / operator.sql / compose.yaml / rvbbit.backend.yaml.
+ * Run the `rvbbit-capability scaffold` CLI against a manifest when a pack
+ * needs template files, then write the client's knob-rendered overrides on top
+ * of the generated register.sql / operator.sql / compose.yaml /
+ * rvbbit.backend.yaml. If the CLI is unavailable and the rendered artifacts are
+ * already self-contained (prebuilt image / SQL-only), write them directly.
  *
  * Why the post-write step: the CLI re-renders from the on-disk manifest
  * and doesn't know about per-install knob edits (batch_size, port,
@@ -151,6 +153,117 @@ async function runScaffoldCli(
   })
 }
 
+function composeNeedsSourceBuild(overrides?: Record<string, string>): boolean {
+  const compose = overrides?.["compose.yaml"] ?? ""
+  return /^(\s*)build\s*:/m.test(compose)
+}
+
+function inlineScaffoldAllowed(overrides?: Record<string, string>): boolean {
+  if (!overrides || Object.keys(overrides).length === 0) return false
+  return !composeNeedsSourceBuild(overrides)
+}
+
+async function applyOverrides(
+  outAbs: string,
+  overrides?: Record<string, string>,
+): Promise<
+  | { ok: true; overridesApplied: string[] }
+  | { ok: false; error: string; overridesApplied: string[] }
+> {
+  const overridesApplied: string[] = []
+  if (!overrides) return { ok: true, overridesApplied }
+
+  for (const [name, content] of Object.entries(overrides)) {
+    if (!ALLOWED_OVERRIDES.has(name)) continue
+    if (typeof content !== "string") continue
+    const target = path.join(/*turbopackIgnore: true*/ outAbs, name)
+    try {
+      await fs.writeFile(/*turbopackIgnore: true*/ target, content, "utf8")
+      overridesApplied.push(name)
+    } catch (e) {
+      return {
+        ok: false,
+        error: `failed to write override ${name}: ${e instanceof Error ? e.message : String(e)}`,
+        overridesApplied,
+      }
+    }
+  }
+  return { ok: true, overridesApplied }
+}
+
+async function writeInlineScaffold(
+  outAbs: string,
+  manifestAbs: string,
+  overrides?: Record<string, string>,
+): Promise<
+  | { ok: true; overridesApplied: string[]; stdout: string; stderr: string }
+  | { ok: false; error: string; overridesApplied: string[] }
+> {
+  await fs.mkdir(/*turbopackIgnore: true*/ outAbs, { recursive: true })
+  try {
+    await fs.copyFile(
+      /*turbopackIgnore: true*/ manifestAbs,
+      /*turbopackIgnore: true*/ path.join(/*turbopackIgnore: true*/ outAbs, "capability.yaml"),
+    )
+  } catch {
+    /* best-effort: rvbbit.backend.yaml is written from overrides below */
+  }
+
+  const applied = await applyOverrides(outAbs, overrides)
+  if (!applied.ok) return applied
+
+  const readme = [
+    "# Rvbbit capability install bundle",
+    "",
+    "Generated from Lens without the rvbbit-capability CLI because the rendered artifacts are self-contained.",
+    "Source-build packs still require the CLI templates; image/API/SQL-only packs do not.",
+    "",
+    "## Run",
+    "",
+    "```bash",
+    "docker compose up -d",
+    "```",
+    "",
+    "## Register",
+    "",
+    "```bash",
+    "psql \"$RVBBIT_DSN\" -f register.sql",
+    "psql \"$RVBBIT_DSN\" -f operator.sql",
+    "psql \"$RVBBIT_DSN\" -f smoke.sql",
+    "```",
+    "",
+  ].join("\n")
+  await fs.writeFile(/*turbopackIgnore: true*/ path.join(/*turbopackIgnore: true*/ outAbs, "README.md"), readme, "utf8")
+
+  return {
+    ok: true,
+    overridesApplied: applied.overridesApplied,
+    stdout: "wrote inline scaffold from rendered artifacts\n",
+    stderr: "",
+  }
+}
+
+async function listScaffoldFiles(outAbs: string, overridesApplied: string[]): Promise<ScaffoldedFile[]> {
+  let files: ScaffoldedFile[] = []
+  try {
+    const entries = await fs.readdir(/*turbopackIgnore: true*/ outAbs)
+    files = await Promise.all(
+      entries.map(async (name) => {
+        const stat = await fs.stat(/*turbopackIgnore: true*/ path.join(/*turbopackIgnore: true*/ outAbs, name))
+        return {
+          name,
+          size: stat.size,
+          isOverride: overridesApplied.includes(name),
+        }
+      }),
+    )
+    files.sort((a, b) => a.name.localeCompare(b.name))
+  } catch {
+    /* best-effort listing */
+  }
+  return files
+}
+
 export async function POST(req: Request) {
   const body = (await req.json().catch(() => null)) as ScaffoldBody | null
   if (!body?.outDir || (!body?.manifestPath && !body?.manifestYaml)) {
@@ -193,19 +306,39 @@ export async function POST(req: Request) {
   }
 
   const cli = locateCli()
-  if (!(await fileExists(cli))) {
-    return NextResponse.json(
-      {
-        ok: false,
-        error:
-          `rvbbit-capability CLI not found at ${cli}. Set RVBBIT_CAPABILITY_CLI, ` +
-          `RVBBIT_REPO_PATH, or package the CLI under RVBBIT_CAPABILITY_ROOT/tools.`,
-      },
-      { status: 500 },
-    )
+  const cliExists = await fileExists(cli)
+  let result: { ok: boolean; stdout: string; stderr: string }
+  let overridesApplied: string[] = []
+
+  if (!cliExists) {
+    if (!inlineScaffoldAllowed(body.overrides)) {
+      const reason = composeNeedsSourceBuild(body.overrides)
+        ? "this source-build pack needs Dockerfile/template files"
+        : "no rendered scaffold artifacts were provided"
+      return NextResponse.json(
+        {
+          ok: false,
+          error:
+            `rvbbit-capability CLI not found at ${cli}; ${reason}. ` +
+            `Use Warren/catalog deploy for SQL-only deployment, install the CLI, or set ` +
+            `RVBBIT_CAPABILITY_CLI / RVBBIT_REPO_PATH / RVBBIT_CAPABILITY_ROOT.`,
+        },
+        { status: 500 },
+      )
+    }
+    const inline = await writeInlineScaffold(out.path, manifestAbs, body.overrides)
+    if (!inline.ok) {
+      return NextResponse.json(
+        { ok: false, error: inline.error, overridesApplied: inline.overridesApplied },
+        { status: 500 },
+      )
+    }
+    result = inline
+    overridesApplied = inline.overridesApplied
+  } else {
+    result = await runScaffoldCli(manifestAbs, out.path, !!body.force)
   }
 
-  const result = await runScaffoldCli(manifestAbs, out.path, !!body.force)
   if (!result.ok) {
     return NextResponse.json(
       { ok: false, error: "scaffold failed", stdout: result.stdout, stderr: result.stderr },
@@ -216,46 +349,19 @@ export async function POST(req: Request) {
   // Stamp client-rendered overrides over the CLI output. Each override
   // must be a name from the allowlist — no path traversal possible since
   // we never honor anything but a flat basename.
-  const overridesApplied: string[] = []
-  if (body.overrides) {
-    for (const [name, content] of Object.entries(body.overrides)) {
-      if (!ALLOWED_OVERRIDES.has(name)) continue
-      if (typeof content !== "string") continue
-      const target = path.join(/*turbopackIgnore: true*/ out.path, name)
-      try {
-        await fs.writeFile(/*turbopackIgnore: true*/ target, content, "utf8")
-        overridesApplied.push(name)
-      } catch (e) {
-        return NextResponse.json(
-          {
-            ok: false,
-            error: `failed to write override ${name}: ${e instanceof Error ? e.message : String(e)}`,
-            overridesApplied,
-          },
-          { status: 500 },
-        )
-      }
+  if (cliExists) {
+    const applied = await applyOverrides(out.path, body.overrides)
+    if (!applied.ok) {
+      return NextResponse.json(
+        { ok: false, error: applied.error, overridesApplied: applied.overridesApplied },
+        { status: 500 },
+      )
     }
+    overridesApplied = applied.overridesApplied
   }
 
   // List the resulting directory so the UI can show what got written.
-  let files: ScaffoldedFile[] = []
-  try {
-    const entries = await fs.readdir(/*turbopackIgnore: true*/ out.path)
-    files = await Promise.all(
-      entries.map(async (name) => {
-        const stat = await fs.stat(/*turbopackIgnore: true*/ path.join(/*turbopackIgnore: true*/ out.path, name))
-        return {
-          name,
-          size: stat.size,
-          isOverride: overridesApplied.includes(name),
-        }
-      }),
-    )
-    files.sort((a, b) => a.name.localeCompare(b.name))
-  } catch {
-    /* best-effort listing */
-  }
+  const files = await listScaffoldFiles(out.path, overridesApplied)
 
   return NextResponse.json({
     ok: true,

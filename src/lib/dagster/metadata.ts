@@ -377,8 +377,8 @@ SELECT r.run_id::text,
 FROM ${qt(runs)} r
 ${tagJoin}
 ORDER BY ${orderExpr} DESC NULLS LAST
-LIMIT 120`
-  const res = await runQuery(connectionId, sql, 120)
+LIMIT 240`
+  const res = await runQuery(connectionId, sql, 240)
   if (!res.ok) return []
   return res.rows.map((r) => ({
     runId: str(r.run_id),
@@ -565,7 +565,7 @@ async function fetchAutomations(connectionId: string, d: DagsterDetection): Prom
            FROM ${qt(ticks)} jt
            WHERE ${tickPredicate}
            ORDER BY jt.timestamp DESC NULLS LAST
-           LIMIT 24
+           LIMIT 128
          ) recent
        ) tick ON true`
     : ""
@@ -584,8 +584,8 @@ SELECT b.${qi(idCol)}::text AS id,
 FROM ${qt(base)} b
 ${tickJoin}
 ORDER BY ${updatedOrder} DESC NULLS LAST
-LIMIT 120`
-  const res = await runQuery(connectionId, sql, 120)
+LIMIT 160`
+  const res = await runQuery(connectionId, sql, 160)
   if (!res.ok) return []
   return res.rows.map((r) => ({
     id: str(r.id),

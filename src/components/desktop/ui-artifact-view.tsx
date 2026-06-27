@@ -2,10 +2,11 @@
 
 import { useEffect, useMemo, useState } from "react"
 import { VegaEmbed } from "react-vega"
-import type { VisualizationSpec } from "vega-embed"
+import type { Result as VegaEmbedResult, VisualizationSpec } from "vega-embed"
 import { Check } from "@/lib/icons"
 import { vegaConfigFromTheme } from "@/lib/desktop/chart-theme"
 import type { DesktopParamOperator, DesktopParamValue } from "@/lib/desktop/types"
+import type { CrossFilter } from "@/lib/desktop/reactive-sql"
 import { formatCellValue } from "@/lib/sql/format"
 import { cn } from "@/lib/utils"
 
@@ -37,6 +38,7 @@ export type UiArtifactParamInput = {
   type?: string
   sourceStmtIndex?: number
   defaultSeedKey?: string
+  requiresBinding?: boolean
 }
 
 export type UiArtifactActionInput = {
@@ -59,6 +61,7 @@ export function UiArtifactView({
   onEmitParam,
   onRunAction,
   sourceStmtIndex,
+  highlightFilters,
 }: {
   artifacts: UiArtifactRow[]
   fill?: boolean
@@ -66,6 +69,7 @@ export function UiArtifactView({
   onEmitParam?: (input: UiArtifactParamInput) => void
   onRunAction?: (input: UiArtifactActionInput) => Promise<UiArtifactActionResult>
   sourceStmtIndex?: number
+  highlightFilters?: CrossFilter[]
 }) {
   const visibleArtifacts = artifacts.filter((artifact) => artifact.artifact_kind !== "meta")
   if (visibleArtifacts.length === 0) return null
@@ -80,6 +84,7 @@ export function UiArtifactView({
           onEmitParam={onEmitParam}
           onRunAction={onRunAction}
           sourceStmtIndex={sourceStmtIndex}
+          highlightFilters={highlightFilters}
         />
       ))}
     </div>
@@ -93,6 +98,7 @@ function UiArtifactCard({
   onEmitParam,
   onRunAction,
   sourceStmtIndex,
+  highlightFilters,
 }: {
   artifact: UiArtifactRow
   fill?: boolean
@@ -100,6 +106,7 @@ function UiArtifactCard({
   onEmitParam?: (input: UiArtifactParamInput) => void
   onRunAction?: (input: UiArtifactActionInput) => Promise<UiArtifactActionResult>
   sourceStmtIndex?: number
+  highlightFilters?: CrossFilter[]
 }) {
   return (
     <section className={cn("min-w-0 overflow-hidden rounded-md border border-chrome-border/70 bg-chrome-bg/45", fill ? "h-full" : "")}>
@@ -112,7 +119,13 @@ function UiArtifactCard({
         {artifact.renderer === "metric_card" ? (
           <MetricCardArtifact artifact={artifact} fill={fill} />
         ) : artifact.renderer === "vega_lite" ? (
-          <VegaLiteArtifact artifact={artifact} fill={fill} />
+          <VegaLiteArtifact
+            artifact={artifact}
+            fill={fill}
+            onEmitParam={onEmitParam}
+            sourceStmtIndex={sourceStmtIndex}
+            highlightFilters={highlightFilters}
+          />
         ) : artifact.renderer === "table_view" ? (
           <TableArtifact artifact={artifact} fill={fill} />
         ) : artifact.renderer === "filter_control" ? (
@@ -505,22 +518,143 @@ function MetricCardArtifact({ artifact, fill }: { artifact: UiArtifactRow; fill?
   )
 }
 
-function VegaLiteArtifact({ artifact, fill }: { artifact: UiArtifactRow; fill?: boolean }) {
+function vegaEncodingField(spec: Record<string, unknown>, channel: string): string {
+  const encoding = spec.encoding
+  if (!encoding || typeof encoding !== "object" || Array.isArray(encoding)) return ""
+  const channelDef = (encoding as Record<string, unknown>)[channel]
+  if (!channelDef || typeof channelDef !== "object" || Array.isArray(channelDef)) return ""
+  const field = (channelDef as Record<string, unknown>).field
+  return typeof field === "string" ? field : ""
+}
+
+function hasVegaClickParam(spec: Record<string, unknown>): boolean {
+  const params = spec.params
+  return Array.isArray(params) && params.some((param) => {
+    if (!param || typeof param !== "object" || Array.isArray(param)) return false
+    return (param as Record<string, unknown>).name === "click"
+  })
+}
+
+function withVegaClickSelection(spec: Record<string, unknown>, field: string): Record<string, unknown> {
+  if (!field || hasVegaClickParam(spec)) return spec
+  const params = Array.isArray(spec.params) ? spec.params : []
+  const encoding = spec.encoding && typeof spec.encoding === "object" && !Array.isArray(spec.encoding)
+    ? { ...(spec.encoding as Record<string, unknown>) }
+    : {}
+  if (!encoding.opacity) {
+    encoding.opacity = { condition: { param: "click", value: 1, empty: true }, value: 0.35 }
+  }
+  return {
+    ...spec,
+    params: [
+      ...params,
+      {
+        name: "click",
+        select: { type: "point", fields: [field], toggle: "true" },
+      },
+    ],
+    encoding,
+  }
+}
+
+function crossFilterValuesForField(filters: CrossFilter[] | undefined, field: string): unknown[] {
+  if (!field || !filters?.length) return []
+  const out: unknown[] = []
+  for (const filter of filters) {
+    if (filter.column.toLowerCase() !== field.toLowerCase()) continue
+    const values = Array.isArray(filter.value) ? filter.value : [filter.value]
+    for (const value of values) {
+      if (value !== undefined && value !== null) out.push(value)
+    }
+  }
+  return out
+}
+
+function withVegaFilterHighlight(
+  spec: Record<string, unknown>,
+  field: string,
+  selectedValues: unknown[],
+): Record<string, unknown> {
+  if (!field || selectedValues.length === 0) return withVegaClickSelection(spec, field)
+  const encoding = spec.encoding && typeof spec.encoding === "object" && !Array.isArray(spec.encoding)
+    ? { ...(spec.encoding as Record<string, unknown>) }
+    : {}
+  encoding.opacity = {
+    condition: {
+      test: `indexof(${JSON.stringify(selectedValues)}, datum[${JSON.stringify(field)}]) >= 0`,
+      value: 1,
+    },
+    value: 0.35,
+  }
+  return { ...withVegaClickSelection(spec, field), encoding }
+}
+
+function VegaLiteArtifact({
+  artifact,
+  fill,
+  onEmitParam,
+  sourceStmtIndex,
+  highlightFilters,
+}: {
+  artifact: UiArtifactRow
+  fill?: boolean
+  onEmitParam?: (input: UiArtifactParamInput) => void
+  sourceStmtIndex?: number
+  highlightFilters?: CrossFilter[]
+}) {
+  const xField = useMemo(
+    () => vegaEncodingField(artifact.spec && typeof artifact.spec === "object" ? artifact.spec : {}, "x"),
+    [artifact.spec],
+  )
+  const highlightValues = useMemo(
+    () => crossFilterValuesForField(highlightFilters, xField),
+    [highlightFilters, xField],
+  )
   const spec = useMemo(() => {
     const base = artifact.spec && typeof artifact.spec === "object" ? { ...artifact.spec } : {}
+    const selectable = onEmitParam ? withVegaFilterHighlight(base, xField, highlightValues) : base
     return {
-      ...base,
-      config: { ...vegaConfigFromTheme(), ...((base.config as Record<string, unknown> | undefined) ?? {}) },
-      width: base.width ?? "container",
-      height: fill ? "container" : base.height ?? "container",
-      autosize: base.autosize ?? { type: "fit", contains: "padding", resize: true },
+      ...selectable,
+      config: { ...vegaConfigFromTheme(), ...((selectable.config as Record<string, unknown> | undefined) ?? {}) },
+      width: selectable.width ?? "container",
+      height: fill ? "container" : selectable.height ?? "container",
+      autosize: selectable.autosize ?? { type: "fit", contains: "padding", resize: true },
     }
-  }, [artifact.spec, fill])
+  }, [artifact.spec, fill, highlightValues, onEmitParam, xField])
+
+  function handleEmbed(res: VegaEmbedResult) {
+    if (!onEmitParam || !xField) return
+    const handler = (_event: unknown, item: unknown) => {
+      const datum =
+        item && typeof item === "object" && "datum" in item
+          ? (item as { datum?: unknown }).datum
+          : null
+      if (!datum || typeof datum !== "object" || Array.isArray(datum)) return
+      const raw = (datum as Record<string, unknown>)[xField]
+      if (raw === undefined || raw === null) return
+      onEmitParam({
+        field: xField,
+        value: [raw],
+        operator: "in",
+        multiValueAction: "replace",
+        cascade: false,
+        sourceStmtIndex,
+        requiresBinding: true,
+      })
+    }
+    try {
+      res.view.addEventListener("click", handler)
+    } catch {
+      // Custom Vega views without mark click events are still valid.
+    }
+  }
+
   return (
     <div className={cn("min-h-0 p-2", fill ? "h-full w-full" : "h-72 w-full")}>
       <VegaEmbed
         spec={spec as unknown as VisualizationSpec}
         options={{ actions: false, renderer: "svg", tooltip: { theme: "dark" } }}
+        onEmbed={handleEmbed}
         className="h-full w-full"
       />
     </div>
