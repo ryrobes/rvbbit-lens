@@ -498,6 +498,43 @@
   animation: slide-in-right 0.18s ease-out both;
 }
 
+@keyframes rvbbit-boot-logo {
+  0%, 100% {
+    opacity: 0.72;
+    transform: translateY(0) scale(0.985);
+    filter: drop-shadow(0 0 0 color-mix(in oklch, var(--main) 0%, transparent));
+  }
+  50% {
+    opacity: 1;
+    transform: translateY(-1px) scale(1);
+    filter: drop-shadow(0 0 18px color-mix(in oklch, var(--main) 30%, transparent));
+  }
+}
+
+@keyframes rvbbit-boot-sweep {
+  from { transform: translateX(-260%); }
+  to { transform: translateX(260%); }
+}
+
+@keyframes rvbbit-boot-progress {
+  from { transform: translateX(-100%); }
+  to { transform: translateX(0); }
+}
+
+.rvbbit-boot-logo {
+  animation: rvbbit-boot-logo 1.45s ease-in-out infinite;
+  transform-origin: center;
+}
+
+.rvbbit-boot-sweep {
+  animation: rvbbit-boot-sweep 1.45s cubic-bezier(0.33, 1, 0.68, 1) infinite;
+}
+
+.rvbbit-boot-progress {
+  animation: rvbbit-boot-progress 1.35s cubic-bezier(0.33, 1, 0.68, 1) both;
+  transform-origin: left center;
+}
+
 /* ─── Workspace canvases (5 desktops) ───
  *
  * All five layers stay mounted so window state survives a switch.
@@ -521,6 +558,12 @@
 @keyframes av-ws-enter-back { from { transform: translateX(-100%); }  to { transform: translateX(0); } }
 
 @media (prefers-reduced-motion: reduce) {
+  .rvbbit-boot-logo,
+  .rvbbit-boot-sweep,
+  .rvbbit-boot-progress {
+    animation: none;
+  }
+
   .av-ws-exit-fwd, .av-ws-exit-back { display: none; }
   .av-ws-enter-fwd, .av-ws-enter-back {
     display: block;

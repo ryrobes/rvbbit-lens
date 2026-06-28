@@ -244,7 +244,7 @@ WITH rvbbit_filter_source AS (
     state,
     county,
     observed,
-    coalesce(nullif(regexp_replace(bfroid, '\D', '', 'g'), '')::int, 0) AS sighting_id
+    coalesce(nullif(regexp_replace(bfroid::text, '\D', '', 'g'), '')::int, 0) AS sighting_id
   FROM public.bigfoot_sightings
   WHERE nullif(trim(state), '') IS NOT NULL
 ),

@@ -576,11 +576,11 @@ export async function fetchSpecialists(
 
 // ── LLM model catalog (for the builder's model picker) ──────────────
 //
-// rvbbit.provider_models is the canonical list of usable chat models —
-// cloud providers AND Warren-hosted local LLMs, which the warren agent
-// registers via rvbbit.register_self_hosted_model (auth_state='configured',
-// raw.kind='self_hosted'). So one catalog covers both; the target string is
-// just `provider/model`.
+// rvbbit.provider_models is the preferred list of usable chat models, but a
+// working database can also know about models through seeded rate cards,
+// existing operators, and receipts before the provider catalog has been
+// refreshed. The picker value is the model string itself; provider is grouping
+// metadata because the backend sends `model` to the selected/default provider.
 
 export interface LlmModel {
   provider: string
@@ -595,12 +595,78 @@ export async function fetchLlmModels(
 ): Promise<{ models: LlmModel[]; error?: string }> {
   const res = await runQuery(
     connectionId,
-    "SELECT pm.provider, pm.model, pm.display_name, " +
-      "(coalesce(pc.raw->>'kind', '') = 'self_hosted') AS self_hosted " +
-      "FROM rvbbit.provider_models pm " +
-      "JOIN rvbbit.provider_catalog pc ON pc.provider = pm.provider " +
-      "WHERE pm.available AND pc.auth_state IN ('configured', 'public') " +
-      "ORDER BY self_hosted DESC, pm.provider, pm.model",
+    `WITH provider_rows AS (
+       SELECT pm.provider,
+              pm.model,
+              pm.display_name,
+              (coalesce(pc.raw->>'kind', '') = 'self_hosted') AS self_hosted,
+              CASE
+                WHEN pc.auth_state IN ('configured', 'public') THEN 0
+                WHEN pc.auth_state IS NULL THEN 1
+                ELSE 2
+              END AS source_rank
+         FROM rvbbit.provider_models pm
+         LEFT JOIN rvbbit.provider_catalog pc ON pc.provider = pm.provider
+        WHERE pm.available
+      ),
+      rate_rows AS (
+       SELECT CASE WHEN model LIKE '%/%' THEN split_part(model, '/', 1) ELSE 'rate-card' END AS provider,
+              model,
+              NULL::text AS display_name,
+              false AS self_hosted,
+              3 AS source_rank
+         FROM rvbbit.model_rates
+      ),
+      operator_rows AS (
+       SELECT CASE WHEN model LIKE '%/%' THEN split_part(model, '/', 1) ELSE 'operator' END AS provider,
+              model,
+              NULL::text AS display_name,
+              false AS self_hosted,
+              4 AS source_rank
+         FROM rvbbit.operators
+        WHERE nullif(btrim(model), '') IS NOT NULL
+       UNION ALL
+       SELECT CASE WHEN step->>'model' LIKE '%/%' THEN split_part(step->>'model', '/', 1) ELSE 'operator-step' END AS provider,
+              step->>'model' AS model,
+              NULL::text AS display_name,
+              false AS self_hosted,
+              5 AS source_rank
+         FROM rvbbit.operators o
+         CROSS JOIN LATERAL jsonb_array_elements(
+           CASE WHEN jsonb_typeof(o.steps) = 'array' THEN o.steps ELSE '[]'::jsonb END
+         ) AS step
+        WHERE nullif(btrim(step->>'model'), '') IS NOT NULL
+      ),
+      receipt_rows AS (
+       SELECT CASE WHEN model LIKE '%/%' THEN split_part(model, '/', 1) ELSE 'receipt' END AS provider,
+              model,
+              NULL::text AS display_name,
+              false AS self_hosted,
+              6 AS source_rank
+         FROM rvbbit.receipts
+        WHERE invocation_at >= now() - interval '90 days'
+          AND nullif(btrim(model), '') IS NOT NULL
+        GROUP BY model
+      ),
+      all_rows AS (
+       SELECT * FROM provider_rows
+       UNION ALL SELECT * FROM rate_rows
+       UNION ALL SELECT * FROM operator_rows
+       UNION ALL SELECT * FROM receipt_rows
+      ),
+      ranked AS (
+       SELECT *,
+              row_number() OVER (
+                PARTITION BY model
+                ORDER BY source_rank, self_hosted DESC, provider
+              ) AS rn
+         FROM all_rows
+        WHERE nullif(btrim(model), '') IS NOT NULL
+      )
+      SELECT provider, model, display_name, self_hosted
+        FROM ranked
+       WHERE rn = 1
+       ORDER BY self_hosted DESC, provider, model`,
   )
   if (!res.ok) return { models: [], error: res.error }
   return {

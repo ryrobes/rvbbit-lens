@@ -1825,6 +1825,8 @@ export function ModelField({
   const filtered = q
     ? models.filter(
         (m) =>
+          m.model.toLowerCase().includes(q) ||
+          m.provider.toLowerCase().includes(q) ||
           `${m.provider}/${m.model}`.toLowerCase().includes(q) ||
           (m.displayName ?? "").toLowerCase().includes(q),
       )
@@ -1835,7 +1837,7 @@ export function ModelField({
     arr.push(m)
     groups.set(m.provider, arr)
   }
-  const inCatalog = models.some((m) => `${m.provider}/${m.model}` === value)
+  const inCatalog = models.some((m) => m.model === value)
 
   // close on click-away / Escape
   useEffect(() => {
@@ -1932,10 +1934,10 @@ export function ModelField({
                         {ms[0].selfHosted ? " · local" : ""}
                       </div>
                       {ms.map((m) => {
-                        const v = `${m.provider}/${m.model}`
+                        const v = m.model
                         return (
                           <Option
-                            key={v}
+                            key={`${m.provider}:${m.model}`}
                             label={m.model}
                             sub={m.displayName ?? undefined}
                             active={v === value}

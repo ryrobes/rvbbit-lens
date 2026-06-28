@@ -22,6 +22,7 @@ export type DesktopWindowKind =
   | "pg-monitor"
   | "notifications"
   | "operators"
+  | "model-settings"
   | "operator-flow"
   | "specialists"
   | "specialist-detail"
@@ -52,6 +53,7 @@ export type DesktopWindowKind =
   | "metric-catalog"
   | "metric-creator"
   | "metric-inspector"
+  | "viz-blocks"
   | "cube-catalog"
   | "cube-creator"
   | "cube-inspector"
@@ -107,6 +109,7 @@ export type WindowPayload =
   | PgMonitorPayload
   | NotificationsPayload
   | OperatorsPayload
+  | ModelSettingsPayload
   | OperatorFlowPayload
   | SpecialistsPayload
   | SpecialistDetailPayload
@@ -137,6 +140,7 @@ export type WindowPayload =
   | MetricCatalogPayload
   | MetricCreatorPayload
   | MetricInspectorPayload
+  | VizBlocksPayload
   | CubeCatalogPayload
   | CubeCreatorPayload
   | CubeInspectorPayload
@@ -801,6 +805,11 @@ export interface MetricInspectorPayload {
   /** Optional metric to select on open. */
   metricName?: string | null
 }
+export interface VizBlocksPayload {
+  kind?: "viz-blocks"
+  /** Optional canonical block to load for editing on open. */
+  blockName?: string | null
+}
 /** Cube Studio — the curated subject-area tables (metrics→cubes→raw). Catalog
  *  browses them, Creator authors them (Manual/Propose/From-Pack), Inspector
  *  grounds one (columns/health/lineage). */
@@ -863,6 +872,10 @@ export interface NotificationsPayload {
 
 export interface OperatorsPayload {
   kind?: "operators"
+}
+
+export interface ModelSettingsPayload {
+  kind?: "model-settings"
 }
 
 export interface OperatorFlowPayload {

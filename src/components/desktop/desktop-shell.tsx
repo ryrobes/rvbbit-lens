@@ -3,6 +3,7 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react"
 import {
   Activity,
+  AlertTriangle,
   Bell,
   Boxes,
   Brain,
@@ -39,6 +40,7 @@ import {
 } from "@/lib/icons"
 import { PhosphorIconProvider } from "@/components/icon-provider"
 import { DesktopIcon } from "./desktop-icon"
+import { RvbbitLogo } from "./rvbbit-logo"
 import { WorkspaceActiveContext } from "./workspace-active-context"
 import { FolderWindow, type LauncherItem } from "./folder-window"
 import { DesktopMenuBar } from "./desktop-menu-bar"
@@ -70,6 +72,7 @@ import { PgMonitorWindow } from "./pg-monitor-window"
 import { NotificationToasts } from "./notification-toasts"
 import { NotificationCenterWindow } from "./notification-center-window"
 import { OperatorsWindow } from "./operators-window"
+import { ModelSettingsWindow } from "./model-settings-window"
 import { CostsWindow } from "./costs-window"
 import { AgentMessagesWindow } from "./agent-messages-window"
 import { SyncMirrorWindow } from "./sync-mirror-window"
@@ -100,6 +103,7 @@ import { ModelStudioWindow } from "./model-studio-window"
 import { MetricCatalogWindow } from "./metric-catalog-window"
 import { MetricCreatorWindow } from "./metric-creator-window"
 import { MetricInspectorWindow } from "./metric-inspector-window"
+import { VizBlocksWindow } from "./viz-blocks-window"
 import { CubeCatalogWindow } from "./cube-catalog-window"
 import { CubeCreatorWindow } from "./cube-creator-window"
 import { CubeInspectorWindow } from "./cube-inspector-window"
@@ -132,7 +136,7 @@ import {
 } from "@/lib/desktop/state-store"
 import { shadowDesktopState, shadowScenes } from "@/lib/desktop/server-sync"
 import { usePresentMode } from "@/lib/desktop/present-mode"
-import type { RvbbitStatus, SchemaSnapshot } from "@/lib/db/types"
+import type { ConnectionTestResult, RvbbitStatus, SchemaSnapshot } from "@/lib/db/types"
 import type { SanitizedConnection } from "@/lib/db/registry"
 import type {
   RvbbitCachePayload,
@@ -166,6 +170,7 @@ import type {
   DuckPayload,
   OperatorFlowPayload,
   OperatorsPayload,
+  ModelSettingsPayload,
   SpecialistsPayload,
   SpecialistDetailPayload,
   RoutingPayload,
@@ -206,6 +211,7 @@ import type {
   MetricCatalogPayload,
   MetricCreatorPayload,
   MetricInspectorPayload,
+  VizBlocksPayload,
   CubeCatalogPayload,
   CubeCreatorPayload,
   CubeInspectorPayload,
@@ -220,6 +226,14 @@ interface WorkspaceTransition {
   from: SlotId
   to: SlotId
   dir: "forward" | "backward"
+}
+
+type ConnectionHealthState = "idle" | "checking" | "online" | "offline"
+
+interface ConnectionHealth {
+  connectionId: string | null
+  state: ConnectionHealthState
+  error?: string
 }
 
 interface OpenSqlDataOptions {
@@ -357,6 +371,11 @@ function computePresentFit(windows: DesktopWindowState[]): PresentFit | null {
 export function DesktopShell() {
   const [connections, setConnections] = useState<SanitizedConnection[]>([])
   const [activeConnectionId, setActiveConnectionId] = useState<string | null>(null)
+  const [connectionHealth, setConnectionHealth] = useState<ConnectionHealth>({
+    connectionId: null,
+    state: "idle",
+  })
+  const [bootOverlayVisible, setBootOverlayVisible] = useState(true)
   const [schema, setSchema] = useState<SchemaSnapshot | null>(null)
   const [rvbbitStatus, setRvbbitStatus] = useState<RvbbitStatus | null>(null)
   const [schemaLoading, setSchemaLoading] = useState(false)
@@ -415,6 +434,11 @@ export function DesktopShell() {
   // never persisted — so it can't leak into saved desktops/scenes.
   const present = usePresentMode()
   const [presentFit, setPresentFit] = useState<PresentFit | null>(null)
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => setBootOverlayVisible(false), 1450)
+    return () => window.clearTimeout(timer)
+  }, [])
 
   // ── LISTEN/NOTIFY feed ──────────────────────────────────────────────
   const [notifications, setNotifications] = useState<NotifyEvent[]>([])
@@ -732,18 +756,81 @@ export function DesktopShell() {
       const res = await fetch(`/api/db/schema?connectionId=${encodeURIComponent(connectionId)}`, { cache: "no-store" })
       if (!res.ok) {
         setSchema(null)
+        const message = (await res.text().catch(() => "")).trim()
+        setConnectionHealth({
+          connectionId,
+          state: "offline",
+          error: message || `schema request failed (${res.status})`,
+        })
         return
       }
       const snap = (await res.json()) as SchemaSnapshot
       setSchema(snap)
-    } catch {
+      setConnectionHealth({ connectionId, state: "online" })
+    } catch (err) {
       setSchema(null)
+      setConnectionHealth({
+        connectionId,
+        state: "offline",
+        error: err instanceof Error ? err.message : String(err),
+      })
     } finally {
       setSchemaLoading(false)
     }
   }, [])
 
   useEffect(() => { void loadConnections() }, [loadConnections])
+
+  useEffect(() => {
+    if (!activeConnectionId) {
+      setConnectionHealth({ connectionId: null, state: "idle" })
+      return
+    }
+    let cancelled = false
+    const check = async (showChecking: boolean) => {
+      if (showChecking) {
+        setConnectionHealth((prev) =>
+          prev.connectionId === activeConnectionId && prev.state === "online"
+            ? prev
+            : { connectionId: activeConnectionId, state: "checking" },
+        )
+      }
+      try {
+        const res = await fetch("/api/db/test", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ connectionId: activeConnectionId }),
+        })
+        const body = (await res.json().catch(() => null)) as ConnectionTestResult | null
+        if (cancelled) return
+        if (res.ok && body?.ok) {
+          setConnectionHealth({ connectionId: activeConnectionId, state: "online" })
+        } else {
+          setConnectionHealth({
+            connectionId: activeConnectionId,
+            state: "offline",
+            error: body?.error ?? `connection check failed (${res.status})`,
+          })
+        }
+      } catch (err) {
+        if (cancelled) return
+        setConnectionHealth({
+          connectionId: activeConnectionId,
+          state: "offline",
+          error: err instanceof Error ? err.message : String(err),
+        })
+      }
+    }
+    void check(true)
+    const interval = window.setInterval(() => void check(false), 12_000)
+    const onFocus = () => void check(false)
+    window.addEventListener("focus", onFocus)
+    return () => {
+      cancelled = true
+      window.clearInterval(interval)
+      window.removeEventListener("focus", onFocus)
+    }
+  }, [activeConnectionId])
 
   useEffect(() => {
     if (!activeConnectionId) {
@@ -1599,7 +1686,7 @@ export function DesktopShell() {
         title: "Untitled SQL",
         sql: "-- Write SQL and press Cmd+Enter\nSELECT 1;",
         origin: "query",
-        view: { activeTab: "sql", sqlRailOpen: true, sqlRailWidthPx: 360 },
+        view: { activeTab: "sql", sqlRailOpen: false, sqlRailWidthPx: 360 },
       } satisfies DataPayload,
     })
   }, [activeConnectionId, openConnections, openWindow])
@@ -1647,7 +1734,7 @@ export function DesktopShell() {
           title,
           sql,
           origin: run ? "table" : "query",
-          view: { activeTab: run ? "rows" : "sql", sqlRailOpen: !run, sqlRailWidthPx: 380 },
+          view: { activeTab: run ? "rows" : "sql", sqlRailOpen: false, sqlRailWidthPx: 380 },
         } satisfies DataPayload,
       })
     },
@@ -1911,7 +1998,7 @@ export function DesktopShell() {
           title: "Untitled SQL",
           sql: "-- Write SQL and press Cmd+Enter\nSELECT 1;",
           origin: "query",
-          view: { activeTab: "sql", sqlRailOpen: true, sqlRailWidthPx: 360 },
+          view: { activeTab: "sql", sqlRailOpen: false, sqlRailWidthPx: 360 },
         } satisfies DataPayload,
       })
     },
@@ -1939,6 +2026,18 @@ export function DesktopShell() {
       title: "Operators",
       x: 160, y: 90, width: 460, height: 540,
       payload: { kind: "operators" } satisfies OperatorsPayload,
+    })
+  }, [focus, openWindow, liveWindows])
+
+  const openModelSettings = useCallback(() => {
+    const existing = liveWindows().find((w) => w.kind === "model-settings")
+    if (existing) return focus(existing.id)
+    openWindow({
+      id: randomUUID(),
+      kind: "model-settings",
+      title: "Model Settings",
+      x: 132, y: 72, width: 1080, height: 700,
+      payload: { kind: "model-settings" } satisfies ModelSettingsPayload,
     })
   }, [focus, openWindow, liveWindows])
 
@@ -2547,6 +2646,23 @@ export function DesktopShell() {
     })
   }, [focus, openWindow, liveWindows, updatePayload])
 
+  const openVizBlocks = useCallback((blockName?: string) => {
+    const existing = liveWindows().find((w) => w.kind === "viz-blocks")
+    if (existing) {
+      if (blockName != null) {
+        updatePayload(existing.id, (p) => ({ ...(p as VizBlocksPayload), blockName }))
+      }
+      return focus(existing.id)
+    }
+    openWindow({
+      id: randomUUID(),
+      kind: "viz-blocks",
+      title: "Viz Blocks",
+      x: 170, y: 88, width: 1080, height: 720,
+      payload: { kind: "viz-blocks", blockName: blockName ?? null } satisfies VizBlocksPayload,
+    })
+  }, [focus, openWindow, liveWindows, updatePayload])
+
   const openMetricBoard = useCallback(() => {
     const existing = liveWindows().find((w) => w.kind === "metric-board")
     if (existing) return focus(existing.id)
@@ -2921,7 +3037,7 @@ export function DesktopShell() {
         sql,
         origin: "derived",
         chartSpec: options?.chartSpec ?? null,
-        view: { activeTab, sqlRailOpen: true, sqlRailWidthPx: 360 },
+        view: { activeTab, sqlRailOpen: activeTab !== "sql", sqlRailWidthPx: 360 },
       } satisfies DataPayload,
     })
   }, [openWindow])
@@ -3588,7 +3704,7 @@ export function DesktopShell() {
         title,
         sql,
         origin: "derived",
-        view: { activeTab: "sql", sqlRailOpen: true, sqlRailWidthPx: 360 },
+        view: { activeTab: "sql", sqlRailOpen: false, sqlRailWidthPx: 360 },
         lineage: {
           kind: "block-ref",
           parentWindowId: payload.windowId,
@@ -3823,6 +3939,7 @@ export function DesktopShell() {
     { id: "sync-mirror", label: "Temporal Mirror", icon: Database, color: "var(--brand-cache)", description: "Sync Postgres sources into time-travel tables", activate: openSyncMirror, folder: "system", rvbbit: true },
     // Semantic
     { id: "operators", label: "Operators", icon: FlowArrow, color: "var(--brand-operators)", description: "Semantic SQL operators", activate: openOperators, folder: "semantic", rvbbit: true },
+    { id: "model-settings", label: "Model Settings", icon: Settings2, color: "var(--brand-routing)", description: "LLM defaults, operator models & spend", activate: openModelSettings, folder: "semantic", rvbbit: true },
     { id: "agent-messages", label: "Messages", icon: Quote, color: "var(--viz-op-agent, var(--brand-warren))", description: "Agent transcripts — by run, with cost", activate: () => openAgentMessages(), folder: "semantic", rvbbit: true },
     { id: "specialists", label: "Specialists", icon: Brain, color: "var(--brand-specialists)", description: "Fine-tuned task models", activate: openSpecialists, folder: "semantic", rvbbit: true },
     { id: "routing", label: "Routing", icon: GitBranch, color: "var(--brand-routing)", description: "Model/backend routing rules", activate: openRouting, folder: "semantic", rvbbit: true },
@@ -3836,6 +3953,7 @@ export function DesktopShell() {
     { id: "metric-catalog", label: "Metric Catalog", icon: Table2, color: "oklch(78% 0.13 95)", description: "Browse all metrics", activate: () => openMetricCatalog(), folder: "metrics", rvbbit: true },
     { id: "metric-creator", label: "Metric Creator", icon: Calculator, color: "oklch(78% 0.13 95)", description: "Author & version metrics", activate: () => openMetricCreator(), folder: "metrics", rvbbit: true },
     { id: "metric-inspector", label: "Metric Inspector", icon: LineChart, color: "oklch(78% 0.13 95)", description: "Run metrics across def-time & data-time", activate: () => openMetricInspector(), folder: "metrics", rvbbit: true },
+    { id: "viz-blocks", label: "Viz Blocks", icon: LayoutDashboard, color: "oklch(78% 0.13 95)", description: "Author canonical SQL/viz building blocks", activate: () => openVizBlocks(), folder: "metrics", rvbbit: true },
     { id: "metric-board", label: "KPI Board", icon: Table2, color: "oklch(78% 0.13 95)", description: "Matrix of metric values & KPI verdicts over time", activate: () => openMetricBoard(), folder: "metrics", rvbbit: true },
     { id: "dashboards", label: "Dashboards", icon: LayoutDashboard, color: "oklch(78% 0.13 95)", description: "Claude-built dashboards — live, inspectable, shareable", activate: () => openDashboards(), folder: "metrics", rvbbit: true },
     // Cubes — the curated subject-area mart layer (metrics → cubes → raw)
@@ -3855,9 +3973,9 @@ export function DesktopShell() {
     viewAppCount, schema, rvbbitVersion,
     openFinder, openSqlScratch, openViewApps, openConnections, openDataSearch, openMcpIncoming,
     openSystemObjects, openExtensions, openPgMonitor, openCache, openRvbbitCache,
-    openCosts, openAgentMessages, openSyncMirror, openOperators, openSpecialists, openRouting,
+    openCosts, openAgentMessages, openSyncMirror, openOperators, openModelSettings, openSpecialists, openRouting,
     openMcpServers, openCapabilities, openHfDeploy, openWarren, openModelStudio,
-    openDuck, openDagster, dagsterDetected, openMetricCatalog, openMetricCreator, openMetricInspector, openMetricBoard, openDashboards, openAlerts, openBrain,
+    openDuck, openDagster, dagsterDetected, openMetricCatalog, openMetricCreator, openMetricInspector, openVizBlocks, openMetricBoard, openDashboards, openAlerts, openBrain,
     openCubeCatalog, openCubeCreator, openCubeInspector, openCubeProposals,
     openKgBrowser, openKgExplorer, openHindsightMemory, hindsightDetected, openQueryLens, openDrift,
   ])
@@ -3981,6 +4099,7 @@ export function DesktopShell() {
       openHindsightMemory,
       openDataSearch,
       openDrift,
+      openModelSettings,
       openModelStudio,
       openMetricCatalog,
       openMetricCreator,
@@ -4006,18 +4125,23 @@ export function DesktopShell() {
       removeWatchedChannel, clearNotifications, openOperatorFlow, openSpecialistDetail,
       openMcpServerDetail, openRouting, openQueryLens, openKgBrowser, openKgEntity,
       openSourceRow, openKgForSource, openKgExtractionRuns, openKgMergeReview, openKgExplorer, openHindsightMemory,
-      openDataSearch, openDrift, openModelStudio, openMetricCatalog, openMetricCreator,
+      openDataSearch, openDrift, openModelSettings, openModelStudio, openMetricCatalog, openMetricCreator,
       openMetricInspector, openCubeCreator, openCubeInspector, openCosts, openDuck, openCapabilities, openCapabilityDetail,
       openHfDeploy, openWarren, openWarrenJob,
     ],
   )
 
   const canRunSqlBlocksOnScreen = windows.some((w) => w.kind === "data")
+  const connectionOffline =
+    !!activeConnectionId &&
+    connectionHealth.connectionId === activeConnectionId &&
+    connectionHealth.state === "offline"
 
   return (
     <PhosphorIconProvider>
     <div
       className="rvbbit-lens-desktop relative h-screen w-screen overflow-hidden bg-background text-foreground"
+      data-connection-health={connectionHealth.state}
       onDragEnter={handleCanvasDragEnter}
       onDragLeave={handleCanvasDragLeave}
       onDragOver={handleCanvasDragOver}
@@ -4131,6 +4255,7 @@ export function DesktopShell() {
         onSetFontScale={setFontScale}
         hasWallpaper={!!wallpaperUrl}
         hasRvbbit={hasRvbbit}
+        connectionOffline={connectionOffline}
         busy={busy || schemaLoading}
         activeWorkspace={activeWorkspace}
         workspaceOccupancy={workspaceOccupancy}
@@ -4208,6 +4333,27 @@ export function DesktopShell() {
             <div className="text-[11px] text-chrome-text/60">.csv · .tsv · .txt</div>
           </div>
         </div>
+      ) : null}
+
+      {connectionOffline ? (
+        <>
+          <div
+            className="pointer-events-none fixed inset-x-0 bottom-0 top-8 z-[42] bg-background/10"
+            style={{
+              backdropFilter: "grayscale(1) saturate(0.22) contrast(0.88)",
+              WebkitBackdropFilter: "grayscale(1) saturate(0.22) contrast(0.88)",
+            }}
+          />
+          <div className="pointer-events-none fixed left-1/2 top-10 z-[56] -translate-x-1/2">
+            <div className="flex max-w-[min(520px,calc(100vw-2rem))] items-center gap-2 rounded-md border border-danger/60 bg-chrome-bg/95 px-3 py-1.5 text-[11px] text-danger shadow-xl backdrop-blur">
+              <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+              <span className="min-w-0 truncate">
+                Database connection lost{activeConnection ? `: ${activeConnection.label}` : ""}
+                {connectionHealth.error ? ` · ${connectionHealth.error}` : ""}
+              </span>
+            </div>
+          </div>
+        </>
       ) : null}
 
       {/* Desktop icons — classic desktop arrangement: a left-aligned vertical
@@ -4325,6 +4471,8 @@ export function DesktopShell() {
           so the user can't interact with windows mid-animation. */}
       {wsTransition ? <div className="fixed inset-0 z-[45]" /> : null}
 
+      {bootOverlayVisible ? <BootOverlay /> : null}
+
       {/* Incoming NOTIFY toasts */}
       <NotificationToasts toasts={toasts} onDismiss={dismissToast} />
 
@@ -4357,6 +4505,30 @@ export function DesktopShell() {
       ) : null}
     </div>
     </PhosphorIconProvider>
+  )
+}
+
+function BootOverlay() {
+  return (
+    <div className="pointer-events-auto fixed inset-0 z-[80] grid place-items-center bg-background/90 backdrop-blur-xl">
+      <div className="relative flex w-[min(440px,calc(100vw-2rem))] flex-col items-center gap-5 overflow-hidden rounded-xl border border-chrome-border bg-chrome-bg/75 px-8 py-7 shadow-2xl">
+        <div className="pointer-events-none absolute inset-0 opacity-35 [background-image:linear-gradient(var(--chrome-border)_1px,transparent_1px),linear-gradient(90deg,var(--chrome-border)_1px,transparent_1px)] [background-size:28px_28px]" />
+        <div className="rvbbit-boot-sweep pointer-events-none absolute inset-y-0 w-20 bg-main/10 blur-xl" />
+        <div className="relative grid h-24 w-48 place-items-center text-main">
+          <RvbbitLogo className="rvbbit-boot-logo h-auto w-44" />
+        </div>
+        <div className="relative flex w-full items-center gap-2">
+          <span className="h-px flex-1 bg-chrome-border/70" />
+          <span className="font-mono text-[10px] uppercase tracking-[0.35em] text-chrome-text/65">
+            rvbbit lens
+          </span>
+          <span className="h-px flex-1 bg-chrome-border/70" />
+        </div>
+        <div className="relative h-1 w-full overflow-hidden rounded-full bg-secondary-background">
+          <div className="rvbbit-boot-progress h-full rounded-full bg-main" />
+        </div>
+      </div>
+    </div>
   )
 }
 
@@ -4438,6 +4610,7 @@ interface WindowContext {
   ) => void
   openDataSearch: (initialQuery?: string) => void
   openDrift: () => void
+  openModelSettings: () => void
   openModelStudio: (modelName?: string) => void
   openMetricCatalog: () => void
   openMetricCreator: (metricName?: string) => void
@@ -4726,6 +4899,15 @@ function renderWindowContent(
           onOpenOperator={ctx.openOperatorFlow}
         />
       )
+    case "model-settings":
+      return (
+        <ModelSettingsWindow
+          activeConnectionId={ctx.activeConnectionId}
+          hasRvbbit={ctx.hasRvbbit}
+          onOpenOperator={ctx.openOperatorFlow}
+          onOpenCosts={ctx.openCosts}
+        />
+      )
     case "operator-flow":
       return (
         <OperatorFlowWindow
@@ -4941,6 +5123,15 @@ function renderWindowContent(
           activeConnectionId={ctx.activeConnectionId}
           hasRvbbit={ctx.hasRvbbit}
           onOpenCreator={ctx.openMetricCreator}
+        />
+      )
+    case "viz-blocks":
+      return (
+        <VizBlocksWindow
+          payload={w.payload as VizBlocksPayload}
+          activeConnectionId={ctx.activeConnectionId}
+          hasRvbbit={ctx.hasRvbbit}
+          onOpenSqlData={ctx.openSqlData}
         />
       )
     case "cube-catalog":
@@ -5200,6 +5391,8 @@ function iconForKind(kind: DesktopWindowState["kind"]) {
     case "operators":
     case "operator-flow":
       return FlowArrow
+    case "model-settings":
+      return Settings2
     case "specialists":
     case "specialist-detail":
       return Brain
@@ -5231,6 +5424,8 @@ function iconForKind(kind: DesktopWindowState["kind"]) {
       return Calculator
     case "metric-inspector":
       return LineChart
+    case "viz-blocks":
+      return LayoutDashboard
     case "metric-board":
       return Table2
     case "cube-catalog":

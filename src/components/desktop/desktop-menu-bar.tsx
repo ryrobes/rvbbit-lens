@@ -1,7 +1,7 @@
 "use client"
 
 import { useEffect, useState } from "react"
-import { Activity, CaretRight, ChevronDown, Database, Layers, Plug, Plus } from "@/lib/icons"
+import { Activity, AlertTriangle, CaretRight, ChevronDown, Database, Layers, Plug, Plus } from "@/lib/icons"
 import { cn } from "@/lib/utils"
 import { RvbbitLogo } from "./rvbbit-logo"
 import { HomeIndicator } from "./home-indicator"
@@ -82,6 +82,7 @@ interface DesktopMenuBarProps {
   onSetFontScale: (scale: FontScale) => void
   hasWallpaper: boolean
   hasRvbbit: boolean
+  connectionOffline?: boolean
   busy?: boolean
   activeWorkspace: SlotId
   /** Ids of workspaces that currently hold at least one window. */
@@ -183,6 +184,7 @@ export function DesktopMenuBar({
   onSetFontScale,
   hasWallpaper,
   hasRvbbit,
+  connectionOffline = false,
   busy,
   activeWorkspace,
   workspaceOccupancy,
@@ -346,6 +348,7 @@ export function DesktopMenuBar({
         <ConnectionPicker
           connections={connections}
           active={active}
+          offline={connectionOffline}
           onSelect={onSelectConnection}
           onManage={onOpenConnections}
         />
@@ -367,7 +370,11 @@ export function DesktopMenuBar({
 
       {/* Right cluster: desktop picker → present → scheduler → clock (far right). */}
       <div className="flex items-center gap-2.5" style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}>
-        {busy ? <Activity className="h-3.5 w-3.5 animate-pulse text-main" /> : null}
+        {connectionOffline ? (
+          <AlertTriangle className="h-3.5 w-3.5 text-danger" />
+        ) : busy ? (
+          <Activity className="h-3.5 w-3.5 animate-pulse text-main" />
+        ) : null}
         <WorkspaceSwitcher
           activeWorkspace={activeWorkspace}
           occupancy={workspaceOccupancy}
@@ -705,20 +712,32 @@ function WorkspaceSwitcher({
 function ConnectionPicker({
   connections,
   active,
+  offline,
   onSelect,
   onManage,
 }: {
   connections: ConnectionSummary[]
   active: ConnectionSummary | null
+  offline: boolean
   onSelect: (id: string) => void
   onManage: () => void
 }) {
   return (
     <details className="group relative">
-      <summary className="flex cursor-pointer list-none items-center gap-1.5 rounded border border-chrome-border bg-secondary-background px-2 py-0.5 text-foreground hover:bg-foreground/[0.06]">
-        <Plug className="h-3.5 w-3.5 text-main" />
+      <summary
+        className={cn(
+          "flex cursor-pointer list-none items-center gap-1.5 rounded border bg-secondary-background px-2 py-0.5 text-foreground hover:bg-foreground/[0.06]",
+          offline ? "border-danger/60 text-danger" : "border-chrome-border",
+        )}
+        title={offline ? "Active database is unreachable" : undefined}
+      >
+        {offline ? (
+          <AlertTriangle className="h-3.5 w-3.5 text-danger" />
+        ) : (
+          <Plug className="h-3.5 w-3.5 text-main" />
+        )}
         <span className="max-w-[200px] truncate">
-          {active ? `${active.label} · ${active.database}` : "No connection"}
+          {offline && active ? `${active.label} · offline` : active ? `${active.label} · ${active.database}` : "No connection"}
         </span>
         <ChevronDown className="h-3 w-3 opacity-70" />
       </summary>

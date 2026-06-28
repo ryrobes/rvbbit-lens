@@ -5,6 +5,14 @@ import { VegaEmbed } from "react-vega"
 import type { Result as VegaEmbedResult, VisualizationSpec } from "vega-embed"
 import { Check } from "@/lib/icons"
 import { vegaConfigFromTheme } from "@/lib/desktop/chart-theme"
+import {
+  UI_ARTIFACT_KIND,
+  UI_RENDERER,
+  isUiBasicChartKind,
+  isUiControlKind,
+  isUiFilterOperator,
+  type UiControlKind,
+} from "@/lib/desktop/ui-artifact-contract"
 import type { DesktopParamOperator, DesktopParamValue } from "@/lib/desktop/types"
 import type { CrossFilter } from "@/lib/desktop/reactive-sql"
 import { formatCellValue } from "@/lib/sql/format"
@@ -73,7 +81,7 @@ export function UiArtifactView({
   sourceStmtIndex?: number
   highlightFilters?: CrossFilter[]
 }) {
-  const visibleArtifacts = artifacts.filter((artifact) => artifact.artifact_kind !== "meta")
+  const visibleArtifacts = artifacts.filter((artifact) => artifact.artifact_kind !== UI_ARTIFACT_KIND.META)
   if (visibleArtifacts.length === 0) return null
   return (
     <div className={cn("grid gap-2 overflow-auto bg-doc-bg p-2", fill ? "h-full auto-rows-fr" : "h-full auto-rows-min")}>
@@ -118,15 +126,15 @@ function UiArtifactCard({
         </div>
       ) : null}
       <div className={cn("min-h-0", fill ? "h-[calc(100%-2rem)]" : "")}>
-        {artifact.renderer === "metric_card" ? (
+        {artifact.renderer === UI_RENDERER.METRIC_CARD ? (
           <MetricCardArtifact artifact={artifact} fill={fill} />
-        ) : artifact.renderer === "kpi_gauge" ? (
+        ) : artifact.renderer === UI_RENDERER.KPI_GAUGE ? (
           <KpiGaugeArtifact artifact={artifact} fill={fill} />
-        ) : artifact.renderer === "sparkline" ? (
+        ) : artifact.renderer === UI_RENDERER.SPARKLINE ? (
           <SparklineArtifact artifact={artifact} fill={fill} />
-        ) : artifact.renderer === "kpi_timeline" ? (
+        ) : artifact.renderer === UI_RENDERER.KPI_TIMELINE ? (
           <KpiTimelineArtifact artifact={artifact} fill={fill} />
-        ) : artifact.renderer === "basic_chart" ? (
+        ) : artifact.renderer === UI_RENDERER.BASIC_CHART ? (
           <BasicChartArtifact
             artifact={artifact}
             fill={fill}
@@ -134,7 +142,7 @@ function UiArtifactCard({
             sourceStmtIndex={sourceStmtIndex}
             highlightFilters={highlightFilters}
           />
-        ) : artifact.renderer === "vega_lite" ? (
+        ) : artifact.renderer === UI_RENDERER.VEGA_LITE ? (
           <VegaLiteArtifact
             artifact={artifact}
             fill={fill}
@@ -142,9 +150,9 @@ function UiArtifactCard({
             sourceStmtIndex={sourceStmtIndex}
             highlightFilters={highlightFilters}
           />
-        ) : artifact.renderer === "table_view" ? (
+        ) : artifact.renderer === UI_RENDERER.TABLE_VIEW ? (
           <TableArtifact artifact={artifact} fill={fill} />
-        ) : artifact.renderer === "filter_control" ? (
+        ) : artifact.renderer === UI_RENDERER.FILTER_CONTROL ? (
           <FilterControlArtifact
             artifact={artifact}
             fill={fill}
@@ -152,7 +160,7 @@ function UiArtifactCard({
             onEmitParam={onEmitParam}
             sourceStmtIndex={sourceStmtIndex}
           />
-        ) : artifact.renderer === "action_button" ? (
+        ) : artifact.renderer === UI_RENDERER.ACTION_BUTTON ? (
           <ActionButtonArtifact artifact={artifact} fill={fill} onRunAction={onRunAction} />
         ) : (
           <pre className="max-h-80 overflow-auto p-3 text-[11px] text-chrome-text">
@@ -200,17 +208,15 @@ function actionConfirmMessage(spec: Record<string, unknown>, label: string): str
   return trimmed
 }
 
-function controlKind(spec: Record<string, unknown>): "dropdown" | "multiselect" | "datepicker" | "slider" {
+function controlKind(spec: Record<string, unknown>): UiControlKind {
   const raw = artifactString(spec, "kind").toLowerCase()
-  if (raw === "multiselect") return "multiselect"
-  if (raw === "datepicker") return "datepicker"
-  if (raw === "slider") return "slider"
+  if (isUiControlKind(raw)) return raw
   return "dropdown"
 }
 
-function controlOperator(spec: Record<string, unknown>, kind: string): DesktopParamOperator {
+function controlOperator(spec: Record<string, unknown>, kind: UiControlKind): DesktopParamOperator {
   const raw = artifactString(spec, "operator").toLowerCase()
-  if (raw === "eq" || raw === "in" || raw === "gte" || raw === "lte") return raw
+  if (isUiFilterOperator(raw)) return raw
   return kind === "slider" || kind === "datepicker" ? "gte" : "in"
 }
 
@@ -326,7 +332,7 @@ function FilterControlArtifact({
   const defaultValue = defaultControlValue(spec, kind, options)
   const defaultKey = defaultValue === undefined ? "" : stableDefaultKey(defaultValue)
   const defaultSeedKey = defaultKey
-    ? [sourceStmtIndex ?? "root", artifact.artifact_id ?? artifact.renderer ?? "filter_control", field, operator, defaultKey].join(":")
+    ? [sourceStmtIndex ?? "root", artifact.artifact_id ?? artifact.renderer ?? UI_RENDERER.FILTER_CONTROL, field, operator, defaultKey].join(":")
     : ""
   const disabled = !field || !onEmitParam
   useEffect(() => {
@@ -610,9 +616,43 @@ function statusClass(status: string): string {
   return "border-chrome-border bg-foreground/[0.04] text-chrome-text"
 }
 
+function StatusPill({ status }: { status: string }) {
+  return (
+    <span
+      title={status}
+      className={cn(
+        "max-w-32 shrink-0 truncate rounded border px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide",
+        statusClass(status),
+      )}
+    >
+      {status}
+    </span>
+  )
+}
+
+function ArtifactEmptyState({
+  label,
+  message,
+  fill,
+  className,
+}: {
+  label?: string
+  message: string
+  fill?: boolean
+  className?: string
+}) {
+  return (
+    <div className={cn("flex min-w-0 flex-col justify-center gap-2 px-4 py-4", fill ? "h-full" : "min-h-32", className)}>
+      {label ? <div className="truncate text-[11px] uppercase tracking-wide text-chrome-text/55">{label}</div> : null}
+      <div className="truncate text-xs text-chrome-text/45">{message}</div>
+    </div>
+  )
+}
+
 function KpiGaugeArtifact({ artifact, fill }: { artifact: UiArtifactRow; fill?: boolean }) {
   const spec = artifact.spec ?? {}
   const rows = rowsForArtifact(artifact)
+  const valueField = artifactStringAny(spec, ["value_field", "field"])
   const value = numericValue(valueFromRowOrSpec(spec, rows, "value", ["value_field", "field"]))
   const max =
     artifactNumber(spec, "max") ??
@@ -629,6 +669,10 @@ function KpiGaugeArtifact({ artifact, fill }: { artifact: UiArtifactRow; fill?: 
   const statusField = artifactStringAny(spec, ["status_field", "verdict_field"])
   const status = statusField ? String(rows[0]?.[statusField] ?? "") : ""
 
+  if (value === null && (valueField || rows.length === 0)) {
+    return <ArtifactEmptyState label={label} message="No KPI data." fill={fill} className="min-h-36" />
+  }
+
   return (
     <div className={cn("flex min-w-0 flex-col justify-center gap-3 px-4 py-4", fill ? "h-full" : "min-h-36")}>
       <div className="flex min-w-0 items-start justify-between gap-3">
@@ -637,9 +681,7 @@ function KpiGaugeArtifact({ artifact, fill }: { artifact: UiArtifactRow; fill?: 
           <div className="mt-1 truncate text-3xl font-semibold tabular-nums text-foreground">{reading}</div>
         </div>
         {status ? (
-          <span className={cn("shrink-0 rounded border px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide", statusClass(status))}>
-            {status}
-          </span>
+          <StatusPill status={status} />
         ) : null}
       </div>
       <Gauge
@@ -664,6 +706,11 @@ function SparklineArtifact({ artifact, fill }: { artifact: UiArtifactRow; fill?:
   const color = artifactString(spec, "color") || "var(--rvbbit-accent)"
   const yMin = artifactNumber(spec, "y_min") ?? undefined
   const yMax = artifactNumber(spec, "y_max") ?? undefined
+
+  if (values.length === 0) {
+    return <ArtifactEmptyState label={label} message="No trend data." fill={fill} />
+  }
+
   return (
     <div className={cn("flex min-w-0 flex-col justify-center gap-3 px-4 py-4", fill ? "h-full" : "min-h-32")}>
       <div className="flex min-w-0 items-baseline justify-between gap-3">
@@ -708,6 +755,10 @@ function KpiTimelineArtifact({ artifact, fill }: { artifact: UiArtifactRow; fill
   const normalizedLatest = latest === null ? null : normalizePercentValue(latest, unit)
   const normalizedMax = normalizePercentValue(max, unit)
 
+  if (values.length === 0) {
+    return <ArtifactEmptyState label={label} message="No timeline data." fill={fill} className="min-h-48" />
+  }
+
   return (
     <div className={cn("grid min-w-0 gap-3 px-4 py-4", fill ? "h-full grid-rows-[auto_auto_1fr]" : "min-h-48")}>
       <div className="flex min-w-0 items-start justify-between gap-3">
@@ -725,9 +776,7 @@ function KpiTimelineArtifact({ artifact, fill }: { artifact: UiArtifactRow; fill
           </div>
         </div>
         {status ? (
-          <span className={cn("shrink-0 rounded border px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide", statusClass(status))}>
-            {status}
-          </span>
+          <StatusPill status={status} />
         ) : null}
       </div>
       <Gauge
@@ -772,7 +821,7 @@ function basicChartSpec(artifact: UiArtifactRow): Record<string, unknown> {
   const spec = artifact.spec ?? {}
   const rows = rowsForArtifact(artifact)
   const kindRaw = artifactStringAny(spec, ["kind", "mark", "chart"]).toLowerCase()
-  const kind = kindRaw === "scatter" ? "point" : kindRaw || "bar"
+  const kind = kindRaw === "scatter" ? "point" : isUiBasicChartKind(kindRaw) ? kindRaw : "bar"
   const x = artifactStringAny(spec, ["x", "x_field", "field"])
   const y = artifactStringAny(spec, ["y", "y_field", "value_field"])
   const color = artifactStringAny(spec, ["color", "color_field", "series_field"])
@@ -834,7 +883,7 @@ function BasicChartArtifact({
   highlightFilters?: CrossFilter[]
 }) {
   const spec = useMemo(() => basicChartSpec(artifact), [artifact])
-  const vegaArtifact = useMemo(() => ({ ...artifact, renderer: "vega_lite", spec }), [artifact, spec])
+  const vegaArtifact = useMemo(() => ({ ...artifact, renderer: UI_RENDERER.VEGA_LITE, spec }), [artifact, spec])
   return (
     <VegaLiteArtifact
       artifact={vegaArtifact}

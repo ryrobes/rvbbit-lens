@@ -64,6 +64,7 @@ import { effectiveRollup } from "@/lib/desktop/sql-builder"
 import { reconcileRollupLineage } from "@/lib/desktop/rollup-sql-parse"
 import { rollupChartSpec } from "@/lib/desktop/rollup-chart"
 import { classifyColumn } from "@/lib/desktop/chart-infer"
+import { UI_ARTIFACT_KIND, UI_RENDERER } from "@/lib/desktop/ui-artifact-contract"
 import { RollupShelf, type FilterKind } from "./rollup-shelf"
 import type { QueryResult, QueryResultColumn, SchemaSnapshot, StatementResult } from "@/lib/db/types"
 import { buildSqlCompletionSchema } from "@/lib/desktop/sql-completion"
@@ -364,13 +365,13 @@ function statementLayoutArtifacts(results: StatementResult[] | null): UiArtifact
   if (!results) return []
   return results.flatMap((statement) => {
     const artifacts = extractUiArtifacts(statement.rows) ?? []
-    return artifacts.filter((artifact) => artifact.artifact_kind === "meta" && artifact.renderer === "statement_layout")
+    return artifacts.filter((artifact) => artifact.artifact_kind === UI_ARTIFACT_KIND.META && artifact.renderer === UI_RENDERER.STATEMENT_LAYOUT)
   })
 }
 
 function isMetaOnlyResult(statement: StatementResult): boolean {
   const artifacts = extractUiArtifacts(statement.rows)
-  return !!artifacts?.length && artifacts.every((artifact) => artifact.artifact_kind === "meta")
+  return !!artifacts?.length && artifacts.every((artifact) => artifact.artifact_kind === UI_ARTIFACT_KIND.META)
 }
 
 function artifactStringValue(artifact: UiArtifactRow, key: string): string {
@@ -407,7 +408,7 @@ function statementNameAliases(results: StatementResult[] | null, sourceStatement
     for (const artifact of artifacts) {
       addStatementAlias(aliases, artifact.title, key)
       addStatementAlias(aliases, artifact.spec?.title, key)
-      if (artifact.artifact_kind === "meta" && artifact.renderer === "statement_name") {
+      if (artifact.artifact_kind === UI_ARTIFACT_KIND.META && artifact.renderer === UI_RENDERER.STATEMENT_NAME) {
         addStatementAlias(aliases, artifactStringValue(artifact, "name"), key)
         addStatementAlias(aliases, artifactStringValue(artifact, "label"), key)
       }
@@ -442,7 +443,7 @@ function statementFilterBindings(
   results.forEach((statement) => {
     const artifacts = extractUiArtifacts(statement.rows) ?? []
     for (const artifact of artifacts) {
-      if (artifact.artifact_kind !== "meta" || artifact.renderer !== "filter_binding") continue
+      if (artifact.artifact_kind !== UI_ARTIFACT_KIND.META || artifact.renderer !== UI_RENDERER.FILTER_BINDING) continue
       const target = artifactStringValue(artifact, "target")
       if (!target) continue
       const targetKey = aliases.get(target) ?? aliases.get(target.toLowerCase()) ?? (keys.includes(target) ? target : undefined)
@@ -2621,18 +2622,22 @@ export function DataGridWindow({
             />
           ) : null}
           {bodyTab === "sql" ? (
-            <div className="h-full bg-doc-bg group-data-[focused=false]/window:bg-doc-bg/70">
-              <SqlEditor
-                value={draftSql}
-                onChange={setDraftSql}
-                onRun={onRun}
-                schema={sqlCompletion?.namespace}
-                defaultSchema={sqlCompletion?.defaultSchema}
-                completionSources={completionSources}
-                blockReferences={blockReferences}
-                semanticOperators={semanticOps}
-              />
-            </div>
+            sqlRailOpen && !present ? (
+              <SqlDockedPlaceholder />
+            ) : (
+              <div className="h-full bg-doc-bg group-data-[focused=false]/window:bg-doc-bg/70">
+                <SqlEditor
+                  value={draftSql}
+                  onChange={setDraftSql}
+                  onRun={onRun}
+                  schema={sqlCompletion?.namespace}
+                  defaultSchema={sqlCompletion?.defaultSchema}
+                  completionSources={completionSources}
+                  blockReferences={blockReferences}
+                  semanticOperators={semanticOps}
+                />
+              </div>
+            )
           ) : null}
           {bodyTab === "explain" ? (
             <ExplainTab
@@ -2666,6 +2671,17 @@ export function DataGridWindow({
           hasRvbbit={hasRvbbit}
         />
       )}
+    </div>
+  )
+}
+
+function SqlDockedPlaceholder() {
+  return (
+    <div className="grid h-full place-items-center bg-doc-bg/60 text-[11px] text-chrome-text/45 group-data-[focused=false]/window:bg-doc-bg/40">
+      <div className="flex items-center gap-2 rounded-md border border-chrome-border/50 bg-chrome-bg/35 px-3 py-2">
+        <PanelLeftOpen className="h-3.5 w-3.5" />
+        SQL editor is open in the side panel
+      </div>
     </div>
   )
 }
