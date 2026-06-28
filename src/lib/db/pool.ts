@@ -92,6 +92,17 @@ function buildPoolConfig(c: ConnectionRecord, lane: PoolLane): PoolConfig {
   }
 }
 
+function connectionStringWithDatabase(connectionString: string, database: string): string | null {
+  try {
+    const url = new URL(connectionString)
+    if (url.protocol !== "postgres:" && url.protocol !== "postgresql:") return null
+    url.pathname = `/${encodeURIComponent(database)}`
+    return url.toString()
+  } catch {
+    return null
+  }
+}
+
 function signatureOf(c: ConnectionRecord): string {
   return JSON.stringify({
     cs: c.connectionString,
@@ -114,12 +125,19 @@ export async function getPool(
 
   // Optional sibling-database override (e.g. pg_cron's home db, 'postgres'): reuse
   // this connection's host + credentials but target a different database on the same
-  // server, pooled separately. Ignored for connectionString-mode connections (the
-  // dbname is baked into the URL) — those must register a dedicated connection.
-  const record: ConnectionRecord =
-    databaseOverride && databaseOverride !== base.database && !base.connectionString
-      ? { ...base, database: databaseOverride }
-      : base
+  // server, pooled separately. For URL-style connection strings, rewrite only the
+  // path/database segment and keep the same auth/host/query options.
+  let record: ConnectionRecord = base
+  if (databaseOverride && databaseOverride !== base.database) {
+    if (base.connectionString) {
+      const overridden = connectionStringWithDatabase(base.connectionString, databaseOverride)
+      if (overridden) {
+        record = { ...base, database: databaseOverride, connectionString: overridden }
+      }
+    } else {
+      record = { ...base, database: databaseOverride }
+    }
+  }
   const baseCacheKey =
     record.database !== base.database ? `${connectionId}::${record.database}` : connectionId
   const cacheKey = `${lane}::${baseCacheKey}`

@@ -61,7 +61,7 @@ async function run(connectionId: string, sql: string, database?: string): Promis
     const res = await fetch("/api/db/query", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ connectionId, sql, rowLimit: 500, database: targetDatabase }),
+      body: JSON.stringify({ connectionId, sql, rowLimit: 500, database: targetDatabase, poolLane: "meta" }),
     })
     return (await res.json()) as Ok | Err
   } catch (e) {
