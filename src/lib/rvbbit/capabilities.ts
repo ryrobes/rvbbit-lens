@@ -2,12 +2,12 @@
 
 /**
  * Client-side model for the rvbbit *capabilities* layer — the install /
- * provenance front-door over `rvbbit.backends`.
+ * provenance front-door over `rvbbit.backends` plus runtime-sidecar registries.
  *
  * A capability pack bundles a model + sidecar + SQL generators. The
  * catalog is a static JSON list of packs, the manifests are YAML files
  * with the full install knobs, and installed packs land in
- * `rvbbit.backends` with `source_*` + `install_manifest` set.
+ * `rvbbit.backends` or a runtime registry with source + install_manifest set.
  *
  * Spec: /home/ryanr/repos2026/rvbbit/docs/CAPABILITIES.md
  *
@@ -16,7 +16,7 @@
  *   route (which reads from disk on the server).
  * - Join the catalog to installed-backend rows from `rvbbit.backend_health`
  *   and derive the 7-state badge from the spec.
- * - Probe a registered backend (default and custom-input variants).
+ * - Probe a registered backend or runtime service.
  * - Render manifest → generated files in TypeScript so the detail
  *   window's knob editor can drive a live preview without shelling
  *   out per keystroke. The TS port mirrors `rvbbit/capabilities/tools/
@@ -112,6 +112,7 @@ export interface OperatorDef {
   return_type: string
   parser?: string | null
   shape?: string
+  cache_policy?: "memoize" | "always" | "never" | string
   infix_symbol?: string | null
   infix_word?: string | null
   inputs?: Record<string, string>
@@ -137,6 +138,10 @@ export interface ManifestRuntimeBlock {
   language?: string
   device?: string
   port?: number
+  publish_host_port?: boolean
+  host_bind?: string
+  host_port?: number
+  host_port_env?: string
   health_path?: string
   base_image?: string
   python_version?: string
@@ -316,7 +321,7 @@ export interface InstalledBackend {
   is_default_embedder_source: boolean
 }
 
-/** A registered execution runtime — e.g. rvbbit.python_runtimes or rvbbit.mcp_gateways. */
+/** A registered execution runtime — e.g. python_runtimes, mcp_gateways, or memory_services. */
 export interface InstalledRuntime {
   name: string
   endpoint_url: string | null
@@ -827,6 +832,20 @@ const MCP_GATEWAYS_SQL = `SELECT
 FROM rvbbit.mcp_gateways
 ORDER BY name`
 
+const MEMORY_SERVICES_SQL = `SELECT
+  name,
+  endpoint_url,
+  'memory' AS language,
+  status,
+  labels,
+  service_source AS runtime_source,
+  install_manifest,
+  health,
+  created_at,
+  updated_at
+FROM rvbbit.memory_services
+ORDER BY name`
+
 function parseRuntime(r: Record<string, unknown>): InstalledRuntime {
   const labels = r.labels
   const manifest = r.install_manifest
@@ -848,18 +867,22 @@ function parseRuntime(r: Record<string, unknown>): InstalledRuntime {
 export async function fetchInstalledRuntimes(
   connectionId: string,
 ): Promise<{ runtimes: InstalledRuntime[]; error?: string }> {
-  const [res, mcpRes] = await Promise.all([
+  const [res, mcpRes, memoryRes] = await Promise.all([
     runQuery(connectionId, PYTHON_RUNTIMES_SQL),
     runQuery(connectionId, MCP_GATEWAYS_SQL),
+    runQuery(connectionId, MEMORY_SERVICES_SQL),
   ])
-  // python_runtimes is newer; tolerate its absence so the capabilities
-  // window still works against older extensions (treat as "no runtimes").
-  if (!res.ok) return { runtimes: [], error: res.error }
+  const rows: InstalledRuntime[] = []
+  const missing = /relation .* does not exist|does not exist/i
+  const errors = [res, mcpRes, memoryRes]
+    .flatMap((r) => (r.ok || missing.test(r.error ?? "") ? [] : [r.error]))
+    .filter((e): e is string => !!e)
+  if (res.ok) rows.push(...res.rows.map(parseRuntime))
+  if (mcpRes.ok) rows.push(...mcpRes.rows.map(parseRuntime))
+  if (memoryRes.ok) rows.push(...memoryRes.rows.map(parseRuntime))
   return {
-    runtimes: [
-      ...res.rows.map(parseRuntime),
-      ...(mcpRes.ok ? mcpRes.rows.map(parseRuntime) : []),
-    ],
+    runtimes: rows,
+    error: rows.length === 0 && errors.length > 0 ? errors[0] : undefined,
   }
 }
 
@@ -949,6 +972,7 @@ export function flagsToStates(flags: InstallStateFlags): InstallState[] {
 export interface ProbeResult {
   ok: boolean
   backend: string
+  targetKind?: "backend" | "runtime" | "memory" | "mcp"
   transport?: string
   endpoint?: string
   latency_ms: number
@@ -1011,9 +1035,102 @@ export async function probeBackend(
   }
 }
 
+function runtimeLanguage(m: Manifest): string {
+  return String(m.runtime_registration?.language ?? m.runtime?.language ?? "python").toLowerCase()
+}
+
+function runtimeRegistrationName(m: Manifest): string {
+  return String(m.runtime_registration?.name ?? m.name)
+}
+
+export async function probeRuntime(
+  connectionId: string,
+  manifest: Manifest,
+): Promise<ProbeResult> {
+  const name = runtimeRegistrationName(manifest)
+  const language = runtimeLanguage(manifest)
+  const isMemory = language === "memory" || language === "hindsight" || language === "http_service"
+  const provider = String(
+    manifest.runtime_registration?.provider ??
+      manifest.warren?.service_provider ??
+      (isMemory ? "hindsight" : ""),
+  ).toLowerCase()
+  const targetKind: ProbeResult["targetKind"] =
+    language === "mcp" || language === "mcp_gateway" ? "mcp" : isMemory ? "memory" : "runtime"
+  let sql: string
+  if (isMemory && provider === "hindsight") {
+    sql = [
+      "SELECT",
+      `  rvbbit.hindsight_status(${sqlLit(name)}) AS r,`,
+      "  (SELECT endpoint_url FROM rvbbit.memory_services WHERE name = " + sqlLit(name) + ") AS endpoint",
+    ].join("\n")
+  } else if (isMemory) {
+    sql = [
+      "SELECT",
+      "  jsonb_build_object('status', status, 'provider', provider, 'health', health) AS r,",
+      "  endpoint_url AS endpoint",
+      "FROM rvbbit.memory_services",
+      `WHERE name = ${sqlLit(name)}`,
+    ].join("\n")
+  } else if (language === "mcp" || language === "mcp_gateway") {
+    sql = `SELECT rvbbit.mcp_probe(${sqlLit(name)}) AS r, (SELECT endpoint_url FROM rvbbit.mcp_gateways WHERE name = ${sqlLit(name)}) AS endpoint`
+  } else {
+    sql = [
+      "SELECT",
+      "  jsonb_build_object('status', status, 'health', health) AS r,",
+      "  endpoint_url AS endpoint",
+      "FROM rvbbit.python_runtimes",
+      `WHERE name = ${sqlLit(name)}`,
+    ].join("\n")
+  }
+
+  const started = Date.now()
+  const res = await runQuery(connectionId, sql)
+  const fallbackLatency = Date.now() - started
+  if (!res.ok) {
+    return {
+      ok: false,
+      backend: name,
+      targetKind,
+      latency_ms: fallbackLatency,
+      error: res.error,
+    }
+  }
+  const row = res.rows[0] ?? {}
+  const output = row.r
+  if (output == null) {
+    return {
+      ok: false,
+      backend: name,
+      targetKind,
+      latency_ms: fallbackLatency,
+      error: "runtime probe returned no row",
+    }
+  }
+  const outputObj = output && typeof output === "object" ? (output as Record<string, unknown>) : null
+  const status = String(outputObj?.status ?? outputObj?.reachable ?? "").toLowerCase()
+  const cls = classifyOutput(output)
+  return {
+    ok:
+      isMemory && provider === "hindsight"
+        ? true
+        : status === "ready" || status === "ok" || outputObj?.reachable === true,
+    backend: name,
+    targetKind,
+    transport: language,
+    endpoint: row.endpoint == null ? undefined : String(row.endpoint),
+    latency_ms: fallbackLatency,
+    output,
+    outputType: cls.outputType,
+    outputSize: cls.outputSize,
+  }
+}
+
 // ── Install pipeline transport ──────────────────────────────────────
 
 export interface ScaffoldRequest {
+  /** Active Lens connection; used by local installs to provision DB-backed runtimes. */
+  connectionId?: string | null
   /** On-disk manifest (catalog packs). One of manifestPath/manifestYaml required. */
   manifestPath?: string
   /** Inline manifest YAML (ad-hoc/from-id deploys with no pack on disk). */
@@ -1610,14 +1727,18 @@ export function defaultKnobs(manifest: Manifest): InstallKnobs {
   const backend: Partial<ManifestBackendBlock> = manifest.backend ?? {}
   const runtime = manifest.runtime ?? {}
   const opts = backend.opts ?? {}
+  const hostPort =
+    typeof runtime.host_port === "number" && Number.isFinite(runtime.host_port)
+      ? runtime.host_port
+      : 0
   return {
     model: manifest.source?.model ?? String(opts.model ?? ""),
     device: runtime.device ?? "auto",
     batchSize: backend.batch_size ?? 32,
     maxConcurrent: backend.max_concurrent ?? 4,
     timeoutMs: backend.timeout_ms ?? 60000,
-    publishHostPort: false,
-    hostPort: 0,
+    publishHostPort: runtime.publish_host_port === true,
+    hostPort,
     dockerNetwork: "docker_default",
     outputDir: `.rvbbit/capabilities/${manifest.name}`,
     gpu: false,
@@ -1699,11 +1820,12 @@ export function renderManifest(
   return {
     manifestYaml: renderManifestYaml(m),
     registerSql: runtime ? renderRegisterRuntimeSql(m) : renderRegisterSql(m),
-    // Runtime sidecars don't create operators directly (OPERATORS.md §16:
-    // they become node primitives used by operators).
-    operatorSql: runtime
-      ? `-- ${m.name} is an execution runtime; it registers no operators.\n-- Use it from an operator workflow node such as \`kind: ${m.runtime_registration?.language ?? m.runtime?.language ?? "python"}\`.\n`
-      : renderOperatorSql(m),
+    operatorSql:
+      (m.operators?.length ?? 0) > 0
+        ? renderOperatorSql(m)
+        : runtime
+          ? `-- ${m.name} is an execution runtime; it declares no SQL operator wrappers.\n-- Use it from an operator workflow node such as \`kind: ${m.runtime_registration?.language ?? m.runtime?.language ?? "python"}\`.\n`
+          : renderOperatorSql(m),
     smokeSql: renderSmokeSql(m),
     composeYaml: renderCompose(m, knobs),
     composeHostPortsYaml: renderHostPortsCompose(m, knobs),
@@ -1796,7 +1918,8 @@ function renderRegisterRuntimeSql(m: Manifest): string {
   const language = reg.language ?? runtime.language ?? "python"
   const endpointPath = runtimeEndpointPath(m)
   const service = m.name.replace(/_/g, "-")
-  const endpoint = reg.endpoint ?? `http://${service}:${runtimeContainerPort(m)}${endpointPath}`
+  const containerHost = `rvbbit-${service.replace(/^-+|-+$/g, "")}`
+  const endpoint = reg.endpoint ?? `http://${containerHost}:${runtimeContainerPort(m)}${endpointPath}`
   const labels = reg.labels ?? {
     language,
     capability_kind: "runtime_sidecar",
@@ -1904,6 +2027,13 @@ function renderOperatorSql(m: Manifest): string {
       `  op_steps       => ${sqlJson(steps)}`,
       ");",
     )
+    if (op.cache_policy) {
+      chunks.push(
+        "UPDATE rvbbit.operators",
+        `SET cache_policy = ${sqlLit(op.cache_policy)}`,
+        `WHERE name = ${sqlLit(op.name)};`,
+      )
+    }
   }
   chunks.push("")
   return chunks.join("\n")
@@ -2046,11 +2176,17 @@ function renderHostPortsCompose(m: Manifest, knobs: InstallKnobs): string {
   }
   const service = m.name.replace(/_/g, "-")
   const containerPort = runtimeContainerPort(m)
+  const hostBind = String(m.runtime?.host_bind ?? "").trim()
+  const hostPrefix = hostBind ? `${hostBind}:` : ""
+  const hostPortEnv = String(m.runtime?.host_port_env ?? "RVBBIT_CAPABILITY_PORT").trim()
+  const safeHostPortEnv = /^[A-Za-z_][A-Za-z0-9_]*$/.test(hostPortEnv)
+    ? hostPortEnv
+    : "RVBBIT_CAPABILITY_PORT"
   return `services:
   ${service}:
     container_name: rvbbit-${service}
     ports:
-      - "\${RVBBIT_CAPABILITY_PORT:-${knobs.hostPort}}:${containerPort}"
+      - "${hostPrefix}\${${safeHostPortEnv}:-${knobs.hostPort}}:${containerPort}"
 `
 }
 

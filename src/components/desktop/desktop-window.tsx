@@ -1055,6 +1055,7 @@ const KIND_HUE: Record<string, number> = {
   "kg-browser": 320,
   "kg-entity-detail": 320,
   "kg-explorer": 320,
+  "hindsight-memory": 300,
   "kg-extraction-runs": 320,
   "kg-merge-review": 320,
   "data-search": 320,
@@ -1065,6 +1066,7 @@ const KIND_HUE: Record<string, number> = {
   "csv-import": 100,
   "scry-results": 72,
   notifications: 260,
+  dagster: 235,
 }
 
 function buildChrome(hue: number): ChromeColors {

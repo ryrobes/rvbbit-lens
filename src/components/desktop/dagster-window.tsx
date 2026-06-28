@@ -5,15 +5,19 @@ import type { ComponentType, ReactNode } from "react"
 import {
   Activity,
   AlertTriangle,
+  BarChart3,
   Bell,
   CheckCircle2,
   Clock,
   Database,
   GitBranch,
+  LineChart,
   Pause,
+  PieChart,
   Play,
   RefreshCw,
   Search,
+  Sparkles,
   Table2,
 } from "@/lib/icons"
 import {
@@ -27,7 +31,8 @@ import {
   type DagsterRunRow,
   type DagsterSnapshot,
 } from "@/lib/dagster/metadata"
-import { fmtAgo, fmtCount, fmtMs, Panel } from "./instruments"
+import { CompositionBar, HBars, Histogram, fmtAgo, fmtCount, fmtMs, Panel, percentile } from "./instruments"
+import { Sparkline } from "./sparkline"
 import { cn } from "@/lib/utils"
 
 type Tab = "timeline" | "resources" | "runs" | "assets" | "checks" | "automation" | "events"
@@ -110,14 +115,15 @@ export function DagsterWindow({ activeConnectionId, workspaceActive }: DagsterWi
     : null
 
   return (
-    <div className="flex h-full flex-col bg-[#070914] text-foreground group-data-[focused=false]/window:bg-[#070914]/75">
-      <div className="flex h-11 shrink-0 items-center gap-2 border-b border-[#1d2235] bg-[#090b18] px-3">
-        <div className="grid h-7 w-7 place-items-center rounded-md border border-[#2b3150] bg-[#151936] shadow-[inset_0_1px_0_rgba(255,255,255,0.05)]">
+    <div className="relative flex h-full flex-col overflow-hidden bg-block-bg/45 text-foreground backdrop-blur-md group-data-[focused=false]/window:bg-block-bg/25">
+      <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_18%_0%,var(--ambient-1),transparent_34%),radial-gradient(circle_at_86%_12%,var(--ambient-2),transparent_30%)] opacity-80" />
+      <div className="relative flex h-11 shrink-0 items-center gap-2 border-b border-chrome-border/65 bg-chrome-bg/55 px-3 backdrop-blur-md">
+        <div className="grid h-7 w-7 place-items-center rounded-md border border-chrome-border/65 bg-secondary-background/55 shadow-[inset_0_1px_0_rgba(255,255,255,0.08)]">
           <GitBranch className="h-3.5 w-3.5 text-rvbbit-accent" />
         </div>
         <div className="min-w-0">
           <div className="text-[12px] font-semibold leading-tight text-foreground">Dagster</div>
-          <div className="truncate font-mono text-[9px] text-[#8e96b8]">
+          <div className="truncate font-mono text-[9px] text-chrome-text/65">
             {detected ? `schemas: ${schemas}` : loading ? "scanning storage tables" : "not detected"}
           </div>
         </div>
@@ -128,7 +134,7 @@ export function DagsterWindow({ activeConnectionId, workspaceActive }: DagsterWi
                 "rounded border px-1.5 py-0.5 font-mono text-[9px]",
                 detected
                   ? "border-success/35 bg-success/10 text-success"
-                  : "border-[#2b3150] bg-white/[0.03] text-[#8e96b8]",
+                  : "border-chrome-border/65 bg-foreground/[0.035] text-chrome-text/70",
               )}
             >
               {snapshot.detection.confidence}%
@@ -142,7 +148,7 @@ export function DagsterWindow({ activeConnectionId, workspaceActive }: DagsterWi
               "inline-flex h-7 items-center gap-1 rounded-md border px-2 font-mono text-[10px] transition-colors",
               autoRefresh
                 ? "border-success/25 bg-success/10 text-success hover:bg-success/15"
-                : "border-[#2b3150] bg-white/[0.03] text-[#8e96b8] hover:bg-white/[0.06] hover:text-foreground",
+                : "border-chrome-border/65 bg-foreground/[0.035] text-chrome-text/70 hover:bg-foreground/[0.07] hover:text-foreground",
             )}
           >
             {autoRefresh ? <RefreshCw className={cn("h-3 w-3", loading && "animate-spin")} /> : <Pause className="h-3 w-3" />}
@@ -153,14 +159,14 @@ export function DagsterWindow({ activeConnectionId, workspaceActive }: DagsterWi
             onClick={() => void refresh()}
             disabled={loading || !activeConnectionId}
             title="Refresh"
-            className="grid h-7 w-7 place-items-center rounded-md border border-[#2b3150] text-[#8e96b8] transition-colors hover:bg-white/[0.06] hover:text-foreground disabled:opacity-45"
+            className="grid h-7 w-7 place-items-center rounded-md border border-chrome-border/65 bg-foreground/[0.025] text-chrome-text/70 transition-colors hover:bg-foreground/[0.07] hover:text-foreground disabled:opacity-45"
           >
             <RefreshCw className={cn("h-3.5 w-3.5", loading && "animate-spin")} />
           </button>
         </div>
       </div>
 
-      <div className="flex min-h-11 shrink-0 items-center gap-2 border-b border-[#1d2235] bg-[#0b0e1d] px-3">
+      <div className="relative flex min-h-11 shrink-0 items-center gap-2 border-b border-chrome-border/60 bg-chrome-bg/35 px-3 backdrop-blur">
         {TABS.map((t) => (
           <button
             key={t.key}
@@ -169,8 +175,8 @@ export function DagsterWindow({ activeConnectionId, workspaceActive }: DagsterWi
             className={cn(
               "h-8 rounded-md px-2.5 text-[11px] font-medium transition-colors",
               tab === t.key
-                ? "bg-[#222743] text-foreground shadow-[inset_0_1px_0_rgba(255,255,255,0.06)]"
-                : "text-[#8e96b8] hover:bg-white/[0.05] hover:text-foreground",
+                ? "bg-foreground/[0.09] text-foreground shadow-[inset_0_1px_0_rgba(255,255,255,0.08)]"
+                : "text-chrome-text/70 hover:bg-foreground/[0.055] hover:text-foreground",
             )}
           >
             {t.label}
@@ -178,15 +184,15 @@ export function DagsterWindow({ activeConnectionId, workspaceActive }: DagsterWi
         ))}
         <div className="ml-auto flex min-w-0 items-center gap-2">
           <label className="relative hidden min-w-[220px] max-w-[520px] flex-1 md:block">
-            <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[#68708e]" />
+            <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-chrome-text/45" />
             <input
               value={query}
               onChange={(e) => setQuery(e.target.value)}
               placeholder="Search and filter automations"
-              className="h-8 w-full rounded-md border border-[#242a43] bg-[#070914] pl-8 pr-2 font-mono text-[11px] text-foreground outline-none placeholder:text-[#68708e] focus:border-[#485073]"
+              className="h-8 w-full rounded-md border border-chrome-border/60 bg-block-bg/50 pl-8 pr-2 font-mono text-[11px] text-foreground outline-none placeholder:text-chrome-text/45 focus:border-rvbbit-accent/45"
             />
           </label>
-          <div className="hidden items-center rounded-md border border-[#242a43] bg-[#070914] p-0.5 md:flex">
+          <div className="hidden items-center rounded-md border border-chrome-border/60 bg-block-bg/45 p-0.5 md:flex">
             {TIMELINE_RANGES.map((range) => (
               <button
                 key={range}
@@ -194,7 +200,7 @@ export function DagsterWindow({ activeConnectionId, workspaceActive }: DagsterWi
                 onClick={() => setRangeHours(range)}
                 className={cn(
                   "h-7 rounded px-2 font-mono text-[10px] transition-colors",
-                  rangeHours === range ? "bg-[#30364f] text-foreground" : "text-[#8e96b8] hover:bg-white/[0.05] hover:text-foreground",
+                  rangeHours === range ? "bg-foreground/[0.11] text-foreground" : "text-chrome-text/70 hover:bg-foreground/[0.055] hover:text-foreground",
                 )}
               >
                 {range}h
@@ -204,14 +210,14 @@ export function DagsterWindow({ activeConnectionId, workspaceActive }: DagsterWi
           <button
             type="button"
             onClick={() => setNowMs(Date.now())}
-            className="hidden h-8 rounded-md border border-[#242a43] bg-[#070914] px-2.5 font-mono text-[10px] text-[#c2c7dd] transition-colors hover:bg-white/[0.05] md:inline-flex md:items-center"
+            className="hidden h-8 rounded-md border border-chrome-border/60 bg-block-bg/45 px-2.5 font-mono text-[10px] text-chrome-text/80 transition-colors hover:bg-foreground/[0.055] hover:text-foreground md:inline-flex md:items-center"
           >
             Now
           </button>
         </div>
       </div>
 
-      <div className="min-h-0 flex-1 overflow-auto bg-[#070914] p-3">
+      <div className="relative min-h-0 flex-1 overflow-auto p-3">
         {!activeConnectionId ? (
           <Empty icon={Database} title="No active connection" detail="Open a connection to scan for Dagster storage." />
         ) : loading && !snapshot ? (
@@ -242,7 +248,7 @@ export function DagsterWindow({ activeConnectionId, workspaceActive }: DagsterWi
         ) : tab === "checks" ? (
           <ChecksTable rows={snapshot.checks} />
         ) : tab === "automation" ? (
-          <AutomationTable rows={snapshot.automations} />
+          <AutomationTable rows={snapshot.automations} nowMs={nowMs} />
         ) : (
           <EventsTable rows={snapshot.events} />
         )}
@@ -273,6 +279,7 @@ interface TimelineLane {
   lastActivityAt: number | null
   ticks: DagsterAutomationTick[]
   runs: TimelineRunBlock[]
+  events: DagsterEventRow[]
   activityCount: number
 }
 
@@ -299,28 +306,34 @@ function AutomationTimeline({
   )
   const selectedLane = lanes.find((lane) => lane.id === selectedLaneId) ?? lanes[0] ?? null
   const nowPct = timePct(nowMs, bounds)
+  const timelineHeight = lanes.length === 0
+    ? 220
+    : Math.min(560, 79 + lanes.length * 42)
 
   return (
     <div className="flex min-h-full flex-col gap-3">
       <TimelineSummary lanes={lanes} bounds={bounds} />
 
-      <div className="min-h-[500px] flex-1 overflow-hidden rounded-md border border-[#1d2235] bg-[#070914] shadow-[inset_0_1px_0_rgba(255,255,255,0.03)]">
+      <div
+        className="shrink-0 overflow-hidden rounded-md border border-chrome-border/60 bg-block-bg/35 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)] backdrop-blur"
+        style={{ height: timelineHeight }}
+      >
         {lanes.length === 0 ? (
           <TinyEmpty label="No recent automation activity" />
         ) : (
           <div className="h-full overflow-auto">
             <div className="min-w-[1080px]">
-              <div className="sticky top-0 z-30 grid grid-cols-[310px_minmax(760px,1fr)] border-b border-[#1d2235] bg-[#0a0d1b]">
-                <div className="flex h-[78px] items-end border-r border-[#1d2235] px-4 pb-3">
+              <div className="sticky top-0 z-30 grid grid-cols-[310px_minmax(760px,1fr)] border-b border-chrome-border/60 bg-chrome-bg/70 backdrop-blur">
+                <div className="flex h-[78px] items-end border-r border-chrome-border/60 px-4 pb-3">
                   <div>
                     <div className="text-[12px] font-semibold text-foreground">Runs</div>
-                    <div className="mt-1 font-mono text-[9px] text-[#68708e]">
+                    <div className="mt-1 font-mono text-[9px] text-chrome-text/55">
                       {formatTimelineWindow(bounds)}
                     </div>
                   </div>
                 </div>
                 <div className="relative h-[78px]">
-                  <div className="absolute left-0 right-0 top-3 text-center font-mono text-[11px] text-[#68708e]">
+                  <div className="absolute left-0 right-0 top-3 text-center font-mono text-[11px] text-chrome-text/55">
                     {formatTimelineDate(bounds.endMs)}
                   </div>
                   <div className="absolute bottom-0 left-0 right-0 top-9">
@@ -329,20 +342,20 @@ function AutomationTimeline({
                       return (
                         <div
                           key={tick}
-                          className="absolute bottom-0 top-0 border-l border-[#1d2235]"
+                          className="absolute bottom-0 top-0 border-l border-chrome-border/45"
                           style={{ left: `${left}%` }}
                         >
-                          <div className="ml-2 mt-1 font-mono text-[10px] text-[#68708e]">
+                          <div className="ml-2 mt-1 font-mono text-[10px] text-chrome-text/55">
                             {formatAxisLabel(tick, rangeHours)}
                           </div>
                         </div>
                       )
                     })}
                     <div
-                      className="absolute bottom-0 top-0 z-20 border-l border-[#d8dcf4]"
+                      className="absolute bottom-0 top-0 z-20 border-l border-foreground/90"
                       style={{ left: `${nowPct}%` }}
                     >
-                      <div className="-ml-3 mt-1 rounded-sm bg-[#d8dcf4] px-1 py-0.5 font-mono text-[9px] leading-none text-[#070914]">
+                      <div className="-ml-3 mt-1 rounded-sm bg-foreground px-1 py-0.5 font-mono text-[9px] leading-none text-background">
                         Now
                       </div>
                     </div>
@@ -357,6 +370,7 @@ function AutomationTimeline({
                     lane={lane}
                     bounds={bounds}
                     axisTicks={axisTicks}
+                    nowMs={nowMs}
                     nowPct={nowPct}
                     selected={lane.id === selectedLane?.id}
                     onSelect={() => onSelectLane(lane.id)}
@@ -368,7 +382,7 @@ function AutomationTimeline({
         )}
       </div>
 
-      {selectedLane ? <TimelineLaneDetail lane={selectedLane} bounds={bounds} /> : null}
+      {selectedLane ? <TimelineLaneDetail lane={selectedLane} bounds={bounds} nowMs={nowMs} /> : null}
     </div>
   )
 }
@@ -411,7 +425,7 @@ function TimelineStat({
   tone?: "danger" | "warning" | "success" | "muted"
 }) {
   return (
-    <div className="rounded-md border border-[#1d2235] bg-[#0a0d1b] px-3 py-2 shadow-[inset_0_1px_0_rgba(255,255,255,0.03)]">
+    <div className="rounded-md border border-chrome-border/60 bg-secondary-background/35 px-3 py-2 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)] backdrop-blur">
       <div
         className={cn(
           "font-mono text-[17px] leading-none tabular-nums",
@@ -419,16 +433,16 @@ function TimelineStat({
             ? "text-danger"
             : tone === "warning"
               ? "text-warning"
-              : tone === "success"
-                ? "text-success"
-                : tone === "muted"
-                  ? "text-[#8e96b8]"
+            : tone === "success"
+              ? "text-success"
+              : tone === "muted"
+                  ? "text-chrome-text/65"
                   : "text-foreground",
         )}
       >
         {value}
       </div>
-      <div className="mt-1 text-[9px] uppercase text-[#68708e]">{label}</div>
+      <div className="mt-1 text-[9px] uppercase tracking-wider text-chrome-text/50">{label}</div>
     </div>
   )
 }
@@ -437,6 +451,7 @@ function TimelineLaneRow({
   lane,
   bounds,
   axisTicks,
+  nowMs,
   nowPct,
   selected,
   onSelect,
@@ -444,6 +459,7 @@ function TimelineLaneRow({
   lane: TimelineLane
   bounds: TimelineBounds
   axisTicks: number[]
+  nowMs: number
   nowPct: number
   selected: boolean
   onSelect: () => void
@@ -458,19 +474,19 @@ function TimelineLaneRow({
         if (e.key === "Enter" || e.key === " ") onSelect()
       }}
       className={cn(
-        "grid grid-cols-[310px_minmax(760px,1fr)] border-b border-[#151a2b] outline-none transition-colors",
-        selected ? "bg-[#171b35]" : "hover:bg-white/[0.025]",
+        "grid grid-cols-[310px_minmax(760px,1fr)] border-b border-chrome-border/35 outline-none transition-colors",
+        selected ? "bg-rvbbit-accent/10 ring-1 ring-inset ring-rvbbit-accent/25" : "hover:bg-foreground/[0.025]",
         quiet && !selected && "opacity-60",
       )}
     >
-      <div className="flex h-[42px] min-w-0 items-center gap-2 border-r border-[#1d2235] px-3">
+      <div className="flex h-[42px] min-w-0 items-center gap-2 border-r border-chrome-border/55 px-3">
         <span className={cn("h-2 w-2 shrink-0 rounded-full", statusDotClass(lane.lastTickStatus ?? lane.status))} />
-        <Clock className="h-3.5 w-3.5 shrink-0 text-[#8e96b8]" />
+        <Clock className="h-3.5 w-3.5 shrink-0 text-chrome-text/60" />
         <div className="min-w-0 flex-1">
-          <div className="truncate text-[11px] font-medium text-[#cfd4ea]" title={lane.name}>
+          <div className="truncate text-[11px] font-medium text-foreground" title={lane.name}>
             {lane.name}
           </div>
-          <div className="truncate font-mono text-[9px] text-[#68708e]">
+          <div className="truncate font-mono text-[9px] text-chrome-text/55">
             {lane.type} · {lane.lastActivityAt ? fmtAgo(lane.lastActivityAt) : "no activity"}
           </div>
         </div>
@@ -480,12 +496,12 @@ function TimelineLaneRow({
         {axisTicks.map((tick) => (
           <span
             key={tick}
-            className="absolute bottom-0 top-0 border-l border-[#151a2b]"
+            className="absolute bottom-0 top-0 border-l border-chrome-border/30"
             style={{ left: `${timePct(tick, bounds)}%` }}
           />
         ))}
         <span
-          className="absolute bottom-0 top-0 z-20 border-l border-[#d8dcf4]"
+          className="absolute bottom-0 top-0 z-20 border-l border-foreground/85"
           style={{ left: `${nowPct}%` }}
         />
         {lane.runs.map((block) => {
@@ -496,7 +512,7 @@ function TimelineLaneRow({
             <span
               key={block.run.runId}
               title={runBlockTitle(block)}
-              className="absolute top-[12px] z-10 h-[18px] overflow-hidden rounded-[4px] border px-1 font-mono text-[9px] leading-[17px] text-[#07100b] shadow-[0_0_0_1px_rgba(0,0,0,0.18)]"
+              className="absolute top-[12px] z-10 h-[18px] overflow-hidden rounded-[4px] border px-1 font-mono text-[9px] leading-[17px] text-main-foreground shadow-[0_0_0_1px_rgba(0,0,0,0.18)]"
               style={{
                 left: `${left}%`,
                 width: `${width}%`,
@@ -515,11 +531,12 @@ function TimelineLaneRow({
           const endAt = tick.updatedAt && tick.updatedAt > tickAt ? tick.updatedAt : tickAt + 90_000
           const widthPct = ((Math.min(endAt, bounds.endMs) - Math.max(tickAt, bounds.startMs)) / (bounds.endMs - bounds.startMs)) * 100
           const width = tick.updatedAt && tick.updatedAt - tickAt > 60_000 ? `${Math.max(0.3, widthPct)}%` : "4px"
+          const future = tickAt > nowMs
           return (
             <span
               key={`${tick.id ?? tickAt}:${index}`}
               title={tickTitle(tick)}
-              className={cn("absolute top-[7px] z-30 h-[28px] rounded-[3px] border", tickSquareClass(tick.status))}
+              className={cn("absolute top-[7px] z-30 h-[28px] rounded-[3px] border", tickSquareClass(tick.status, future))}
               style={{ left: `${left}%`, width, maxWidth: "28px" }}
             />
           )
@@ -529,67 +546,464 @@ function TimelineLaneRow({
   )
 }
 
-function TimelineLaneDetail({ lane, bounds }: { lane: TimelineLane; bounds: TimelineBounds }) {
-  const latestRuns = lane.runs.slice().sort((a, b) => b.startMs - a.startMs).slice(0, 5)
-  const latestTicks = lane.ticks.slice().sort((a, b) => (b.timestamp ?? b.updatedAt ?? 0) - (a.timestamp ?? a.updatedAt ?? 0)).slice(0, 12)
+function TimelineLaneDetail({ lane, bounds, nowMs }: { lane: TimelineLane; bounds: TimelineBounds; nowMs: number }) {
+  const latestRuns = lane.runs.slice().sort((a, b) => b.startMs - a.startMs).slice(0, 6)
+  const latestTicks = lane.ticks.slice().sort((a, b) => (b.timestamp ?? b.updatedAt ?? 0) - (a.timestamp ?? a.updatedAt ?? 0)).slice(0, 14)
+  const runningBlock = latestRuns.find((block) => isRunningStatus(block.run.status)) ?? null
+  const focusBlock = runningBlock ?? latestRuns[0] ?? null
+  const focusEvents = focusBlock
+    ? lane.events.filter((event) => event.runId === focusBlock.run.runId).sort((a, b) => (a.timestamp ?? 0) - (b.timestamp ?? 0) || a.id - b.id)
+    : lane.events.slice().sort((a, b) => (a.timestamp ?? 0) - (b.timestamp ?? 0) || a.id - b.id)
+  const stepRows = buildStepRows(focusEvents)
+  const currentStep = focusEvents.slice().reverse().find((event) => !!event.stepKey) ?? null
+  const recentEvents = focusEvents.slice(-10).reverse()
+  const durationValues = lane.runs
+    .map((block) => Math.max(0, block.endMs - block.startMs))
+    .filter((value) => value > 0)
+  const sortedDurations = durationValues.slice().sort((a, b) => a - b)
+  const durationP50 = sortedDurations.length > 0 ? percentile(sortedDurations, 0.5) : 0
+  const durationP95 = sortedDurations.length > 0 ? percentile(sortedDurations, 0.95) : 0
+  const cadence = tickCadenceSeries(lane.ticks, bounds, 18)
+  const statusSegments = laneStatusSegments(lane)
+  const topHistory = topHistoryRows(lane.events)
+  const expectedMs = Math.max(durationP50 || durationP95 || 1, 1)
+  const runningElapsedMs = runningBlock ? Math.max(0, nowMs - runningBlock.startMs) : 0
+  const runningPct = runningBlock ? Math.min(98, Math.max(3, (runningElapsedMs / expectedMs) * 100)) : null
+  const inspectionTitle = runningBlock ? "Live Inspection" : "Historical Inspection"
 
   return (
     <Panel
-      icon={Clock}
-      title="Drill-in"
-      right={<span className="font-mono text-[9px] text-[#8e96b8]">{formatTimelineWindow(bounds)}</span>}
-      className="shrink-0 border-[#1d2235] bg-[#0a0d1b]"
+      icon={runningBlock ? Activity : LineChart}
+      title={inspectionTitle}
+      right={<span className="font-mono text-[9px] text-chrome-text/60">{formatTimelineWindow(bounds)}</span>}
+      className="min-h-0 shrink-0 border-chrome-border/60 bg-secondary-background/35 backdrop-blur"
     >
-      <div className="grid gap-3 lg:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)_minmax(0,1fr)]">
-        <div className="min-w-0">
-          <div className="truncate text-[13px] font-semibold text-foreground" title={lane.name}>{lane.name}</div>
-          <div className="mt-1 flex flex-wrap items-center gap-1.5">
-            <Pill className={statusClass(lane.lastTickStatus ?? lane.status)}>{lane.lastTickStatus ?? lane.status}</Pill>
-            <span className="font-mono text-[10px] text-[#8e96b8]">{lane.type}</span>
-            <span className="font-mono text-[10px] text-[#68708e]">
-              last {lane.lastActivityAt ? fmtAgo(lane.lastActivityAt) : "never"}
-            </span>
+      <div className="space-y-3">
+        <div className="grid gap-3 xl:grid-cols-[minmax(250px,0.85fr)_minmax(360px,1.25fr)_minmax(300px,1fr)]">
+          <div className="min-w-0 space-y-3">
+            <div className="min-w-0">
+              <div className="truncate text-[13px] font-semibold text-foreground" title={lane.name}>{lane.name}</div>
+              <div className="mt-1 flex flex-wrap items-center gap-1.5">
+                <Pill className={statusClass(lane.lastTickStatus ?? lane.status)}>{lane.lastTickStatus ?? lane.status}</Pill>
+                <span className="font-mono text-[10px] text-chrome-text/65">{lane.type}</span>
+                <span className="font-mono text-[10px] text-chrome-text/50">
+                  last {lane.lastActivityAt ? fmtAgo(lane.lastActivityAt) : "never"}
+                </span>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-3 gap-2">
+              <DetailMetric label="runs" value={fmtCount(lane.runs.length)} />
+              <DetailMetric label="ticks" value={fmtCount(lane.ticks.length)} />
+              <DetailMetric label="events" value={fmtCount(lane.events.length)} />
+            </div>
+
+            <div>
+              <MiniHeading icon={PieChart} label="Status Mix" />
+              {statusSegments.length === 0 ? (
+                <TinyEmpty label="No status samples" />
+              ) : (
+                <>
+                  <CompositionBar segments={statusSegments} height={12} />
+                  <div className="mt-1 flex flex-wrap gap-1">
+                    {statusSegments.map((segment) => (
+                      <span key={segment.label} className="inline-flex items-center gap-1 font-mono text-[9px] text-chrome-text/60">
+                        <span className="h-1.5 w-1.5 rounded-full" style={{ background: segment.color }} />
+                        {short(segment.label, 12)} {segment.value}
+                      </span>
+                    ))}
+                  </div>
+                </>
+              )}
+            </div>
+
+            {runningBlock ? (
+              <div>
+                <MiniHeading icon={Activity} label="Running Progress" />
+                <div className="relative h-2 overflow-hidden rounded-sm bg-foreground/[0.06]">
+                  <div
+                    className="absolute inset-y-0 left-0 rounded-sm bg-rvbbit-accent shadow-[0_0_16px_var(--rvbbit-accent)]"
+                    style={{ width: `${runningPct ?? 0}%` }}
+                  />
+                </div>
+                <div className="mt-1 flex justify-between font-mono text-[9px] text-chrome-text/55">
+                  <span>{fmtMs(runningElapsedMs)} elapsed</span>
+                  <span>median {durationP50 ? fmtMs(durationP50) : "unknown"}</span>
+                </div>
+              </div>
+            ) : null}
+          </div>
+
+          <div className="min-w-0 space-y-3">
+            <LaneActivityRibbon lane={lane} bounds={bounds} nowMs={nowMs} />
+
+            <div>
+              <MiniHeading
+                icon={Sparkles}
+                label={runningBlock ? "Current Step Trace" : "Last Run Trace"}
+                right={focusBlock ? <span className="font-mono text-[9px] text-chrome-text/50">{short(focusBlock.run.runId, 18)}</span> : null}
+              />
+              {focusBlock ? (
+                <div className="mb-2 flex min-w-0 items-center gap-2 border-b border-chrome-border/35 pb-2">
+                  <Pill className={statusClass(focusBlock.run.status)}>{short(focusBlock.run.status, 13)}</Pill>
+                  <div className="min-w-0 flex-1">
+                    <div className="truncate text-[11px] text-foreground" title={focusBlock.run.jobName}>{focusBlock.run.jobName}</div>
+                    <div className="font-mono text-[9px] text-chrome-text/50">
+                      {formatRunDuration(focusBlock)}
+                      {focusBlock.run.partition ? ` · ${focusBlock.run.partition}` : ""}
+                    </div>
+                  </div>
+                </div>
+              ) : null}
+
+              {currentStep ? (
+                <div className="mb-2 rounded border border-rvbbit-accent/25 bg-rvbbit-accent/10 px-2 py-1.5">
+                  <div className="text-[9px] uppercase tracking-wider text-rvbbit-accent/85">
+                    {runningBlock ? "active step" : "latest step"}
+                  </div>
+                  <div className="mt-0.5 truncate font-mono text-[11px] text-foreground" title={currentStep.stepKey ?? undefined}>
+                    {currentStep.stepKey}
+                  </div>
+                  <div className="mt-0.5 flex flex-wrap gap-1.5 font-mono text-[9px] text-chrome-text/55">
+                    <span>{currentStep.eventType ?? "event"}</span>
+                    {currentStep.assetLabel ? <span>{currentStep.assetLabel}</span> : null}
+                    <span>{currentStep.timestamp ? fmtAgo(currentStep.timestamp) : "no time"}</span>
+                  </div>
+                </div>
+              ) : null}
+
+              <StepLadder rows={stepRows} currentStep={currentStep?.stepKey ?? null} />
+            </div>
+          </div>
+
+          <div className="min-w-0 space-y-3">
+            <div>
+              <MiniHeading icon={LineChart} label="Tick Cadence" />
+              <Sparkline values={cadence} height={36} color="var(--rvbbit-accent)" fillOpacity={0.16} yMin={0} />
+              <div className="mt-1 font-mono text-[9px] text-chrome-text/50">
+                {fmtCount(lane.ticks.length)} ticks across this window
+              </div>
+            </div>
+
+            <div>
+              <MiniHeading icon={BarChart3} label="Run Duration Spread" right={durationP95 ? <span>p95 {fmtMs(durationP95)}</span> : null} />
+              {durationValues.length === 0 ? (
+                <TinyEmpty label="No duration samples" />
+              ) : (
+                <Histogram
+                  values={durationValues}
+                  bins={14}
+                  height={46}
+                  markers={[
+                    { value: durationP50, label: "p50", color: "var(--foreground)" },
+                    { value: durationP95, label: "p95", color: "var(--warning)" },
+                  ]}
+                  barColor="var(--rvbbit-accent)"
+                />
+              )}
+            </div>
+
+            <div>
+              <MiniHeading icon={Table2} label="Historical Hotspots" />
+              {topHistory.length === 0 ? (
+                <TinyEmpty label="No step or asset history" />
+              ) : (
+                <HBars rows={topHistory} />
+              )}
+            </div>
           </div>
         </div>
 
-        <div className="min-w-0">
-          <div className="mb-1 text-[9px] uppercase text-[#68708e]">Latest Runs</div>
-          <div className="space-y-1">
-            {latestRuns.length === 0 ? (
-              <div className="font-mono text-[10px] text-[#68708e]">none in window</div>
+        <div className="grid gap-3 lg:grid-cols-2">
+          <div className="min-w-0">
+            <MiniHeading icon={Play} label="Latest Runs" />
+            <div className="space-y-1">
+              {latestRuns.length === 0 ? (
+                <div className="font-mono text-[10px] text-chrome-text/55">none in window</div>
+              ) : (
+                latestRuns.map((block) => (
+                  <div key={block.run.runId} className="flex min-w-0 items-center gap-2 rounded border border-chrome-border/40 bg-foreground/[0.025] px-2 py-1">
+                    <Pill className={statusClass(block.run.status)}>{short(block.run.status, 12)}</Pill>
+                    <span className="min-w-0 flex-1 truncate text-[11px] text-foreground">{block.run.jobName}</span>
+                    <span className="font-mono text-[10px] text-chrome-text/65">{formatRunDuration(block)}</span>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+
+          <div className="min-w-0">
+            <MiniHeading icon={Clock} label="Latest Ticks" />
+            {latestTicks.length === 0 ? (
+              <div className="font-mono text-[10px] text-chrome-text/55">none in window</div>
             ) : (
-              latestRuns.map((block) => (
-                <div key={block.run.runId} className="flex min-w-0 items-center gap-2 rounded border border-[#1d2235] bg-white/[0.025] px-2 py-1">
-                  <Pill className={statusClass(block.run.status)}>{short(block.run.status, 12)}</Pill>
-                  <span className="min-w-0 flex-1 truncate text-[11px] text-[#cfd4ea]">{block.run.jobName}</span>
-                  <span className="font-mono text-[10px] text-[#8e96b8]">{formatRunDuration(block)}</span>
-                </div>
-              ))
+              <div className="flex flex-wrap gap-1.5">
+                {latestTicks.map((tick, i) => {
+                  const tickAt = tick.timestamp ?? tick.updatedAt ?? 0
+                  return (
+                    <span
+                      key={`${tick.id ?? "tick"}:${i}`}
+                      title={tickTitle(tick)}
+                      className={cn("inline-flex h-5 items-center rounded border px-1.5 font-mono text-[9px]", tickSquareClass(tick.status, tickAt > nowMs))}
+                    >
+                      {tick.timestamp ? formatShortClock(tick.timestamp) : short(tick.status, 10)}
+                    </span>
+                  )
+                })}
+              </div>
             )}
           </div>
         </div>
 
-        <div className="min-w-0">
-          <div className="mb-1 text-[9px] uppercase text-[#68708e]">Latest Ticks</div>
-          {latestTicks.length === 0 ? (
-            <div className="font-mono text-[10px] text-[#68708e]">none in window</div>
-          ) : (
-            <div className="flex flex-wrap gap-1.5">
-              {latestTicks.map((tick, i) => (
-                <span
-                  key={`${tick.id ?? "tick"}:${i}`}
-                  title={tickTitle(tick)}
-                  className={cn("inline-flex h-5 items-center rounded border px-1.5 font-mono text-[9px]", statusClass(tick.status))}
-                >
-                  {tick.timestamp ? formatShortClock(tick.timestamp) : short(tick.status, 10)}
-                </span>
+        {recentEvents.length > 0 ? (
+          <div>
+            <MiniHeading icon={Bell} label="Recent Events" />
+            <div className="grid gap-1 md:grid-cols-2 xl:grid-cols-3">
+              {recentEvents.map((event) => (
+                <EventChip key={event.id} event={event} />
               ))}
             </div>
-          )}
-        </div>
+          </div>
+        ) : null}
       </div>
     </Panel>
   )
+}
+
+function DetailMetric({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="min-w-0 border-l border-chrome-border/45 pl-2">
+      <div className="font-mono text-[15px] leading-none tabular-nums text-foreground">{value}</div>
+      <div className="mt-1 text-[9px] uppercase tracking-wider text-chrome-text/50">{label}</div>
+    </div>
+  )
+}
+
+function MiniHeading({
+  icon: Icon,
+  label,
+  right,
+}: {
+  icon: ComponentType<{ className?: string }>
+  label: string
+  right?: ReactNode
+}) {
+  return (
+    <div className="mb-1.5 flex items-center gap-1.5 text-[9px] uppercase tracking-wider text-chrome-text/55">
+      <Icon className="h-3 w-3 text-rvbbit-accent" />
+      <span>{label}</span>
+      {right ? <span className="ml-auto normal-case tracking-normal text-chrome-text/55">{right}</span> : null}
+    </div>
+  )
+}
+
+function LaneActivityRibbon({ lane, bounds, nowMs }: { lane: TimelineLane; bounds: TimelineBounds; nowMs: number }) {
+  const eventDots = lane.events
+    .filter((event) => !!event.timestamp && event.timestamp >= bounds.startMs && event.timestamp <= bounds.endMs)
+    .slice(-80)
+  return (
+    <div className="relative h-16 overflow-hidden rounded border border-chrome-border/45 bg-block-bg/35">
+      {[0, 25, 50, 75, 100].map((left) => (
+        <span key={left} className="absolute bottom-0 top-0 border-l border-chrome-border/20" style={{ left: `${left}%` }} />
+      ))}
+      {lane.runs.map((block) => {
+        const left = timePct(Math.max(block.startMs, bounds.startMs), bounds)
+        const right = timePct(Math.min(block.endMs, bounds.endMs), bounds)
+        const width = Math.max(0.7, right - left)
+        return (
+          <span
+            key={block.run.runId}
+            className="absolute top-3 h-3 rounded-sm opacity-90"
+            title={runBlockTitle(block)}
+            style={{
+              left: `${left}%`,
+              width: `${width}%`,
+              background: statusFillColor(block.run.status),
+              boxShadow: "0 0 16px color-mix(in oklch, currentColor 45%, transparent)",
+            }}
+          />
+        )
+      })}
+      {lane.ticks.map((tick, i) => {
+        const tickAt = tick.timestamp ?? tick.updatedAt
+        if (!tickAt) return null
+        const future = tickAt > nowMs
+        return (
+          <span
+            key={`${tick.id ?? "tick"}:${i}`}
+            className={cn("absolute top-7 h-5 w-1 rounded-sm border", tickSquareClass(tick.status, future))}
+            title={tickTitle(tick)}
+            style={{ left: `${timePct(tickAt, bounds)}%` }}
+          />
+        )
+      })}
+      {eventDots.map((event) => (
+        <span
+          key={event.id}
+          className={cn("absolute bottom-3 h-1.5 w-1.5 -translate-x-1/2 rounded-full", eventDotClass(event.eventType))}
+          title={eventTitle(event)}
+          style={{ left: `${timePct(event.timestamp ?? bounds.startMs, bounds)}%` }}
+        />
+      ))}
+      <span className="absolute bottom-0 top-0 z-10 border-l border-foreground/80" style={{ left: `${timePct(nowMs, bounds)}%` }} />
+      <div className="absolute bottom-0 left-0 right-0 flex justify-between px-2 pb-1 font-mono text-[8px] text-chrome-text/45">
+        <span>{formatShortClock(bounds.startMs)}</span>
+        <span>{formatShortClock(bounds.endMs)}</span>
+      </div>
+    </div>
+  )
+}
+
+interface StepRow {
+  stepKey: string
+  firstAt: number | null
+  lastAt: number | null
+  status: string
+  count: number
+  assetLabel: string | null
+}
+
+function StepLadder({ rows, currentStep }: { rows: StepRow[]; currentStep: string | null }) {
+  if (rows.length === 0) {
+    return <TinyEmpty label="No step events for this run" />
+  }
+  return (
+    <div className="max-h-[178px] space-y-1 overflow-auto pr-1">
+      {rows.slice(-10).map((row, index) => {
+        const active = row.stepKey === currentStep
+        return (
+          <div
+            key={row.stepKey}
+            className={cn(
+              "grid grid-cols-[22px_1fr_auto] items-center gap-2 border-l px-1.5 py-1",
+              active ? "border-rvbbit-accent bg-rvbbit-accent/10" : "border-chrome-border/45",
+            )}
+          >
+            <span className="font-mono text-[9px] tabular-nums text-chrome-text/45">{index + 1}</span>
+            <div className="min-w-0">
+              <div className="truncate font-mono text-[10px] text-foreground" title={row.stepKey}>{row.stepKey}</div>
+              <div className="truncate text-[9px] text-chrome-text/50">
+                {row.assetLabel ?? row.status}
+                {row.lastAt ? ` · ${fmtAgo(row.lastAt)}` : ""}
+              </div>
+            </div>
+            <Pill className={eventClass(row.status)}>{short(row.status, 13)}</Pill>
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
+function EventChip({ event }: { event: DagsterEventRow }) {
+  return (
+    <div className="flex min-w-0 items-center gap-2 rounded border border-chrome-border/35 bg-foreground/[0.02] px-2 py-1">
+      <span className={cn("h-2 w-2 shrink-0 rounded-full", eventDotClass(event.eventType))} />
+      <div className="min-w-0 flex-1">
+        <div className="truncate font-mono text-[10px] text-foreground" title={event.eventType ?? undefined}>
+          {short(event.eventType ?? "LOG", 24)}
+        </div>
+        <div className="truncate text-[9px] text-chrome-text/50">
+          {event.stepKey ?? event.assetLabel ?? event.runId ?? `event ${event.id}`}
+        </div>
+      </div>
+      <span className="font-mono text-[9px] text-chrome-text/45">{event.timestamp ? formatShortClock(event.timestamp) : "-"}</span>
+    </div>
+  )
+}
+
+function buildStepRows(events: DagsterEventRow[]): StepRow[] {
+  const rows = new Map<string, StepRow>()
+  for (const event of events) {
+    if (!event.stepKey) continue
+    const prev = rows.get(event.stepKey)
+    if (!prev) {
+      rows.set(event.stepKey, {
+        stepKey: event.stepKey,
+        firstAt: event.timestamp,
+        lastAt: event.timestamp,
+        status: event.eventType ?? "STEP",
+        count: 1,
+        assetLabel: event.assetLabel,
+      })
+      continue
+    }
+    prev.count += 1
+    if ((event.timestamp ?? 0) >= (prev.lastAt ?? 0)) {
+      prev.lastAt = event.timestamp
+      prev.status = event.eventType ?? prev.status
+      prev.assetLabel = event.assetLabel ?? prev.assetLabel
+    }
+    if ((event.timestamp ?? Number.POSITIVE_INFINITY) < (prev.firstAt ?? Number.POSITIVE_INFINITY)) {
+      prev.firstAt = event.timestamp
+    }
+  }
+  return [...rows.values()].sort((a, b) => (a.firstAt ?? 0) - (b.firstAt ?? 0))
+}
+
+function tickCadenceSeries(ticks: DagsterAutomationTick[], bounds: TimelineBounds, buckets: number): number[] {
+  const counts = new Array<number>(buckets).fill(0)
+  const span = Math.max(1, bounds.endMs - bounds.startMs)
+  for (const tick of ticks) {
+    const at = tick.timestamp ?? tick.updatedAt
+    if (!at || at < bounds.startMs || at > bounds.endMs) continue
+    const index = Math.min(buckets - 1, Math.max(0, Math.floor(((at - bounds.startMs) / span) * buckets)))
+    counts[index] += 1
+  }
+  return counts
+}
+
+function laneStatusSegments(lane: TimelineLane): { label: string; value: number; color: string }[] {
+  const counts = new Map<string, number>()
+  for (const block of lane.runs) {
+    counts.set(block.run.status, (counts.get(block.run.status) ?? 0) + 1)
+  }
+  for (const tick of lane.ticks) {
+    counts.set(tick.status, (counts.get(tick.status) ?? 0) + 1)
+  }
+  return [...counts.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 6)
+    .map(([label, value]) => ({ label, value, color: statusFillColor(label) }))
+}
+
+function topHistoryRows(events: DagsterEventRow[]) {
+  const counts = new Map<string, { count: number; sub: string }>()
+  for (const event of events) {
+    const label = event.stepKey ?? event.assetLabel ?? event.eventType
+    if (!label) continue
+    const prev = counts.get(label) ?? { count: 0, sub: event.stepKey ? "step" : event.assetLabel ? "asset" : "event" }
+    prev.count += 1
+    counts.set(label, prev)
+  }
+  return [...counts.entries()]
+    .sort((a, b) => b[1].count - a[1].count || a[0].localeCompare(b[0]))
+    .slice(0, 5)
+    .map(([label, value]) => ({
+      label: short(label, 28),
+      value: value.count,
+      valueLabel: fmtCount(value.count),
+      sub: value.sub,
+      color: value.sub === "asset" ? "var(--success)" : value.sub === "step" ? "var(--rvbbit-accent)" : "var(--chrome-text)",
+      title: label,
+    }))
+}
+
+function eventTitle(event: DagsterEventRow): string {
+  const lines = [event.eventType ?? "LOG"]
+  if (event.stepKey) lines.push(`step: ${event.stepKey}`)
+  if (event.assetLabel) lines.push(`asset: ${event.assetLabel}`)
+  if (event.timestamp) lines.push(new Date(event.timestamp).toLocaleString())
+  return lines.join("\n")
+}
+
+function eventDotClass(type: string | null): string {
+  if (!type) return "bg-chrome-text/45"
+  if (type.includes("FAIL")) return "bg-danger shadow-[0_0_8px_var(--danger)]"
+  if (type.includes("SUCCESS") || type.includes("MATERIALIZATION")) return "bg-success"
+  if (type.includes("CHECK")) return "bg-warning"
+  if (type.includes("STEP")) return "bg-rvbbit-accent"
+  return "bg-info"
 }
 
 function Overview({ snapshot }: { snapshot: DagsterSnapshot }) {
@@ -679,7 +1093,7 @@ function DagsterFlowGraph({ flows }: { flows: DagsterFlowEdge[] }) {
   }
 
   return (
-    <div ref={ref} className="min-h-[300px] flex-1 overflow-hidden rounded border border-chrome-border/50 bg-[#0b0c0f]">
+    <div ref={ref} className="min-h-[300px] flex-1 overflow-hidden rounded border border-chrome-border/50 bg-block-bg/45">
       <svg viewBox={`0 0 760 ${data.height}`} className="block h-full min-h-[300px] w-full" preserveAspectRatio="xMidYMid meet">
         {data.edges.map((e, i) => {
           const y1 = data.sourceY.get(e.source) ?? 0
@@ -781,7 +1195,7 @@ function ChecksTable({ rows }: { rows: DagsterCheckRow[] }) {
   )
 }
 
-function AutomationTable({ rows }: { rows: DagsterAutomationRow[] }) {
+function AutomationTable({ rows, nowMs }: { rows: DagsterAutomationRow[]; nowMs: number }) {
   return (
     <Panel icon={Clock} title="Automation">
       <DataTable
@@ -794,7 +1208,7 @@ function AutomationTable({ rows }: { rows: DagsterAutomationRow[] }) {
             <div className="truncate font-mono text-[9px] text-chrome-text/45" title={a.id}>{short(a.id, 44)}</div>
           </div>,
           a.type,
-          <TickStrip key="ticks" ticks={a.ticks} />,
+          <TickStrip key="ticks" ticks={a.ticks} nowMs={nowMs} />,
           a.updatedAt ? fmtAgo(a.updatedAt) : "-",
           a.lastTickAt ? fmtAgo(a.lastTickAt) : "-",
         ])}
@@ -803,17 +1217,20 @@ function AutomationTable({ rows }: { rows: DagsterAutomationRow[] }) {
   )
 }
 
-function TickStrip({ ticks }: { ticks: DagsterAutomationTick[] }) {
+function TickStrip({ ticks, nowMs }: { ticks: DagsterAutomationTick[]; nowMs: number }) {
   if (ticks.length === 0) return <span className="text-chrome-text/35">no ticks</span>
   return (
     <div className="flex max-w-[280px] items-center gap-[3px]">
-      {ticks.map((tick, i) => (
-        <span
-          key={`${tick.id ?? "tick"}:${i}`}
-          title={tickTitle(tick)}
-          className={cn("h-2 w-2 shrink-0 rounded-[2px] border", tickSquareClass(tick.status))}
-        />
-      ))}
+      {ticks.map((tick, i) => {
+        const tickAt = tick.timestamp ?? tick.updatedAt ?? 0
+        return (
+          <span
+            key={`${tick.id ?? "tick"}:${i}`}
+            title={tickTitle(tick)}
+            className={cn("h-2 w-2 shrink-0 rounded-[2px] border", tickSquareClass(tick.status, tickAt > nowMs))}
+          />
+        )
+      })}
     </div>
   )
 }
@@ -986,6 +1403,7 @@ function buildTimelineLanes(
   const lanes = snapshot.automations.length > 0
     ? snapshot.automations.map((automation) => {
       const runs = matchingRunBlocks(automation, snapshot.runs, bounds, nowMs)
+      const events = eventsForRunBlocks(snapshot.events, runs)
       const ticks = automation.ticks
         .filter((tick) => {
           const t = tick.timestamp ?? tick.updatedAt
@@ -1011,10 +1429,11 @@ function buildTimelineLanes(
         lastActivityAt,
         ticks,
         runs,
-        activityCount: ticks.length + runs.length,
+        events,
+        activityCount: ticks.length + runs.length + events.length,
       } satisfies TimelineLane
     })
-    : buildRunOnlyLanes(snapshot.runs, bounds, nowMs)
+    : buildRunOnlyLanes(snapshot.runs, snapshot.events, bounds, nowMs)
 
   return lanes
     .filter((lane) => {
@@ -1054,7 +1473,7 @@ function matchingRunBlocks(
     .sort((a, b) => a.startMs - b.startMs)
 }
 
-function buildRunOnlyLanes(runs: DagsterRunRow[], bounds: TimelineBounds, nowMs: number): TimelineLane[] {
+function buildRunOnlyLanes(runs: DagsterRunRow[], events: DagsterEventRow[], bounds: TimelineBounds, nowMs: number): TimelineLane[] {
   const groups = new Map<string, DagsterRunRow[]>()
   for (const run of runs) {
     const key = run.jobName || "(unknown)"
@@ -1068,6 +1487,7 @@ function buildRunOnlyLanes(runs: DagsterRunRow[], bounds: TimelineBounds, nowMs:
       .filter((block): block is TimelineRunBlock => !!block)
       .sort((a, b) => a.startMs - b.startMs)
     const latest = jobRuns.slice().sort((a, b) => (b.updatedAt ?? b.endedAt ?? b.startedAt ?? 0) - (a.updatedAt ?? a.endedAt ?? a.startedAt ?? 0))[0]
+    const laneEvents = eventsForRunBlocks(events, blocks)
     return {
       id: `job:${normalizeTimelineKey(jobName)}`,
       name: jobName,
@@ -1079,9 +1499,18 @@ function buildRunOnlyLanes(runs: DagsterRunRow[], bounds: TimelineBounds, nowMs:
       lastActivityAt: maxEpoch(jobRuns.map((run) => run.updatedAt ?? run.endedAt ?? run.startedAt ?? run.createdAt ?? 0)),
       ticks: [],
       runs: blocks,
-      activityCount: blocks.length,
+      events: laneEvents,
+      activityCount: blocks.length + laneEvents.length,
     } satisfies TimelineLane
   })
+}
+
+function eventsForRunBlocks(events: DagsterEventRow[], runs: TimelineRunBlock[]): DagsterEventRow[] {
+  if (runs.length === 0 || events.length === 0) return []
+  const runIds = new Set(runs.map((block) => block.run.runId))
+  return events
+    .filter((event) => !!event.runId && runIds.has(event.runId))
+    .sort((a, b) => (a.timestamp ?? 0) - (b.timestamp ?? 0) || a.id - b.id)
 }
 
 function runToBlock(run: DagsterRunRow, bounds: TimelineBounds, nowMs: number): TimelineRunBlock | null {
@@ -1193,7 +1622,7 @@ function statusDotClass(status: string): string {
   if (s.includes("SKIP") || s.includes("WARN")) return "bg-warning shadow-[0_0_10px_var(--warning)]"
   if (s.includes("QUEU") || s.includes("START") || s.includes("RUN")) return "bg-rvbbit-accent shadow-[0_0_10px_var(--rvbbit-accent)]"
   if (s.includes("SUCCESS")) return "bg-success shadow-[0_0_10px_var(--success)]"
-  return "bg-[#68708e]"
+  return "bg-chrome-text/55"
 }
 
 function tickTitle(tick: DagsterAutomationTick): string {
@@ -1205,7 +1634,8 @@ function tickTitle(tick: DagsterAutomationTick): string {
   return lines.join("\n")
 }
 
-function tickSquareClass(status: string): string {
+function tickSquareClass(status: string, future = false): string {
+  if (future) return "border-info/70 bg-info/25 text-info shadow-[0_0_10px_var(--info)]"
   const s = status.toUpperCase()
   if (s.includes("FAIL") || s.includes("ERROR")) return "border-danger/70 bg-danger"
   if (s.includes("SUCCESS")) return "border-success/70 bg-success"
@@ -1217,8 +1647,9 @@ function tickSquareClass(status: string): string {
 function statusClass(status: string): string {
   const s = status.toUpperCase()
   if (s.includes("FAIL") || s.includes("CANCEL")) return "border-danger/35 bg-danger/10 text-danger"
-  if (s.includes("SUCCESS") || s === "STARTED" || s === "RUNNING") return "border-success/35 bg-success/10 text-success"
+  if (s.includes("SUCCESS")) return "border-success/35 bg-success/10 text-success"
   if (s.includes("QUEU") || s.includes("START") || s.includes("PLANNED")) return "border-rvbbit-accent/35 bg-rvbbit-accent/10 text-rvbbit-accent"
+  if (s.includes("RUN")) return "border-rvbbit-accent/35 bg-rvbbit-accent/10 text-rvbbit-accent"
   if (s.includes("SKIP") || s.includes("WARN")) return "border-warning/35 bg-warning/10 text-warning"
   return "border-chrome-border/70 bg-foreground/[0.04] text-chrome-text/75"
 }

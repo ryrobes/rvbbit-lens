@@ -237,6 +237,7 @@ export function CapabilityInstallGraph({
   const runScaffoldStep = useCallback(async (): Promise<boolean> => {
     setStep("scaffold", { status: "running", startedAt: Date.now(), error: undefined })
     const result = await runScaffold({
+      connectionId: activeConnectionId,
       manifestPath,
       manifestYaml: manifestYaml ?? rendered.manifestYaml,
       outDir: knobs.outputDir,
@@ -267,7 +268,7 @@ export function CapabilityInstallGraph({
     }
     setStep("scaffold", { status: "ok", endedAt: Date.now() })
     return true
-  }, [manifestPath, manifestYaml, knobs.outputDir, rendered, setStep])
+  }, [activeConnectionId, manifestPath, manifestYaml, knobs.outputDir, rendered, setStep])
 
   const runBuildStep = useCallback(async (): Promise<boolean> => {
     setStep("build", { status: "running", startedAt: Date.now(), error: undefined })

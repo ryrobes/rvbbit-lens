@@ -173,6 +173,7 @@
   --win-palette-h: 320;
   --win-pg-monitor-h: 150;
   --win-duck-h: 210;
+  --win-dagster-h: 235;
   --win-folder-h: 85;
 
   /* Desktop shortcut brand colors. Most match a window-kind hue, but
@@ -314,6 +315,7 @@
   --win-palette-h: 320;
   --win-pg-monitor-h: 150;
   --win-duck-h: 210;
+  --win-dagster-h: 235;
   --win-folder-h: 85;
 
   --brand-finder: oklch(50% 0.025 220);

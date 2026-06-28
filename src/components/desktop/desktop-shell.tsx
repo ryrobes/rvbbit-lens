@@ -89,6 +89,7 @@ import { KgExtractionRunsWindow } from "./kg-extraction-runs-window"
 import { KgMergeReviewWindow } from "./kg-merge-review-window"
 import { KgExplorerWindow } from "./kg-explorer-window"
 import { DataSearchWindow } from "./data-search-window"
+import { HindsightMemoryWindow } from "./hindsight-memory-window"
 import { ScryCanvas } from "./scry-canvas"
 import { ScryResultsWindow } from "./scry-results-window"
 import { fetchFieldFocusSql } from "@/lib/desktop/scry-field"
@@ -176,6 +177,7 @@ import type {
   KgEntityDetailPayload,
   KgEntitySource,
   KgExplorerPayload,
+  HindsightMemoryPayload,
   KgExtractionRunsPayload,
   KgMergeReviewPayload,
   KgSourceContext,
@@ -261,6 +263,7 @@ import {
 import { fetchObjectDdl } from "@/lib/db/object-ddl"
 import { invalidateSemanticOps, loadSemanticOps } from "@/lib/desktop/semantic-ops"
 import { detectDagsterStorage } from "@/lib/dagster/metadata"
+import { detectHindsight } from "@/lib/rvbbit/hindsight"
 import { fetchKgEvidenceBySource, fetchPrimaryKeyColumn } from "@/lib/rvbbit/kg"
 import { broadcastTargetWindowIds, buildDesktopRuntimeGraph, paramKey, resolveParamTableTarget, sameParamValue, sourceSqlForPayload, uniqueBlockName } from "@/lib/desktop/reactive-sql"
 import {
@@ -363,6 +366,9 @@ export function DesktopShell() {
   // Read-only Dagster surface: visible only when the active database has a
   // recognizable Dagster storage table set.
   const [dagsterDetected, setDagsterDetected] = useState(false)
+  // Read-only Hindsight memory observer: visible only when the active database
+  // has the Hindsight schema created by the slim memory capability.
+  const [hindsightDetected, setHindsightDetected] = useState(false)
   // Multi-arg semantic op awaiting its literal args (the drop-site bind step).
   const [pendingBind, setPendingBind] = useState<{
     payload: DesktopColumnDragPayload
@@ -813,6 +819,22 @@ export function DesktopShell() {
       cancelled = true
     }
   }, [activeConnectionId])
+
+  useEffect(() => {
+    if (!activeConnectionId || !hasRvbbit) {
+      queueMicrotask(() => setHindsightDetected(false))
+      return
+    }
+    let cancelled = false
+    detectHindsight(activeConnectionId).then((availability) => {
+      if (!cancelled) setHindsightDetected(availability.ready)
+    }).catch(() => {
+      if (!cancelled) setHindsightDetected(false)
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [activeConnectionId, hasRvbbit])
 
   // Refresh the semantic-op catalog when operators change. Two triggers:
   //  (1) in-session operator/capability edits dispatch `operators-changed`;
@@ -2109,7 +2131,7 @@ export function DesktopShell() {
       id: randomUUID(),
       kind: "dagster",
       title: "Dagster",
-      x: 136, y: 74, width: 1060, height: 720,
+      x: 128, y: 68, width: 1180, height: 760,
       payload: { kind: "dagster" } satisfies DagsterPayload,
     })
   }, [activeConnectionId, focus, openConnections, openWindow, liveWindows])
@@ -2368,6 +2390,38 @@ export function DesktopShell() {
           direction: "both",
           maxEdges: 80,
         } satisfies KgExplorerPayload,
+      })
+    },
+    [focus, openWindow, liveWindows, updatePayload],
+  )
+
+  const openHindsightMemory = useCallback(
+    (
+      initialTab?: HindsightMemoryPayload["initialTab"],
+      bankId?: string | null,
+    ) => {
+      const existing = liveWindows().find((w) => w.kind === "hindsight-memory")
+      if (existing) {
+        updatePayload(existing.id, (p) => ({
+          ...(p as HindsightMemoryPayload),
+          initialTab: initialTab ?? (p as HindsightMemoryPayload).initialTab,
+          bankId: bankId ?? (p as HindsightMemoryPayload).bankId ?? null,
+        }))
+        return focus(existing.id)
+      }
+      openWindow({
+        id: randomUUID(),
+        kind: "hindsight-memory",
+        title: "Hindsight Memory",
+        x: 150,
+        y: 84,
+        width: 1220,
+        height: 780,
+        payload: {
+          kind: "hindsight-memory",
+          initialTab: initialTab ?? "overview",
+          bankId: bankId ?? null,
+        } satisfies HindsightMemoryPayload,
       })
     },
     [focus, openWindow, liveWindows, updatePayload],
@@ -3794,6 +3848,7 @@ export function DesktopShell() {
     // Knowledge
     { id: "kg", label: "Knowledge Graph", icon: TreeStructure, color: "var(--brand-kg)", description: "Browse the extracted graph", activate: () => openKgBrowser(), folder: "knowledge", rvbbit: true },
     { id: "kg-explorer", label: "Graph Explorer", icon: TreeStructure, color: "var(--brand-kg)", description: "Walk entities & relations", activate: () => openKgExplorer(), folder: "knowledge", rvbbit: true },
+    { id: "hindsight-memory", label: "Hindsight", icon: Brain, color: "oklch(70% 0.17 300)", sublabel: "detected", description: "Inspect memory banks, recall evidence & graph", activate: () => openHindsightMemory(), rvbbit: true, visible: hindsightDetected },
     { id: "query-lens", label: "Query Lens", icon: Eye, color: "var(--brand-query-lens)", description: "Trace a query's execution", activate: () => openQueryLens(), folder: "knowledge", rvbbit: true },
     { id: "drift", label: "Drift", icon: LineChart, color: "var(--brand-kg)", description: "Compare extraction runs", activate: () => openDrift(), folder: "knowledge", rvbbit: true },
   ], [
@@ -3804,7 +3859,7 @@ export function DesktopShell() {
     openMcpServers, openCapabilities, openHfDeploy, openWarren, openModelStudio,
     openDuck, openDagster, dagsterDetected, openMetricCatalog, openMetricCreator, openMetricInspector, openMetricBoard, openDashboards, openAlerts, openBrain,
     openCubeCatalog, openCubeCreator, openCubeInspector, openCubeProposals,
-    openKgBrowser, openKgExplorer, openQueryLens, openDrift,
+    openKgBrowser, openKgExplorer, openHindsightMemory, hindsightDetected, openQueryLens, openDrift,
   ])
 
   // ── Command palette (⌘P) item groups ───────────────────────────────
@@ -3923,6 +3978,7 @@ export function DesktopShell() {
       openKgExtractionRuns,
       openKgMergeReview,
       openKgExplorer,
+      openHindsightMemory,
       openDataSearch,
       openDrift,
       openModelStudio,
@@ -3949,7 +4005,7 @@ export function DesktopShell() {
       notifications, watchedChannels, windowChannels, notifyStatus, addWatchedChannel,
       removeWatchedChannel, clearNotifications, openOperatorFlow, openSpecialistDetail,
       openMcpServerDetail, openRouting, openQueryLens, openKgBrowser, openKgEntity,
-      openSourceRow, openKgForSource, openKgExtractionRuns, openKgMergeReview, openKgExplorer,
+      openSourceRow, openKgForSource, openKgExtractionRuns, openKgMergeReview, openKgExplorer, openHindsightMemory,
       openDataSearch, openDrift, openModelStudio, openMetricCatalog, openMetricCreator,
       openMetricInspector, openCubeCreator, openCubeInspector, openCosts, openDuck, openCapabilities, openCapabilityDetail,
       openHfDeploy, openWarren, openWarrenJob,
@@ -4375,6 +4431,10 @@ interface WindowContext {
     graphId?: string,
     seedKind?: string | null,
     seedLabel?: string | null,
+  ) => void
+  openHindsightMemory: (
+    initialTab?: HindsightMemoryPayload["initialTab"],
+    bankId?: string | null,
   ) => void
   openDataSearch: (initialQuery?: string) => void
   openDrift: () => void
@@ -4807,6 +4867,17 @@ function renderWindowContent(
           }
         />
       )
+    case "hindsight-memory":
+      return (
+        <HindsightMemoryWindow
+          payload={w.payload as HindsightMemoryPayload}
+          activeConnectionId={ctx.activeConnectionId}
+          hasRvbbit={ctx.hasRvbbit}
+          onChangePayload={(mut) =>
+            ctx.updatePayload(w.id, (p) => mut(p as HindsightMemoryPayload))
+          }
+        />
+      )
     case "data-search":
       return (
         <DataSearchWindow
@@ -4980,6 +5051,7 @@ function renderWindowContent(
           onOpenSpecialist={ctx.openSpecialistDetail}
           onOpenOperator={(name) => ctx.openOperatorFlow(name)}
           onOpenWarrenJob={ctx.openWarrenJob}
+          onOpenHindsightMemory={() => ctx.openHindsightMemory()}
         />
       )
     case "warren":
@@ -5143,6 +5215,8 @@ function iconForKind(kind: DesktopWindowState["kind"]) {
     case "kg-merge-review":
     case "kg-explorer":
       return TreeStructure
+    case "hindsight-memory":
+      return Brain
     case "kg-extraction-runs":
       return FlowArrow
     case "data-search":

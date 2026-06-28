@@ -35,6 +35,7 @@ export type DesktopWindowKind =
   | "kg-extraction-runs"
   | "kg-merge-review"
   | "kg-explorer"
+  | "hindsight-memory"
   | "capabilities"
   | "capability-detail"
   | "warren"
@@ -119,6 +120,7 @@ export type WindowPayload =
   | KgExtractionRunsPayload
   | KgMergeReviewPayload
   | KgExplorerPayload
+  | HindsightMemoryPayload
   | CapabilitiesPayload
   | CapabilityDetailPayload
   | WarrenPayload
@@ -149,6 +151,14 @@ export type WindowPayload =
 export interface AlertsPayload {
   kind?: "alerts"
   rule?: string
+}
+
+/** Read-only Hindsight schema observer. Recall can call the registered service;
+ *  the table and graph views only select from Hindsight's own schema. */
+export interface HindsightMemoryPayload {
+  kind?: "hindsight-memory"
+  bankId?: string | null
+  initialTab?: "overview" | "memories" | "recall" | "graph" | "ops"
 }
 
 /** Read-only Dagster instance observer, backed by any Dagster metadata tables

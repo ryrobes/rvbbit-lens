@@ -22,6 +22,7 @@ type ViewLayer = "topics" | "detail"
 interface KnowledgeGraphCanvasProps {
   graph: KgGraph
   mode: SigmaMode
+  initialViewLayer?: ViewLayer
   hoveredNodeId: number | null
   hoveredEdgeId: number | null
   selectedEdgeId: number | null
@@ -251,6 +252,7 @@ const TOPIC_STOP_WORDS = new Set([
 export function KnowledgeGraphCanvas({
   graph,
   mode,
+  initialViewLayer = "topics",
   hoveredNodeId,
   hoveredEdgeId,
   selectedEdgeId,
@@ -268,7 +270,7 @@ export function KnowledgeGraphCanvas({
   const [colorMode, setColorMode] = useState<ColorMode>("kind")
   const [edgeMode, setEdgeMode] = useState<EdgeMode>("dim")
   const [cloudMode, setCloudMode] = useState<CloudMode>("kind")
-  const [viewLayer, setViewLayer] = useState<ViewLayer>("topics")
+  const [viewLayer, setViewLayer] = useState<ViewLayer>(initialViewLayer)
   const [focusNeighborhood, setFocusNeighborhood] = useState(true)
   const [focusedNodeId, setFocusedNodeId] = useState<number | null>(null)
   const [selectedNodeKey, setSelectedNodeKey] = useState<string | null>(null)

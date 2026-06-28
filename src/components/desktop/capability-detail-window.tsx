@@ -31,8 +31,10 @@ import {
   flagsToStates,
   isExternalBackendManifest,
   isSqlTestManifest,
+  isRuntimeManifest,
   joinCatalogToInstalled,
   probeBackend,
+  probeRuntime,
   renderManifest,
   runAcceptanceSql,
   type CatalogEntry,
@@ -72,6 +74,7 @@ interface CapabilityDetailWindowProps {
   onOpenSpecialist: (specialistName: string) => void
   onOpenOperator: (operatorName: string) => void
   onOpenWarrenJob: (jobId: string, jobName: string | null) => void
+  onOpenHindsightMemory?: () => void
 }
 
 type TabKey = "overview" | "generated-sql" | "probe" | "install" | "tests"
@@ -102,6 +105,7 @@ export function CapabilityDetailWindow({
   onOpenSpecialist,
   onOpenOperator,
   onOpenWarrenJob,
+  onOpenHindsightMemory,
 }: CapabilityDetailWindowProps) {
   const [catalog, setCatalog] = useState<CatalogEntry | null>(null)
   const [manifest, setManifest] = useState<Manifest | null>(null)
@@ -209,10 +213,8 @@ export function CapabilityDetailWindow({
 
   const externalBackend = !!manifest && isExternalBackendManifest(manifest)
   const isSqlTest = !!manifest && isSqlTestManifest(manifest)
-
-  useEffect(() => {
-    if (isSqlTest && (tab === "probe" || tab === "install")) setTab("tests")
-  }, [isSqlTest, tab])
+  const activeTab: TabKey =
+    isSqlTest && (tab === "probe" || tab === "install") ? "tests" : tab
 
   /** Effective install mode — explicit user choice wins, else availability decides. */
   const effectiveInstallMode: "warren" | "local" =
@@ -232,6 +234,15 @@ export function CapabilityDetailWindow({
     [manifest],
   )
   const defaultEmbedderActive = installed?.is_default_embedder_source === true
+  const isHindsight = useMemo(() => {
+    if (!catalog || !manifest) return false
+    const tags = new Set([...(catalog.tags ?? []), ...(manifest.tags ?? [])].map((tag) => String(tag).toLowerCase()))
+    return (
+      catalog.id === "memory/hindsight-slim" ||
+      manifest.name === "hindsight_slim" ||
+      tags.has("hindsight")
+    )
+  }, [catalog, manifest])
 
   const join: JoinedCatalogEntry | null = useMemo(() => {
     if (!catalog) return null
@@ -314,6 +325,17 @@ export function CapabilityDetailWindow({
             runtime · {join.installedRuntime.status}
           </span>
         ) : null}
+        {isHindsight && onOpenHindsightMemory ? (
+          <button
+            type="button"
+            onClick={onOpenHindsightMemory}
+            className="inline-flex items-center gap-1 rounded-full border border-brand-specialists/40 bg-brand-specialists/10 px-2 py-0.5 text-[10px] text-brand-specialists hover:bg-brand-specialists/15"
+            title="Open Hindsight Memory"
+          >
+            <Brain className="h-3 w-3" />
+            memory
+          </button>
+        ) : null}
         {catalog!.operators.map((opName) => (
           <button
             key={opName}
@@ -350,7 +372,7 @@ export function CapabilityDetailWindow({
             onClick={() => setTab(t.key)}
             className={cn(
               "border-b-2 px-3 py-1.5 text-[11px] font-medium uppercase tracking-wider transition",
-              tab === t.key
+              activeTab === t.key
                 ? "border-brand-capability text-brand-capability"
                 : "border-transparent text-chrome-text/65 hover:text-foreground",
             )}
@@ -363,7 +385,7 @@ export function CapabilityDetailWindow({
       {/* body */}
       <div className="min-h-0 flex-1 overflow-hidden">
         {isMcp ? (
-          tab === "install" ? (
+          activeTab === "install" ? (
             <div className="h-full overflow-auto p-3">
               {mcpCap ? (
                 <McpInstallPanel
@@ -382,7 +404,7 @@ export function CapabilityDetailWindow({
           )
         ) : (
           <>
-        {tab === "overview" ? (
+        {activeTab === "overview" ? (
           <OverviewTab
             catalog={catalog!}
             manifest={manifest!}
@@ -391,17 +413,17 @@ export function CapabilityDetailWindow({
             onChangeKnobs={setKnobs}
           />
         ) : null}
-        {tab === "generated-sql" ? (
+        {activeTab === "generated-sql" ? (
           <GeneratedSqlTab rendered={rendered!} />
         ) : null}
-        {tab === "probe" && !isSqlTest ? (
+        {activeTab === "probe" && !isSqlTest ? (
           <ProbeTab
             activeConnectionId={activeConnectionId}
             manifest={manifest!}
-            registered={!!installed}
+            registered={!!installed || !!installedRuntime}
           />
         ) : null}
-        {tab === "install" && !isSqlTest ? (
+        {activeTab === "install" && !isSqlTest ? (
           <InstallTabDispatcher
             mode={effectiveInstallMode}
             warrenAvail={warrenAvail}
@@ -421,7 +443,7 @@ export function CapabilityDetailWindow({
             acceptance={catalog!.acceptance}
           />
         ) : null}
-        {tab === "tests" ? (
+        {activeTab === "tests" ? (
           <AcceptanceTestsTab
             activeConnectionId={activeConnectionId}
             catalog={catalog!}
@@ -886,6 +908,11 @@ function OverviewTab({
                 />
                 <span className="text-[11px] text-foreground">
                   Publish host port overlay
+                  {runtime.host_bind ? (
+                    <span className="ml-1 font-mono text-chrome-text/55">
+                      ({runtime.host_bind})
+                    </span>
+                  ) : null}
                 </span>
               </label>
               <NumberKnob
@@ -895,7 +922,11 @@ function OverviewTab({
                 min={0}
                 max={65535}
                 step={1}
-                help="Only used by compose.host-ports.yaml; 0 lets Docker choose a free host port"
+                help={
+                  runtime.host_bind
+                    ? `Only used by compose.host-ports.yaml; binds ${runtime.host_bind}`
+                    : "Only used by compose.host-ports.yaml; 0 lets Docker choose a free host port"
+                }
               />
               <TextKnob
                 label="Docker network"
@@ -1279,27 +1310,36 @@ function ProbeTab({
   const [useCustomInput, setUseCustomInput] = useState(false)
   const [running, setRunning] = useState(false)
   const [history, setHistory] = useState<HistoryEntry[]>([])
-  const probeName = manifest.backend?.name ?? manifest.name
+  const isRuntime = isRuntimeManifest(manifest) || !manifest.backend
+  const probeName = manifest.backend?.name ?? manifest.runtime_registration?.name ?? manifest.name
+  const runtimeLanguage = String(manifest.runtime_registration?.language ?? manifest.runtime?.language ?? "").toLowerCase()
+  const runtimeProvider = String(manifest.runtime_registration?.provider ?? manifest.warren?.service_provider ?? "").toLowerCase()
+  const probeTarget = isRuntime
+    ? runtimeProvider === "hindsight" ||
+      runtimeLanguage === "memory" ||
+      runtimeLanguage === "hindsight"
+      ? "memory service"
+      : "runtime"
+    : "backend"
+  const supportsCustomInput = !isRuntime
 
   const runOnce = useCallback(async () => {
     if (!activeConnectionId) return
     setRunning(true)
-    const filled = useCustomInput
+    const filled = supportsCustomInput && useCustomInput
       ? Object.fromEntries(
           Object.entries(inputs).filter(([, v]) => v.length > 0),
         )
       : null
-    const result = await probeBackend(
-      activeConnectionId,
-      probeName,
-      filled,
-    )
+    const result = isRuntime
+      ? await probeRuntime(activeConnectionId, manifest)
+      : await probeBackend(activeConnectionId, probeName, filled)
     setHistory((prev) => [
       ...prev,
       { at: Date.now(), result, input: filled },
     ])
     setRunning(false)
-  }, [activeConnectionId, probeName, inputs, useCustomInput])
+  }, [activeConnectionId, isRuntime, manifest, probeName, inputs, supportsCustomInput, useCustomInput])
 
   const okLatencies = history.filter((h) => h.result.ok).map((h) => h.result.latency_ms)
   const sorted = [...okLatencies].sort((a, b) => a - b)
@@ -1313,11 +1353,13 @@ function ProbeTab({
       <div className="grid h-full place-items-center p-6 text-center text-[12px] text-chrome-text">
         <div className="max-w-md space-y-2">
           <Plug className="mx-auto h-6 w-6 text-chrome-text/40" />
-          <div className="text-foreground">Backend not registered yet</div>
+          <div className="text-foreground">
+            {isRuntime ? "Runtime not registered yet" : "Backend not registered yet"}
+          </div>
           <p className="text-[11px] leading-snug text-chrome-text/65">
-            Probing calls <span className="font-mono">rvbbit.backend_probe</span>{" "}
-            on <span className="font-mono">{(manifest.backend?.name ?? manifest.name)}</span>. Run the
-            install pipeline first (Phase 2) or apply the generated SQL manually.
+            Probing targets the {probeTarget}{" "}
+            <span className="font-mono">{probeName}</span>. Run the install
+            pipeline first or apply the generated SQL manually.
           </p>
         </div>
       </div>
@@ -1337,26 +1379,32 @@ function ProbeTab({
         <div className="space-y-2 overflow-auto p-3">
           <p className="text-[10px] leading-snug text-chrome-text/65">
             <span className="text-warning">Active call:</span> runs the model
-            through the same transport path your operators use. Each click is
-            one billable round-trip.
+            or runtime through the same path your operators use.
+            {isRuntime ? "" : " Each click is one billable round-trip."}
           </p>
-          <label className="flex items-center gap-2">
-            <input
-              type="checkbox"
-              checked={useCustomInput}
-              onChange={(e) => setUseCustomInput(e.target.checked)}
-              className="h-3.5 w-3.5 accent-brand-capability"
-            />
-            <span className="text-[11px] text-foreground">
-              Use custom input
-            </span>
-          </label>
+          {supportsCustomInput ? (
+            <label className="flex items-center gap-2">
+              <input
+                type="checkbox"
+                checked={useCustomInput}
+                onChange={(e) => setUseCustomInput(e.target.checked)}
+                className="h-3.5 w-3.5 accent-brand-capability"
+              />
+              <span className="text-[11px] text-foreground">
+                Use custom input
+              </span>
+            </label>
+          ) : null}
           <div className="text-[10px] text-chrome-text/55">
-            {useCustomInput
-              ? "Sends backend_probe_with_input(name, jsonb)."
-              : "Sends backend_probe(name) — handler-default sample input."}
+            {supportsCustomInput
+              ? useCustomInput
+                ? "Sends backend_probe_with_input(name, jsonb)."
+                : "Sends backend_probe(name) — handler-default sample input."
+              : probeTarget === "memory service"
+                ? "Sends rvbbit.hindsight_status(service_name)."
+                : "Reads the registered runtime health/status row."}
           </div>
-          {useCustomInput ? (
+          {supportsCustomInput && useCustomInput ? (
             <div className="space-y-1.5">
               {fieldNames.length === 0 ? (
                 <p className="text-[10px] italic text-chrome-text/45">
@@ -1587,10 +1635,19 @@ function AcceptanceTestsTab({
   const [running, setRunning] = useState(false)
   const [runSteps, setRunSteps] = useState<AcceptanceRunStep[]>([])
   const [lastOk, setLastOk] = useState<boolean | null>(null)
-  const selectedDef = definitions[Math.min(selected, Math.max(0, definitions.length - 1))]
+  const selectedIndex = Math.min(selected, Math.max(0, definitions.length - 1))
+  const selectedDef = definitions[selectedIndex]
+  const failedRun = runSteps.find((s) => !s.ok)
+  const failedIndex = failedRun
+    ? definitions.findIndex(
+        (d) => d.kind === failedRun.kind && d.name === failedRun.name,
+      )
+    : -1
   const selectedRun = selectedDef
     ? runSteps.find((s) => s.kind === selectedDef.kind && s.name === selectedDef.name)
     : undefined
+  const selectedSkipped =
+    lastOk === false && !selectedRun && failedIndex >= 0 && selectedIndex > failedIndex
 
   const runAll = useCallback(async () => {
     if (!activeConnectionId || !acceptance || running) return
@@ -1645,14 +1702,21 @@ function AcceptanceTestsTab({
           {lastOk != null ? (
             <div
               className={cn(
-                "flex items-center gap-1.5 rounded border px-2 py-1 text-[11px]",
+                "rounded border px-2 py-1 text-[11px]",
                 lastOk
                   ? "border-success/40 bg-success/10 text-success"
                   : "border-danger/40 bg-danger/10 text-danger",
               )}
             >
-              {lastOk ? <CheckCircle2 className="h-3 w-3" /> : <X className="h-3 w-3" />}
-              {lastOk ? "all tests passed" : "stopped on failure"}
+              <div className="flex items-center gap-1.5">
+                {lastOk ? <CheckCircle2 className="h-3 w-3" /> : <X className="h-3 w-3" />}
+                {lastOk ? "all tests passed" : `failed at ${failedRun?.name ?? "step"}`}
+              </div>
+              {!lastOk && failedRun?.error ? (
+                <div className="mt-1 line-clamp-2 font-mono text-[10px] leading-snug text-danger/85">
+                  {failedRun.error}
+                </div>
+              ) : null}
             </div>
           ) : null}
         </div>
@@ -1660,6 +1724,7 @@ function AcceptanceTestsTab({
           {definitions.map((def, i) => {
             const run = runSteps.find((s) => s.kind === def.kind && s.name === def.name)
             const active = i === selected
+            const skipped = lastOk === false && !run && failedIndex >= 0 && i > failedIndex
             return (
               <button
                 key={`${def.kind}:${def.name}`}
@@ -1672,7 +1737,11 @@ function AcceptanceTestsTab({
                     : "text-chrome-text hover:bg-foreground/[0.04] hover:text-foreground",
                 )}
               >
-                <StatusDot ok={run?.ok} running={running && !run && runSteps.length === i} />
+                <StatusDot
+                  ok={run?.ok}
+                  running={running && !run && runSteps.length === i}
+                  skipped={skipped}
+                />
                 <div className="min-w-0 flex-1">
                   <div className="truncate font-mono">{def.name}</div>
                   <div className="text-[9px] uppercase tracking-wider text-chrome-text/45">
@@ -1682,6 +1751,10 @@ function AcceptanceTestsTab({
                 {run ? (
                   <span className="font-mono text-[9px] tabular-nums text-chrome-text/55">
                     {fmtMs(run.latencyMs)}
+                  </span>
+                ) : skipped ? (
+                  <span className="text-[9px] uppercase tracking-wider text-chrome-text/45">
+                    skipped
                   </span>
                 ) : null}
               </button>
@@ -1698,14 +1771,18 @@ function AcceptanceTestsTab({
           <span className="rounded bg-foreground/[0.05] px-1 text-[9px] uppercase tracking-wider text-chrome-text/55">
             sql
           </span>
-          {selectedRun ? (
+          {selectedRun || selectedSkipped ? (
             <span
               className={cn(
                 "ml-auto rounded-full px-1.5 py-px text-[9px] uppercase tracking-wider",
-                selectedRun.ok ? "bg-success/15 text-success" : "bg-danger/15 text-danger",
+                selectedRun
+                  ? selectedRun.ok
+                    ? "bg-success/15 text-success"
+                    : "bg-danger/15 text-danger"
+                  : "bg-chrome-border/60 text-chrome-text/60",
               )}
             >
-              {selectedRun.ok ? "passed" : "failed"}
+              {selectedRun ? (selectedRun.ok ? "passed" : "failed") : "skipped"}
             </span>
           ) : null}
         </div>
@@ -1717,7 +1794,15 @@ function AcceptanceTestsTab({
         <div className="grid min-h-0 flex-1 grid-rows-[minmax(0,1fr)_minmax(120px,0.45fr)]">
           <CodePreview code={selectedDef?.sql ?? ""} lang="sql" className="min-h-0" />
           <div className="min-h-0 overflow-auto border-t border-chrome-border bg-secondary-background/30 p-2">
-            {!selectedRun ? (
+            {!selectedRun && selectedSkipped ? (
+              <div className="grid h-full place-items-center px-6 text-center text-[11px] text-chrome-text/55">
+                <div className="max-w-md">
+                  Skipped because{" "}
+                  <span className="font-mono text-danger">{failedRun?.name ?? "an earlier step"}</span>{" "}
+                  failed. Select that step for the error, then rerun the acceptance SQL.
+                </div>
+              </div>
+            ) : !selectedRun ? (
               <div className="grid h-full place-items-center text-[11px] text-chrome-text/45">
                 Run tests to see output for this step.
               </div>
@@ -1742,9 +1827,11 @@ function AcceptanceTestsTab({
 function StatusDot({
   ok,
   running,
+  skipped,
 }: {
   ok: boolean | undefined
   running: boolean
+  skipped?: boolean
 }) {
   if (running) {
     return (
@@ -1756,6 +1843,7 @@ function StatusDot({
   }
   if (ok === true) return <span className="h-2 w-2 shrink-0 rounded-full bg-success" />
   if (ok === false) return <span className="h-2 w-2 shrink-0 rounded-full bg-danger" />
+  if (skipped) return <span className="h-2 w-2 shrink-0 rounded-full bg-chrome-text/30" />
   return <span className="h-2 w-2 shrink-0 rounded-full bg-chrome-border" />
 }
 
