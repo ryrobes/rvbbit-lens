@@ -284,7 +284,7 @@ function dockerPublishedPortTarget(
     "--format",
     "{{.Names}}\t{{.Ports}}",
   ])
-  const result = spawnSync(docker.command, docker.args, {
+  const result = spawnSync(/*turbopackIgnore: true*/ docker.command, docker.args, {
     env: process.env,
     encoding: "utf8",
     stdio: ["ignore", "pipe", "ignore"],

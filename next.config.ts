@@ -4,32 +4,49 @@ import { fileURLToPath } from "url"
 
 const appRoot = path.dirname(fileURLToPath(import.meta.url))
 
+// The scaffold route intentionally reads/writes capability bundles from runtime
+// paths. Keep Turbopack's NFT trace focused on runtime dependencies, not local
+// repo files that happen to exist during a developer build.
+const capabilityScaffoldTraceExcludes = [
+  "src/**/*",
+  "docs/**/*",
+  "public/**/*",
+  "scratch/**/*",
+  "capabilities/**/*",
+  "coverage/**/*",
+  "test-results/**/*",
+  "*.jpeg",
+  "*.jpg",
+  "*.png",
+  "*.mjs",
+  "*.config.*",
+  "Dockerfile",
+  "README*",
+  "docker-entrypoint.sh",
+  "eslint.config.mjs",
+  "next-env.d.ts",
+  "next.config.*",
+  "package-lock.json",
+  "package.json",
+  "postcss.config.mjs",
+  "tsconfig*.json",
+  "tsconfig.tsbuildinfo",
+]
+
 const nextConfig: NextConfig = {
   output: "standalone",
   outputFileTracingRoot: appRoot,
   outputFileTracingExcludes: {
-    "/api/rvbbit/capabilities/scaffold": [
-      "src/**/*",
-      "docs/**/*",
-      "public/**/*",
-      "*.jpeg",
-      "*.jpg",
-      "*.png",
-      "*.mjs",
-      "Dockerfile",
-      "README.md",
-      "docker-entrypoint.sh",
-      "eslint.config.mjs",
-      "next.config.ts",
-      "package-lock.json",
-      "package.json",
-      "postcss.config.mjs",
-      "tsconfig.json",
-      "tsconfig.tsbuildinfo",
-    ],
+    "/api/rvbbit/capabilities/scaffold": capabilityScaffoldTraceExcludes,
   },
   turbopack: {
     root: appRoot,
+    ignoreIssue: [
+      {
+        path: /next\.config\.ts$/,
+        title: "Encountered unexpected file in NFT list",
+      },
+    ],
   },
   experimental: {
     // Raised so the CSV importer can stream multi-GB uploads to
