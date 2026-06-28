@@ -78,8 +78,16 @@ function templatedFields(step: OpStep): string[] {
   const fields: string[] = []
   if (step.system) fields.push(step.system)
   if (step.user) fields.push(step.user)
+  if (step.task) fields.push(step.task)
   if (step.inputs) fields.push(...Object.values(step.inputs))
   if (step.params) fields.push(...step.params)
+  if (step.memory && typeof step.memory === "object") {
+    const memory = step.memory as Record<string, unknown>
+    for (const key of ["service", "service_name", "context", "context_id", "context_name"]) {
+      const value = memory[key]
+      if (typeof value === "string") fields.push(value)
+    }
+  }
   return fields
 }
 

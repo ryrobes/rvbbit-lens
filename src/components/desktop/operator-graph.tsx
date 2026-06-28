@@ -1254,6 +1254,7 @@ function describeStepNode(step: OpStep | undefined, fallbackModel: string): Node
       }
     case "agent": {
       const nTools = step.tools?.length ?? 0
+      const hasMemory = step.memory === true || (!!step.memory && typeof step.memory === "object" && step.memory.enabled !== false)
       return {
         Icon: RefreshCw,
         kindLabel: "agent",
@@ -1261,7 +1262,7 @@ function describeStepNode(step: OpStep | undefined, fallbackModel: string): Node
         subtitle: step.name,
         body: preview(step.task ?? "", 80),
         foot: `${nTools} tool${nTools === 1 ? "" : "s"} · ≤${step.max_iters ?? 8} iters`,
-        badges: ["loop"],
+        badges: hasMemory ? ["loop", "memory"] : ["loop"],
         accent: "agent",
       }
     }

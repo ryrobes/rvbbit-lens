@@ -16,6 +16,7 @@ import { Button } from "@/components/ui/button"
 import {
   defaultNode,
   emptyOperator,
+  fetchMemoryServices,
   fetchLlmModels,
   fetchOperators,
   fetchPythonEnvs,
@@ -28,6 +29,7 @@ import {
   signatureChanged,
   toStepTemplate,
   type LlmModel,
+  type MemoryService,
   type NodeKind,
   type OpStep,
   type PythonEnv,
@@ -103,6 +105,7 @@ export function OperatorFlowWindow({
   const [pythonEnvs, setPythonEnvs] = useState<PythonEnv[]>([])
   const [pythonHandlers, setPythonHandlers] = useState<PythonHandler[]>([])
   const [llmModels, setLlmModels] = useState<LlmModel[]>([])
+  const [memoryServices, setMemoryServices] = useState<MemoryService[]>([])
   const [receipts, setReceipts] = useState<OperatorReceipt[]>([])
   const [receiptId, setReceiptId] = useState<string | null>(payload.receiptId ?? null)
   const [tryInputs, setTryInputs] = useState<string[]>([])
@@ -140,7 +143,7 @@ export function OperatorFlowWindow({
     let cancelled = false
     const conn = activeConnectionId
     const run = async () => {
-      const [sp, srv, tools, gateway, envs, handlers, models] = await Promise.all([
+      const [sp, srv, tools, gateway, envs, handlers, models, memory] = await Promise.all([
         fetchSpecialists(conn),
         fetchServers(conn),
         fetchAllToolsLite(conn),
@@ -148,6 +151,7 @@ export function OperatorFlowWindow({
         fetchPythonEnvs(conn),
         fetchPythonHandlers(conn),
         fetchLlmModels(conn),
+        fetchMemoryServices(conn),
       ])
       if (cancelled) return
       setSpecialists(sp.specialists)
@@ -157,6 +161,7 @@ export function OperatorFlowWindow({
       setPythonEnvs(envs.envs)
       setPythonHandlers(handlers.handlers)
       setLlmModels(models.models)
+      setMemoryServices(memory.services)
     }
     void run()
     return () => {
@@ -754,6 +759,7 @@ export function OperatorFlowWindow({
               pythonEnvs={pythonEnvs}
               pythonHandlers={pythonHandlers}
               llmModels={llmModels}
+              memoryServices={memoryServices}
               mcpGatewayReady={mcpGateway?.ready === true}
               onOpenMcpGateway={() =>
                 onOpenCapability?.(mcpGateway?.catalogId ?? MCP_GATEWAY_CATALOG_ID, "install")

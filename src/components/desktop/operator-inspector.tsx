@@ -8,6 +8,7 @@ import {
   defaultNode,
   toStepTemplate,
   type LlmModel,
+  type MemoryService,
   type PythonEnv,
   type PythonHandler,
   type RvbbitOperator,
@@ -16,6 +17,7 @@ import {
   type OpStep,
   type AgentToolRef,
   type AgentBudget,
+  type AgentMemoryConfig,
   type RetryPlan,
   type TakesPlan,
   type Validator,
@@ -39,6 +41,7 @@ interface OperatorInspectorProps {
   pythonEnvs: PythonEnv[]
   pythonHandlers: PythonHandler[]
   llmModels: LlmModel[]
+  memoryServices: MemoryService[]
   mcpGatewayReady: boolean
   onOpenMcpGateway?: () => void
   onChange: (next: RvbbitOperator) => void
@@ -76,6 +79,7 @@ export function OperatorInspector({
   pythonEnvs,
   pythonHandlers,
   llmModels,
+  memoryServices,
   mcpGatewayReady,
   onOpenMcpGateway,
   onChange,
@@ -98,6 +102,7 @@ export function OperatorInspector({
         pythonEnvs={pythonEnvs}
         pythonHandlers={pythonHandlers}
         llmModels={llmModels}
+        memoryServices={memoryServices}
         mcpGatewayReady={mcpGatewayReady}
         onOpenMcpGateway={onOpenMcpGateway}
         onChange={onChange}
@@ -281,6 +286,7 @@ function SelectedEditor({
   pythonEnvs,
   pythonHandlers,
   llmModels,
+  memoryServices,
   mcpGatewayReady,
   onOpenMcpGateway,
   onChange,
@@ -294,6 +300,7 @@ function SelectedEditor({
   pythonEnvs: PythonEnv[]
   pythonHandlers: PythonHandler[]
   llmModels: LlmModel[]
+  memoryServices: MemoryService[]
   mcpGatewayReady: boolean
   onOpenMcpGateway?: () => void
   onChange: (n: RvbbitOperator) => void
@@ -361,6 +368,7 @@ function SelectedEditor({
           pythonEnvs={pythonEnvs}
           pythonHandlers={pythonHandlers}
           llmModels={llmModels}
+          memoryServices={memoryServices}
           mcpGatewayReady={mcpGatewayReady}
           onOpenMcpGateway={onOpenMcpGateway}
           onChange={(s) => setNodes(nodes.map((x, i) => (i === ni ? s : x)))}
@@ -389,6 +397,7 @@ function SelectedEditor({
           pythonEnvs={pythonEnvs}
           pythonHandlers={pythonHandlers}
           llmModels={llmModels}
+          memoryServices={memoryServices}
           mcpGatewayReady={mcpGatewayReady}
           onOpenMcpGateway={onOpenMcpGateway}
           onChange={(s) => setSteps(steps.map((x, i) => (i === si ? s : x)))}
@@ -584,6 +593,7 @@ function StepEditor({
   pythonEnvs,
   pythonHandlers,
   llmModels,
+  memoryServices,
   mcpGatewayReady,
   onOpenMcpGateway,
   onChange,
@@ -599,6 +609,7 @@ function StepEditor({
   pythonEnvs: PythonEnv[]
   pythonHandlers: PythonHandler[]
   llmModels: LlmModel[]
+  memoryServices: MemoryService[]
   mcpGatewayReady: boolean
   onOpenMcpGateway?: () => void
   onChange: (s: OpStep) => void
@@ -760,6 +771,7 @@ function StepEditor({
           mcpServers={mcpServers}
           mcpTools={mcpTools}
           llmModels={llmModels}
+          memoryServices={memoryServices}
           onChange={onChange}
         />
       ) : (
@@ -980,16 +992,21 @@ function AgentFields({
   mcpServers,
   mcpTools,
   llmModels,
+  memoryServices,
   onChange,
 }: {
   step: OpStep
   mcpServers: McpServerOverview[]
   mcpTools: McpToolLite[]
   llmModels: LlmModel[]
+  memoryServices: MemoryService[]
   onChange: (s: OpStep) => void
 }) {
   const tools = step.tools ?? []
   const budget = step.budget ?? {}
+  const memory = normalizeAgentMemory(step.memory)
+  const memoryAvailable = memoryServices.some((s) => s.provider === "hindsight" && s.status === "ready")
+  const readyMemoryServices = memoryServices.filter((s) => s.provider === "hindsight" && s.status === "ready")
   const num = (v: string): number | undefined => (v.trim() === "" ? undefined : Number(v))
   const setTool = (i: number, next: AgentToolRef) => {
     const arr = tools.slice()
@@ -1007,6 +1024,44 @@ function AgentFields({
     if (v === undefined) delete next[k]
     else next[k] = v
     onChange({ ...step, budget: next })
+  }
+  const setMemoryEnabled = (enabled: boolean) => {
+    if (!enabled) {
+      const next = { ...step }
+      delete next.memory
+      onChange(next)
+      return
+    }
+    onChange({
+      ...step,
+      memory: {
+        enabled: true,
+        provider: "hindsight",
+        service: memory?.service ?? readyMemoryServices[0]?.name ?? "hindsight_default",
+        context: memory?.context ?? "",
+        allow_tools: memory?.allow_tools ?? true,
+        recall_before_run: memory?.recall_before_run ?? true,
+        retain_final: memory?.retain_final ?? true,
+        required: memory?.required ?? true,
+        limit: memory?.limit ?? 6,
+        max_chars: memory?.max_chars ?? 4000,
+      },
+    })
+  }
+  const setMemory = (patch: Partial<AgentMemoryConfig>) => {
+    const base: AgentMemoryConfig = {
+      enabled: true,
+      provider: "hindsight",
+      service: readyMemoryServices[0]?.name ?? "hindsight_default",
+      allow_tools: true,
+      recall_before_run: true,
+      retain_final: true,
+      required: true,
+      limit: 6,
+      max_chars: 4000,
+      ...memory,
+    }
+    onChange({ ...step, memory: { ...base, ...patch } })
   }
   return (
     <>
@@ -1031,6 +1086,89 @@ function AgentFields({
           className={areaCls}
         />
       </Field>
+
+      <div className="rounded border border-foreground/10 bg-foreground/[0.025] p-2">
+        <div className="mb-1.5 flex items-center justify-between">
+          <span className="text-[9px] uppercase tracking-wider text-chrome-text/45">
+            memory
+          </span>
+          <Toggle label="Hindsight" on={memory != null} onClick={() => setMemoryEnabled(memory == null)} />
+        </div>
+        {memory ? (
+          <div className="space-y-2">
+              <Row>
+                <Field label="service">
+                  {memoryServices.length > 0 ? (
+                    <select
+                      value={memory.service ?? ""}
+                      onChange={(e) => setMemory({ service: e.target.value })}
+                      className={inputCls}
+                    >
+                      {memory.service && !memoryServices.find((s) => s.name === memory.service) ? (
+                        <option value={memory.service}>{memory.service}</option>
+                      ) : null}
+                      {memoryServices.map((s) => (
+                        <option key={s.name} value={s.name}>
+                          {s.name}{s.status !== "ready" ? ` · ${s.status}` : ""}
+                        </option>
+                      ))}
+                    </select>
+                  ) : (
+                    <input
+                      value={memory.service ?? ""}
+                      onChange={(e) => setMemory({ service: e.target.value })}
+                      placeholder="hindsight_default"
+                      className={inputCls}
+                    />
+                  )}
+                </Field>
+                <Field label="context">
+                  <input
+                    value={memory.context ?? ""}
+                    onChange={(e) => setMemory({ context: e.target.value })}
+                    placeholder="{{ inputs.customer_id }}"
+                    className={inputCls}
+                  />
+                </Field>
+              </Row>
+              <div className="grid grid-cols-2 gap-1">
+                <CheckRow label="recall first" checked={memory.recall_before_run !== false} onChange={(v) => setMemory({ recall_before_run: v })} />
+                <CheckRow label="agent tools" checked={memory.allow_tools !== false} onChange={(v) => setMemory({ allow_tools: v })} />
+                <CheckRow label="retain final" checked={memory.retain_final !== false} onChange={(v) => setMemory({ retain_final: v })} />
+                <CheckRow label="allow fallback" checked={memory.required === false} onChange={(v) => setMemory({ required: !v })} />
+              </div>
+              <Row>
+                <Field label="limit">
+                  <input
+                    type="number"
+                    value={memory.limit ?? ""}
+                    onChange={(e) => setMemory({ limit: num(e.target.value) })}
+                    placeholder="6"
+                    className={inputCls}
+                  />
+                </Field>
+                <Field label="memory chars">
+                  <input
+                    type="number"
+                    value={memory.max_chars ?? ""}
+                    onChange={(e) => setMemory({ max_chars: num(e.target.value) })}
+                    placeholder="4000"
+                    className={inputCls}
+                  />
+                </Field>
+              </Row>
+            {memoryAvailable ? null : (
+              <p className="px-1 text-[10px] leading-relaxed text-warning/80">
+                Hindsight is enabled, but no ready service is registered. This node will fail unless fallback is allowed or a service comes online.
+              </p>
+            )}
+          </div>
+        ) : (
+          <p className="px-1 text-[10px] leading-relaxed text-chrome-text/45">
+            Enable Hindsight to give this agent node scoped recall and retention.
+          </p>
+        )}
+      </div>
 
       <div>
         <div className="mb-1 flex items-center justify-between">
@@ -1156,6 +1294,36 @@ function AgentFields({
         operators bypass the result cache automatically.
       </p>
     </>
+  )
+}
+
+function normalizeAgentMemory(memory: OpStep["memory"]): AgentMemoryConfig | null {
+  if (memory === true) return { enabled: true, provider: "hindsight" }
+  if (memory && typeof memory === "object" && memory.enabled !== false) {
+    return { provider: "hindsight", ...memory, enabled: true }
+  }
+  return null
+}
+
+function CheckRow({
+  label,
+  checked,
+  onChange,
+}: {
+  label: string
+  checked: boolean
+  onChange: (checked: boolean) => void
+}) {
+  return (
+    <label className="flex items-center gap-1.5 rounded border border-foreground/10 bg-foreground/[0.025] px-2 py-1 text-[10px] text-chrome-text/70">
+      <input
+        type="checkbox"
+        checked={checked}
+        onChange={(e) => onChange(e.target.checked)}
+        className="h-3 w-3 accent-main"
+      />
+      <span>{label}</span>
+    </label>
   )
 }
 

@@ -906,12 +906,66 @@ export function crossFilterAppliesToStatement(filter: CrossFilter, stmtIndex: nu
   return filter.sourceStmtIndex !== stmtIndex
 }
 
+function findMatchingParen(maskedSql: string, openIndex: number): number {
+  let depth = 0
+  for (let i = openIndex; i < maskedSql.length; i += 1) {
+    const c = maskedSql[i]
+    if (c === "(") depth += 1
+    else if (c === ")") {
+      depth -= 1
+      if (depth === 0) return i
+    }
+  }
+  return -1
+}
+
+function leadingFilterSourceCteBody(sql: string): { start: number; end: number } | null {
+  const masked = maskSql(sql)
+  const match = masked.match(
+    /^\s*WITH\s+(?:RECURSIVE\s+)?(?:"(?:rvbbit_filter_source|__rvbbit_filter_source)"|rvbbit_filter_source|__rvbbit_filter_source)(?:\s*\([^)]*\))?\s+AS\s+(?:(?:NOT\s+)?MATERIALIZED\s+)?\(/i,
+  )
+  if (!match?.[0]) return null
+  const open = match[0].lastIndexOf("(")
+  if (open < 0) return null
+  const close = findMatchingParen(masked, open)
+  return close > open ? { start: open + 1, end: close } : null
+}
+
+/**
+ * Opt-in target filtering for SQL-authored UI artifacts.
+ *
+ * Artifact statements usually output only rvbbit_artifact/spec/data JSON columns,
+ * so the generic output-column wrapper cannot see domain fields like `state`.
+ * When a statement starts with:
+ *
+ *   WITH rvbbit_filter_source AS (SELECT ... state ... FROM ...)
+ *
+ * explicit filter bindings targeting that statement are pushed into the CTE
+ * result before the artifact aggregates it into JSON. Untargeted broadcast
+ * filters are ignored here so old dashboards do not suddenly rewrite every UI
+ * artifact with a coincidental field name.
+ */
+function injectFilterSourceCteFilters(stmt: string, filters: CrossFilter[]): string {
+  const explicit = filters.filter((f) => f.targetStmtIndex !== undefined)
+  if (explicit.length === 0) return stmt
+  const body = leadingFilterSourceCteBody(stmt)
+  if (!body) return stmt
+  const source = stmt.slice(body.start, body.end)
+  const maskedSource = maskSql(source)
+  if (!/^\s*SELECT\b/i.test(maskedSource) || isSelectInto(maskedSource)) return stmt
+  const predicates = explicit.map((f) => predicateForParam(f.column, f.value, f.operator))
+  if (predicates.length === 0) return stmt
+  const wrapped = `\n  SELECT * FROM (\n${indentSql(source)}\n  ) AS __rvbbit_filter_source WHERE ${predicates.join(" AND ")}\n`
+  return `${stmt.slice(0, body.start)}${wrapped}${stmt.slice(body.end)}`
+}
+
 /**
  * Push cross-filters into a multi-statement block. TWO mechanisms, both producing
  * valid server-side SQL — we never front-end filter and never touch DML:
  *
  *  1. **Surgical pre-aggregation** (best): when a statement's FROM is a single
- *     BASE TABLE that IS a filter's source table, wrap that table —
+ *     BASE TABLE that is either the filter's source table or an explicitly
+ *     bound field target, wrap that table —
  *     `FROM t` → `FROM (SELECT * FROM t WHERE <preds>) t`. Filters base rows even
  *     when the column is not selected, and lands BEFORE a GROUP BY.
  *  2. **Output-column wrap** (for everything else — a `{ref}`/subquery/JOIN FROM
@@ -948,13 +1002,18 @@ export function injectStatementFilters(
     const masked = maskSql(stmt)
     const hasContent = masked.trim().length > 0
     if (hasContent) resultIdx++
-    // Only a plain SELECT is safe. Reject DML/DDL/CTE (not SELECT-led) AND
-    // `SELECT … INTO …` (a CREATE-TABLE-AS write whose rows we must not change).
-    if (!hasContent || !/^\s*SELECT\b/i.test(masked) || isSelectInto(masked)) return stmt
+    if (!hasContent) return stmt
     // Untargeted filters skip their source statement; targeted filters apply only
     // to their declared statement.
     const applicable = filters.filter((f) => crossFilterAppliesToStatement(f, resultIdx))
     if (applicable.length === 0) return stmt
+    const cteFiltered = injectFilterSourceCteFilters(stmt, applicable)
+    if (cteFiltered !== stmt) return cteFiltered
+    // Only a plain SELECT is safe for the generic paths. Reject DML/DDL/CTE (not
+    // SELECT-led) AND `SELECT … INTO …` (a CREATE-TABLE-AS write whose rows we
+    // must not change). Filterable UI artifact CTEs are handled by the explicit
+    // opt-in branch above.
+    if (!/^\s*SELECT\b/i.test(masked) || isSelectInto(masked)) return stmt
     // (1) Surgical pre-aggregation wrap for a single base-table FROM.
     const item = singleFromItem(stmt)
     if (item && item.type === "table") {
@@ -963,9 +1022,12 @@ export function injectStatementFilters(
         const cols = new Set(table.columns.map((c) => c.name.toLowerCase()))
         const matching = applicable.filter(
           (f) =>
-            !!f.sourceTable &&
-            f.sourceTable.toLowerCase() === table.name.toLowerCase() &&
-            (!f.sourceSchema || f.sourceSchema.toLowerCase() === table.schema.toLowerCase()) &&
+            (
+              !!f.sourceTable
+                ? f.sourceTable.toLowerCase() === table.name.toLowerCase() &&
+                  (!f.sourceSchema || f.sourceSchema.toLowerCase() === table.schema.toLowerCase())
+                : f.targetStmtIndex !== undefined
+            ) &&
             cols.has(f.column.toLowerCase()),
         )
         if (matching.length > 0) {

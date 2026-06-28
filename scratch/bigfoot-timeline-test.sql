@@ -1,9 +1,12 @@
 -- Bigfoot SQL/viz shorthand scratch
 --
--- This is intentionally not just datasets. It exercises the SQL-authored UI
--- artifact path:
---   - renderer = vega_lite charts
+-- This tests the SQL-authored UI artifact path, including the newer custom
+-- renderers:
+--   - renderer = basic_chart
 --   - renderer = filter_control
+--   - renderer = kpi_gauge
+--   - renderer = sparkline
+--   - renderer = kpi_timeline
 --   - renderer = filter_binding meta rows
 --   - renderer = statement_layout meta row
 --
@@ -11,13 +14,13 @@
 --   1. Run the whole block.
 --   2. It should open as an arranged dashboard.
 --   3. Click a state bar in "Sightings by State" or pick a state in the control.
---   4. County/detail tiles should re-run with a state filter.
+--   4. KPI, timeline, heatmap, and raw rows should re-run filtered to that state.
 --   5. Re-click the same selected state to clear.
 --
--- Note: the Report Themes tile is also SQL-authored Vega, but it is static in
--- this scratch. Cross-filter rewrite can target normal SQL statements because
--- they expose a `state` output column; it cannot rewrite inside a JSON data
--- payload already embedded in another UI artifact row.
+-- Filterable UI artifact convention:
+--   If a UI artifact statement starts with a CTE named rvbbit_filter_source,
+--   explicit filter bindings targeting that statement are pushed into that CTE
+--   before the statement builds embedded JSON artifact data.
 
 WITH states AS (
   SELECT
@@ -63,11 +66,27 @@ FROM (
       (SELECT jsonb_agg(jsonb_build_object('state', state) ORDER BY state) FROM states)
     ),
     (
-      'bind-state-filter-counties',
+      'bind-state-filter-kpi',
       'meta',
       'filter_binding',
-      'State Filter -> County Detail',
-      jsonb_build_object('target', '#3', 'field', 'state', 'operator', 'in'),
+      'State Filter -> KPI',
+      jsonb_build_object('target', 'kpi_overview', 'field', 'state', 'operator', 'in'),
+      NULL::jsonb
+    ),
+    (
+      'bind-state-filter-timeline',
+      'meta',
+      'filter_binding',
+      'State Filter -> Timeline',
+      jsonb_build_object('target', 'timeline_cards', 'field', 'state', 'operator', 'in'),
+      NULL::jsonb
+    ),
+    (
+      'bind-state-filter-heatmap',
+      'meta',
+      'filter_binding',
+      'State Filter -> County Heatmap',
+      jsonb_build_object('target', 'county_heatmap', 'field', 'state', 'operator', 'in'),
       NULL::jsonb
     ),
     (
@@ -75,7 +94,7 @@ FROM (
       'meta',
       'filter_binding',
       'State Filter -> Raw Rows',
-      jsonb_build_object('target', '#5', 'field', 'state', 'operator', 'in'),
+      jsonb_build_object('target', '#6', 'field', 'state', 'operator', 'in'),
       NULL::jsonb
     )
 ) AS v(artifact_id, artifact_kind, renderer, title, spec, data);
@@ -114,28 +133,40 @@ FROM (
     (
       'state-bars',
       'chart',
-      'vega_lite',
+      'basic_chart',
       'Sightings by State',
       jsonb_build_object(
-        '$schema', 'https://vega.github.io/schema/vega-lite/v6.json',
-        'mark', jsonb_build_object('type', 'bar', 'cornerRadiusEnd', 2),
-        'encoding', jsonb_build_object(
-          'x', jsonb_build_object('field', 'state', 'type', 'nominal', 'sort', '-y', 'axis', jsonb_build_object('labelAngle', -35)),
-          'y', jsonb_build_object('field', 'sightings', 'type', 'quantitative'),
-          'tooltip', jsonb_build_array(
-            jsonb_build_object('field', 'state', 'type', 'nominal'),
-            jsonb_build_object('field', 'sightings', 'type', 'quantitative')
-          )
-        )
+        'kind', 'bar',
+        'x', 'state',
+        'y', 'sightings',
+        'x_type', 'nominal',
+        'y_type', 'quantitative',
+        'sort', '-y'
       ),
       (SELECT jsonb_agg(to_jsonb(states)) FROM states)
     ),
     (
-      'bind-state-bars-counties',
+      'bind-state-bars-kpi',
       'meta',
       'filter_binding',
-      'State Bars -> County Detail',
-      jsonb_build_object('target', '#3', 'field', 'state', 'operator', 'in'),
+      'State Bars -> KPI',
+      jsonb_build_object('target', 'kpi_overview', 'field', 'state', 'operator', 'in'),
+      NULL::jsonb
+    ),
+    (
+      'bind-state-bars-timeline',
+      'meta',
+      'filter_binding',
+      'State Bars -> Timeline',
+      jsonb_build_object('target', 'timeline_cards', 'field', 'state', 'operator', 'in'),
+      NULL::jsonb
+    ),
+    (
+      'bind-state-bars-heatmap',
+      'meta',
+      'filter_binding',
+      'State Bars -> County Heatmap',
+      jsonb_build_object('target', 'county_heatmap', 'field', 'state', 'operator', 'in'),
       NULL::jsonb
     ),
     (
@@ -143,38 +174,31 @@ FROM (
       'meta',
       'filter_binding',
       'State Bars -> Raw Rows',
-      jsonb_build_object('target', '#5', 'field', 'state', 'operator', 'in'),
+      jsonb_build_object('target', '#6', 'field', 'state', 'operator', 'in'),
       NULL::jsonb
     )
 ) AS v(artifact_id, artifact_kind, renderer, title, spec, data);
 
-SELECT
-  state,
-  county,
-  count(*)::int AS sightings
-FROM public.bigfoot_sightings
-WHERE nullif(trim(state), '') IS NOT NULL
-  AND nullif(trim(county), '') IS NOT NULL
-GROUP BY state, county
-ORDER BY sightings DESC, state, county
-LIMIT 75;
-
-WITH themed AS (
+WITH rvbbit_filter_source AS (
   SELECT
+    bfroid,
     state,
-    CASE
-      WHEN observed ILIKE '%road%' OR observed ILIKE '%highway%' THEN 'road / highway'
-      WHEN observed ILIKE '%night%' OR observed ILIKE '%dark%' THEN 'night / dark'
-      WHEN observed ILIKE '%camp%' OR observed ILIKE '%tent%' THEN 'camping'
-      WHEN observed ILIKE '%tree%' OR observed ILIKE '%woods%' OR observed ILIKE '%forest%' THEN 'woods / forest'
-      ELSE 'other'
-    END AS report_theme,
-    count(*)::int AS sightings
+    county,
+    observed
   FROM public.bigfoot_sightings
   WHERE nullif(trim(state), '') IS NOT NULL
-  GROUP BY state, report_theme
-  ORDER BY sightings DESC, state, report_theme
-  LIMIT 100
+),
+summary AS (
+  SELECT
+    count(*)::int AS sightings,
+    count(DISTINCT county)::int AS counties,
+    greatest(count(*)::int, 500) AS max_value,
+    CASE
+      WHEN count(*) >= 500 THEN 'healthy'
+      WHEN count(*) >= 150 THEN 'warning'
+      ELSE 'thin'
+    END AS status
+  FROM rvbbit_filter_source
 )
 SELECT
   'ui'::text AS rvbbit_artifact,
@@ -190,33 +214,158 @@ SELECT
 FROM (
   VALUES
     (
-      'name-report-themes',
+      'name-kpi-overview',
       'meta',
       'statement_name',
-      'Report Themes',
-      jsonb_build_object('name', 'report_themes'),
+      'KPI Overview',
+      jsonb_build_object('name', 'kpi_overview'),
       NULL::jsonb
     ),
     (
-      'report-themes',
-      'chart',
-      'vega_lite',
-      'Report Themes',
+      'sighting-volume-kpi',
+      'metric',
+      'kpi_gauge',
+      'Sighting Volume',
       jsonb_build_object(
-        '$schema', 'https://vega.github.io/schema/vega-lite/v6.json',
-        'mark', jsonb_build_object('type', 'bar'),
-        'encoding', jsonb_build_object(
-          'x', jsonb_build_object('field', 'report_theme', 'type', 'nominal', 'sort', '-y'),
-          'y', jsonb_build_object('field', 'sightings', 'type', 'quantitative'),
-          'color', jsonb_build_object('field', 'report_theme', 'type', 'nominal', 'legend', NULL),
-          'tooltip', jsonb_build_array(
-            jsonb_build_object('field', 'state', 'type', 'nominal'),
-            jsonb_build_object('field', 'report_theme', 'type', 'nominal'),
-            jsonb_build_object('field', 'sightings', 'type', 'quantitative')
-          )
-        )
+        'label', 'Sighting Volume',
+        'value_field', 'sightings',
+        'max_field', 'max_value',
+        'target', 500,
+        'status_field', 'status',
+        'good_high', true
       ),
-      (SELECT jsonb_agg(to_jsonb(themed)) FROM themed)
+      (SELECT jsonb_agg(to_jsonb(summary)) FROM summary)
+    )
+) AS v(artifact_id, artifact_kind, renderer, title, spec, data);
+
+WITH rvbbit_filter_source AS (
+  SELECT
+    bfroid,
+    state,
+    county,
+    observed,
+    coalesce(nullif(regexp_replace(bfroid, '\D', '', 'g'), '')::int, 0) AS sighting_id
+  FROM public.bigfoot_sightings
+  WHERE nullif(trim(state), '') IS NOT NULL
+),
+series AS (
+  SELECT
+    make_date(2000 + (sighting_id % 24), 1 + (sighting_id % 12), 1) AS bucket_date,
+    count(*)::int AS sightings,
+    CASE
+      WHEN count(*) >= 25 THEN 'healthy'
+      WHEN count(*) >= 10 THEN 'warning'
+      ELSE 'thin'
+    END AS status
+  FROM rvbbit_filter_source
+  GROUP BY bucket_date
+  ORDER BY bucket_date
+)
+SELECT
+  'ui'::text AS rvbbit_artifact,
+  v.artifact_id,
+  v.artifact_kind,
+  v.renderer,
+  v.title,
+  v.spec,
+  v.data,
+  NULL::jsonb AS layout,
+  NULL::jsonb AS bindings,
+  NULL::jsonb AS diagnostics
+FROM (
+  VALUES
+    (
+      'name-timeline-cards',
+      'meta',
+      'statement_name',
+      'Timeline Cards',
+      jsonb_build_object('name', 'timeline_cards'),
+      NULL::jsonb
+    ),
+    (
+      'sighting-kpi-timeline',
+      'metric',
+      'kpi_timeline',
+      'Volume Timeline',
+      jsonb_build_object(
+        'label', 'Volume Timeline',
+        'time_field', 'bucket_date',
+        'value_field', 'sightings',
+        'target', 25,
+        'status_field', 'status',
+        'good_high', true
+      ),
+      (SELECT jsonb_agg(to_jsonb(series) ORDER BY bucket_date) FROM series)
+    ),
+    (
+      'sighting-sparkline',
+      'chart',
+      'sparkline',
+      'Sparkline',
+      jsonb_build_object(
+        'label', 'Monthly Sightings',
+        'time_field', 'bucket_date',
+        'value_field', 'sightings'
+      ),
+      (SELECT jsonb_agg(to_jsonb(series) ORDER BY bucket_date) FROM series)
+    )
+) AS v(artifact_id, artifact_kind, renderer, title, spec, data);
+
+WITH rvbbit_filter_source AS (
+  SELECT
+    bfroid,
+    state,
+    county,
+    observed
+  FROM public.bigfoot_sightings
+  WHERE nullif(trim(state), '') IS NOT NULL
+    AND nullif(trim(county), '') IS NOT NULL
+),
+counties AS (
+  SELECT
+    state,
+    county,
+    count(*)::int AS sightings
+  FROM rvbbit_filter_source
+  GROUP BY state, county
+  ORDER BY sightings DESC, state, county
+  LIMIT 80
+)
+SELECT
+  'ui'::text AS rvbbit_artifact,
+  v.artifact_id,
+  v.artifact_kind,
+  v.renderer,
+  v.title,
+  v.spec,
+  v.data,
+  NULL::jsonb AS layout,
+  NULL::jsonb AS bindings,
+  NULL::jsonb AS diagnostics
+FROM (
+  VALUES
+    (
+      'name-county-heatmap',
+      'meta',
+      'statement_name',
+      'County Heatmap',
+      jsonb_build_object('name', 'county_heatmap'),
+      NULL::jsonb
+    ),
+    (
+      'county-heatmap',
+      'chart',
+      'basic_chart',
+      'County Heatmap',
+      jsonb_build_object(
+        'kind', 'heatmap',
+        'x', 'state',
+        'y', 'county',
+        'color', 'sightings',
+        'x_type', 'nominal',
+        'y_type', 'nominal'
+      ),
+      (SELECT jsonb_agg(to_jsonb(counties)) FROM counties)
     )
 ) AS v(artifact_id, artifact_kind, renderer, title, spec, data);
 
@@ -225,8 +374,9 @@ SELECT
   title,
   state,
   county,
-  observed
+  left(observed, 240) AS observed_excerpt
 FROM public.bigfoot_sightings
+WHERE nullif(trim(state), '') IS NOT NULL
 ORDER BY state NULLS LAST, county NULLS LAST, bfroid
 LIMIT 250;
 
@@ -252,23 +402,24 @@ FROM (
         'mode', 'arrange',
         'rows', jsonb_build_array(
           jsonb_build_object(
-            'h', 1,
+            'h', 0.8,
             'tiles', jsonb_build_array(
               jsonb_build_object('name', 'state_filter', 'w', 0.7),
               jsonb_build_object('name', 'state_bars', 'w', 2.3)
             )
           ),
           jsonb_build_object(
-            'h', 1.25,
+            'h', 1.2,
             'tiles', jsonb_build_array(
-              jsonb_build_object('name', '#3', 'w', 1.4),
-              jsonb_build_object('name', 'report_themes', 'w', 1.0)
+              jsonb_build_object('name', 'kpi_overview', 'w', 0.9),
+              jsonb_build_object('name', 'timeline_cards', 'w', 2.1)
             )
           ),
           jsonb_build_object(
             'h', 1.6,
             'tiles', jsonb_build_array(
-              jsonb_build_object('name', '#5', 'w', 1.0)
+              jsonb_build_object('name', 'county_heatmap', 'w', 1.4),
+              jsonb_build_object('name', '#6', 'w', 1.0)
             )
           )
         )

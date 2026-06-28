@@ -58,6 +58,22 @@ export interface AgentBudget {
   wall_ms?: number
 }
 
+export interface AgentMemoryConfig {
+  enabled?: boolean
+  provider?: "hindsight"
+  service?: string
+  context?: string
+  required?: boolean
+  allow_tools?: boolean
+  recall_before_run?: boolean
+  retain_final?: boolean
+  async_retain?: boolean
+  limit?: number
+  max_chars?: number
+  recall_options?: Record<string, unknown>
+  retain_options?: Record<string, unknown>
+}
+
 export interface OpStep {
   name: string
   kind: NodeKind
@@ -87,6 +103,9 @@ export interface OpStep {
   // feeds results back, and stops on no-tool-call or a `budget`/max_iters cap.
   task?: string
   tools?: AgentToolRef[]
+  /** Optional long-term memory capability for the agent loop. `true` means
+   * Hindsight with scoped defaults; object form tunes service/context/fallbacks. */
+  memory?: boolean | AgentMemoryConfig
   max_iters?: number
   budget?: AgentBudget
   tool_result_max_chars?: number
@@ -156,6 +175,13 @@ export interface RvbbitSpecialist {
   timeout_ms: number
   description: string | null
   transport_opts: Record<string, unknown> | null
+}
+
+export interface MemoryService {
+  name: string
+  provider: string
+  status: string
+  endpoint_url: string | null
 }
 
 // ── The operator row ────────────────────────────────────────────────
@@ -312,6 +338,32 @@ export async function fetchOperators(
   )
   if (!res.ok) return { operators: [], error: res.error }
   return { operators: res.rows.map(coerceOperator) }
+}
+
+export async function fetchMemoryServices(
+  connectionId: string,
+): Promise<{ services: MemoryService[]; error?: string }> {
+  const res = await runQuery(
+    connectionId,
+    `SELECT name, provider, status, endpoint_url
+       FROM rvbbit.memory_services
+      WHERE provider = 'hindsight'
+      ORDER BY (status = 'ready') DESC, name`,
+  )
+  if (!res.ok) {
+    if (/relation .*memory_services.* does not exist|does not exist/i.test(res.error)) {
+      return { services: [] }
+    }
+    return { services: [], error: res.error }
+  }
+  return {
+    services: res.rows.map((r) => ({
+      name: String(r.name ?? ""),
+      provider: String(r.provider ?? ""),
+      status: String(r.status ?? ""),
+      endpoint_url: r.endpoint_url == null ? null : String(r.endpoint_url),
+    })),
+  }
 }
 
 const RECEIPT_COLUMNS =

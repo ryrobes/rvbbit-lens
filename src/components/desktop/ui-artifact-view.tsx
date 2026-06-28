@@ -9,6 +9,8 @@ import type { DesktopParamOperator, DesktopParamValue } from "@/lib/desktop/type
 import type { CrossFilter } from "@/lib/desktop/reactive-sql"
 import { formatCellValue } from "@/lib/sql/format"
 import { cn } from "@/lib/utils"
+import { Gauge } from "./gauge"
+import { Sparkline } from "./sparkline"
 
 export interface UiArtifactRow extends Record<string, unknown> {
   rvbbit_artifact: "ui"
@@ -118,6 +120,20 @@ function UiArtifactCard({
       <div className={cn("min-h-0", fill ? "h-[calc(100%-2rem)]" : "")}>
         {artifact.renderer === "metric_card" ? (
           <MetricCardArtifact artifact={artifact} fill={fill} />
+        ) : artifact.renderer === "kpi_gauge" ? (
+          <KpiGaugeArtifact artifact={artifact} fill={fill} />
+        ) : artifact.renderer === "sparkline" ? (
+          <SparklineArtifact artifact={artifact} fill={fill} />
+        ) : artifact.renderer === "kpi_timeline" ? (
+          <KpiTimelineArtifact artifact={artifact} fill={fill} />
+        ) : artifact.renderer === "basic_chart" ? (
+          <BasicChartArtifact
+            artifact={artifact}
+            fill={fill}
+            onEmitParam={onEmitParam}
+            sourceStmtIndex={sourceStmtIndex}
+            highlightFilters={highlightFilters}
+          />
         ) : artifact.renderer === "vega_lite" ? (
           <VegaLiteArtifact
             artifact={artifact}
@@ -518,6 +534,318 @@ function MetricCardArtifact({ artifact, fill }: { artifact: UiArtifactRow; fill?
   )
 }
 
+function numericValue(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) return value
+  if (typeof value === "string" && value.trim() !== "") {
+    const n = Number(value)
+    return Number.isFinite(n) ? n : null
+  }
+  return null
+}
+
+function artifactNumber(spec: Record<string, unknown>, key: string): number | null {
+  return numericValue(spec[key])
+}
+
+function artifactStringAny(spec: Record<string, unknown>, keys: string[]): string {
+  for (const key of keys) {
+    const value = artifactString(spec, key)
+    if (value) return value
+  }
+  return ""
+}
+
+function artifactBoolAny(spec: Record<string, unknown>, keys: string[], fallback: boolean): boolean {
+  for (const key of keys) {
+    if (Object.prototype.hasOwnProperty.call(spec, key)) return artifactBool(spec, key, fallback)
+  }
+  return fallback
+}
+
+function valueFromRowOrSpec(
+  spec: Record<string, unknown>,
+  rows: Record<string, unknown>[],
+  valueKey: string,
+  fieldKeys: string[],
+): unknown {
+  if (Object.prototype.hasOwnProperty.call(spec, valueKey)) return spec[valueKey]
+  const field = artifactStringAny(spec, fieldKeys)
+  if (field) return rows[0]?.[field]
+  return undefined
+}
+
+function valuesFromRows(rows: Record<string, unknown>[], field: string): number[] {
+  if (!field) return []
+  return rows.map((row) => numericValue(row[field])).filter((value): value is number => value !== null)
+}
+
+function normalizePercentValue(value: number, unit: string): number {
+  return unit === "%" && Math.abs(value) <= 1 ? value * 100 : value
+}
+
+function formatMetricNumber(value: unknown, unit = ""): string {
+  const n = numericValue(value)
+  if (n === null) return value == null ? "NULL" : formatCellValue(value)
+  if (unit === "%") {
+    const pct = normalizePercentValue(n, unit)
+    return `${pct.toLocaleString(undefined, { maximumFractionDigits: Math.abs(pct) < 10 ? 1 : 0 })}%`
+  }
+  const rendered = Math.abs(n) >= 1000
+    ? n.toLocaleString(undefined, { maximumFractionDigits: 1 })
+    : n.toLocaleString(undefined, { maximumFractionDigits: 2 })
+  return unit ? `${rendered} ${unit}` : rendered
+}
+
+function statusClass(status: string): string {
+  const normalized = status.toLowerCase()
+  if (["ok", "pass", "passed", "healthy", "success", "succeeded", "green"].includes(normalized)) {
+    return "border-success/35 bg-success/15 text-success"
+  }
+  if (["warn", "warning", "degraded", "late", "amber"].includes(normalized)) {
+    return "border-warning/40 bg-warning/15 text-warning"
+  }
+  if (["fail", "failed", "error", "critical", "red", "unhealthy"].includes(normalized)) {
+    return "border-danger/40 bg-danger/15 text-danger"
+  }
+  return "border-chrome-border bg-foreground/[0.04] text-chrome-text"
+}
+
+function KpiGaugeArtifact({ artifact, fill }: { artifact: UiArtifactRow; fill?: boolean }) {
+  const spec = artifact.spec ?? {}
+  const rows = rowsForArtifact(artifact)
+  const value = numericValue(valueFromRowOrSpec(spec, rows, "value", ["value_field", "field"]))
+  const max =
+    artifactNumber(spec, "max") ??
+    numericValue(valueFromRowOrSpec(spec, rows, "max_value", ["max_field"])) ??
+    100
+  const target =
+    artifactNumber(spec, "target") ??
+    numericValue(valueFromRowOrSpec(spec, rows, "target_value", ["target_field"]))
+  const label = artifactStringAny(spec, ["label", "metric", "name"]) || artifact.title || "KPI"
+  const unit = artifactString(spec, "unit")
+  const goodHigh = artifactBoolAny(spec, ["good_high", "higher_is_better"], true)
+  const reading = value === null ? "NULL" : formatMetricNumber(value, unit)
+  const gaugeMax = max > 0 ? max : target && target > 0 ? target : Math.max(1, value ?? 0)
+  const statusField = artifactStringAny(spec, ["status_field", "verdict_field"])
+  const status = statusField ? String(rows[0]?.[statusField] ?? "") : ""
+
+  return (
+    <div className={cn("flex min-w-0 flex-col justify-center gap-3 px-4 py-4", fill ? "h-full" : "min-h-36")}>
+      <div className="flex min-w-0 items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="truncate text-[11px] uppercase tracking-wide text-chrome-text/55">{label}</div>
+          <div className="mt-1 truncate text-3xl font-semibold tabular-nums text-foreground">{reading}</div>
+        </div>
+        {status ? (
+          <span className={cn("shrink-0 rounded border px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide", statusClass(status))}>
+            {status}
+          </span>
+        ) : null}
+      </div>
+      <Gauge
+        value={value ?? 0}
+        max={gaugeMax}
+        goodHigh={goodHigh}
+        label={target === null ? undefined : `target ${formatMetricNumber(target, unit)}`}
+        reading={reading}
+      />
+    </div>
+  )
+}
+
+function SparklineArtifact({ artifact, fill }: { artifact: UiArtifactRow; fill?: boolean }) {
+  const spec = artifact.spec ?? {}
+  const rows = rowsForArtifact(artifact)
+  const valueField = artifactStringAny(spec, ["value_field", "field", "y"])
+  const label = artifactStringAny(spec, ["label", "metric", "name"]) || artifact.title
+  const unit = artifactString(spec, "unit")
+  const values = valuesFromRows(rows, valueField)
+  const latest = values.length ? values[values.length - 1] : null
+  const color = artifactString(spec, "color") || "var(--rvbbit-accent)"
+  const yMin = artifactNumber(spec, "y_min") ?? undefined
+  const yMax = artifactNumber(spec, "y_max") ?? undefined
+  return (
+    <div className={cn("flex min-w-0 flex-col justify-center gap-3 px-4 py-4", fill ? "h-full" : "min-h-32")}>
+      <div className="flex min-w-0 items-baseline justify-between gap-3">
+        {label ? <div className="truncate text-[11px] uppercase tracking-wide text-chrome-text/55">{label}</div> : <span />}
+        <div className="shrink-0 font-mono text-sm tabular-nums text-foreground">
+          {latest === null ? "NULL" : formatMetricNumber(latest, unit)}
+        </div>
+      </div>
+      <Sparkline values={values} height={fill ? 48 : 40} color={color} fillOpacity={0.16} yMin={yMin} yMax={yMax} />
+    </div>
+  )
+}
+
+function sortedTimelineRows(
+  rows: Record<string, unknown>[],
+  timeField: string,
+): Record<string, unknown>[] {
+  if (!timeField) return rows
+  return [...rows].sort((a, b) => String(a[timeField] ?? "").localeCompare(String(b[timeField] ?? "")))
+}
+
+function KpiTimelineArtifact({ artifact, fill }: { artifact: UiArtifactRow; fill?: boolean }) {
+  const spec = artifact.spec ?? {}
+  const rows = sortedTimelineRows(rowsForArtifact(artifact), artifactStringAny(spec, ["time_field", "x", "date_field"]))
+  const valueField = artifactStringAny(spec, ["value_field", "field", "y"])
+  const statusField = artifactStringAny(spec, ["status_field", "verdict_field"])
+  const timeField = artifactStringAny(spec, ["time_field", "x", "date_field"])
+  const values = valuesFromRows(rows, valueField)
+  const latestRow = rows[rows.length - 1]
+  const latest = values.length ? values[values.length - 1] : null
+  const previous = values.length > 1 ? values[values.length - 2] : null
+  const delta = latest !== null && previous !== null ? latest - previous : null
+  const unit = artifactString(spec, "unit")
+  const label = artifactStringAny(spec, ["label", "metric", "name"]) || artifact.title || "KPI"
+  const target = artifactNumber(spec, "target")
+  const max = artifactNumber(spec, "max") ?? (unit === "%" ? 100 : Math.max(target ?? 0, ...values, 1))
+  const goodHigh = artifactBoolAny(spec, ["good_high", "higher_is_better"], true)
+  const status = statusField ? String(latestRow?.[statusField] ?? "") : ""
+  const color = status ? undefined : artifactString(spec, "color")
+  const yMin = artifactNumber(spec, "y_min") ?? undefined
+  const yMax = artifactNumber(spec, "y_max") ?? undefined
+  const normalizedLatest = latest === null ? null : normalizePercentValue(latest, unit)
+  const normalizedMax = normalizePercentValue(max, unit)
+
+  return (
+    <div className={cn("grid min-w-0 gap-3 px-4 py-4", fill ? "h-full grid-rows-[auto_auto_1fr]" : "min-h-48")}>
+      <div className="flex min-w-0 items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="truncate text-[11px] uppercase tracking-wide text-chrome-text/55">{label}</div>
+          <div className="mt-1 flex min-w-0 items-baseline gap-2">
+            <span className="truncate text-3xl font-semibold tabular-nums text-foreground">
+              {latest === null ? "NULL" : formatMetricNumber(latest, unit)}
+            </span>
+            {delta !== null ? (
+              <span className={cn("shrink-0 text-xs tabular-nums", delta === 0 ? "text-chrome-text/45" : delta > 0 === goodHigh ? "text-success" : "text-danger")}>
+                {delta > 0 ? "+" : ""}{formatMetricNumber(delta, unit)}
+              </span>
+            ) : null}
+          </div>
+        </div>
+        {status ? (
+          <span className={cn("shrink-0 rounded border px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide", statusClass(status))}>
+            {status}
+          </span>
+        ) : null}
+      </div>
+      <Gauge
+        value={normalizedLatest ?? 0}
+        max={normalizedMax > 0 ? normalizedMax : Math.max(1, normalizedLatest ?? 0)}
+        goodHigh={goodHigh}
+        label={target === null ? undefined : `target ${formatMetricNumber(target, unit)}`}
+        reading={latest === null ? "NULL" : formatMetricNumber(latest, unit)}
+      />
+      <div className="flex min-h-0 flex-col justify-end gap-1">
+        <Sparkline
+          values={values.map((value) => normalizePercentValue(value, unit))}
+          height={fill ? 58 : 46}
+          color={color || "var(--rvbbit-accent)"}
+          fillOpacity={0.16}
+          yMin={yMin}
+          yMax={yMax}
+        />
+        {timeField && latestRow?.[timeField] != null ? (
+          <div className="truncate text-right text-[10px] text-chrome-text/45">
+            latest {formatCellValue(latestRow[timeField])}
+          </div>
+        ) : null}
+      </div>
+    </div>
+  )
+}
+
+function inferVegaType(rows: Record<string, unknown>[], field: string, fallback: "quantitative" | "temporal" | "nominal" = "nominal") {
+  if (!field) return fallback
+  const sample = rows.find((row) => row[field] !== null && row[field] !== undefined)?.[field]
+  if (typeof sample === "number") return "quantitative"
+  if (sample instanceof Date) return "temporal"
+  if (typeof sample === "string") {
+    if (/^\d{4}-\d{2}-\d{2}(?:[T\s].*)?$/.test(sample)) return "temporal"
+    if (sample.trim() !== "" && Number.isFinite(Number(sample))) return "quantitative"
+  }
+  return fallback
+}
+
+function basicChartSpec(artifact: UiArtifactRow): Record<string, unknown> {
+  const spec = artifact.spec ?? {}
+  const rows = rowsForArtifact(artifact)
+  const kindRaw = artifactStringAny(spec, ["kind", "mark", "chart"]).toLowerCase()
+  const kind = kindRaw === "scatter" ? "point" : kindRaw || "bar"
+  const x = artifactStringAny(spec, ["x", "x_field", "field"])
+  const y = artifactStringAny(spec, ["y", "y_field", "value_field"])
+  const color = artifactStringAny(spec, ["color", "color_field", "series_field"])
+  const size = artifactStringAny(spec, ["size", "size_field"])
+  const aggregate = artifactString(spec, "aggregate")
+  const xType = artifactStringAny(spec, ["x_type", "field_type"]) || inferVegaType(rows, x)
+  const yType = artifactString(spec, "y_type") || inferVegaType(rows, y, "quantitative")
+  const sort = spec.sort ?? (kind === "bar" ? "-y" : undefined)
+  const tooltip = [x, y, color, size]
+    .filter(Boolean)
+    .filter((field, index, arr) => arr.indexOf(field) === index)
+    .map((field) => ({ field, type: field === y ? yType : field === x ? xType : inferVegaType(rows, field) }))
+  const encoding: Record<string, unknown> = {}
+
+  if (kind === "histogram") {
+    encoding.x = { field: x || y, type: "quantitative", bin: spec.bin ?? true }
+    encoding.y = { aggregate: "count", type: "quantitative" }
+  } else if (kind === "heatmap" || kind === "rect") {
+    encoding.x = { field: x, type: xType }
+    encoding.y = { field: y, type: yType }
+    encoding.color = color
+      ? { field: color, type: inferVegaType(rows, color, "quantitative"), aggregate: aggregate || undefined }
+      : { aggregate: "count", type: "quantitative" }
+  } else {
+    encoding.x = { field: x, type: xType, ...(sort ? { sort } : {}) }
+    if (y) encoding.y = { field: y, type: yType, ...(aggregate ? { aggregate } : {}) }
+    else encoding.y = { aggregate: "count", type: "quantitative" }
+    if (color) encoding.color = { field: color, type: inferVegaType(rows, color) }
+    if (size) encoding.size = { field: size, type: inferVegaType(rows, size, "quantitative") }
+  }
+  if (tooltip.length > 0) encoding.tooltip = tooltip
+
+  return {
+    $schema: "https://vega.github.io/schema/vega-lite/v6.json",
+    mark: kind === "area"
+      ? { type: "area", interpolate: "monotone", opacity: 0.8 }
+      : kind === "line"
+        ? { type: "line", point: spec.point ?? true, interpolate: "monotone" }
+        : kind === "point"
+          ? { type: "point", filled: true, size: 55 }
+          : kind === "heatmap"
+            ? { type: "rect" }
+            : { type: kind === "histogram" ? "bar" : kind || "bar", cornerRadiusEnd: kind === "bar" ? 2 : undefined },
+    encoding,
+  }
+}
+
+function BasicChartArtifact({
+  artifact,
+  fill,
+  onEmitParam,
+  sourceStmtIndex,
+  highlightFilters,
+}: {
+  artifact: UiArtifactRow
+  fill?: boolean
+  onEmitParam?: (input: UiArtifactParamInput) => void
+  sourceStmtIndex?: number
+  highlightFilters?: CrossFilter[]
+}) {
+  const spec = useMemo(() => basicChartSpec(artifact), [artifact])
+  const vegaArtifact = useMemo(() => ({ ...artifact, renderer: "vega_lite", spec }), [artifact, spec])
+  return (
+    <VegaLiteArtifact
+      artifact={vegaArtifact}
+      fill={fill}
+      onEmitParam={onEmitParam}
+      sourceStmtIndex={sourceStmtIndex}
+      highlightFilters={highlightFilters}
+    />
+  )
+}
+
 function vegaEncodingField(spec: Record<string, unknown>, channel: string): string {
   const encoding = spec.encoding
   if (!encoding || typeof encoding !== "object" || Array.isArray(encoding)) return ""
@@ -602,6 +930,7 @@ function VegaLiteArtifact({
   sourceStmtIndex?: number
   highlightFilters?: CrossFilter[]
 }) {
+  const rows = useMemo(() => rowsForArtifact(artifact), [artifact])
   const xField = useMemo(
     () => vegaEncodingField(artifact.spec && typeof artifact.spec === "object" ? artifact.spec : {}, "x"),
     [artifact.spec],
@@ -615,12 +944,13 @@ function VegaLiteArtifact({
     const selectable = onEmitParam ? withVegaFilterHighlight(base, xField, highlightValues) : base
     return {
       ...selectable,
+      data: selectable.data ?? (rows.length > 0 ? { values: rows } : undefined),
       config: { ...vegaConfigFromTheme(), ...((selectable.config as Record<string, unknown> | undefined) ?? {}) },
       width: selectable.width ?? "container",
       height: fill ? "container" : selectable.height ?? "container",
       autosize: selectable.autosize ?? { type: "fit", contains: "padding", resize: true },
     }
-  }, [artifact.spec, fill, highlightValues, onEmitParam, xField])
+  }, [artifact.spec, fill, highlightValues, onEmitParam, rows, xField])
 
   function handleEmbed(res: VegaEmbedResult) {
     if (!onEmitParam || !xField) return
