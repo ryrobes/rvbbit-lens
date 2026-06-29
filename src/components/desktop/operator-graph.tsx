@@ -10,6 +10,7 @@ import {
   FileCode2,
   Filter,
   FlowArrow,
+  GitBranch,
   Globe,
   RefreshCw,
   Shield,
@@ -791,6 +792,7 @@ const PALETTE_KINDS: { kind: NodeKind; label: string; Icon: React.ComponentType<
   { kind: "code", label: "code", Icon: Cpu },
   { kind: "sql", label: "sql", Icon: Database },
   { kind: "mcp", label: "mcp", Icon: Globe },
+  { kind: "n8n", label: "n8n", Icon: GitBranch },
   { kind: "agent", label: "agent", Icon: RefreshCw },
 ]
 
@@ -848,6 +850,7 @@ type NodeAccent =
   | "python"
   | "sql"
   | "mcp"
+  | "n8n"
   | "agent"
   | "terminal"
 
@@ -862,6 +865,7 @@ const ACCENT_COLOR: Record<NodeAccent, string> = {
   python: "var(--viz-op-runtime)",
   sql: "var(--viz-op-sql)",
   mcp: "var(--viz-op-mcp)",
+  n8n: "var(--viz-op-n8n)",
   agent: "var(--viz-op-agent)",
   terminal: "var(--viz-op-terminal)",
 }
@@ -1252,6 +1256,17 @@ function describeStepNode(step: OpStep | undefined, fallbackModel: string): Node
         badges: [],
         accent: "mcp",
       }
+    case "n8n":
+      return {
+        Icon: GitBranch,
+        kindLabel: "n8n",
+        title: step.workflow_name || step.webhook || "(unset)",
+        subtitle: step.runtime ? `runtime: ${step.runtime}` : step.name,
+        body: step.inputs ? Object.keys(step.inputs).join(", ") : undefined,
+        foot: `${(step.method ?? "POST").toUpperCase()} webhook`,
+        badges: [],
+        accent: "n8n",
+      }
     case "agent": {
       const nTools = step.tools?.length ?? 0
       const hasMemory = step.memory === true || (!!step.memory && typeof step.memory === "object" && step.memory.enabled !== false)
@@ -1322,6 +1337,8 @@ export function accentForSubCallKind(kind: string): string {
       return "var(--viz-op-sql)"
     case "mcp":
       return "var(--viz-op-mcp)"
+    case "n8n":
+      return "var(--viz-op-n8n)"
     case "agent":
       return "var(--viz-op-agent)"
     default:

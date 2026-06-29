@@ -2,13 +2,14 @@
 
 import { useEffect, useLayoutEffect, useRef, useState } from "react"
 import { createPortal } from "react-dom"
-import { ChevronDown, Globe, Plus, Search, Trash2 } from "@/lib/icons"
+import { ChevronDown, GitBranch, Globe, Plus, Search, Trash2 } from "@/lib/icons"
 import { cn } from "@/lib/utils"
 import {
   defaultNode,
   toStepTemplate,
   type LlmModel,
   type MemoryService,
+  type N8nWorkflow,
   type PythonEnv,
   type PythonHandler,
   type RvbbitOperator,
@@ -42,6 +43,7 @@ interface OperatorInspectorProps {
   pythonHandlers: PythonHandler[]
   llmModels: LlmModel[]
   memoryServices: MemoryService[]
+  n8nWorkflows: N8nWorkflow[]
   mcpGatewayReady: boolean
   onOpenMcpGateway?: () => void
   onChange: (next: RvbbitOperator) => void
@@ -80,6 +82,7 @@ export function OperatorInspector({
   pythonHandlers,
   llmModels,
   memoryServices,
+  n8nWorkflows,
   mcpGatewayReady,
   onOpenMcpGateway,
   onChange,
@@ -103,6 +106,7 @@ export function OperatorInspector({
         pythonHandlers={pythonHandlers}
         llmModels={llmModels}
         memoryServices={memoryServices}
+        n8nWorkflows={n8nWorkflows}
         mcpGatewayReady={mcpGatewayReady}
         onOpenMcpGateway={onOpenMcpGateway}
         onChange={onChange}
@@ -111,7 +115,7 @@ export function OperatorInspector({
   )
 }
 
-const NODE_KINDS: NodeKind[] = ["llm", "specialist", "python", "code", "sql", "mcp", "agent"]
+const NODE_KINDS: NodeKind[] = ["llm", "specialist", "python", "code", "sql", "mcp", "n8n", "agent"]
 
 // ── Flow-control toggles ────────────────────────────────────────────
 
@@ -287,6 +291,7 @@ function SelectedEditor({
   pythonHandlers,
   llmModels,
   memoryServices,
+  n8nWorkflows,
   mcpGatewayReady,
   onOpenMcpGateway,
   onChange,
@@ -301,6 +306,7 @@ function SelectedEditor({
   pythonHandlers: PythonHandler[]
   llmModels: LlmModel[]
   memoryServices: MemoryService[]
+  n8nWorkflows: N8nWorkflow[]
   mcpGatewayReady: boolean
   onOpenMcpGateway?: () => void
   onChange: (n: RvbbitOperator) => void
@@ -369,6 +375,7 @@ function SelectedEditor({
           pythonHandlers={pythonHandlers}
           llmModels={llmModels}
           memoryServices={memoryServices}
+          n8nWorkflows={n8nWorkflows}
           mcpGatewayReady={mcpGatewayReady}
           onOpenMcpGateway={onOpenMcpGateway}
           onChange={(s) => setNodes(nodes.map((x, i) => (i === ni ? s : x)))}
@@ -398,6 +405,7 @@ function SelectedEditor({
           pythonHandlers={pythonHandlers}
           llmModels={llmModels}
           memoryServices={memoryServices}
+          n8nWorkflows={n8nWorkflows}
           mcpGatewayReady={mcpGatewayReady}
           onOpenMcpGateway={onOpenMcpGateway}
           onChange={(s) => setSteps(steps.map((x, i) => (i === si ? s : x)))}
@@ -594,6 +602,7 @@ function StepEditor({
   pythonHandlers,
   llmModels,
   memoryServices,
+  n8nWorkflows,
   mcpGatewayReady,
   onOpenMcpGateway,
   onChange,
@@ -610,6 +619,7 @@ function StepEditor({
   pythonHandlers: PythonHandler[]
   llmModels: LlmModel[]
   memoryServices: MemoryService[]
+  n8nWorkflows: N8nWorkflow[]
   mcpGatewayReady: boolean
   onOpenMcpGateway?: () => void
   onChange: (s: OpStep) => void
@@ -765,6 +775,8 @@ function StepEditor({
           onOpenMcpGateway={onOpenMcpGateway}
           onChange={onChange}
         />
+      ) : step.kind === "n8n" ? (
+        <N8nFields step={step} workflows={n8nWorkflows} onChange={onChange} />
       ) : step.kind === "agent" ? (
         <AgentFields
           step={step}
@@ -984,6 +996,143 @@ function McpFields({
       />
     </>
   )
+}
+
+function N8nFields({
+  step,
+  workflows,
+  onChange,
+}: {
+  step: OpStep
+  workflows: N8nWorkflow[]
+  onChange: (s: OpStep) => void
+}) {
+  const options = workflows.flatMap((workflow) => {
+    const paths = workflow.triggerPaths.length > 0 ? workflow.triggerPaths : [""]
+    return paths.map((path) => ({ workflow, path, key: `${workflow.workflowId}\u0000${path}` }))
+  })
+  const currentKey =
+    step.workflow_id && step.webhook != null ? `${step.workflow_id}\u0000${step.webhook}` : ""
+  const setWorkflow = (key: string) => {
+    const picked = options.find((o) => o.key === key)
+    if (!picked) return
+    const method = n8nMethodForPath(picked.workflow, picked.path) ?? step.method ?? "POST"
+    onChange({
+      ...step,
+      workflow_id: picked.workflow.workflowId,
+      workflow_name: picked.workflow.workflowName,
+      webhook: picked.path,
+      method,
+      runtime: step.runtime ?? "default",
+      inputs: Object.keys(step.inputs ?? {}).length > 0 ? step.inputs : { text: "{{ inputs.text }}" },
+    })
+  }
+  const selected = workflows.find((w) => w.workflowId === step.workflow_id)
+    ?? workflows.find((w) => w.triggerPaths.includes(step.webhook ?? ""))
+
+  return (
+    <>
+      <Row>
+        <Field label="runtime">
+          <input
+            value={step.runtime ?? "default"}
+            onChange={(e) => onChange({ ...step, runtime: e.target.value })}
+            placeholder="default"
+            className={inputCls}
+          />
+        </Field>
+        <Field label="method">
+          <select
+            value={(step.method ?? "POST").toUpperCase()}
+            onChange={(e) => onChange({ ...step, method: e.target.value })}
+            className={inputCls}
+          >
+            {["POST", "GET", "PUT", "PATCH", "DELETE"].map((m) => (
+              <option key={m} value={m}>
+                {m}
+              </option>
+            ))}
+          </select>
+        </Field>
+      </Row>
+      {options.length > 0 ? (
+        <Field label="discovered workflow">
+          <select value={currentKey} onChange={(e) => setWorkflow(e.target.value)} className={inputCls}>
+            <option value="">— pick a workflow webhook —</option>
+            {currentKey && !options.some((o) => o.key === currentKey) ? (
+              <option value={currentKey}>
+                {step.workflow_name ?? step.workflow_id} · {step.webhook || "manual path"}
+              </option>
+            ) : null}
+            {options.map(({ workflow, path, key }) => (
+              <option key={key} value={key}>
+                {workflow.active === false ? "inactive · " : ""}
+                {workflow.workflowName || workflow.workflowId} · {path || "(no path)"}
+              </option>
+            ))}
+          </select>
+        </Field>
+      ) : (
+        <div className="rounded border border-foreground/10 bg-foreground/[0.025] p-2 text-[10px] text-chrome-text/55">
+          No n8n workflow table detected. Type the production webhook path manually.
+        </div>
+      )}
+      <Field label="webhook path">
+        <input
+          value={step.webhook ?? ""}
+          onChange={(e) => onChange({ ...step, webhook: e.target.value })}
+          placeholder="my-workflow/webhook-path"
+          className={cn(inputCls, "font-mono")}
+        />
+      </Field>
+      {selected ? (
+        <div className="flex flex-wrap gap-1">
+          <span className="inline-flex items-center gap-1 rounded border border-foreground/10 bg-foreground/[0.03] px-1.5 py-0.5 text-[9px] text-chrome-text/65">
+            <GitBranch className="h-3 w-3" />
+            {selected.active === false ? "inactive" : "active"}
+          </span>
+          {selected.triggerPaths.map((path) => (
+            <span
+              key={path}
+              className="rounded border border-foreground/10 bg-foreground/[0.03] px-1.5 py-0.5 font-mono text-[9px] text-chrome-text/65"
+            >
+              {n8nMethodForPath(selected, path) ?? "POST"} {path}
+            </span>
+          ))}
+        </div>
+      ) : null}
+      <InputsEditor
+        inputs={step.inputs ?? {}}
+        label="body (key → template)"
+        onChange={(inputs) => onChange({ ...step, inputs })}
+      />
+      <InputsEditor
+        inputs={step.headers ?? {}}
+        label="headers (optional)"
+        onChange={(headers) => onChange({ ...step, headers })}
+      />
+      <Field label="timeout (ms)">
+        <input
+          type="number"
+          value={step.timeout_ms ?? ""}
+          onChange={(e) => onChange({ ...step, timeout_ms: e.target.value ? Number(e.target.value) : undefined })}
+          placeholder="60000"
+          className={inputCls}
+        />
+      </Field>
+    </>
+  )
+}
+
+function n8nMethodForPath(workflow: N8nWorkflow, path: string): string | null {
+  for (const node of workflow.webhookNodes) {
+    const nodePath = typeof node.path === "string" ? node.path : ""
+    if (nodePath === path) {
+      const method = typeof node.method === "string" ? node.method : null
+      return method?.toUpperCase() ?? null
+    }
+  }
+  return null
 }
 
 /** Editor for an `agent` node — a bounded tool-calling loop. */
@@ -1407,9 +1556,11 @@ function AgentMcpToolRow({
 /** Key→template editor for a node's `inputs` map. */
 function InputsEditor({
   inputs,
+  label = "inputs (key → template)",
   onChange,
 }: {
   inputs: Record<string, string>
+  label?: string
   onChange: (inputs: Record<string, string>) => void
 }) {
   const entries = Object.entries(inputs)
@@ -1430,7 +1581,7 @@ function InputsEditor({
   }
   return (
     <div>
-      <span className="mb-0.5 block text-[10px] text-chrome-text/60">inputs (key → template)</span>
+      <span className="mb-0.5 block text-[10px] text-chrome-text/60">{label}</span>
       <div className="space-y-1">
         {entries.map(([k, v], i) => (
           <div key={i} className="flex items-center gap-1">

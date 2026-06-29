@@ -807,13 +807,16 @@ function JsonObjectField({
 }) {
   return (
     <Field label={label}>
-      <textarea
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        spellCheck={false}
-        rows={8}
-        className={`${areaCls} h-32`}
-      />
+      <div className="h-32 overflow-hidden rounded-[3px] border border-chrome-border/60">
+        <SqlEditor
+          language="json"
+          value={value}
+          onChange={onChange}
+          height="100%"
+          fontSize={11}
+          autoFocus={false}
+        />
+      </div>
       {error ? <div className="pt-1 text-[10px] text-danger">{error}</div> : null}
     </Field>
   )
@@ -884,15 +887,18 @@ function LinkRowsEditor({
             />
           </div>
           <div className="mt-1.5 grid gap-1.5 xl:grid-cols-[1fr_1fr]">
+            <div className="h-20 overflow-hidden rounded-[3px] border border-chrome-border/60">
+              <SqlEditor
+                language="json"
+                value={link.conditionsText}
+                onChange={(value) => patch(index, { conditionsText: value })}
+                height="100%"
+                fontSize={11}
+                autoFocus={false}
+              />
+            </div>
             <textarea
-              className={`${areaCls} h-16`}
-              value={link.conditionsText}
-              spellCheck={false}
-              onChange={(e) => patch(index, { conditionsText: e.target.value })}
-              placeholder="conditions JSON"
-            />
-            <textarea
-              className={`${areaCls} h-16`}
+              className={`${areaCls} h-20`}
               value={link.notes}
               onChange={(e) => patch(index, { notes: e.target.value })}
               placeholder="notes"

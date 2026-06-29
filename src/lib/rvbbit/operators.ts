@@ -43,7 +43,7 @@ export interface TakesPlan {
 }
 
 /** The node-kind primitives — peers, each `inputs → output`. */
-export type NodeKind = "llm" | "specialist" | "python" | "code" | "sql" | "mcp" | "agent"
+export type NodeKind = "llm" | "specialist" | "python" | "code" | "sql" | "mcp" | "n8n" | "agent"
 
 /**
  * A tool an `agent` node may call: the built-in read-only `query` tool, or an
@@ -95,6 +95,13 @@ export interface OpStep {
   // mcp — references rvbbit.mcp_servers / rvbbit.mcp_tools
   server?: string
   tool?: string
+  // n8n — calls a configured production webhook from rvbbit.n8n_runtimes
+  runtime?: string
+  workflow_id?: string
+  workflow_name?: string
+  webhook?: string
+  method?: string
+  headers?: Record<string, string>
   // sql
   sql?: string
   params?: string[]
@@ -117,7 +124,7 @@ export interface OpStep {
  * (a memoized agent replays a frozen transcript instead of re-inspecting
  * live state), so the save path forces cache_policy='never'. */
 export function hasAgentStep(steps: OpStep[] | null): boolean {
-  return !!steps?.some((s) => s.kind === "agent")
+  return !!steps?.some((s) => s.kind === "agent" || s.kind === "n8n")
 }
 
 /**
@@ -149,6 +156,16 @@ export function defaultNode(kind: NodeKind, name: string): OpStep {
       return { name, kind, sql: "SELECT 1 AS value", params: [] }
     case "mcp":
       return { name, kind, server: "", tool: "", inputs: {} }
+    case "n8n":
+      return {
+        name,
+        kind,
+        runtime: "default",
+        webhook: "",
+        method: "POST",
+        inputs: { text: "{{ inputs.text }}" },
+        timeout_ms: 60000,
+      }
     case "agent":
       return {
         name,
@@ -182,6 +199,17 @@ export interface MemoryService {
   provider: string
   status: string
   endpoint_url: string | null
+}
+
+export interface N8nWorkflow {
+  workflowId: string
+  workflowName: string
+  active: boolean | null
+  triggerPaths: string[]
+  inputSchema: Record<string, unknown> | null
+  webhookNodes: Array<Record<string, unknown>>
+  createdAt: string | null
+  updatedAt: string | null
 }
 
 // ── The operator row ────────────────────────────────────────────────
@@ -362,6 +390,38 @@ export async function fetchMemoryServices(
       provider: String(r.provider ?? ""),
       status: String(r.status ?? ""),
       endpoint_url: r.endpoint_url == null ? null : String(r.endpoint_url),
+    })),
+  }
+}
+
+export async function fetchN8nWorkflows(
+  connectionId: string,
+): Promise<{ workflows: N8nWorkflow[]; error?: string }> {
+  const res = await runQuery(
+    connectionId,
+    `SELECT workflow_id, workflow_name, active, trigger_paths, input_schema, webhook_nodes,
+            created_at, updated_at
+       FROM rvbbit.n8n_workflows()
+      ORDER BY active DESC NULLS LAST, workflow_name, workflow_id`,
+  )
+  if (!res.ok) {
+    if (/function .*n8n_workflows.* does not exist|does not exist/i.test(res.error)) {
+      return { workflows: [] }
+    }
+    return { workflows: [], error: res.error }
+  }
+  return {
+    workflows: res.rows.map((r) => ({
+      workflowId: String(r.workflow_id ?? ""),
+      workflowName: String(r.workflow_name ?? ""),
+      active: r.active == null ? null : r.active === true || r.active === "t",
+      triggerPaths: Array.isArray(r.trigger_paths) ? (r.trigger_paths as string[]) : [],
+      inputSchema: (r.input_schema as Record<string, unknown> | null) ?? null,
+      webhookNodes: Array.isArray(r.webhook_nodes)
+        ? (r.webhook_nodes as Array<Record<string, unknown>>)
+        : [],
+      createdAt: r.created_at == null ? null : String(r.created_at),
+      updatedAt: r.updated_at == null ? null : String(r.updated_at),
     })),
   }
 }

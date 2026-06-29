@@ -86,6 +86,7 @@
   --viz-op-code: color-mix(in oklch, var(--brand-operators) 58%, var(--chart-2));
   --viz-op-sql: color-mix(in oklch, var(--brand-query-lens) 58%, var(--chart-4));
   --viz-op-mcp: color-mix(in oklch, var(--brand-mcp) 68%, var(--chart-5));
+  --viz-op-n8n: color-mix(in oklch, var(--brand-operators) 58%, var(--chart-6));
   --viz-op-gate: color-mix(in oklch, var(--main) 42%, var(--chart-3));
   --viz-op-terminal: var(--main);
   --viz-op-pipeline: color-mix(in oklch, var(--brand-operators) 70%, var(--chart-2));

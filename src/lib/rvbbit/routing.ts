@@ -368,6 +368,9 @@ function strOrNull(v: unknown): string | null {
 function bool(v: unknown): boolean {
   return v === true || v === "t"
 }
+function compactCount(v: number): string {
+  return Number.isFinite(v) ? new Intl.NumberFormat("en", { notation: "compact" }).format(v) : "0"
+}
 function epoch(v: unknown): number {
   return v ? new Date(String(v)).getTime() : 0
 }
@@ -978,6 +981,309 @@ export function recommendPolicy(r: AccelFreshnessRow): PolicyRecommendation {
     return { strategy: "scheduled", targetSecs: null, why: "queried on the slow path — refresh whenever dirty" }
   }
   return { strategy: "demand", targetSecs: null, why: "low traffic — only refresh when it's actually being hit" }
+}
+
+// ── workload layout advisor ─────────────────────────────────────────
+
+export type WorkloadLayoutKind = "cluster" | "hive"
+export type WorkloadLayoutStatus = "candidate" | "accepted" | "rejected" | "retired"
+
+export interface WorkloadLayoutCatalog {
+  catalogPresent: boolean
+  statusViewPresent: boolean
+  advisorPresent: boolean
+  buildHelperPresent: boolean
+}
+
+export interface WorkloadLayoutTable {
+  tableName: string
+  schema: string
+  name: string
+  parquetRows: number
+  rowGroups: number
+  heapSeqScans: number
+  dirty: boolean
+  opRunning: boolean
+  recommendations: number
+  accepted: number
+  ready: number
+}
+
+export interface WorkloadRoleCounts {
+  where: number
+  groupBy: number
+  orderBy: number
+  countDistinct: number
+}
+
+export interface WorkloadLayoutRecommendation {
+  tableName: string
+  tableOid: string
+  layoutKind: WorkloadLayoutKind
+  columnName: string
+  layout: string
+  status: WorkloadLayoutStatus
+  score: number
+  observations: number
+  weightedMs: number
+  roleCounts: WorkloadRoleCounts
+  sampleShapes: string[]
+  layoutStatus: string | null
+  layoutRows: number | null
+  layoutFiles: number | null
+  reason: string
+  details: Record<string, unknown>
+  recommendedAt: number
+  updatedAt: number
+}
+
+export interface WorkloadAdvisorRun {
+  table: string
+  ok: boolean
+  recommendations: number
+  matchedShapes: number
+  error?: string
+}
+
+export interface WorkloadLayoutBuildRun {
+  table: string
+  ok: boolean
+  status: string
+  acceptedLayouts: number | null
+  readyLayouts: number | null
+  layoutRows: number | null
+  baseAction: string | null
+  message: string
+  error?: string
+}
+
+export async function fetchWorkloadLayoutCatalog(
+  connectionId: string,
+): Promise<{ catalog: WorkloadLayoutCatalog | null; error?: string }> {
+  const res = await runQuery(
+    connectionId,
+    "SELECT " +
+      "to_regclass('rvbbit.workload_layout_recommendations') IS NOT NULL AS catalog_present, " +
+      "to_regclass('rvbbit.workload_layout_recommendation_status') IS NOT NULL AS status_view_present, " +
+      "EXISTS ( " +
+      "  SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace " +
+      "  WHERE n.nspname = 'rvbbit' AND p.proname = 'recommend_workload_layouts' " +
+      ") AS advisor_present, " +
+      "EXISTS ( " +
+      "  SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace " +
+      "  WHERE n.nspname = 'rvbbit' AND p.proname = 'build_accepted_workload_layouts' " +
+      ") AS build_helper_present",
+  )
+  if (!res.ok) return { catalog: null, error: res.error }
+  const r = res.rows[0] ?? {}
+  return {
+    catalog: {
+      catalogPresent: bool(r.catalog_present),
+      statusViewPresent: bool(r.status_view_present),
+      advisorPresent: bool(r.advisor_present),
+      buildHelperPresent: bool(r.build_helper_present),
+    },
+  }
+}
+
+export async function fetchWorkloadLayoutTables(
+  connectionId: string,
+): Promise<{ rows: WorkloadLayoutTable[]; error?: string }> {
+  const res = await runQuery(
+    connectionId,
+    "WITH rec AS ( " +
+      "SELECT table_oid, count(*) AS recommendations, " +
+      "count(*) FILTER (WHERE status = 'accepted') AS accepted, " +
+      "count(*) FILTER (WHERE layout_status = 'ready') AS ready " +
+      "FROM rvbbit.workload_layout_recommendation_status GROUP BY table_oid " +
+      ") " +
+      "SELECT c.oid::regclass::text AS table_name, n.nspname AS schema, c.relname AS name, " +
+      "coalesce(f.parquet_rows, 0) AS parquet_rows, coalesce(f.row_groups, 0) AS row_groups, " +
+      "coalesce(f.heap_seq_scans, 0) AS heap_seq_scans, " +
+      "coalesce(f.shadow_heap_dirty, false) AS dirty, coalesce(f.op_running, false) AS op_running, " +
+      "coalesce(rec.recommendations, 0) AS recommendations, " +
+      "coalesce(rec.accepted, 0) AS accepted, coalesce(rec.ready, 0) AS ready " +
+      "FROM rvbbit.tables t " +
+      "JOIN pg_class c ON c.oid = t.table_oid " +
+      "JOIN pg_namespace n ON n.oid = c.relnamespace " +
+      "LEFT JOIN rvbbit.accel_freshness f ON f.table_oid = t.table_oid " +
+      "LEFT JOIN rec ON rec.table_oid = t.table_oid " +
+      "WHERE coalesce(t.acceleration_enabled, true) " +
+      "ORDER BY n.nspname, c.relname",
+  )
+  if (!res.ok) return { rows: [], error: res.error }
+  return {
+    rows: res.rows.map((r) => ({
+      tableName: String(r.table_name ?? ""),
+      schema: String(r.schema ?? ""),
+      name: String(r.name ?? ""),
+      parquetRows: num(r.parquet_rows),
+      rowGroups: num(r.row_groups),
+      heapSeqScans: num(r.heap_seq_scans),
+      dirty: bool(r.dirty),
+      opRunning: bool(r.op_running),
+      recommendations: num(r.recommendations),
+      accepted: num(r.accepted),
+      ready: num(r.ready),
+    })),
+  }
+}
+
+export async function fetchWorkloadLayoutRecommendations(
+  connectionId: string,
+): Promise<{ rows: WorkloadLayoutRecommendation[]; error?: string }> {
+  const res = await runQuery(
+    connectionId,
+    "SELECT table_name, table_oid::text AS table_oid, layout_kind, column_name, layout, status, " +
+      "score, observations, weighted_ms, role_counts, sample_shapes, layout_status, " +
+      "layout_rows, layout_files, reason, details, recommended_at, updated_at " +
+      "FROM rvbbit.workload_layout_recommendation_status " +
+      "ORDER BY table_name, " +
+      "CASE status WHEN 'accepted' THEN 0 WHEN 'candidate' THEN 1 WHEN 'rejected' THEN 2 ELSE 3 END, " +
+      "score DESC, updated_at DESC",
+  )
+  if (!res.ok) return { rows: [], error: res.error }
+  return {
+    rows: res.rows.map((r) => {
+      const roles = (r.role_counts as Record<string, unknown> | null) ?? {}
+      return {
+        tableName: String(r.table_name ?? ""),
+        tableOid: String(r.table_oid ?? ""),
+        layoutKind: normalizeLayoutKind(r.layout_kind),
+        columnName: String(r.column_name ?? ""),
+        layout: String(r.layout ?? ""),
+        status: normalizeLayoutStatus(r.status),
+        score: num(r.score),
+        observations: num(r.observations),
+        weightedMs: num(r.weighted_ms),
+        roleCounts: {
+          where: num(roles.where),
+          groupBy: num(roles.group_by),
+          orderBy: num(roles.order_by),
+          countDistinct: num(roles.count_distinct),
+        },
+        sampleShapes: pgArray(r.sample_shapes),
+        layoutStatus: strOrNull(r.layout_status),
+        layoutRows: numOrNull(r.layout_rows),
+        layoutFiles: numOrNull(r.layout_files),
+        reason: String(r.reason ?? ""),
+        details: (r.details as Record<string, unknown> | null) ?? {},
+        recommendedAt: epoch(r.recommended_at),
+        updatedAt: epoch(r.updated_at),
+      }
+    }),
+  }
+}
+
+export async function runWorkloadLayoutAdvisor(
+  connectionId: string,
+  tableName: string,
+  lookbackHours: number,
+  minObservations: number,
+  maxRecommendations = 8,
+): Promise<WorkloadAdvisorRun> {
+  const res = await runQuery(
+    connectionId,
+    `SELECT rvbbit.recommend_workload_layouts(${qIdent(tableName)}, ` +
+      `${Math.max(1, Math.floor(lookbackHours))}, ` +
+      `${Math.max(1, Math.floor(minObservations))}, ` +
+      `${Math.max(1, Math.floor(maxRecommendations))}, true) AS r`,
+  )
+  if (!res.ok) return { table: tableName, ok: false, recommendations: 0, matchedShapes: 0, error: res.error }
+  const doc = (res.rows[0]?.r as Record<string, unknown> | null) ?? {}
+  return {
+    table: tableName,
+    ok: bool(doc.ok),
+    recommendations: Array.isArray(doc.recommendations) ? doc.recommendations.length : 0,
+    matchedShapes: num(doc.sample_shapes_matched),
+    error: bool(doc.ok) ? undefined : String(doc.reason ?? "advisor returned ok=false"),
+  }
+}
+
+export async function setWorkloadLayoutRecommendationStatus(
+  connectionId: string,
+  tableName: string,
+  layoutKind: WorkloadLayoutKind,
+  columnName: string,
+  status: "accepted" | "rejected",
+): Promise<{ ok: boolean; error?: string }> {
+  const fn = status === "accepted" ? "accept_workload_layout" : "reject_workload_layout"
+  const res = await runQuery(
+    connectionId,
+    `SELECT rvbbit.${fn}(${qIdent(tableName)}, ${sqlStr(layoutKind)}, ${sqlStr(columnName)}) AS r`,
+  )
+  if (!res.ok) return { ok: false, error: res.error }
+  const doc = (res.rows[0]?.r as Record<string, unknown> | null) ?? {}
+  return bool(doc.ok) ? { ok: true } : { ok: false, error: String(doc.reason ?? "status update failed") }
+}
+
+export async function refreshAcceptedWorkloadLayouts(
+  connectionId: string,
+  tableName: string,
+): Promise<WorkloadLayoutBuildRun> {
+  const helper = await runQuery(
+    connectionId,
+    "SELECT EXISTS ( " +
+      "SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace " +
+      "WHERE n.nspname = 'rvbbit' AND p.proname = 'build_accepted_workload_layouts' " +
+      ") AS present",
+  )
+  const helperPresent = helper.ok && bool(helper.rows[0]?.present)
+  const sql = helperPresent
+    ? `SELECT rvbbit.build_accepted_workload_layouts(${qIdent(tableName)}) AS r`
+    : `SELECT rvbbit.refresh_acceleration(${qIdent(tableName)}, true) AS r`
+  const res = await runQuery(connectionId, sql)
+  if (!res.ok) {
+    return {
+      table: tableName,
+      ok: false,
+      status: "failed",
+      acceptedLayouts: null,
+      readyLayouts: null,
+      layoutRows: null,
+      baseAction: null,
+      message: "layout build failed",
+      error: res.error,
+    }
+  }
+  const doc = (res.rows[0]?.r as Record<string, unknown> | null) ?? {}
+  const status = String(doc.status ?? "ok")
+  const acceptedLayouts = numOrNull(doc.accepted_layouts)
+  const readyLayouts = numOrNull(doc.ready_layouts)
+  const layoutRows = numOrNull(doc.layout_rows ?? doc.variants_rows)
+  const baseAction = strOrNull(doc.base_action ?? doc.operation)
+  const ok = helperPresent
+    ? status === "ok" || status === "partial"
+    : status === "ok" || status === "noop"
+  const message =
+    readyLayouts != null && acceptedLayouts != null
+      ? `${compactCount(readyLayouts)}/${compactCount(acceptedLayouts)} ready · ${compactCount(layoutRows ?? 0)} layout rows`
+      : `${status} · ${compactCount(layoutRows ?? 0)} layout rows`
+  return {
+    table: tableName,
+    ok,
+    status,
+    acceptedLayouts,
+    readyLayouts,
+    layoutRows,
+    baseAction,
+    message,
+    error: ok ? undefined : String(doc.reason ?? "no accepted layouts were built"),
+  }
+}
+
+export async function runRvbbitMigrate(connectionId: string): Promise<{ ok: boolean; error?: string }> {
+  const res = await runQuery(connectionId, "SELECT rvbbit.migrate()")
+  return res.ok ? { ok: true } : { ok: false, error: res.error }
+}
+
+function normalizeLayoutKind(v: unknown): WorkloadLayoutKind {
+  return String(v ?? "") === "hive" ? "hive" : "cluster"
+}
+
+function normalizeLayoutStatus(v: unknown): WorkloadLayoutStatus {
+  const s = String(v ?? "")
+  return s === "accepted" || s === "rejected" || s === "retired" ? s : "candidate"
 }
 
 // ── routing overlay (tested pins) + auto-optimizer ──────────────────────

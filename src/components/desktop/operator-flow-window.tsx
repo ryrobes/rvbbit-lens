@@ -17,6 +17,7 @@ import {
   defaultNode,
   emptyOperator,
   fetchMemoryServices,
+  fetchN8nWorkflows,
   fetchLlmModels,
   fetchOperators,
   fetchPythonEnvs,
@@ -30,6 +31,7 @@ import {
   toStepTemplate,
   type LlmModel,
   type MemoryService,
+  type N8nWorkflow,
   type NodeKind,
   type OpStep,
   type PythonEnv,
@@ -106,6 +108,7 @@ export function OperatorFlowWindow({
   const [pythonHandlers, setPythonHandlers] = useState<PythonHandler[]>([])
   const [llmModels, setLlmModels] = useState<LlmModel[]>([])
   const [memoryServices, setMemoryServices] = useState<MemoryService[]>([])
+  const [n8nWorkflows, setN8nWorkflows] = useState<N8nWorkflow[]>([])
   const [receipts, setReceipts] = useState<OperatorReceipt[]>([])
   const [receiptId, setReceiptId] = useState<string | null>(payload.receiptId ?? null)
   const [tryInputs, setTryInputs] = useState<string[]>([])
@@ -143,7 +146,7 @@ export function OperatorFlowWindow({
     let cancelled = false
     const conn = activeConnectionId
     const run = async () => {
-      const [sp, srv, tools, gateway, envs, handlers, models, memory] = await Promise.all([
+      const [sp, srv, tools, gateway, envs, handlers, models, memory, n8n] = await Promise.all([
         fetchSpecialists(conn),
         fetchServers(conn),
         fetchAllToolsLite(conn),
@@ -152,6 +155,7 @@ export function OperatorFlowWindow({
         fetchPythonHandlers(conn),
         fetchLlmModels(conn),
         fetchMemoryServices(conn),
+        fetchN8nWorkflows(conn),
       ])
       if (cancelled) return
       setSpecialists(sp.specialists)
@@ -162,6 +166,7 @@ export function OperatorFlowWindow({
       setPythonHandlers(handlers.handlers)
       setLlmModels(models.models)
       setMemoryServices(memory.services)
+      setN8nWorkflows(n8n.workflows)
     }
     void run()
     return () => {
@@ -760,6 +765,7 @@ export function OperatorFlowWindow({
               pythonHandlers={pythonHandlers}
               llmModels={llmModels}
               memoryServices={memoryServices}
+              n8nWorkflows={n8nWorkflows}
               mcpGatewayReady={mcpGateway?.ready === true}
               onOpenMcpGateway={() =>
                 onOpenCapability?.(mcpGateway?.catalogId ?? MCP_GATEWAY_CATALOG_ID, "install")

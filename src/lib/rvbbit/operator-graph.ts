@@ -20,6 +20,7 @@ export type OpNodeKind =
   | "specialist"
   | "python"
   | "mcp"
+  | "n8n"
   | "sql"
   | "agent"
   | "ward"
@@ -80,7 +81,9 @@ function templatedFields(step: OpStep): string[] {
   if (step.user) fields.push(step.user)
   if (step.task) fields.push(step.task)
   if (step.inputs) fields.push(...Object.values(step.inputs))
+  if (step.headers) fields.push(...Object.values(step.headers))
   if (step.params) fields.push(...step.params)
+  if (step.webhook) fields.push(step.webhook)
   if (step.memory && typeof step.memory === "object") {
     const memory = step.memory as Record<string, unknown>
     for (const key of ["service", "service_name", "context", "context_id", "context_name"]) {

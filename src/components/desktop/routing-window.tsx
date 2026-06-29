@@ -47,6 +47,7 @@ import { RoutingExplainTab } from "./routing-explain-tab"
 import { RoutingTrainTab } from "./routing-train-tab"
 import { RoutingAutoTrainTab } from "./routing-auto-train-tab"
 import { RoutingFreshnessTab } from "./routing-freshness-tab"
+import { RoutingWorkloadLayoutsTab } from "./routing-workload-layouts-tab"
 
 interface RoutingWindowProps {
   activeConnectionId: string | null
@@ -60,10 +61,11 @@ const REFRESH_OPTIONS_MS = [
   { ms: 30_000, label: "30s" },
 ]
 
-type TabKey = "flow" | "freshness" | "overlay" | "explain" | "train" | "autotrain"
+type TabKey = "flow" | "freshness" | "layouts" | "overlay" | "explain" | "train" | "autotrain"
 const TABS: { key: TabKey; label: string }[] = [
   { key: "flow", label: "Flow" },
   { key: "freshness", label: "OLAP Maint" },
+  { key: "layouts", label: "Layouts" },
   { key: "overlay", label: "Overlay" },
   { key: "explain", label: "Explain" },
   { key: "train", label: "Train" },
@@ -283,6 +285,8 @@ export function RoutingWindow({ activeConnectionId, hasRvbbit }: RoutingWindowPr
           />
         ) : tab === "freshness" ? (
           <RoutingFreshnessTab activeConnectionId={activeConnectionId} />
+        ) : tab === "layouts" ? (
+          <RoutingWorkloadLayoutsTab activeConnectionId={activeConnectionId} />
         ) : tab === "overlay" ? (
           <RoutingOverlayTab activeConnectionId={activeConnectionId} />
         ) : tab === "explain" ? (

@@ -26,6 +26,7 @@ import {
   PanelLeftOpen,
   Play,
   RotateCcw,
+  Save,
   Sigma,
   Sparkles,
   Table2,
@@ -37,7 +38,7 @@ import { ChartView } from "./chart-view"
 import { ControlView } from "./control-view"
 import { ModelField } from "./operator-inspector"
 import { ResultGrid } from "./result-grid"
-import { ResultTranscript, statementKeys } from "./result-transcript"
+import { ResultTranscript, defaultKind, statementKeys } from "./result-transcript"
 import { ArrangeGrid } from "./arrange-grid"
 import { extractUiArtifacts, UiArtifactView, type UiArtifactActionInput, type UiArtifactActionResult, type UiArtifactParamInput, type UiArtifactRow } from "./ui-artifact-view"
 import { ContextMenu, type ContextMenuState } from "./context-menu"
@@ -63,8 +64,8 @@ import type {
 import { effectiveRollup } from "@/lib/desktop/sql-builder"
 import { reconcileRollupLineage } from "@/lib/desktop/rollup-sql-parse"
 import { rollupChartSpec } from "@/lib/desktop/rollup-chart"
-import { classifyColumn } from "@/lib/desktop/chart-infer"
-import { UI_ARTIFACT_KIND, UI_RENDERER } from "@/lib/desktop/ui-artifact-contract"
+import { classifyColumn, inferChartSpec } from "@/lib/desktop/chart-infer"
+import { UI_ARTIFACT_KIND, UI_FILTER_SOURCE_CTE, UI_RENDERER } from "@/lib/desktop/ui-artifact-contract"
 import { RollupShelf, type FilterKind } from "./rollup-shelf"
 import type { QueryResult, QueryResultColumn, SchemaSnapshot, StatementResult } from "@/lib/db/types"
 import { buildSqlCompletionSchema } from "@/lib/desktop/sql-completion"
@@ -104,6 +105,7 @@ import { setActiveBlockDragSource, writeBlockDragPayload } from "@/lib/desktop/b
 import { usePresentMode } from "@/lib/desktop/present-mode"
 import { hasParamDragPayload, readParamDragPayload } from "@/lib/desktop/param-drag"
 import { attachDragGhost } from "@/lib/desktop/drag-ghost"
+import { defineVizBlock } from "@/lib/rvbbit/viz-blocks"
 
 interface DataGridWindowProps {
   window: DesktopWindowState
@@ -576,6 +578,326 @@ function saveAskModel(model: string): void {
   try { window.localStorage.setItem(ASK_MODEL_KEY, model) } catch { /* ignore */ }
 }
 
+type VizExportRenderer = "current" | "vega_lite" | "basic_chart" | "table_view" | "metric_card" | "filter_control"
+type MaterializedVizRenderer = Exclude<VizExportRenderer, "current">
+
+interface VizExportSource {
+  sourceIndex: number
+  sourceSql: string
+  key: string
+  title: string
+  columns: QueryResultColumn[]
+  rows: Record<string, unknown>[]
+  defaultRenderer: MaterializedVizRenderer
+  defaultChartKind?: "bar" | "line"
+  vegaSpec?: Record<string, unknown> | null
+}
+
+interface VizExportSeed {
+  title: string
+  blockName: string
+  objectKind: string
+  objectKey: string
+  filterField: string
+  sources: VizExportSource[]
+  statementLayout?: DataPayload["statementLayout"]
+  multi: boolean
+}
+
+interface VizExportForm {
+  name: string
+  title: string
+  intent: string
+  description: string
+  owner: string
+  tagsText: string
+  artifactPrefix: string
+  renderer: VizExportRenderer
+  chartKind: "bar" | "line" | "area" | "point"
+  filterField: string
+  includeTable: boolean
+  objectKind: string
+  objectKey: string
+  linkRole: string
+}
+
+interface BuiltVizBlockSql {
+  sql: string
+  labels: Record<string, unknown>
+  layoutTemplate: Record<string, unknown>
+  warnings: string[]
+}
+
+function sqlText(value: string): string {
+  return `'${String(value).replace(/'/g, "''")}'`
+}
+
+function sqlJson(value: unknown): string {
+  return `${sqlText(JSON.stringify(value ?? {}))}::jsonb`
+}
+
+function artifactId(value: string, fallback: string): string {
+  return slugifyBlockName(value || fallback).slice(0, 54)
+}
+
+function artifactRowSql(input: {
+  artifactId: string
+  artifactKind: string
+  renderer: string
+  title: string
+  specSql: string
+  dataSql?: string
+}): string {
+  return [
+    "SELECT",
+    "  'ui'::text AS rvbbit_artifact,",
+    `  ${sqlText(input.artifactId)}::text AS artifact_id,`,
+    `  ${sqlText(input.artifactKind)}::text AS artifact_kind,`,
+    `  ${sqlText(input.renderer)}::text AS renderer,`,
+    `  ${sqlText(input.title)}::text AS title,`,
+    `  ${input.specSql} AS spec,`,
+    `  ${input.dataSql ?? "NULL::jsonb"} AS data,`,
+    "  NULL::jsonb AS layout,",
+    "  NULL::jsonb AS bindings,",
+    "  NULL::jsonb AS diagnostics",
+  ].join("\n")
+}
+
+function statementNameRowSql(name: string, title: string): string {
+  return artifactRowSql({
+    artifactId: `${name}_name`,
+    artifactKind: UI_ARTIFACT_KIND.META,
+    renderer: UI_RENDERER.STATEMENT_NAME,
+    title: `${title} Name`,
+    specSql: `jsonb_build_object('name', ${sqlText(name)}, 'label', ${sqlText(title)})`,
+  })
+}
+
+function filterBindingRowSql(sourceName: string, targetName: string, field: string): string {
+  return artifactRowSql({
+    artifactId: `${sourceName}_bind_${targetName}`.slice(0, 60),
+    artifactKind: UI_ARTIFACT_KIND.META,
+    renderer: UI_RENDERER.FILTER_BINDING,
+    title: `${sourceName} -> ${targetName}`,
+    specSql: `jsonb_build_object('target', ${sqlText(targetName)}, 'field', ${sqlText(field)}, 'operator', 'in')`,
+  })
+}
+
+function sourceDataSql(): string {
+  return `(SELECT coalesce(jsonb_agg(to_jsonb(${UI_FILTER_SOURCE_CTE})), '[]'::jsonb) FROM ${UI_FILTER_SOURCE_CTE})`
+}
+
+function sourceColumnsSpec(columns: QueryResultColumn[]): Record<string, unknown> {
+  return { columns: columns.map((column) => column.name) }
+}
+
+function firstNumericOrFirstColumn(columns: QueryResultColumn[]): string {
+  return columns.find((column) => classifyColumn(column) === "numeric")?.name ?? columns[0]?.name ?? ""
+}
+
+function inferredChartFields(source: VizExportSource, chartKind: string): Record<string, unknown> {
+  const inferred = inferChartSpec(source.columns, source.rows)
+  const x = inferred?.xField ?? source.columns.find((column) => classifyColumn(column) !== "numeric")?.name ?? source.columns[0]?.name ?? ""
+  const y = inferred?.yField ?? source.columns.find((column) => classifyColumn(column) === "numeric")?.name ?? ""
+  return {
+    kind: chartKind,
+    x,
+    ...(y ? { y } : {}),
+  }
+}
+
+function sanitizeVegaSpec(spec: Record<string, unknown> | null | undefined): Record<string, unknown> | null {
+  if (!spec) return null
+  const rest = { ...spec }
+  delete rest.data
+  return rest
+}
+
+function vegaXField(spec: Record<string, unknown> | null | undefined): string {
+  const encoding = spec?.encoding
+  if (!encoding || typeof encoding !== "object" || Array.isArray(encoding)) return ""
+  const x = (encoding as Record<string, unknown>).x
+  if (!x || typeof x !== "object" || Array.isArray(x)) return ""
+  const field = (x as Record<string, unknown>).field
+  return typeof field === "string" ? field : ""
+}
+
+function materializedRenderer(source: VizExportSource, form: VizExportForm): MaterializedVizRenderer {
+  if (form.renderer !== "current") return form.renderer
+  return source.defaultRenderer
+}
+
+function visibleArtifactSql(source: VizExportSource, renderer: MaterializedVizRenderer, form: VizExportForm, name: string): string {
+  const title = source.title
+  if (renderer === "table_view") {
+    return artifactRowSql({
+      artifactId: name,
+      artifactKind: "table",
+      renderer: UI_RENDERER.TABLE_VIEW,
+      title,
+      specSql: sqlJson(sourceColumnsSpec(source.columns)),
+      dataSql: sourceDataSql(),
+    })
+  }
+  if (renderer === "metric_card") {
+    const valueField = firstNumericOrFirstColumn(source.columns)
+    return artifactRowSql({
+      artifactId: name,
+      artifactKind: "metric",
+      renderer: UI_RENDERER.METRIC_CARD,
+      title,
+      specSql: `jsonb_build_object('label', ${sqlText(valueField || title)}, 'value', (SELECT to_jsonb(${quoteSqlIdent(valueField || "value")}) FROM ${UI_FILTER_SOURCE_CTE} LIMIT 1))`,
+      dataSql: sourceDataSql(),
+    })
+  }
+  if (renderer === "filter_control") {
+    const field = form.filterField || source.columns[0]?.name || ""
+    return artifactRowSql({
+      artifactId: name,
+      artifactKind: "control",
+      renderer: UI_RENDERER.FILTER_CONTROL,
+      title,
+      specSql: sqlJson({
+        kind: "dropdown",
+        field,
+        operator: "in",
+      }),
+      dataSql: sourceDataSql(),
+    })
+  }
+  if (renderer === "vega_lite") {
+    const inferred = inferChartSpec(source.columns, source.rows)?.spec ?? {}
+    const spec = sanitizeVegaSpec(source.vegaSpec) ?? inferred
+    return artifactRowSql({
+      artifactId: name,
+      artifactKind: "chart",
+      renderer: UI_RENDERER.VEGA_LITE,
+      title,
+      specSql: sqlJson(spec),
+      dataSql: sourceDataSql(),
+    })
+  }
+  const chartKind = form.renderer === "current"
+    ? source.defaultChartKind ?? "bar"
+    : form.chartKind
+  return artifactRowSql({
+    artifactId: name,
+    artifactKind: "chart",
+    renderer: UI_RENDERER.BASIC_CHART,
+    title,
+    specSql: sqlJson(inferredChartFields(source, chartKind)),
+    dataSql: sourceDataSql(),
+  })
+}
+
+function artifactStatementSql(source: VizExportSource, rows: string[]): string {
+  return [
+    `WITH ${UI_FILTER_SOURCE_CTE} AS (`,
+    stripTrailingSqlTerminator(source.sourceSql)
+      .split("\n")
+      .map((line) => `  ${line}`)
+      .join("\n"),
+    ")",
+    rows.join("\nUNION ALL\n"),
+  ].join("\n")
+}
+
+function layoutRowsForExport(seed: VizExportSeed, namesByKey: Map<string, string>, fallbackNames: string[]): Record<string, unknown>[] {
+  const rows = seed.statementLayout?.rows
+  if (!rows?.length) {
+    return fallbackNames.map((name) => ({ h: 1, tiles: [{ name, w: 1 }] }))
+  }
+  return rows.map((row) => ({
+    h: row.h,
+    tiles: row.tiles
+      .map((tile) => {
+        const name = namesByKey.get(tile.key)
+        return name ? { name, w: tile.w } : null
+      })
+      .filter(Boolean),
+  })).filter((row) => row.tiles.length > 0)
+}
+
+function buildVizBlockExportSql(seed: VizExportSeed, form: VizExportForm): BuiltVizBlockSql {
+  const warnings: string[] = []
+  const prefix = artifactId(form.artifactPrefix, "viz")
+  const statements: string[] = []
+  const namesByKey = new Map<string, string>()
+  const primaryNames: string[] = []
+  let emittedDetailTables = 0
+
+  for (const [i, source] of seed.sources.entries()) {
+    const renderer = materializedRenderer(source, form)
+    const suffix = seed.sources.length > 1 ? `_${i + 1}` : ""
+    const primaryName = artifactId(`${prefix}${suffix}_${renderer}`, `${prefix}_${i + 1}`)
+    const primaryRows = [
+      visibleArtifactSql(source, renderer, form, primaryName),
+      statementNameRowSql(primaryName, source.title),
+    ]
+    const filterable =
+      form.filterField &&
+      source.columns.some((column) => column.name.toLowerCase() === form.filterField.toLowerCase()) &&
+      (renderer === "vega_lite" || renderer === "basic_chart" || renderer === "filter_control")
+    const detailName = artifactId(`${prefix}${suffix}_table`, `${prefix}_${i + 1}_table`)
+    if (filterable && form.includeTable) {
+      primaryRows.push(filterBindingRowSql(primaryName, detailName, form.filterField))
+    } else if (renderer === "vega_lite" || renderer === "basic_chart" || renderer === "filter_control") {
+      warnings.push(`No explicit filter target emitted for ${source.title}. Add a table target or another binding later if it should cross-filter.`)
+    }
+    statements.push(`${artifactStatementSql(source, primaryRows)};`)
+    namesByKey.set(source.key, primaryName)
+    primaryNames.push(primaryName)
+
+    if (form.includeTable && renderer !== "table_view") {
+      statements.push(`${artifactStatementSql(source, [
+        visibleArtifactSql(source, "table_view", form, detailName),
+        statementNameRowSql(detailName, `${source.title} Detail`),
+      ])};`)
+      emittedDetailTables += 1
+    }
+  }
+
+  const layoutRows = layoutRowsForExport(seed, namesByKey, primaryNames)
+  if (primaryNames.length > 1 || seed.statementLayout?.mode === "arrange") {
+    statements.push(`${artifactRowSql({
+      artifactId: `${prefix}_layout`,
+      artifactKind: UI_ARTIFACT_KIND.META,
+      renderer: UI_RENDERER.STATEMENT_LAYOUT,
+      title: "Layout",
+      specSql: sqlJson({
+        mode: seed.statementLayout?.mode ?? "arrange",
+        rows: layoutRows,
+      }),
+    })};`)
+  }
+
+  return {
+    sql: statements.join("\n\n"),
+    labels: {
+      source: "data_window_export",
+      renderer: form.renderer,
+      primary_artifacts: primaryNames.length,
+      detail_tables: emittedDetailTables,
+      filter_field: form.filterField || null,
+    },
+    layoutTemplate: {
+      mode: seed.statementLayout?.mode ?? (primaryNames.length > 1 ? "arrange" : "transcript"),
+      rows: layoutRows,
+    },
+    warnings: [...new Set(warnings)],
+  }
+}
+
+function vizObjectLinkDefaults(payload: DataPayload, result: QueryResult | null, blockName: string): { objectKind: string; objectKey: string } {
+  if (payload.table) return { objectKind: "table", objectKey: `${payload.table.schema}.${payload.table.name}` }
+  if (payload.sourceContext?.sourceTable) return { objectKind: "table", objectKey: payload.sourceContext.sourceTable }
+  const sourceColumn = result?.columns.find((column) => column.sourceSchema && column.sourceTable)
+  if (sourceColumn?.sourceSchema && sourceColumn.sourceTable) {
+    return { objectKind: "table", objectKey: `${sourceColumn.sourceSchema}.${sourceColumn.sourceTable}` }
+  }
+  return { objectKind: "query", objectKey: blockName }
+}
+
 export function DataGridWindow({
   window: w,
   payload,
@@ -658,6 +980,7 @@ export function DataGridWindow({
   // both abort the client fetch and pg_cancel_backend the server query.
   const runControlRef = useRef<{ controller: AbortController; token: string } | null>(null)
   const [exportMenu, setExportMenu] = useState<ContextMenuState | null>(null)
+  const [vizExportSeed, setVizExportSeed] = useState<VizExportSeed | null>(null)
   const [historyMenu, setHistoryMenu] = useState<ContextMenuState | null>(null)
   // Per-window target database (the connection's default unless overridden).
   const [databases, setDatabases] = useState<string[]>([])
@@ -2100,6 +2423,92 @@ export function DataGridWindow({
     return (name: string): FilterKind => map.get(name) ?? "text"
   }, [result])
 
+  const openVizBlockExport = useCallback(() => {
+    if (!result) return
+    const sourceTitle = payload.title || w.title || blockName
+    const blockSlug = artifactId(sourceTitle, blockName)
+    const link = vizObjectLinkDefaults(payload, result, blockName)
+    const sources: VizExportSource[] = []
+
+    if (multiResults?.length) {
+      const keys = statementKeys(multiResults, sourceStatements)
+      multiResults.forEach((statement, index) => {
+        if (statement.columns.length === 0) return
+        const sourceSql = sourceStatements[statement.index] ?? statement.sql ?? ""
+        if (!sourceSql.trim()) return
+        const key = keys[index] ?? `stmt_${statement.index + 1}`
+        const view = payload.statementViews?.[key] ?? defaultKind(statement)
+        const renderer: MaterializedVizRenderer =
+          view === "number"
+            ? "metric_card"
+            : view === "bar" || view === "line"
+              ? "basic_chart"
+              : "table_view"
+        sources.push({
+          sourceIndex: statement.index,
+          sourceSql,
+          key,
+          title: `Statement ${statement.index + 1}`,
+          columns: statement.columns,
+          rows: statement.rows,
+          defaultRenderer: renderer,
+          defaultChartKind: view === "line" ? "line" : "bar",
+        })
+      })
+    } else if (result.columns.length > 0) {
+      const inferred = inferChartSpec(result.columns, result.rows)
+      const spec = sanitizeVegaSpec(payload.chartSpec ?? chartSeedSpec ?? inferred?.spec ?? null)
+      const renderer: MaterializedVizRenderer =
+        activeTab === "chart"
+          ? viewKind === "chart" ? "vega_lite" : "filter_control"
+          : "table_view"
+      sources.push({
+        sourceIndex: 0,
+        sourceSql: sourceSqlForPayload(payload) || draftSql || result.sql,
+        key: "result",
+        title: sourceTitle,
+        columns: result.columns,
+        rows: result.rows,
+        defaultRenderer: renderer,
+        defaultChartKind: "bar",
+        vegaSpec: spec,
+      })
+    }
+
+    const chartSource = sources.find((source) => source.defaultRenderer === "vega_lite" || source.defaultRenderer === "basic_chart")
+    const inferred = chartSource ? inferChartSpec(chartSource.columns, chartSource.rows) : null
+    const filterField =
+      payload.controlField ??
+      vegaXField(chartSource?.vegaSpec) ??
+      inferred?.xField ??
+      sources[0]?.columns.find((column) => classifyColumn(column) !== "numeric")?.name ??
+      sources[0]?.columns[0]?.name ??
+      ""
+
+    setVizExportSeed({
+      title: sourceTitle,
+      blockName: blockSlug,
+      objectKind: link.objectKind,
+      objectKey: link.objectKey,
+      filterField,
+      sources,
+      statementLayout: multiResults ? effectiveStatementLayout : undefined,
+      multi: !!multiResults,
+    })
+  }, [
+    activeTab,
+    blockName,
+    chartSeedSpec,
+    draftSql,
+    effectiveStatementLayout,
+    multiResults,
+    payload,
+    result,
+    sourceStatements,
+    viewKind,
+    w.title,
+  ])
+
   // Provide the column drag source so result-grid header cells can
   // serialize themselves into a column-drag DataTransfer payload.
   const columnDragSource = useMemo(() => {
@@ -2148,6 +2557,13 @@ export function DataGridWindow({
             {paramNotice}
           </div>
         </div>
+      ) : null}
+      {vizExportSeed && activeConnectionId ? (
+        <VizBlockExportDialog
+          seed={vizExportSeed}
+          connectionId={activeConnectionId}
+          onClose={() => setVizExportSeed(null)}
+        />
       ) : null}
       {sqlRailOpen && !present ? (
         <>
@@ -2377,6 +2793,16 @@ export function DataGridWindow({
                 }}
               >
                 <Download className="h-3.5 w-3.5" />
+              </Button>
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={openVizBlockExport}
+                disabled={!hasRvbbit || !activeConnectionId}
+                title={hasRvbbit ? "Save the current SQL view as a canonical viz block" : "Requires an rvbbit-enabled database"}
+              >
+                <Save className="h-3.5 w-3.5" />
+                <span className="text-xs">Save viz</span>
               </Button>
               <Button
                 size="sm"
@@ -2965,6 +3391,313 @@ function Toolbar({
         </span>
       ) : null}
     </div>
+  )
+}
+
+const vizInputCls =
+  "h-7 w-full rounded-[3px] border border-foreground/10 bg-foreground/[0.03] px-2 font-mono text-[12px] text-foreground outline-none placeholder:text-chrome-text/30 focus:border-main/50 focus:bg-foreground/[0.06]"
+const vizAreaCls =
+  "w-full rounded-[3px] border border-foreground/10 bg-foreground/[0.03] px-2 py-1 font-mono text-[11px] leading-snug text-foreground outline-none placeholder:text-chrome-text/30 focus:border-main/50 focus:bg-foreground/[0.06]"
+
+function tagsFromText(text: string): string[] {
+  return text.split(/[,\n]/).map((tag) => tag.trim()).filter(Boolean)
+}
+
+function initialVizExportForm(seed: VizExportSeed): VizExportForm {
+  const hasNonTable = seed.sources.some((source) => source.defaultRenderer !== "table_view")
+  return {
+    name: seed.blockName,
+    title: seed.title,
+    intent: seed.multi ? "dashboard" : "overview",
+    description: `Canonical view exported from ${seed.title}.`,
+    owner: "",
+    tagsText: "viz-block, exported-view",
+    artifactPrefix: seed.blockName,
+    renderer: "current",
+    chartKind: "bar",
+    filterField: seed.filterField,
+    includeTable: hasNonTable,
+    objectKind: seed.objectKind,
+    objectKey: seed.objectKey,
+    linkRole: "source",
+  }
+}
+
+function VizBlockExportDialog({
+  seed,
+  connectionId,
+  onClose,
+}: {
+  seed: VizExportSeed
+  connectionId: string
+  onClose: () => void
+}) {
+  const [form, setForm] = useState<VizExportForm>(() => initialVizExportForm(seed))
+  const [saving, setSaving] = useState(false)
+  const [saveError, setSaveError] = useState<string | null>(null)
+  const [savedVersion, setSavedVersion] = useState<number | null>(null)
+
+  const built = useMemo(() => buildVizBlockExportSql(seed, form), [seed, form])
+  const canSave = !saving && seed.sources.length > 0 && form.name.trim() !== "" && built.sql.trim() !== ""
+
+  const save = useCallback(async () => {
+    if (!canSave) return
+    setSaving(true)
+    setSaveError(null)
+    setSavedVersion(null)
+    const name = artifactId(form.name, "viz_block")
+    const links =
+      form.objectKind.trim() && form.objectKey.trim()
+        ? [{
+            objectKind: form.objectKind.trim(),
+            objectKey: form.objectKey.trim(),
+            role: form.linkRole.trim() || "source",
+            confidence: 1,
+            linkSource: "declared",
+            conditions: {},
+          }]
+        : []
+    const { version, error } = await defineVizBlock(connectionId, {
+      name,
+      title: form.title.trim() || name,
+      intent: form.intent.trim() || "overview",
+      description: form.description.trim() || null,
+      owner: form.owner.trim() || null,
+      sqlTemplate: built.sql,
+      inputSchema: {
+        source: "data_window_export",
+        renderer: form.renderer,
+        filter_field: form.filterField || null,
+        statement_count: seed.sources.length,
+      },
+      layoutTemplate: built.layoutTemplate,
+      params: {},
+      tags: tagsFromText(form.tagsText),
+      labels: built.labels,
+      enabled: true,
+      links,
+    })
+    setSaving(false)
+    if (error) {
+      setSaveError(error)
+      return
+    }
+    setSavedVersion(version)
+    setForm((current) => ({ ...current, name }))
+  }, [built.labels, built.layoutTemplate, built.sql, canSave, connectionId, form, seed.sources.length])
+
+  return (
+    <div className="absolute inset-0 z-50 grid place-items-center bg-background/55 p-4 backdrop-blur-sm">
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-label="Save canonical viz block"
+        className="flex max-h-[92%] w-[min(1120px,96%)] min-h-0 flex-col overflow-hidden rounded-md border border-chrome-border bg-chrome-bg shadow-2xl"
+      >
+        <div className="flex shrink-0 items-center gap-2 border-b border-chrome-border/70 px-3 py-2">
+          <Save className="h-4 w-4 text-main" />
+          <div className="min-w-0">
+            <div className="truncate text-sm font-medium text-foreground">Save Canonical Viz Block</div>
+            <div className="truncate text-[11px] text-chrome-text/50">
+              {seed.sources.length} artifact source{seed.sources.length === 1 ? "" : "s"} from {seed.title}
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="ml-auto grid h-7 w-7 place-items-center rounded text-chrome-text/55 hover:bg-foreground/[0.06] hover:text-foreground"
+            title="Close"
+          >
+            <X className="h-3.5 w-3.5" />
+          </button>
+        </div>
+
+        <div className="grid min-h-0 flex-1 grid-cols-[340px_minmax(0,1fr)] overflow-hidden">
+          <div className="min-h-0 overflow-y-auto border-r border-chrome-border/60 p-3">
+            <div className="space-y-2">
+              <VizExportField label="block name">
+                <input
+                  value={form.name}
+                  onChange={(e) => setForm((f) => ({ ...f, name: artifactId(e.target.value, "viz_block") }))}
+                  className={vizInputCls}
+                  placeholder="orders_overview"
+                />
+              </VizExportField>
+              <VizExportField label="title">
+                <input
+                  value={form.title}
+                  onChange={(e) => setForm((f) => ({ ...f, title: e.target.value }))}
+                  className={vizInputCls}
+                />
+              </VizExportField>
+              <div className="grid grid-cols-2 gap-2">
+                <VizExportField label="intent">
+                  <input
+                    value={form.intent}
+                    onChange={(e) => setForm((f) => ({ ...f, intent: artifactId(e.target.value, "overview") }))}
+                    className={vizInputCls}
+                  />
+                </VizExportField>
+                <VizExportField label="owner">
+                  <input
+                    value={form.owner}
+                    onChange={(e) => setForm((f) => ({ ...f, owner: e.target.value }))}
+                    className={vizInputCls}
+                    placeholder="analytics"
+                  />
+                </VizExportField>
+              </div>
+              <VizExportField label="description">
+                <textarea
+                  value={form.description}
+                  onChange={(e) => setForm((f) => ({ ...f, description: e.target.value }))}
+                  className={`${vizAreaCls} h-16`}
+                />
+              </VizExportField>
+              <VizExportField label="tags">
+                <input
+                  value={form.tagsText}
+                  onChange={(e) => setForm((f) => ({ ...f, tagsText: e.target.value }))}
+                  className={vizInputCls}
+                />
+              </VizExportField>
+
+              <div className="my-2 h-px bg-chrome-border/55" />
+
+              <VizExportField label="artifact prefix">
+                <input
+                  value={form.artifactPrefix}
+                  onChange={(e) => setForm((f) => ({ ...f, artifactPrefix: artifactId(e.target.value, "artifact") }))}
+                  className={vizInputCls}
+                />
+              </VizExportField>
+              <VizExportField label="renderer">
+                <select
+                  value={form.renderer}
+                  onChange={(e) => setForm((f) => ({ ...f, renderer: e.target.value as VizExportRenderer }))}
+                  className={vizInputCls}
+                >
+                  <option value="current">{seed.multi ? "current statement views" : "current view"}</option>
+                  <option value="vega_lite">vega_lite</option>
+                  <option value="basic_chart">basic_chart</option>
+                  <option value="table_view">table_view</option>
+                  <option value="metric_card">metric_card</option>
+                  <option value="filter_control">filter_control</option>
+                </select>
+              </VizExportField>
+              {form.renderer === "basic_chart" ? (
+                <VizExportField label="chart kind">
+                  <select
+                    value={form.chartKind}
+                    onChange={(e) => setForm((f) => ({ ...f, chartKind: e.target.value as VizExportForm["chartKind"] }))}
+                    className={vizInputCls}
+                  >
+                    <option value="bar">bar</option>
+                    <option value="line">line</option>
+                    <option value="area">area</option>
+                    <option value="point">point</option>
+                  </select>
+                </VizExportField>
+              ) : null}
+              <VizExportField label="filter field">
+                <input
+                  value={form.filterField}
+                  onChange={(e) => setForm((f) => ({ ...f, filterField: e.target.value }))}
+                  className={vizInputCls}
+                  placeholder="state"
+                />
+              </VizExportField>
+              <label className="flex items-center gap-2 rounded-[3px] border border-foreground/10 bg-foreground/[0.03] px-2 py-1.5 text-[11px] text-chrome-text/75">
+                <input
+                  type="checkbox"
+                  checked={form.includeTable}
+                  onChange={(e) => setForm((f) => ({ ...f, includeTable: e.currentTarget.checked }))}
+                  className="h-3 w-3"
+                />
+                include detail table target
+              </label>
+
+              <div className="my-2 h-px bg-chrome-border/55" />
+
+              <div className="grid grid-cols-[0.7fr_1.3fr] gap-2">
+                <VizExportField label="object kind">
+                  <input
+                    value={form.objectKind}
+                    onChange={(e) => setForm((f) => ({ ...f, objectKind: artifactId(e.target.value, "table") }))}
+                    className={vizInputCls}
+                  />
+                </VizExportField>
+                <VizExportField label="object key">
+                  <input
+                    value={form.objectKey}
+                    onChange={(e) => setForm((f) => ({ ...f, objectKey: e.target.value }))}
+                    className={vizInputCls}
+                  />
+                </VizExportField>
+              </div>
+              <VizExportField label="link role">
+                <input
+                  value={form.linkRole}
+                  onChange={(e) => setForm((f) => ({ ...f, linkRole: artifactId(e.target.value, "source") }))}
+                  className={vizInputCls}
+                />
+              </VizExportField>
+            </div>
+          </div>
+
+          <div className="flex min-h-0 flex-col">
+            <div className="flex shrink-0 items-center gap-2 border-b border-chrome-border/60 px-3 py-2">
+              <div className="text-[10px] uppercase tracking-wider text-chrome-text/55">Generated SQL Template</div>
+              <div className="flex-1" />
+              {savedVersion != null ? (
+                <span className="rounded border border-success/35 bg-success/10 px-1.5 py-0.5 text-[10px] text-success">
+                  saved v{savedVersion}
+                </span>
+              ) : null}
+              <Button size="sm" onClick={() => void save()} disabled={!canSave}>
+                <Save className="h-3 w-3" />
+                {saving ? "Saving..." : "Save block"}
+              </Button>
+            </div>
+            {built.warnings.length ? (
+              <div className="shrink-0 border-b border-warning/20 bg-warning/10 px-3 py-1.5 text-[11px] text-warning">
+                {built.warnings[0]}
+              </div>
+            ) : null}
+            {seed.sources.length === 0 ? (
+              <div className="shrink-0 border-b border-danger/25 bg-danger/10 px-3 py-1.5 text-[11px] text-danger">
+                No SELECT result with columns is available to export.
+              </div>
+            ) : null}
+            {saveError ? (
+              <div className="shrink-0 whitespace-pre-wrap border-b border-danger/25 bg-danger/10 px-3 py-1.5 text-[11px] text-danger">
+                {saveError}
+              </div>
+            ) : null}
+            <div className="min-h-0 flex-1">
+              <SqlEditor
+                value={built.sql}
+                onChange={() => {}}
+                readOnly
+                autoFocus={false}
+                wrap
+                height="100%"
+                fontSize={12}
+              />
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function VizExportField({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <label className="block">
+      <span className="mb-0.5 block text-[10px] uppercase tracking-wider text-chrome-text/55">{label}</span>
+      {children}
+    </label>
   )
 }
 
