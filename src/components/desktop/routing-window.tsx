@@ -491,7 +491,7 @@ function RecentExecutions({
     >
       {rows.length === 0 ? (
         <p className="text-[11px] text-chrome-text/55">
-          No routed executions recorded. Run a SELECT against an rvbbit columnar table.
+          No routed executions recorded. Run a SELECT against an rvbbit-enabled table.
         </p>
       ) : (
         <table className="w-full text-[11px]">

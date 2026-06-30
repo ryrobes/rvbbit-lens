@@ -5,6 +5,7 @@ import type { ExtensionInfo, SchemaColumn, SchemaFunction, SchemaSnapshot, Schem
 import { loadFinderStats } from "./finder-stats"
 
 type OperatorRow = { name: string; description: string | null; shape: string | null }
+type RvbbitRegistryRow = { oid: string | number; acceleration_enabled: boolean | string | null }
 
 const TABLE_QUERY = `
 SELECT
@@ -105,6 +106,14 @@ ORDER BY n.nspname, p.proname
 // connections without the rvbbit extension don't error on the missing table.
 const OPERATOR_QUERY = `SELECT name, description, shape FROM rvbbit.operators`
 
+// Registry-first rvbbit identity. Guarded at the call site so plain Postgres
+// connections and older extension versions still degrade to relam detection.
+const RVBBIT_TABLE_REGISTRY_QUERY = `
+SELECT table_oid::int8 AS oid,
+       coalesce(acceleration_enabled, true) AS acceleration_enabled
+FROM rvbbit.tables
+`
+
 const EXTENSION_QUERY = `
 SELECT e.extname AS name,
        n.nspname AS schema,
@@ -127,7 +136,17 @@ export async function loadSchema(connectionId: string): Promise<SchemaSnapshot> 
   const { pool } = await getPool(connectionId, undefined, "meta")
   const client = await pool.connect()
   try {
-    const [tablesResult, columnsResult, dbResult, schemasResult, extResult, functionsResult, opsResult, finderStats] = await Promise.all([
+    const [
+      tablesResult,
+      columnsResult,
+      dbResult,
+      schemasResult,
+      extResult,
+      functionsResult,
+      opsResult,
+      rvbbitRegistryResult,
+      finderStats,
+    ] = await Promise.all([
       client.query(TABLE_QUERY),
       client.query(COLUMN_QUERY),
       client.query<{ database: string }>("SELECT current_database() AS database"),
@@ -141,6 +160,7 @@ export async function loadSchema(connectionId: string): Promise<SchemaSnapshot> 
       client.query<ExtensionInfo>(EXTENSION_QUERY),
       client.query(FUNCTION_QUERY),
       client.query<OperatorRow>(OPERATOR_QUERY).catch(() => ({ rows: [] as OperatorRow[] })),
+      client.query<RvbbitRegistryRow>(RVBBIT_TABLE_REGISTRY_QUERY).catch(() => ({ rows: [] as RvbbitRegistryRow[] })),
       loadFinderStats(client),
     ])
 
@@ -164,6 +184,12 @@ export async function loadSchema(connectionId: string): Promise<SchemaSnapshot> 
       colsByTable.set(key, list)
     }
 
+    const bool = (v: unknown) => v === true || v === "t" || v === "true"
+    const rvbbitRegistryByOid = new Map<string, boolean>()
+    for (const row of rvbbitRegistryResult.rows) {
+      rvbbitRegistryByOid.set(String(row.oid), bool(row.acceleration_enabled))
+    }
+
     const tables: SchemaTable[] = (tablesResult.rows as Array<{
       oid: string | number
       schema: string
@@ -179,7 +205,8 @@ export async function loadSchema(connectionId: string): Promise<SchemaSnapshot> 
     }>).map((t) => {
       const numOrNull = (v: string | number | null) => (v == null ? null : Number(v))
       const cols = colsByTable.get(String(t.oid)) ?? []
-      const isRvbbit = t.relam_is_rvbbit === true
+      const registryEnabled = rvbbitRegistryByOid.get(String(t.oid))
+      const isRvbbit = registryEnabled ?? (t.relam_is_rvbbit === true)
       const st = finderStats.byOid.get(String(t.oid))
       const reltuples = t.row_estimate == null ? null : Number(t.row_estimate)
       // PG14+ uses -1 as the "never analyzed" sentinel — clamp to null so we

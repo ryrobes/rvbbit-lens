@@ -1314,10 +1314,15 @@ function ProbeTab({
   const probeName = manifest.backend?.name ?? manifest.runtime_registration?.name ?? manifest.name
   const runtimeLanguage = String(manifest.runtime_registration?.language ?? manifest.runtime?.language ?? "").toLowerCase()
   const runtimeProvider = String(manifest.runtime_registration?.provider ?? manifest.warren?.service_provider ?? "").toLowerCase()
+  const isMcpRuntime = runtimeLanguage === "mcp" || runtimeLanguage === "mcp_gateway"
+  const isMemoryRuntime =
+    runtimeProvider === "hindsight" ||
+    runtimeLanguage === "memory" ||
+    runtimeLanguage === "hindsight"
   const probeTarget = isRuntime
-    ? runtimeProvider === "hindsight" ||
-      runtimeLanguage === "memory" ||
-      runtimeLanguage === "hindsight"
+    ? isMcpRuntime
+      ? "MCP gateway"
+      : isMemoryRuntime
       ? "memory service"
       : "runtime"
     : "backend"

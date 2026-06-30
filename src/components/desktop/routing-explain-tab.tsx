@@ -134,7 +134,7 @@ export function RoutingExplainTab({
           </button>
           {columnarTables.length > 0 ? (
             <span className="ml-1 text-[10px] text-chrome-text/45">
-              {columnarTables.length} columnar table{columnarTables.length === 1 ? "" : "s"}:
+              {columnarTables.length} rvbbit-enabled table{columnarTables.length === 1 ? "" : "s"}:
             </span>
           ) : null}
           {examples.map((ex) => (
@@ -399,7 +399,7 @@ function TablesPanel({ explain }: { explain: RouteExplain }) {
     <Panel icon={Layers} title="Rvbbit tables">
       {explain.tables.length === 0 ? (
         <p className="text-[11px] text-chrome-text/55">
-          No rvbbit columnar tables referenced by this query.
+          No rvbbit-enabled tables referenced by this query.
         </p>
       ) : (
         <div className="space-y-2">

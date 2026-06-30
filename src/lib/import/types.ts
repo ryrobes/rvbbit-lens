@@ -6,7 +6,7 @@
  * Flow: drop a CSV → /api/db/import/inspect reads a bounded head slice
  * and returns a {@link InspectResult} (detected dialect + inferred typed
  * columns + a row sample). The user edits column names/types and picks a
- * target (schema + table + HEAP/RVBBIT) to form an {@link ImportConfig},
+ * target (schema + table + HEAP/RVBBIT acceleration) to form an {@link ImportConfig},
  * then /api/db/import/run streams the full file into a freshly-created
  * table via COPY, emitting {@link ImportProgress} frames.
  */
@@ -22,7 +22,7 @@ export type PgType =
   | "date"
   | "timestamptz"
 
-/** Table storage. `heap` = standard Postgres; `rvbbit` = `CREATE TABLE … USING rvbbit`. */
+/** Import target mode. `rvbbit` uses `CREATE TABLE … USING rvbbit` as a registration shortcut. */
 export type AccessMethod = "heap" | "rvbbit"
 
 /**

@@ -16,6 +16,8 @@
  * events first, time-correlated co-occurring events labelled separately.
  */
 
+import { normalizeCandidate } from "./routing"
+
 export type LensSurface =
   | "receipt"
   | "subcall"
@@ -417,7 +419,7 @@ async function fetchRoutingInWindow(
           endAt: at,
           durationMs: 0,
           decisionId: num(r.id),
-          candidate: String(r.candidate ?? ""),
+          candidate: normalizeCandidate(String(r.candidate ?? "")),
           route: String(r.route ?? ""),
           routeSource: String(r.route_source ?? ""),
           reason: String(r.reason ?? ""),
@@ -439,7 +441,7 @@ async function fetchRoutingInWindow(
           endAt: at + dur,
           durationMs: dur,
           executionId: num(r.id),
-          candidate: String(r.candidate ?? ""),
+          candidate: normalizeCandidate(String(r.candidate ?? "")),
           routeSource: String(r.route_source ?? ""),
           rowsReturned: num(r.rows_returned),
           cacheHit: bool(r.cache_hit),

@@ -528,7 +528,7 @@ function TargetBar({
         <SegBtn
           active={accessMethod === "rvbbit"}
           disabled={!hasRvbbit}
-          title={hasRvbbit ? "Create as a rvbbit columnar table" : "rvbbit extension not installed on this connection"}
+          title={hasRvbbit ? "Create and register for rvbbit acceleration" : "rvbbit extension not installed on this connection"}
           onClick={() => hasRvbbit && onAccessMethod("rvbbit")}
         >
           RVBBIT

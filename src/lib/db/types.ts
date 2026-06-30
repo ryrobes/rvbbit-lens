@@ -165,7 +165,7 @@ export interface SchemaTable {
   sizeBytes: number | null
   comment: string | null
   columns: SchemaColumn[]
-  /** true iff the table's access method is rvbbit (pg_class.relam), NOT a schema-name guess. */
+  /** true iff the relation is enabled in the rvbbit registry, with legacy relam fallback. */
   isRvbbit?: boolean
 
   // ── Finder "instrument panel" fields (all optional; absent ⇒ render neutral) ──

@@ -1,8 +1,8 @@
 /**
  * Generates the `CREATE TABLE` (and COPY column list) for an import.
  *
- * HEAP vs RVBBIT differ only by the trailing `USING rvbbit` — the rvbbit
- * access method is heap-compatible, so the column list, types, and COPY
+ * HEAP vs RVBBIT differ only by the trailing `USING rvbbit`. In registry-first
+ * rvbbit this is a registration shortcut, so the column list, types, and COPY
  * path are identical either way.
  */
 

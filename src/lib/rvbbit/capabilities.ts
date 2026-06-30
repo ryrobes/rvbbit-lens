@@ -1073,7 +1073,22 @@ export async function probeRuntime(
       `WHERE name = ${sqlLit(name)}`,
     ].join("\n")
   } else if (language === "mcp" || language === "mcp_gateway") {
-    sql = `SELECT rvbbit.mcp_probe(${sqlLit(name)}) AS r, (SELECT endpoint_url FROM rvbbit.mcp_gateways WHERE name = ${sqlLit(name)}) AS endpoint`
+    sql = [
+      "SELECT",
+      "  jsonb_build_object(",
+      "    'status', status,",
+      "    'reachable', status = 'ready',",
+      "    'transport', 'mcp_gateway',",
+      "    'endpoint', endpoint_url,",
+      "    'gateway_source', gateway_source,",
+      "    'health', health,",
+      "    'n_servers', (SELECT count(*) FROM rvbbit.mcp_servers),",
+      "    'n_tools', (SELECT count(*) FROM rvbbit.mcp_tools)",
+      "  ) AS r,",
+      "  endpoint_url AS endpoint",
+      "FROM rvbbit.mcp_gateways",
+      `WHERE name = ${sqlLit(name)}`,
+    ].join("\n")
   } else {
     sql = [
       "SELECT",

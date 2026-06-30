@@ -161,6 +161,7 @@ function engineMsFromColumns(r: Record<string, unknown>): EngineMs {
     duck_vortex: numOrNull(r.duck_vortex_ms),
     duck_hive: numOrNull(r.duck_hive_ms),
     datafusion_vector: numOrNull(r.datafusion_ms),
+    datafusion_vortex: numOrNull(r.datafusion_vortex_ms),
     datafusion_hive: numOrNull(r.datafusion_hive_ms),
     pg_rowstore: numOrNull(r.pg_ms),
   }
@@ -250,7 +251,8 @@ export async function fetchProfileEntriesByName(
   const res = await runQuery(
     connectionId,
     `SELECT shape_key, shape_family, choice, confidence, observations, reason,
-            native_ms, duck_ms, duck_hive_ms, datafusion_ms, datafusion_hive_ms, pg_ms
+            native_ms, duck_ms, duck_vortex_ms, duck_hive_ms,
+            datafusion_ms, datafusion_vortex_ms, datafusion_hive_ms, pg_ms
      FROM rvbbit.route_profile_summary
      WHERE profile_name = ${sqlStr(profileName)}
      ORDER BY confidence DESC NULLS LAST, observations DESC`,
@@ -289,6 +291,7 @@ export async function fetchRejectedShapes(
       duck_vortex: numOrNull(cands.duck_vortex),
       duck_hive: numOrNull(cands.duck_hive),
       datafusion_vector: numOrNull(cands.datafusion_vector ?? cands.datafusion),
+      datafusion_vortex: numOrNull(cands.datafusion_vortex ?? cands.df_vortex ?? cands.vortex),
       datafusion_hive: numOrNull(cands.datafusion_hive ?? cands.df_hive),
       pg_rowstore: numOrNull(cands.pg_rowstore ?? cands.pg_heap ?? cands.pg),
     }

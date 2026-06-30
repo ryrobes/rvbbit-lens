@@ -2,8 +2,8 @@
 
 /**
  * Client-side model for rvbbit's adaptive query router — the system that
- * picks one of six execution engines for a SELECT against an rvbbit
- * columnar table, based on the query's shape and a trained profile.
+ * picks one of the configured execution paths for a SELECT against an
+ * rvbbit-enabled table, based on the query's shape and a trained profile.
  *
  * Surfaces (see rvbbit docs/RVBBIT_ROUTING_UI.md):
  *   - route_decisions / route_executions — online telemetry (paths taken)
@@ -21,6 +21,7 @@ export type EngineId =
   | "duck_vortex"
   | "duck_hive"
   | "datafusion_vector"
+  | "datafusion_vortex"
   | "datafusion_hive"
   | "pg_rowstore"
 
@@ -31,7 +32,7 @@ export interface EngineMeta {
   blurb: string
 }
 
-/** The six candidate engines, in router-display order. */
+/** The candidate engines, in router-display order. */
 export const ENGINES: EngineMeta[] = [
   {
     id: "rvbbit_native",
@@ -62,6 +63,12 @@ export const ENGINES: EngineMeta[] = [
     label: "datafusion",
     color: "var(--viz-engine-datafusion-vector)",
     blurb: "DataFusion over authoritative rvbbit parquet row groups",
+  },
+  {
+    id: "datafusion_vortex",
+    label: "datafusion vortex",
+    color: "var(--viz-engine-datafusion-vortex)",
+    blurb: "DataFusion over the Vortex columnar layout",
   },
   {
     id: "datafusion_hive",
@@ -139,12 +146,15 @@ export function engineFlowOrder(id: string): [number, number] {
 
 /**
  * Older candidate aliases (`duck`, `datafusion`, `native`, `df_hive`,
- * `pg_heap`) may surface in legacy profile JSON or scripts. Normalize
- * to the canonical six before storing in UI state.
+ * `df_vortex`, `pg_heap`) may surface in legacy profile JSON or scripts.
+ * Normalize to the canonical engine ids before storing in UI state.
  */
 const CANDIDATE_ALIASES: Record<string, EngineId> = {
   duck: "duck_vector",
   datafusion: "datafusion_vector",
+  "datafusion-vortex": "datafusion_vortex",
+  df_vortex: "datafusion_vortex",
+  vortex: "datafusion_vortex",
   native: "rvbbit_native",
   df_hive: "datafusion_hive",
   pg_heap: "pg_rowstore",
@@ -165,6 +175,7 @@ function engineMsFromRow(r: Record<string, unknown>): EngineMs {
     duck_vortex: numOrNull(r.duck_vortex_ms),
     duck_hive: numOrNull(r.duck_hive_ms),
     datafusion_vector: numOrNull(r.datafusion_ms),
+    datafusion_vortex: numOrNull(r.datafusion_vortex_ms),
     datafusion_hive: numOrNull(r.datafusion_hive_ms),
     pg_rowstore: numOrNull(r.pg_ms),
   }
@@ -177,6 +188,7 @@ function engineMediansFromRow(r: Record<string, unknown>): EngineMs {
     duck_vortex: numOrNull(r.duck_vortex_median_ms),
     duck_hive: numOrNull(r.duck_hive_median_ms),
     datafusion_vector: numOrNull(r.datafusion_median_ms),
+    datafusion_vortex: numOrNull(r.datafusion_vortex_median_ms),
     datafusion_hive: numOrNull(r.datafusion_hive_median_ms),
     pg_rowstore: numOrNull(r.pg_median_ms),
   }
@@ -189,6 +201,7 @@ function engineObservationsFromRow(r: Record<string, unknown>): Record<EngineId,
     duck_vortex: numOrNull(r.duck_vortex_observations),
     duck_hive: numOrNull(r.duck_hive_observations),
     datafusion_vector: numOrNull(r.datafusion_observations),
+    datafusion_vortex: numOrNull(r.datafusion_vortex_observations),
     datafusion_hive: numOrNull(r.datafusion_hive_observations),
     pg_rowstore: numOrNull(r.pg_observations),
   }
@@ -539,7 +552,8 @@ export async function fetchProfileEntries(connectionId: string): Promise<Profile
   const res = await runQuery(
     connectionId,
     "SELECT shape_key, choice, confidence, observations, native_ms, duck_ms, " +
-      "duck_vortex_ms, duck_hive_ms, datafusion_ms, datafusion_hive_ms, pg_ms, reason " +
+      "duck_vortex_ms, duck_hive_ms, datafusion_ms, datafusion_vortex_ms, " +
+      "datafusion_hive_ms, pg_ms, reason " +
       "FROM rvbbit.route_profile_entries " +
       `WHERE profile_name = ${ACTIVE_PROFILE_SUBQUERY} ` +
       "ORDER BY confidence DESC NULLS LAST",
@@ -560,10 +574,12 @@ export async function fetchShapeSummary(connectionId: string): Promise<ShapeSumm
     connectionId,
     "SELECT shape_family, observations, best_candidate, best_median_ms, " +
       "native_median_ms, duck_median_ms, duck_vortex_median_ms, duck_hive_median_ms, " +
-      "datafusion_median_ms, datafusion_hive_median_ms, pg_median_ms, " +
+      "datafusion_median_ms, datafusion_vortex_median_ms, datafusion_hive_median_ms, " +
+      "pg_median_ms, " +
       "native_observations, duck_observations, duck_vortex_observations, " +
       "duck_hive_observations, " +
-      "datafusion_observations, datafusion_hive_observations, pg_observations, " +
+      "datafusion_observations, datafusion_vortex_observations, " +
+      "datafusion_hive_observations, pg_observations, " +
       "observed_gain, needs_exploration FROM rvbbit.route_shape_summary " +
       "ORDER BY observations DESC",
   )
@@ -584,7 +600,7 @@ export async function fetchProfilePoints(connectionId: string): Promise<ProfileP
   const res = await runQuery(
     connectionId,
     "SELECT shape_family, table_rows, native_ms, duck_ms, duck_vortex_ms, duck_hive_ms, " +
-      "datafusion_ms, datafusion_hive_ms, pg_ms " +
+      "datafusion_ms, datafusion_vortex_ms, datafusion_hive_ms, pg_ms " +
       `FROM rvbbit.route_profile_points WHERE profile_name = ${ACTIVE_PROFILE_SUBQUERY}`,
   )
   if (!res.ok) return []
@@ -616,9 +632,12 @@ export async function fetchColumnarTables(connectionId: string): Promise<Columna
   const res = await runQuery(
     connectionId,
     "SELECT n.nspname AS schema, c.relname AS name, c.reltuples::bigint AS est_rows " +
-      "FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace " +
-      "JOIN pg_am am ON am.oid = c.relam " +
-      "WHERE c.relkind = 'r' AND am.amname = 'rvbbit' ORDER BY n.nspname, c.relname",
+      "FROM rvbbit.tables t " +
+      "JOIN pg_class c ON c.oid = t.table_oid " +
+      "JOIN pg_namespace n ON n.oid = c.relnamespace " +
+      "WHERE c.relkind IN ('r','p','m') " +
+      "AND coalesce(t.acceleration_enabled, true) " +
+      "ORDER BY n.nspname, c.relname",
   )
   if (!res.ok) return []
   return res.rows.map((r) => ({
