@@ -50,8 +50,14 @@ function q(s: string): string {
 function num(v: unknown): number | null {
   return v == null ? null : Number(v)
 }
+function num0(v: unknown): number {
+  return v == null ? 0 : Number(v)
+}
 function str(v: unknown): string | null {
   return v == null ? null : String(v)
+}
+function bool(v: unknown): boolean {
+  return v === true || v === "t"
 }
 
 export interface BrainDoc {
@@ -472,6 +478,250 @@ export async function syncSourceNow(
   const r = await run(connectionId, `SELECT rvbbit.brain_sync_dispatch(${Math.floor(sourceId)}, 'manual') AS r`, 1)
   if (!r.ok) return { result: null, error: r.error }
   return { result: (r.rows[0]?.r as Record<string, unknown>) ?? null, error: null }
+}
+
+export interface SystemLearningBrainStatus {
+  installed: boolean
+  sourceId: number | null
+  enabled: boolean
+  docs: number
+  indexedItems: number
+  groups: SystemLearningGroup[]
+  examples: SystemLearningExample[]
+  lastSyncedAt: number | null
+  lastRunAt: number | null
+  lastRunAdded: number
+  lastRunChanged: number
+  lastRunSkipped: number
+  error?: string
+}
+
+export interface SystemLearningGroup {
+  objectType: string
+  items: number
+  lastSeenAt: number | null
+}
+
+export interface SystemLearningExample {
+  uri: string
+  title: string
+  objectType: string
+  tableName: string | null
+  columnName: string | null
+  layout: string | null
+  shapeKey: string | null
+  engine: string | null
+  operatorName: string | null
+  status: string | null
+  occurredAt: number | null
+}
+
+export interface SystemLearningBrainSync {
+  ok: boolean
+  result: Record<string, unknown> | null
+  added: number
+  changed: number
+  skipped: number
+  removed: number
+  error?: string
+}
+
+function emptySystemLearningBrainStatus(error?: string): SystemLearningBrainStatus {
+  return {
+    installed: false,
+    sourceId: null,
+    enabled: false,
+    docs: 0,
+    indexedItems: 0,
+    groups: [],
+    examples: [],
+    lastSyncedAt: null,
+    lastRunAt: null,
+    lastRunAdded: 0,
+    lastRunChanged: 0,
+    lastRunSkipped: 0,
+    ...(error ? { error } : {}),
+  }
+}
+
+export async function fetchSystemLearningBrainStatus(connectionId: string): Promise<SystemLearningBrainStatus> {
+  const catalog = await runRead(
+    connectionId,
+    `SELECT
+       to_regclass('rvbbit.system_learning_items') IS NOT NULL AS items_present,
+       to_regclass('rvbbit.system_learning_brain_status') IS NOT NULL AS status_present,
+       to_regclass('rvbbit.system_learning_item_summary') IS NOT NULL AS summary_present,
+       to_regclass('rvbbit.brain_sources') IS NOT NULL AS sources_present,
+       to_regclass('rvbbit.brain_documents') IS NOT NULL AS documents_present,
+       to_regclass('rvbbit.brain_sync_runs') IS NOT NULL AS runs_present`,
+    1,
+  )
+  if (!catalog.ok) return emptySystemLearningBrainStatus(catalog.error)
+  const catalogRow = catalog.rows[0] ?? {}
+  const itemsPresent = bool(catalogRow.items_present)
+  const groups = await fetchSystemLearningGroups(connectionId, bool(catalogRow.summary_present))
+  const examples = await fetchSystemLearningExamples(connectionId, itemsPresent)
+  if (!bool(catalogRow.sources_present) || !bool(catalogRow.documents_present) || !bool(catalogRow.runs_present)) {
+    return emptySystemLearningBrainStatus()
+  }
+
+  if (bool(catalogRow.status_present)) {
+    const status = await runRead(
+      connectionId,
+      `SELECT installed, source_id, enabled, indexed_items, docs,
+              extract(epoch FROM last_synced_at) * 1000 AS last_synced_ms,
+              extract(epoch FROM last_run_at) * 1000 AS last_run_ms,
+              last_run_added, last_run_changed, last_run_skipped
+       FROM rvbbit.system_learning_brain_status`,
+      1,
+    )
+    if (!status.ok) return emptySystemLearningBrainStatus(status.error)
+    const row = status.rows[0] ?? {}
+    return {
+      installed: bool(row.installed),
+      sourceId: num(row.source_id),
+      enabled: bool(row.enabled),
+      docs: num0(row.docs),
+      indexedItems: num0(row.indexed_items),
+      groups,
+      examples,
+      lastSyncedAt: num(row.last_synced_ms),
+      lastRunAt: num(row.last_run_ms),
+      lastRunAdded: num0(row.last_run_added),
+      lastRunChanged: num0(row.last_run_changed),
+      lastRunSkipped: num0(row.last_run_skipped),
+    }
+  }
+
+  const res = await runRead(
+    connectionId,
+    `WITH src AS (
+       SELECT source_id, enabled, last_synced_at
+       FROM rvbbit.brain_sources
+       WHERE label = 'RVBBIT System Learning'
+     ), last_run AS (
+       SELECT r.started_at, r.added, r.changed, r.skipped
+       FROM rvbbit.brain_sync_runs r
+       JOIN src s ON s.source_id = r.source_id
+       ORDER BY r.started_at DESC
+       LIMIT 1
+     )
+     SELECT
+       to_regclass('rvbbit.system_learning_items') IS NOT NULL AS installed,
+       (SELECT source_id FROM src) AS source_id,
+       coalesce((SELECT enabled FROM src), false) AS enabled,
+       ${itemsPresent ? "coalesce((SELECT count(*) FROM rvbbit.system_learning_items), 0)::bigint" : "0::bigint"} AS indexed_items,
+       coalesce((SELECT count(*) FROM rvbbit.brain_documents d JOIN src s ON s.source_id = d.source_id WHERE d.deleted_at IS NULL), 0)::bigint AS docs,
+       (SELECT extract(epoch FROM last_synced_at) * 1000 FROM src) AS last_synced_ms,
+       (SELECT extract(epoch FROM started_at) * 1000 FROM last_run) AS last_run_ms,
+       coalesce((SELECT added FROM last_run), 0)::int AS last_run_added,
+       coalesce((SELECT changed FROM last_run), 0)::int AS last_run_changed,
+       coalesce((SELECT skipped FROM last_run), 0)::int AS last_run_skipped`,
+    1,
+  )
+  if (!res.ok) return emptySystemLearningBrainStatus(res.error)
+  const row = res.rows[0] ?? {}
+  return {
+    installed: itemsPresent && bool(row.installed),
+    sourceId: num(row.source_id),
+    enabled: bool(row.enabled),
+    docs: num0(row.docs),
+    indexedItems: num0(row.indexed_items),
+    groups,
+    examples,
+    lastSyncedAt: num(row.last_synced_ms),
+    lastRunAt: num(row.last_run_ms),
+    lastRunAdded: num0(row.last_run_added),
+    lastRunChanged: num0(row.last_run_changed),
+    lastRunSkipped: num0(row.last_run_skipped),
+  }
+}
+
+async function fetchSystemLearningGroups(connectionId: string, summaryPresent: boolean): Promise<SystemLearningGroup[]> {
+  if (!summaryPresent) return []
+  const res = await runRead(
+    connectionId,
+    `SELECT object_type, items, extract(epoch FROM last_seen_at) * 1000 AS last_seen_ms
+     FROM rvbbit.system_learning_item_summary
+     ORDER BY items DESC, object_type`,
+    40,
+  )
+  if (!res.ok) return []
+  return res.rows.map((row) => ({
+    objectType: String(row.object_type ?? "unknown"),
+    items: num0(row.items),
+    lastSeenAt: num(row.last_seen_ms),
+  }))
+}
+
+async function fetchSystemLearningExamples(connectionId: string, itemsPresent: boolean): Promise<SystemLearningExample[]> {
+  if (!itemsPresent) return []
+  const res = await runRead(
+    connectionId,
+    `WITH ranked AS (
+       SELECT uri, title, occurred_at, props,
+              coalesce(props->>'object_type', 'unknown') AS object_type,
+              row_number() OVER (
+                PARTITION BY coalesce(props->>'object_type', 'unknown')
+                ORDER BY occurred_at DESC, title
+              ) AS rn
+       FROM rvbbit.system_learning_items
+     )
+     SELECT uri, title, object_type,
+            props->>'table' AS table_name,
+            props->>'column' AS column_name,
+            props->>'layout' AS layout,
+            props->>'shape_key' AS shape_key,
+            props->>'engine' AS engine,
+            props->>'operator' AS operator_name,
+            props->>'status' AS status,
+            extract(epoch FROM occurred_at) * 1000 AS occurred_ms
+     FROM ranked
+     WHERE rn = 1
+     ORDER BY object_type, occurred_at DESC, title
+     LIMIT 8`,
+    8,
+  )
+  if (!res.ok) return []
+  return res.rows.map((row) => ({
+    uri: String(row.uri ?? ""),
+    title: String(row.title ?? ""),
+    objectType: String(row.object_type ?? "unknown"),
+    tableName: str(row.table_name),
+    columnName: str(row.column_name),
+    layout: str(row.layout),
+    shapeKey: str(row.shape_key),
+    engine: str(row.engine),
+    operatorName: str(row.operator_name),
+    status: str(row.status),
+    occurredAt: num(row.occurred_ms),
+  }))
+}
+
+export async function syncSystemLearningBrain(connectionId: string): Promise<SystemLearningBrainSync> {
+  const res = await run(
+    connectionId,
+    `WITH src AS (
+       SELECT source_id
+       FROM rvbbit.brain_sources
+       WHERE label = 'RVBBIT System Learning'
+     )
+     SELECT rvbbit.brain_sync_dispatch((SELECT source_id FROM src), 'manual') AS r`,
+    1,
+    { statementTimeout: 0 },
+  )
+  if (!res.ok) {
+    return { ok: false, result: null, added: 0, changed: 0, skipped: 0, removed: 0, error: res.error }
+  }
+  const result = (res.rows[0]?.r as Record<string, unknown> | null) ?? null
+  return {
+    ok: true,
+    result,
+    added: num0(result?.added),
+    changed: num0(result?.changed),
+    skipped: num0(result?.skipped),
+    removed: num0(result?.removed),
+  }
 }
 
 export interface BrainSyncRun {

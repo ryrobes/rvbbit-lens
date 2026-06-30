@@ -332,6 +332,7 @@ function toRvbbitOperator(op: SemanticOpMeta): RvbbitOperator {
     system_prompt: op.systemPrompt ?? "",
     user_prompt: op.userPrompt ?? "",
     parser: op.parser ?? "strip",
+    cache_policy: "memoize",
     max_tokens: op.maxTokens ?? 256,
     temperature: op.temperature ?? null,
     steps: op.steps ?? null,

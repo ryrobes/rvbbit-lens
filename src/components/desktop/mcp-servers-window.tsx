@@ -1,6 +1,7 @@
 "use client"
 
 import { useCallback, useEffect, useMemo, useState } from "react"
+import type { ComponentType } from "react"
 import { useWorkspaceActive } from "./workspace-active-context"
 import { usePolling } from "@/lib/desktop/use-polling"
 import { McpInstallPanel } from "./mcp-install-panel"
@@ -8,6 +9,7 @@ import {
   Activity,
   AlertTriangle,
   Box,
+  Brain,
   Globe,
   Layers,
   Pause,
@@ -47,6 +49,11 @@ import {
   type ServerStatus,
   type Transport,
 } from "@/lib/rvbbit/mcp"
+import {
+  fetchSystemLearningBrainStatus,
+  syncSystemLearningBrain,
+  type SystemLearningBrainStatus,
+} from "@/lib/rvbbit/brain"
 
 const mcpInputCls =
   "mt-0.5 w-full rounded border border-chrome-border bg-chrome-bg px-1.5 py-1 text-[11px] text-foreground outline-none focus:border-rvbbit-accent/50"
@@ -75,6 +82,8 @@ export function McpServersWindow({
   const [invocations, setInvocations] = useState<McpInvocation[]>([])
   const [ghosts, setGhosts] = useState<GhostServerRow[]>([])
   const [gateway, setGateway] = useState<McpGatewayStatus | null>(null)
+  const [learningStatus, setLearningStatus] = useState<SystemLearningBrainStatus | null>(null)
+  const [learningBusy, setLearningBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [paused, setPaused] = useState(false)
   const [intervalMs, setIntervalMs] = useState(5000)
@@ -86,19 +95,36 @@ export function McpServersWindow({
 
   const reload = useCallback(async () => {
     if (!activeConnectionId) return
-    const [s, inv, gh] = await Promise.all([
+    const [s, inv, gh, gw, learning] = await Promise.all([
       fetchServers(activeConnectionId),
       fetchInvocations(activeConnectionId, { limit: 300 }),
       fetchGhostServers(activeConnectionId),
+      fetchMcpGatewayStatus(activeConnectionId),
+      fetchSystemLearningBrainStatus(activeConnectionId),
     ])
-    const gw = await fetchMcpGatewayStatus(activeConnectionId)
     setGateway(gw)
+    setLearningStatus(learning)
     setError(s.error ?? inv.error ?? gw.error ?? null)
     setServers(s.rows)
     setInvocations(inv.rows)
     setGhosts(gh)
     setUpdatedAt(Date.now())
   }, [activeConnectionId])
+
+  const syncLearning = useCallback(async () => {
+    if (!activeConnectionId) return
+    setLearningBusy(true)
+    try {
+      const res = await syncSystemLearningBrain(activeConnectionId)
+      if (!res.ok) {
+        setError(res.error ?? "system learning sync failed")
+        return
+      }
+      await reload()
+    } finally {
+      setLearningBusy(false)
+    }
+  }, [activeConnectionId, reload])
 
   useEffect(() => {
     if (!activeConnectionId || !hasRvbbit) return
@@ -280,6 +306,13 @@ export function McpServersWindow({
           />
         ) : null}
 
+        <AgentBrainPanel
+          status={learningStatus}
+          gatewayReady={gatewayReady}
+          busy={learningBusy}
+          onSync={syncLearning}
+        />
+
         {showAdd ? (
           <RegisterForm
             connId={activeConnectionId}
@@ -416,6 +449,158 @@ function McpGatewayRequiredPanel({
         </div>
       </div>
     </Panel>
+  )
+}
+
+function AgentBrainPanel({
+  status,
+  gatewayReady,
+  busy,
+  onSync,
+}: {
+  status: SystemLearningBrainStatus | null
+  gatewayReady: boolean
+  busy: boolean
+  onSync: () => void
+}) {
+  const installed = !!status?.installed && !!status.sourceId
+  const ready = gatewayReady && installed && status?.enabled === true && status.docs > 0
+  const statusLabel = !status
+    ? "checking"
+    : ready
+      ? "agent-ready"
+      : status.error
+        ? "error"
+        : installed
+          ? status.enabled
+            ? "indexed"
+            : "paused"
+          : "missing"
+  const statusTone = ready
+    ? "text-success"
+    : status?.error
+      ? "text-danger"
+      : installed
+        ? "text-rvbbit-accent"
+        : "text-chrome-text/55"
+  const lastActivity = status?.lastSyncedAt ?? status?.lastRunAt
+  const canSync = installed && status.enabled
+  const corpusReady = installed && status.enabled && status.docs > 0
+  const canAsk = corpusReady && gatewayReady
+  const askState = !installed
+    ? "missing"
+    : !status.enabled
+      ? "paused"
+      : status.docs <= 0
+        ? "needs docs"
+        : gatewayReady
+          ? "queryable"
+          : "gateway off"
+
+  return (
+    <Panel
+      icon={Brain}
+      title="Agent Brain"
+      right={
+        <span className={cn("font-mono text-[10px] uppercase", statusTone)} title={status?.error ?? undefined}>
+          {statusLabel}
+        </span>
+      }
+    >
+      <div className="grid grid-cols-4 gap-2">
+        <Metric label="items" value={status ? fmtCount(status.indexedItems) : "—"} tone={installed ? undefined : "muted"} />
+        <Metric label="docs" value={status ? fmtCount(status.docs) : "—"} tone={status?.docs ? undefined : "muted"} />
+        <Metric label="synced" value={lastActivity ? fmtAgo(lastActivity) : "never"} tone={lastActivity ? undefined : "muted"} />
+        <Metric label="gateway" value={gatewayReady ? "ready" : "off"} tone={gatewayReady ? undefined : "muted"} />
+      </div>
+      <div className="mt-2 grid grid-cols-[repeat(auto-fit,minmax(10rem,1fr))] gap-1.5 border-t border-chrome-border/45 pt-2">
+        <AgentToolStep
+          icon={Activity}
+          label="system_learning_status"
+          state={installed ? "available" : "missing"}
+          active={installed}
+        />
+        <AgentToolStep
+          icon={RefreshCw}
+          label="sync_system_learning"
+          state={canSync ? "manual sync" : installed ? "paused" : "missing"}
+          active={canSync}
+          busy={busy}
+        />
+        <AgentToolStep
+          icon={Brain}
+          label="ask_system_learning"
+          state={askState}
+          active={canAsk}
+        />
+      </div>
+      <div className="mt-2 flex min-w-0 flex-wrap items-center gap-1.5 border-t border-chrome-border/45 pt-2">
+        <AgentBrainChip label="system_learning" tone={installed ? "accent" : "muted"} />
+        <AgentBrainChip label="ask_system_learning" tone={canAsk ? "accent" : "muted"} />
+        <span className="min-w-0 flex-1 truncate font-mono text-[10px] tabular-nums text-chrome-text/55">
+          +{fmtCount(status?.lastRunAdded ?? 0)} / ~{fmtCount(status?.lastRunChanged ?? 0)} / skip {fmtCount(status?.lastRunSkipped ?? 0)}
+        </span>
+        <button
+          type="button"
+          disabled={!installed || busy}
+          onClick={onSync}
+          title={installed ? "Sync RVBBIT system learning into Brain" : "Run migrate to install RVBBIT System Learning"}
+          className="inline-flex h-6 items-center gap-1 rounded border border-chrome-border px-2 text-[11px] text-chrome-text/85 hover:bg-foreground/[0.06] hover:text-foreground disabled:opacity-40"
+        >
+          <RefreshCw className={cn("h-3 w-3", busy && "animate-spin")} />
+          Sync
+        </button>
+      </div>
+    </Panel>
+  )
+}
+
+function AgentToolStep({
+  icon: Icon,
+  label,
+  state,
+  active,
+  busy,
+}: {
+  icon: ComponentType<{ className?: string }>
+  label: string
+  state: string
+  active: boolean
+  busy?: boolean
+}) {
+  return (
+    <div
+      className={cn(
+        "flex min-w-0 items-center gap-1.5 rounded border px-2 py-1",
+        active
+          ? "border-rvbbit-accent/30 bg-rvbbit-accent/10"
+          : "border-chrome-border/60 bg-doc-bg/45",
+      )}
+      title={`${label}: ${state}`}
+    >
+      <Icon className={cn("h-3 w-3 shrink-0", active ? "text-rvbbit-accent" : "text-chrome-text/40", busy && "animate-spin")} />
+      <span className="min-w-0 flex-1 truncate font-mono text-[10px] text-foreground/85">
+        {label}
+      </span>
+      <span className={cn("shrink-0 font-mono text-[9px] uppercase", active ? "text-rvbbit-accent" : "text-chrome-text/45")}>
+        {state}
+      </span>
+    </div>
+  )
+}
+
+function AgentBrainChip({ label, tone }: { label: string; tone: "accent" | "muted" }) {
+  return (
+    <span
+      className={cn(
+        "rounded border px-1.5 py-0.5 font-mono text-[10px]",
+        tone === "accent"
+          ? "border-rvbbit-accent/35 bg-rvbbit-accent/10 text-rvbbit-accent"
+          : "border-chrome-border bg-doc-bg/60 text-chrome-text/45",
+      )}
+    >
+      {label}
+    </span>
   )
 }
 

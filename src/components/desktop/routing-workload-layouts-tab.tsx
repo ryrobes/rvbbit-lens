@@ -1,10 +1,12 @@
 "use client"
 
 import { useCallback, useEffect, useMemo, useState } from "react"
-import type { ReactNode } from "react"
+import type { ComponentType, ReactNode } from "react"
 import {
   AlertTriangle,
+  Activity,
   Boxes,
+  Brain,
   Check,
   Clock,
   Database,
@@ -37,6 +39,12 @@ import {
   type WorkloadLayoutRecommendation,
   type WorkloadLayoutTable,
 } from "@/lib/rvbbit/routing"
+import {
+  fetchSystemLearningBrainStatus,
+  syncSystemLearningBrain,
+  type SystemLearningBrainSync,
+  type SystemLearningBrainStatus,
+} from "@/lib/rvbbit/brain"
 import { fmtBytes } from "@/lib/rvbbit/finder-format"
 import { fmtAgo, fmtCount, fmtMs, Metric, Panel } from "./instruments"
 
@@ -73,6 +81,7 @@ export function RoutingWorkloadLayoutsTab({ activeConnectionId }: Props) {
   const [tables, setTables] = useState<WorkloadLayoutTable[]>([])
   const [recommendations, setRecommendations] = useState<WorkloadLayoutRecommendation[]>([])
   const [accelerationCandidates, setAccelerationCandidates] = useState<AccelerationCandidate[]>([])
+  const [learningStatus, setLearningStatus] = useState<SystemLearningBrainStatus | null>(null)
   const [accelPgStatStatements, setAccelPgStatStatements] = useState(false)
   const [selectedTable, setSelectedTable] = useState<string>(ALL_TABLES)
   const [search, setSearch] = useState("")
@@ -100,10 +109,14 @@ export function RoutingWorkloadLayoutsTab({ activeConnectionId }: Props) {
       !!catalog.catalog?.statusViewPresent &&
       !!catalog.catalog?.advisorPresent
     setCatalogReady(ready)
-    const accelRes = await fetchAccelerationCandidates(activeConnectionId)
+    const [accelRes, learningRes] = await Promise.all([
+      fetchAccelerationCandidates(activeConnectionId),
+      fetchSystemLearningBrainStatus(activeConnectionId),
+    ])
     setAccelerationCandidates(accelRes.rows)
     setAccelPgStatStatements(accelRes.pgStatStatements)
     setAccelError(accelRes.error ?? null)
+    setLearningStatus(learningRes)
     if (!ready) {
       setTables([])
       setRecommendations([])
@@ -237,6 +250,12 @@ export function RoutingWorkloadLayoutsTab({ activeConnectionId }: Props) {
     }
   }, [viewMode])
 
+  const syncLearningAfterAction = useCallback(async (): Promise<string | null> => {
+    if (!activeConnectionId || !learningStatus?.installed || !learningStatus.sourceId || !learningStatus.enabled) return null
+    const res = await syncSystemLearningBrain(activeConnectionId)
+    return res.ok ? formatBrainSync(res) : "Brain sync failed"
+  }, [activeConnectionId, learningStatus])
+
   const runMigrate = useCallback(async () => {
     if (!activeConnectionId) return
     setBusy("migrate")
@@ -265,17 +284,18 @@ export function RoutingWorkloadLayoutsTab({ activeConnectionId }: Props) {
     const failures = results.filter((r) => !r.ok)
     const recommended = results.reduce((n, r) => n + r.recommendations, 0)
     const matched = results.reduce((n, r) => n + r.matchedShapes, 0)
+    const brainSync = failures.length ? null : await syncLearningAfterAction()
     setToast(
       failures.length
         ? { ok: false, msg: failures[0].error ?? `${failures.length} advisor run(s) failed` }
         : {
             ok: true,
-            msg: `${fmtCount(recommended)} recommendation${recommended === 1 ? "" : "s"} from ${fmtCount(matched)} matched shape${matched === 1 ? "" : "s"}`,
+            msg: `${fmtCount(recommended)} recommendation${recommended === 1 ? "" : "s"} from ${fmtCount(matched)} matched shape${matched === 1 ? "" : "s"}${brainSync ? ` · ${brainSync}` : ""}`,
           },
     )
     setBusy(null)
     await load()
-  }, [activeConnectionId, analyzeScope, load, lookbackHours, minObservations])
+  }, [activeConnectionId, analyzeScope, load, lookbackHours, minObservations, syncLearningAfterAction])
 
   const act = useCallback(
     async (
@@ -320,16 +340,17 @@ export function RoutingWorkloadLayoutsTab({ activeConnectionId }: Props) {
               ? build?.baseAction && build.baseAction !== "none"
                 ? `accepted and built via ${build.baseAction.replace("_", " ")}`
                 : "accepted and built"
-              : "accepted"
+                : "accepted"
+      const brainSync = res.ok ? await syncLearningAfterAction() : null
       setToast(
         res.ok
-          ? { ok: true, msg: `${label} · ${rec.layout}${build?.message ? ` · ${build.message}` : ""}` }
+          ? { ok: true, msg: `${label} · ${rec.layout}${build?.message ? ` · ${build.message}` : ""}${brainSync ? ` · ${brainSync}` : ""}` }
           : { ok: false, msg: res.error ?? build?.message ?? "action failed" },
       )
       setBusy(null)
       await load()
     },
-    [activeConnectionId, load],
+    [activeConnectionId, load, syncLearningAfterAction],
   )
 
   const actAcceleration = useCallback(
@@ -339,16 +360,34 @@ export function RoutingWorkloadLayoutsTab({ activeConnectionId }: Props) {
       setBusy(`${action}:${candidate.tableName}`)
       setToast(null)
       const res = await enableAccelerationCandidate(activeConnectionId, candidate.tableName, build)
+      const brainSync = res.ok ? await syncLearningAfterAction() : null
       setToast(
         res.ok
-          ? { ok: true, msg: `${build ? "enabled and built" : "enabled"} · ${candidate.tableName} · ${res.message}` }
+          ? { ok: true, msg: `${build ? "enabled and built" : "enabled"} · ${candidate.tableName} · ${res.message}${brainSync ? ` · ${brainSync}` : ""}` }
           : { ok: false, msg: res.error ?? "acceleration action failed" },
       )
       setBusy(null)
       await load()
     },
-    [activeConnectionId, load],
+    [activeConnectionId, load, syncLearningAfterAction],
   )
+
+  const syncLearning = useCallback(async () => {
+    if (!activeConnectionId || !learningStatus?.installed || !learningStatus.sourceId) return
+    setBusy("sync-learning")
+    setToast(null)
+    const res = await syncSystemLearningBrain(activeConnectionId)
+    setToast(
+      res.ok
+        ? {
+            ok: true,
+            msg: `Brain indexed learning · ${formatBrainSync(res)}`,
+          }
+        : { ok: false, msg: res.error ?? "system learning sync failed" },
+    )
+    setBusy(null)
+    await load()
+  }, [activeConnectionId, learningStatus, load])
 
   if (!loaded) {
     return (
@@ -621,6 +660,14 @@ export function RoutingWorkloadLayoutsTab({ activeConnectionId }: Props) {
                       <Metric label="rejected" value={fmtCount(stats.rejected)} tone="muted" />
                     </div>
                   </Panel>
+                  <LearningBrainPanel status={learningStatus} busy={busy === "sync-learning"} onSync={() => void syncLearning()} />
+                  <LearningLoopPanel
+                    mode="layouts"
+                    recommendations={visibleRecommendations}
+                    layoutStats={stats}
+                    accelStats={accelStats}
+                    learningStatus={learningStatus}
+                  />
                 </div>
 
                 {visibleRecommendations.length === 0 ? (
@@ -661,6 +708,14 @@ export function RoutingWorkloadLayoutsTab({ activeConnectionId }: Props) {
                     <Metric label="source" value={accelPgStatStatements ? "pg_stat" : "table stats"} tone="muted" />
                   </div>
                 </Panel>
+                <LearningBrainPanel status={learningStatus} busy={busy === "sync-learning"} onSync={() => void syncLearning()} />
+                <LearningLoopPanel
+                  mode="accelerate"
+                  recommendations={visibleRecommendations}
+                  layoutStats={stats}
+                  accelStats={accelStats}
+                  learningStatus={learningStatus}
+                />
               </div>
 
               {visibleAccelerationCandidates.length === 0 ? (
@@ -863,6 +918,248 @@ function AccelerationCandidateCard({
   )
 }
 
+function LearningBrainPanel({
+  status,
+  busy,
+  onSync,
+}: {
+  status: SystemLearningBrainStatus | null
+  busy: boolean
+  onSync: () => void
+}) {
+  const installed = !!status?.installed && !!status.sourceId
+  const ready = installed && status.enabled && status.docs > 0
+  const statusLabel = !status ? "checking" : ready ? "agent ready" : installed ? (status.enabled ? "needs sync" : "paused") : status.error ? "error" : "missing"
+  const statusClass = ready ? "text-success" : status?.error ? "text-danger" : installed ? "text-rvbbit-accent" : "text-chrome-text/55"
+  const lastActivity = status?.lastSyncedAt ?? status?.lastRunAt
+  return (
+    <Panel
+      icon={Brain}
+      title="Brain"
+      right={
+        <span className={cn("font-mono text-[10px] uppercase", statusClass)} title={status?.error ?? undefined}>
+          {statusLabel}
+        </span>
+      }
+    >
+      <div className="grid grid-cols-3 gap-2">
+        <Metric label="items" value={status ? fmtCount(status.indexedItems) : "—"} tone={installed ? undefined : "muted"} />
+        <Metric label="docs" value={status ? fmtCount(status.docs) : "—"} tone={status?.docs ? undefined : "muted"} />
+        <Metric label="synced" value={lastActivity ? fmtAgo(lastActivity) : "never"} tone={lastActivity ? undefined : "muted"} />
+      </div>
+      <div className="mt-2 flex min-w-0 items-center gap-2 border-t border-chrome-border/45 pt-2">
+        <span className="min-w-0 flex-1 truncate font-mono text-[10px] tabular-nums text-chrome-text/55">
+          +{fmtCount(status?.lastRunAdded ?? 0)} / ~{fmtCount(status?.lastRunChanged ?? 0)} / skip {fmtCount(status?.lastRunSkipped ?? 0)}
+        </span>
+        <button
+          type="button"
+          disabled={!installed || busy}
+          onClick={onSync}
+          title={installed ? "Sync RVBBIT system learning into Brain" : "Run migrate to install RVBBIT System Learning"}
+          className="inline-flex h-6 items-center gap-1 rounded border border-chrome-border px-2 text-[11px] text-chrome-text/85 hover:bg-foreground/[0.06] hover:text-foreground disabled:opacity-40"
+        >
+          <RefreshCw className={cn("h-3 w-3", busy && "animate-spin")} />
+          Sync
+        </button>
+      </div>
+    </Panel>
+  )
+}
+
+function LearningLoopPanel({
+  mode,
+  recommendations,
+  layoutStats,
+  accelStats,
+  learningStatus,
+}: {
+  mode: PanelMode
+  recommendations: WorkloadLayoutRecommendation[]
+  layoutStats: { total: number; accepted: number; candidates: number; rejected: number; ready: number; built: number }
+  accelStats: { total: number; strong: number; stable: number; slowQueries: number; seqScans: number }
+  learningStatus: SystemLearningBrainStatus | null
+}) {
+  const observations = recommendations.reduce((n, rec) => n + rec.observations, 0)
+  const shapes = new Set(recommendations.flatMap((rec) => rec.sampleShapes)).size
+  const learningReady = !!learningStatus?.installed && learningStatus.enabled && learningStatus.docs > 0
+  const learningItems = learningStatus?.indexedItems ?? 0
+  const learningDocs = learningStatus?.docs ?? 0
+  const learningKinds = (learningStatus?.groups ?? []).filter((g) => g.items > 0).length
+  const steps =
+    mode === "layouts"
+      ? [
+          {
+            key: "observed",
+            icon: Activity,
+            label: "Observed",
+            value: observations,
+            detail: `${fmtCount(shapes)} shape${shapes === 1 ? "" : "s"}`,
+            active: observations > 0,
+          },
+          {
+            key: "suggested",
+            icon: Sparkles,
+            label: "Suggested",
+            value: layoutStats.total,
+            detail: `${fmtCount(layoutStats.candidates)} candidate${layoutStats.candidates === 1 ? "" : "s"}`,
+            active: layoutStats.total > 0,
+          },
+          {
+            key: "accepted",
+            icon: Check,
+            label: "Accepted",
+            value: layoutStats.accepted,
+            detail: `${fmtCount(layoutStats.rejected)} rejected`,
+            active: layoutStats.accepted > 0,
+          },
+          {
+            key: "built",
+            icon: Hammer,
+            label: "Built",
+            value: layoutStats.built,
+            detail: `${fmtCount(layoutStats.ready)} ready`,
+            active: layoutStats.built > 0,
+          },
+          {
+            key: "brain",
+            icon: Brain,
+            label: "Brain",
+            value: learningDocs,
+            detail: `${fmtCount(learningItems)} item${learningItems === 1 ? "" : "s"}`,
+            active: learningReady,
+          },
+        ]
+      : [
+          {
+            key: "observed",
+            icon: Activity,
+            label: "Observed",
+            value: accelStats.slowQueries || accelStats.seqScans,
+            detail: accelStats.slowQueries > 0 ? `${fmtCount(accelStats.seqScans)} seq scans` : "scan stats",
+            active: accelStats.slowQueries > 0 || accelStats.seqScans > 0,
+          },
+          {
+            key: "candidates",
+            icon: Target,
+            label: "Candidates",
+            value: accelStats.total,
+            detail: "heap tables",
+            active: accelStats.total > 0,
+          },
+          {
+            key: "stable",
+            icon: Clock,
+            label: "Stable",
+            value: accelStats.stable,
+            detail: "low churn",
+            active: accelStats.stable > 0,
+          },
+          {
+            key: "strong",
+            icon: Rocket,
+            label: "Strong",
+            value: accelStats.strong,
+            detail: "ranked high",
+            active: accelStats.strong > 0,
+          },
+          {
+            key: "brain",
+            icon: Brain,
+            label: "Brain",
+            value: learningDocs,
+            detail: `${fmtCount(learningItems)} item${learningItems === 1 ? "" : "s"}`,
+            active: learningReady,
+          },
+        ]
+  const maxValue = Math.max(1, ...steps.map((step) => step.value))
+  const rightLabel = learningReady
+    ? "ask_system_learning"
+    : learningStatus?.installed
+      ? "sync pending"
+      : "not installed"
+
+  return (
+    <Panel
+      icon={Activity}
+      title="Learning Loop"
+      className="col-span-full"
+      right={
+        <span className={cn("font-mono text-[10px]", learningReady ? "text-success" : "text-chrome-text/55")}>
+          {rightLabel}
+        </span>
+      }
+    >
+      <div className="grid grid-cols-[repeat(auto-fit,minmax(7.5rem,1fr))] gap-3">
+        {steps.map((step, index) => (
+          <LearningLoopStep
+            key={step.key}
+            icon={step.icon}
+            label={step.label}
+            value={step.value}
+            detail={step.detail}
+            active={step.active}
+            maxValue={maxValue}
+            showConnector={index < steps.length - 1}
+          />
+        ))}
+      </div>
+      <div className="mt-2 flex flex-wrap items-center gap-1.5 border-t border-chrome-border/40 pt-2 text-[10px] text-chrome-text/55">
+        {(learningStatus?.groups ?? []).slice(0, 6).map((g) => (
+          <span key={g.objectType} className="font-mono tabular-nums">
+            {g.objectType.replace(/_/g, " ")} {fmtCount(g.items)}
+          </span>
+        ))}
+        {learningKinds === 0 ? <span>no Brain artifacts synced</span> : null}
+      </div>
+    </Panel>
+  )
+}
+
+function LearningLoopStep({
+  icon: Icon,
+  label,
+  value,
+  detail,
+  active,
+  maxValue,
+  showConnector,
+}: {
+  icon: ComponentType<{ className?: string }>
+  label: string
+  value: number
+  detail: string
+  active: boolean
+  maxValue: number
+  showConnector: boolean
+}) {
+  const pct = Math.max(4, Math.round((value / Math.max(1, maxValue)) * 100))
+  return (
+    <div className="relative min-w-0">
+      {showConnector ? (
+        <div className="pointer-events-none absolute left-[calc(100%+0.25rem)] top-3 hidden h-px w-2 bg-chrome-border/60 md:block" />
+      ) : null}
+      <div className="flex min-w-0 items-center gap-1.5">
+        <Icon className={cn("h-3.5 w-3.5 shrink-0", active ? "text-rvbbit-accent" : "text-chrome-text/35")} />
+        <span className="min-w-0 truncate text-[10px] uppercase tracking-wider text-chrome-text/65">
+          {label}
+        </span>
+        <span className={cn("ml-auto font-mono text-[12px] tabular-nums", active ? "text-foreground" : "text-chrome-text/45")}>
+          {fmtCount(value)}
+        </span>
+      </div>
+      <div className="mt-1 h-1 overflow-hidden rounded-full bg-foreground/[0.06]">
+        <div
+          className={cn("h-full rounded-full", active ? "bg-rvbbit-accent" : "bg-chrome-border")}
+          style={{ width: `${pct}%` }}
+        />
+      </div>
+      <div className="mt-1 truncate font-mono text-[10px] text-chrome-text/45" title={detail}>
+        {detail}
+      </div>
+    </div>
+  )
+}
+
 function RecommendationCard({
   rec,
   busy,
@@ -913,6 +1210,8 @@ function RecommendationCard({
         <RoleChip label="order" value={rec.roleCounts.orderBy} />
         <RoleChip label="distinct" value={rec.roleCounts.countDistinct} />
       </div>
+
+      <RecommendationEvidence rec={rec} nDistinct={nDistinct} />
 
       <div className="mt-2 grid grid-cols-[repeat(auto-fit,minmax(7rem,1fr))] gap-x-3 gap-y-1 border-t border-chrome-border/45 pt-2 text-[10px]">
         <Info label="reason" value={rec.reason} />
@@ -976,6 +1275,108 @@ function RecommendationCard({
       </div>
     </article>
   )
+}
+
+function RecommendationEvidence({
+  rec,
+  nDistinct,
+}: {
+  rec: WorkloadLayoutRecommendation
+  nDistinct: string
+}) {
+  const roles = [
+    { label: "where", value: rec.roleCounts.where },
+    { label: "group", value: rec.roleCounts.groupBy },
+    { label: "order", value: rec.roleCounts.orderBy },
+    { label: "distinct", value: rec.roleCounts.countDistinct },
+  ].filter((r) => r.value > 0)
+  const maxRole = Math.max(1, ...roles.map((r) => r.value))
+  const askHandle = `${rec.tableName} ${rec.columnName} ${rec.layoutKind} layout recommendation`
+  return (
+    <div className="mt-2 rounded border border-chrome-border/45 bg-doc-bg/35 p-2">
+      <div className="grid gap-2 lg:grid-cols-[minmax(0,1.1fr)_minmax(0,1fr)_minmax(0,1fr)]">
+        <div className="min-w-0">
+          <div className="mb-1 text-[9px] uppercase tracking-wider text-chrome-text/40">Clause evidence</div>
+          {roles.length === 0 ? (
+            <div className="font-mono text-[10px] text-chrome-text/40">no clause roles recorded</div>
+          ) : (
+            <div className="space-y-1">
+              {roles.map((role) => (
+                <div key={role.label} className="grid grid-cols-[3.75rem_minmax(0,1fr)_2.5rem] items-center gap-1.5">
+                  <span className="font-mono text-[10px] text-chrome-text/60">{role.label}</span>
+                  <div className="h-1.5 overflow-hidden rounded-full bg-foreground/[0.06]">
+                    <div
+                      className="h-full rounded-full bg-rvbbit-accent"
+                      style={{ width: `${Math.max(6, Math.round((role.value / maxRole) * 100))}%` }}
+                    />
+                  </div>
+                  <span className="text-right font-mono text-[10px] tabular-nums text-foreground/80">
+                    {fmtCount(role.value)}
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+        <div className="min-w-0">
+          <div className="mb-1 text-[9px] uppercase tracking-wider text-chrome-text/40">Shape samples</div>
+          <div className="flex min-w-0 flex-wrap gap-1">
+            {rec.sampleShapes.length === 0 ? (
+              <span className="font-mono text-[10px] text-chrome-text/40">none captured</span>
+            ) : (
+              rec.sampleShapes.slice(0, 3).map((shape) => (
+                <span
+                  key={shape}
+                  className="max-w-full truncate rounded bg-foreground/[0.06] px-1.5 py-0.5 font-mono text-[9px] text-chrome-text/70"
+                  title={shape}
+                >
+                  {shortShape(shape)}
+                </span>
+              ))
+            )}
+            {rec.sampleShapes.length > 3 ? (
+              <span className="rounded bg-foreground/[0.04] px-1.5 py-0.5 font-mono text-[9px] text-chrome-text/45">
+                +{rec.sampleShapes.length - 3}
+              </span>
+            ) : null}
+          </div>
+          <div className="mt-1 truncate font-mono text-[9px] text-chrome-text/40" title={askHandle}>
+            ask_system_learning · {askHandle}
+          </div>
+        </div>
+        <div className="grid min-w-0 grid-cols-3 gap-1.5">
+          <EvidenceMetric label="score" value={fmtScore(rec.score)} />
+          <EvidenceMetric label="weighted" value={fmtMs(rec.weightedMs)} />
+          <EvidenceMetric label="ndv" value={nDistinct} />
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function EvidenceMetric({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="min-w-0 rounded bg-foreground/[0.04] px-1.5 py-1">
+      <div className="truncate font-mono text-[11px] tabular-nums text-foreground" title={value}>
+        {value}
+      </div>
+      <div className="mt-0.5 truncate text-[8px] uppercase tracking-wider text-chrome-text/40">
+        {label}
+      </div>
+    </div>
+  )
+}
+
+function formatBrainSync(res: SystemLearningBrainSync): string {
+  return `Brain +${fmtCount(res.added)} / ~${fmtCount(res.changed)} / skip ${fmtCount(res.skipped)}`
+}
+
+function shortShape(shape: string): string {
+  if (!shape) return "shape"
+  const parts = shape.split("|").filter(Boolean)
+  const interesting = parts.filter((p) => !p.endsWith("=0") && !p.endsWith("=false")).slice(0, 3)
+  const text = (interesting.length ? interesting : parts.slice(0, 2)).join(" · ")
+  return text.length > 56 ? `${text.slice(0, 53)}...` : text || shape.slice(0, 56)
 }
 
 function LayoutKindPill({ kind }: { kind: WorkloadLayoutKind }) {

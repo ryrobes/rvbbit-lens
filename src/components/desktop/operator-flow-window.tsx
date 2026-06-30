@@ -9,6 +9,7 @@ import {
   Play,
   RefreshCw,
   Save,
+  Shield,
   X,
 } from "@/lib/icons"
 import { cn } from "@/lib/utils"
@@ -24,6 +25,7 @@ import {
   fetchPythonHandlers,
   fetchReceiptById,
   fetchReceipts,
+  hasAgentStep,
   fetchSpecialists,
   runOperator,
   saveOperator,
@@ -175,11 +177,12 @@ export function OperatorFlowWindow({
   }, [activeConnectionId, hasRvbbit])
 
   const loadReceipts = useCallback(async () => {
-    if (!activeConnectionId || !op || !persisted) return
-    const res = await fetchReceipts(activeConnectionId, op.name)
+    const operatorName = op?.name
+    if (!activeConnectionId || !operatorName || !persisted) return
+    const res = await fetchReceipts(activeConnectionId, operatorName)
     setReceipts(res.receipts)
     setReceiptId((cur) => cur ?? res.receipts[0]?.receipt_id ?? null)
-  }, [activeConnectionId, op, persisted])
+  }, [activeConnectionId, op?.name, persisted])
 
   useEffect(() => {
     if (mode !== "run") return
@@ -193,6 +196,19 @@ export function OperatorFlowWindow({
       cancelled = true
     }
   }, [mode, loadReceipts])
+
+  useEffect(() => {
+    if (mode !== "build" || !persisted) return
+    let cancelled = false
+    const run = async () => {
+      if (cancelled) return
+      await loadReceipts()
+    }
+    void run()
+    return () => {
+      cancelled = true
+    }
+  }, [mode, persisted, loadReceipts])
 
   // Caller pushed a new deep-link target (e.g. clicking another receipt
   // in Query Lens while this window is already open). Fetch it by id so
@@ -255,8 +271,10 @@ export function OperatorFlowWindow({
       setSaveError(res.error)
       return
     }
+    const saved = { ...op, cache_policy: hasAgentStep(op.steps) ? "never" : "memoize" }
+    setOp(saved)
     setPersisted(true)
-    setBaseline(op)
+    setBaseline(saved)
     setDirty(false)
     window.dispatchEvent(new Event("rvbbit-lens:operators-changed"))
   }, [activeConnectionId, op, persisted, baseline])
@@ -752,41 +770,46 @@ export function OperatorFlowWindow({
             onSelect={onSelectReceipt}
           />
         </div>
-        <aside className="w-[320px] shrink-0 border-l border-chrome-border">
+        <aside className="flex min-h-0 w-[320px] shrink-0 flex-col border-l border-chrome-border">
+          <OperatorTrustPanel op={op} receipts={receipts} persisted={persisted} />
           {mode === "build" ? (
-            <OperatorInspector
-              op={op}
-              isNew={!persisted}
-              selectedNodeId={selectedNodeId}
-              specialists={specialists}
-              mcpServers={mcpServers}
-              mcpTools={mcpTools}
-              pythonEnvs={pythonEnvs}
-              pythonHandlers={pythonHandlers}
-              llmModels={llmModels}
-              memoryServices={memoryServices}
-              n8nWorkflows={n8nWorkflows}
-              mcpGatewayReady={mcpGateway?.ready === true}
-              onOpenMcpGateway={() =>
-                onOpenCapability?.(mcpGateway?.catalogId ?? MCP_GATEWAY_CATALOG_ID, "install")
-              }
-              onChange={onChangeOp}
-              onSelectNode={setSelectedNodeId}
-            />
+            <div className="min-h-0 flex-1">
+              <OperatorInspector
+                op={op}
+                isNew={!persisted}
+                selectedNodeId={selectedNodeId}
+                specialists={specialists}
+                mcpServers={mcpServers}
+                mcpTools={mcpTools}
+                pythonEnvs={pythonEnvs}
+                pythonHandlers={pythonHandlers}
+                llmModels={llmModels}
+                memoryServices={memoryServices}
+                n8nWorkflows={n8nWorkflows}
+                mcpGatewayReady={mcpGateway?.ready === true}
+                onOpenMcpGateway={() =>
+                  onOpenCapability?.(mcpGateway?.catalogId ?? MCP_GATEWAY_CATALOG_ID, "install")
+                }
+                onChange={onChangeOp}
+                onSelectNode={setSelectedNodeId}
+              />
+            </div>
           ) : (
-            <RunPanel
-              op={op}
-              receipt={receipt}
-              selectedNodeId={selectedNodeId}
-              tryInputs={tryInputs}
-              onChangeTryInput={(i, v) =>
-                setTryInputs((prev) => prev.map((x, j) => (j === i ? v : x)))
-              }
-              running={running}
-              runError={runError}
-              onRun={() => void onTryRun()}
-              canRun={!!activeConnectionId && persisted}
-            />
+            <div className="min-h-0 flex-1">
+              <RunPanel
+                op={op}
+                receipt={receipt}
+                selectedNodeId={selectedNodeId}
+                tryInputs={tryInputs}
+                onChangeTryInput={(i, v) =>
+                  setTryInputs((prev) => prev.map((x, j) => (j === i ? v : x)))
+                }
+                running={running}
+                runError={runError}
+                onRun={() => void onTryRun()}
+                canRun={!!activeConnectionId && persisted}
+              />
+            </div>
           )}
         </aside>
       </div>
@@ -795,6 +818,115 @@ export function OperatorFlowWindow({
 }
 
 // ── Receipt metrics strip (header) ──────────────────────────────────
+
+function OperatorTrustPanel({
+  op,
+  receipts,
+  persisted,
+}: {
+  op: RvbbitOperator
+  receipts: OperatorReceipt[]
+  persisted: boolean
+}) {
+  const recent = receipts.slice(0, 40)
+  const calls = recent.length
+  const errors = recent.filter((r) => r.error).length
+  const ok = Math.max(0, calls - errors)
+  const successPct = calls > 0 ? Math.round((ok / calls) * 100) : null
+  const avgLatency = calls > 0 ? recent.reduce((n, r) => n + r.latency_ms, 0) / calls : 0
+  const totalCost = recent.reduce((n, r) => n + (r.cost_usd ?? 0), 0)
+  const stepKinds = op.steps?.map((s) => s.kind) ?? ["llm"]
+  const kindChips = Array.from(new Set(stepKinds))
+  const preWards = op.wards?.pre?.length ?? 0
+  const postWards = op.wards?.post?.length ?? 0
+  const guardCount = preWards + postWards
+  const tests = Array.isArray(op.tests) ? op.tests.length : 0
+  const takes =
+    op.takes?.nodes?.length ??
+    op.takes?.factor ??
+    0
+  const cachePolicy = op.cache_policy || (hasAgentStep(op.steps) ? "never" : "memoize")
+  const status = !persisted ? "draft" : calls === 0 ? "unobserved" : errors > 0 ? "errors" : "observed"
+  const statusClass =
+    status === "observed"
+      ? "bg-success/15 text-success ring-success/30"
+      : status === "errors"
+        ? "bg-danger/15 text-danger ring-danger/35"
+        : "bg-foreground/[0.06] text-chrome-text/65 ring-chrome-border"
+
+  return (
+    <section className="shrink-0 border-b border-chrome-border bg-chrome-bg/55 px-3 py-2 text-[11px] text-chrome-text">
+      <header className="mb-2 flex items-center gap-1.5">
+        <Shield className="h-3.5 w-3.5 text-rvbbit-accent" />
+        <span className="font-medium text-foreground">Trust</span>
+        <span className={cn("ml-auto rounded-full px-1.5 py-px text-[9px] uppercase tracking-wider ring-1", statusClass)}>
+          {status}
+        </span>
+      </header>
+
+      <div className="grid grid-cols-3 gap-1.5">
+        <TrustMetric label="shape" value={op.shape} />
+        <TrustMetric label="returns" value={op.return_type} />
+        <TrustMetric label="cache" value={cachePolicy} tone={cachePolicy === "never" ? "warning" : undefined} />
+      </div>
+
+      <div className="mt-2 flex min-w-0 flex-wrap gap-1">
+        {kindChips.map((kind) => (
+          <span key={kind} className="rounded bg-foreground/[0.06] px-1.5 py-0.5 font-mono text-[9.5px] text-chrome-text/75">
+            {kind}
+          </span>
+        ))}
+      </div>
+
+      <div className="mt-2 grid grid-cols-4 gap-1.5 border-t border-chrome-border/60 pt-2">
+        <TrustMetric label="guards" value={String(guardCount)} tone={guardCount > 0 ? "ok" : "muted"} />
+        <TrustMetric label="retry" value={op.retry ? String(op.retry.max_attempts ?? "on") : "off"} tone={op.retry ? "ok" : "muted"} />
+        <TrustMetric label="takes" value={takes ? String(takes) : "off"} tone={takes ? "ok" : "muted"} />
+        <TrustMetric label="tests" value={String(tests)} tone={tests > 0 ? "ok" : "muted"} />
+      </div>
+
+      <div className="mt-2 grid grid-cols-4 gap-1.5 border-t border-chrome-border/60 pt-2">
+        <TrustMetric label="runs" value={String(calls)} tone={calls > 0 ? undefined : "muted"} />
+        <TrustMetric label="ok" value={successPct == null ? "—" : `${successPct}%`} tone={errors > 0 ? "danger" : calls > 0 ? "ok" : "muted"} />
+        <TrustMetric label="avg" value={calls > 0 ? fmtMsShort(avgLatency) : "—"} tone={calls > 0 ? undefined : "muted"} />
+        <TrustMetric label="cost" value={totalCost > 0 ? `$${totalCost.toFixed(4)}` : "$0"} tone="muted" />
+      </div>
+
+      <div className="mt-1.5 truncate font-mono text-[10px] text-chrome-text/50">
+        {recent[0] ? `last ${fmtTime(recent[0].invocation_at)}` : "last never"}
+      </div>
+    </section>
+  )
+}
+
+function TrustMetric({
+  label,
+  value,
+  tone,
+}: {
+  label: string
+  value: string
+  tone?: "ok" | "warning" | "danger" | "muted"
+}) {
+  const toneClass =
+    tone === "ok"
+      ? "text-success"
+      : tone === "warning"
+        ? "text-warning"
+        : tone === "danger"
+          ? "text-danger"
+          : tone === "muted"
+            ? "text-chrome-text/50"
+            : "text-foreground"
+  return (
+    <div className="min-w-0">
+      <div className={cn("truncate font-mono text-[11px] tabular-nums", toneClass)} title={value}>
+        {value}
+      </div>
+      <div className="truncate text-[9px] uppercase tracking-wider text-chrome-text/45">{label}</div>
+    </div>
+  )
+}
 
 function ReceiptMetricsStrip({ receipt }: { receipt: OperatorReceipt }) {
   const errs = (receipt.sub_calls ?? []).filter((c) => c.error).length

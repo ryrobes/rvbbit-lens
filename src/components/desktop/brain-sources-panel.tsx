@@ -1,16 +1,18 @@
 import { useCallback, useEffect, useState } from "react"
-import { Database, RefreshCw, Plus, Check, Clock, Zap, Users, AlertTriangle, GitBranch, Trash2, X, Plug, FileCode2, Layers } from "@/lib/icons"
+import { Brain, Database, RefreshCw, Plus, Check, Clock, Zap, Users, AlertTriangle, GitBranch, Trash2, X, Plug, FileCode2, Layers } from "@/lib/icons"
 import {
   fetchSources,
   fetchSyncRuns,
   fetchPendingGrants,
   fetchProviders,
+  fetchSystemLearningBrainStatus,
   defineProvider,
   deleteProvider,
   addQuerySource,
   configureSource,
   setSourceEnabled,
   syncSourceNow,
+  syncSystemLearningBrain,
   enrichSource,
   deleteSource,
   approvePendingGrant,
@@ -25,6 +27,7 @@ import {
   type BrainGraphRow,
   type BrainRelation,
   type NerStatus,
+  type SystemLearningBrainStatus,
 } from "@/lib/rvbbit/brain"
 
 const GLINER_CATALOG_ID = "extract/gliner-medium-v2.1"
@@ -42,6 +45,10 @@ function ago(ms: number | null): string {
   return `${Math.round(s / 86400)}d ago`
 }
 
+function fmtCount(n: number): string {
+  return Number.isFinite(n) ? new Intl.NumberFormat("en", { notation: "compact" }).format(n) : "0"
+}
+
 // ── Sources admin: configure remote stores, sync, view runs, approve grants ────
 export function SourcesPanel({
   conn,
@@ -55,9 +62,11 @@ export function SourcesPanel({
   const [grants, setGrants] = useState<BrainPendingGrant[]>([])
   const [providers, setProviders] = useState<BrainProvider[]>([])
   const [ner, setNer] = useState<NerStatus | null>(null)
+  const [learning, setLearning] = useState<SystemLearningBrainStatus | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [toast, setToast] = useState<{ ok: boolean; msg: string } | null>(null)
   const [busy, setBusy] = useState<number | null>(null)
+  const [learningBusy, setLearningBusy] = useState(false)
   const [enrichBusy, setEnrichBusy] = useState<number | null>(null)
   const [confirmDel, setConfirmDel] = useState<{ sourceId: number; purge: boolean } | null>(null)
 
@@ -69,19 +78,28 @@ export function SourcesPanel({
 
   const reload = useCallback(async () => {
     if (!conn) return
-    const [s, r, g, p, n] = await Promise.all([
-      fetchSources(conn), fetchSyncRuns(conn), fetchPendingGrants(conn), fetchProviders(conn), fetchNerStatus(conn),
+    const [s, r, g, p, n, l] = await Promise.all([
+      fetchSources(conn), fetchSyncRuns(conn), fetchPendingGrants(conn), fetchProviders(conn), fetchNerStatus(conn), fetchSystemLearningBrainStatus(conn),
     ])
-    setError(s.error ?? r.error ?? g.error ?? p.error ?? null)
+    setError(s.error ?? r.error ?? g.error ?? p.error ?? l.error ?? null)
     setSources(s.sources)
     setRuns(r.runs)
     setGrants(g.grants)
     setProviders(p.providers)
     setNer(n)
+    setLearning(l)
   }, [conn])
 
   useEffect(() => {
-    void reload()
+    let cancelled = false
+    const run = async () => {
+      if (cancelled) return
+      await reload()
+    }
+    void run()
+    return () => {
+      cancelled = true
+    }
   }, [reload])
 
   const addSource = useCallback(async () => {
@@ -154,6 +172,23 @@ export function SourcesPanel({
     [conn, reload],
   )
 
+  const syncLearningNow = useCallback(async () => {
+    if (!conn) return
+    setLearningBusy(true)
+    setToast(null)
+    const r = await syncSystemLearningBrain(conn)
+    setLearningBusy(false)
+    if (!r.ok) {
+      setToast({ ok: false, msg: r.error ?? "system learning sync failed" })
+    } else {
+      setToast({
+        ok: true,
+        msg: `system learning: +${fmtCount(r.added)} ~${fmtCount(r.changed)} skip ${fmtCount(r.skipped)}`,
+      })
+    }
+    void reload()
+  }, [conn, reload])
+
   return (
     <div className="flex-1 min-h-0 overflow-auto p-3 flex flex-col gap-3 text-sm" style={{ color: "var(--chrome-text)" }}>
       {error && <div className="text-xs" style={{ color: "var(--danger)" }}>{error}</div>}
@@ -169,6 +204,8 @@ export function SourcesPanel({
           {toast.msg}
         </div>
       )}
+
+      <SystemLearningStrip status={learning} busy={learningBusy} onSync={() => void syncLearningNow()} />
 
       {/* enrichment / NER capability status */}
       {ner && (
@@ -335,6 +372,116 @@ export function SourcesPanel({
       </div>
     </div>
   )
+}
+
+function SystemLearningStrip({
+  status,
+  busy,
+  onSync,
+}: {
+  status: SystemLearningBrainStatus | null
+  busy: boolean
+  onSync: () => void
+}) {
+  const installed = !!status?.installed && !!status.sourceId
+  const ready = installed && status.enabled && status.docs > 0
+  const groups = status?.groups ?? []
+  const examples = status?.examples ?? []
+  const groupLine = groups.length
+    ? groups
+        .slice(0, 5)
+        .map((g) => `${g.objectType.replace(/_/g, " ")} ${fmtCount(g.items)}`)
+        .join(" · ")
+    : "no learned artifacts indexed yet"
+
+  return (
+    <div className="rounded p-2 flex flex-col gap-2 text-[11px]" style={{ background: SOFTER, border: `1px solid ${LINE}` }}>
+      <div className="flex items-start gap-2">
+        <Brain size={14} className="mt-0.5 opacity-80" />
+        <div className="min-w-0 flex-1">
+          <div className="flex min-w-0 items-center gap-1.5">
+            <span className="font-medium">RVBBIT System Learning</span>
+            <span
+              className="px-1.5 py-0.5 rounded font-mono text-[9px] uppercase"
+              style={{
+                background: ready
+                  ? "color-mix(in oklch, var(--success) 16%, transparent)"
+                  : installed
+                    ? "color-mix(in oklch, var(--rvbbit-accent, var(--chrome-text)) 16%, transparent)"
+                    : "color-mix(in oklch, var(--warning) 16%, transparent)",
+                color: ready ? "var(--success)" : installed ? "var(--rvbbit-accent, var(--chrome-text))" : "var(--warning)",
+              }}
+              title={status?.error ?? undefined}
+            >
+              {!status ? "checking" : ready ? "agent ready" : installed ? "needs sync" : "missing"}
+            </span>
+            <span className="ml-auto opacity-50 tabular-nums">
+              {status ? `${fmtCount(status.indexedItems)} items · ${fmtCount(status.docs)} docs` : "—"}
+            </span>
+          </div>
+          <div className="mt-0.5 truncate opacity-55" title={groupLine}>
+            {groupLine}
+          </div>
+        </div>
+        <button
+          onClick={onSync}
+          disabled={!installed || busy}
+          className="px-1.5 py-0.5 rounded flex items-center gap-1 disabled:opacity-40"
+          style={{ background: "color-mix(in oklch, var(--rvbbit-accent, var(--chrome-text)) 16%, transparent)" }}
+          title={installed ? "Sync learned workload, routing, acceleration, and operator artifacts into Brain" : "Run rvbbit.migrate() to install system learning"}
+        >
+          <RefreshCw size={11} className={busy ? "animate-pulse" : ""} />
+          {busy ? "syncing..." : "Sync"}
+        </button>
+      </div>
+      <div className="flex flex-wrap gap-1.5 pl-6">
+        {groups.length === 0 ? (
+          <span className="opacity-45">Agent search will include this source after the first sync.</span>
+        ) : (
+          groups.slice(0, 8).map((g) => (
+            <span key={g.objectType} className="rounded px-1.5 py-0.5 tabular-nums" style={{ background: SOFT }}>
+              {g.objectType.replace(/_/g, " ")} <span className="opacity-55">{fmtCount(g.items)}</span>
+            </span>
+          ))
+        )}
+      </div>
+      {examples.length > 0 ? (
+        <div className="grid grid-cols-[repeat(auto-fit,minmax(13rem,1fr))] gap-1.5 pl-6">
+          {examples.slice(0, 4).map((example) => {
+            const handle = systemLearningExampleHandle(example)
+            return (
+              <div
+                key={example.uri}
+                className="min-w-0 rounded px-2 py-1"
+                style={{ background: SOFT, border: `1px solid ${LINE}` }}
+                title={`${example.title}${handle ? ` · ${handle}` : ""}`}
+              >
+                <div className="flex min-w-0 items-center gap-1.5">
+                  <span className="shrink-0 rounded px-1 py-0.5 font-mono text-[8px] uppercase opacity-65" style={{ background: SOFTER }}>
+                    {example.objectType.replace(/_/g, " ")}
+                  </span>
+                  <span className="min-w-0 flex-1 truncate text-[10px] text-foreground/85">
+                    {example.title}
+                  </span>
+                </div>
+                {handle ? <div className="mt-0.5 truncate font-mono text-[9px] opacity-45">{handle}</div> : null}
+              </div>
+            )
+          })}
+        </div>
+      ) : null}
+    </div>
+  )
+}
+
+function systemLearningExampleHandle(example: SystemLearningBrainStatus["examples"][number]): string {
+  if (example.tableName && example.columnName) return `${example.tableName}.${example.columnName}`
+  if (example.tableName) return example.tableName
+  if (example.operatorName) return `rvbbit.${example.operatorName}`
+  if (example.layout) return example.layout
+  if (example.shapeKey) return example.shapeKey
+  if (example.engine) return example.engine
+  return example.status ?? ""
 }
 
 // ── Providers: MCP/SQL-backed document types + instantiate them as query sources ──
@@ -590,7 +737,15 @@ export function DocGraph({
   }, [conn, email, docId])
 
   useEffect(() => {
-    void reload()
+    let cancelled = false
+    const run = async () => {
+      if (cancelled) return
+      await reload()
+    }
+    void run()
+    return () => {
+      cancelled = true
+    }
   }, [reload])
 
   const entities = rows.filter((r) => r.relType === "entity")

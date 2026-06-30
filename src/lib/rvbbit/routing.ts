@@ -356,12 +356,26 @@ interface QueryErr {
   error: string
 }
 
-async function runQuery(connectionId: string, sql: string): Promise<QueryOk | QueryErr> {
+interface QueryOpts {
+  rowLimit?: number
+  readOnly?: boolean
+  statementTimeout?: number
+  poolLane?: "interactive" | "meta"
+}
+
+async function runQuery(connectionId: string, sql: string, opts: QueryOpts = {}): Promise<QueryOk | QueryErr> {
   try {
     const res = await fetch("/api/db/query", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ connectionId, sql, rowLimit: 5000 }),
+      body: JSON.stringify({
+        connectionId,
+        sql,
+        rowLimit: opts.rowLimit ?? 5000,
+        ...(opts.readOnly ? { readOnly: true } : {}),
+        ...(opts.statementTimeout != null ? { statementTimeout: opts.statementTimeout } : {}),
+        ...(opts.poolLane ? { poolLane: opts.poolLane } : {}),
+      }),
     })
     return (await res.json()) as QueryOk | QueryErr
   } catch (e) {

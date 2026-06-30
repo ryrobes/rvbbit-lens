@@ -227,6 +227,7 @@ export interface RvbbitOperator {
   system_prompt: string
   user_prompt: string
   parser: string
+  cache_policy: string
   max_tokens: number
   temperature: number | null
   steps: OpStep[] | null
@@ -252,6 +253,7 @@ export function emptyOperator(): RvbbitOperator {
     system_prompt: "",
     user_prompt: "{{ text }}",
     parser: "strip",
+    cache_policy: "memoize",
     max_tokens: 256,
     temperature: null,
     // Start as a real one-step pipeline so the canvas opens with an actual,
@@ -329,7 +331,7 @@ async function runQuery(connectionId: string, sql: string): Promise<QueryOk | Qu
 
 const OPERATOR_COLUMNS =
   "name, shape, arg_names, arg_types, return_type, model, system_prompt, " +
-  "user_prompt, parser, max_tokens, temperature, steps, retry, wards, takes, " +
+  "user_prompt, parser, cache_policy, max_tokens, temperature, steps, retry, wards, takes, " +
   "description, tests, infix_symbol, created_at, updated_at"
 
 function coerceOperator(row: Record<string, unknown>): RvbbitOperator {
@@ -343,6 +345,7 @@ function coerceOperator(row: Record<string, unknown>): RvbbitOperator {
     system_prompt: String(row.system_prompt ?? ""),
     user_prompt: String(row.user_prompt ?? ""),
     parser: String(row.parser ?? "strip"),
+    cache_policy: String(row.cache_policy ?? "memoize"),
     max_tokens: Number(row.max_tokens ?? 256),
     temperature: row.temperature == null ? null : Number(row.temperature),
     steps: (row.steps as OpStep[] | null) ?? null,
