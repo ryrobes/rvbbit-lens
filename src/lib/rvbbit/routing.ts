@@ -1076,6 +1076,37 @@ export interface WorkloadLayoutBuildRun {
   error?: string
 }
 
+export interface AccelerationCandidate {
+  tableName: string
+  schema: string
+  name: string
+  rowEstimate: number
+  sizeBytes: number
+  seqScans: number
+  seqRows: number
+  idxScans: number
+  writes: number
+  inserts: number
+  updates: number
+  deletes: number
+  modSinceAnalyze: number
+  heapBlocksRead: number
+  heapBlocksHit: number
+  slowQueries: number
+  queryCalls: number
+  totalMs: number
+  maxMeanMs: number | null
+  querySamples: string[]
+  mutationRatio: number
+  readWriteRatio: number
+  score: number
+  recommendation: "strong" | "watch" | "low"
+  writeProfile: string
+  reason: string
+  registered: boolean
+  lastMaintenanceAt: number | null
+}
+
 export async function fetchWorkloadLayoutCatalog(
   connectionId: string,
 ): Promise<{ catalog: WorkloadLayoutCatalog | null; error?: string }> {
@@ -1103,6 +1134,174 @@ export async function fetchWorkloadLayoutCatalog(
       buildHelperPresent: bool(r.build_helper_present),
     },
   }
+}
+
+function accelerationCandidateSql(includePgStatStatements: boolean): string {
+  const matched = includePgStatStatements
+    ? "pgss AS ( " +
+      "SELECT queryid::text AS query_id, calls::bigint AS calls, " +
+      "total_exec_time::double precision AS total_ms, mean_exec_time::double precision AS mean_ms, " +
+      "rows::bigint AS rows_returned, query " +
+      "FROM pg_stat_statements " +
+      "WHERE dbid = (SELECT oid FROM pg_database WHERE datname = current_database()) " +
+      "AND query IS NOT NULL " +
+      "AND query !~* '^\\s*(create|alter|drop|vacuum|analyze|explain)' " +
+      "ORDER BY total_exec_time DESC LIMIT 250 " +
+      "), matched AS ( " +
+      "SELECT h.oid, " +
+      "count(*) FILTER (WHERE p.mean_ms >= 50 OR p.total_ms >= 1000) AS slow_queries, " +
+      "coalesce(sum(p.calls), 0)::bigint AS query_calls, " +
+      "coalesce(sum(p.total_ms), 0)::double precision AS total_ms, " +
+      "max(p.mean_ms)::double precision AS max_mean_ms, " +
+      "(array_agg(left(regexp_replace(p.query, '\\s+', ' ', 'g'), 180) ORDER BY p.total_ms DESC))[1:3] AS query_samples " +
+      "FROM heap_tables h " +
+      "JOIN pgss p ON position(lower(h.name) in lower(p.query)) > 0 " +
+      "  OR position(lower(h.table_name) in lower(p.query)) > 0 " +
+      "GROUP BY h.oid " +
+      ") "
+    : "matched AS ( " +
+      "SELECT oid, 0::bigint AS slow_queries, 0::bigint AS query_calls, " +
+      "0::double precision AS total_ms, NULL::double precision AS max_mean_ms, " +
+      "ARRAY[]::text[] AS query_samples FROM heap_tables " +
+      ") "
+
+  return (
+    "WITH heap_tables AS ( " +
+    "SELECT c.oid::int8 AS oid, c.oid::regclass::text AS table_name, n.nspname AS schema, c.relname AS name, " +
+    "GREATEST(c.reltuples, 0)::bigint AS row_estimate, pg_total_relation_size(c.oid)::bigint AS size_bytes, " +
+    "coalesce(s.seq_scan, 0)::bigint AS seq_scans, coalesce(s.seq_tup_read, 0)::bigint AS seq_rows, " +
+    "coalesce(s.idx_scan, 0)::bigint AS idx_scans, " +
+    "(coalesce(s.n_tup_ins, 0) + coalesce(s.n_tup_upd, 0) + coalesce(s.n_tup_del, 0))::bigint AS writes, " +
+    "coalesce(s.n_tup_ins, 0)::bigint AS inserts, coalesce(s.n_tup_upd, 0)::bigint AS updates, " +
+    "coalesce(s.n_tup_del, 0)::bigint AS deletes, coalesce(s.n_mod_since_analyze, 0)::bigint AS mod_since_analyze, " +
+    "NULLIF(GREATEST(coalesce(s.last_vacuum, 'epoch'::timestamptz), coalesce(s.last_autovacuum, 'epoch'::timestamptz), " +
+    "coalesce(s.last_analyze, 'epoch'::timestamptz), coalesce(s.last_autoanalyze, 'epoch'::timestamptz)), 'epoch'::timestamptz) AS last_maintenance_at, " +
+    "coalesce(io.heap_blks_read, 0)::bigint AS heap_blks_read, coalesce(io.heap_blks_hit, 0)::bigint AS heap_blks_hit, " +
+    "t.table_oid IS NOT NULL AS registered, coalesce(t.acceleration_enabled, false) AS acceleration_enabled " +
+    "FROM pg_class c " +
+    "JOIN pg_namespace n ON n.oid = c.relnamespace " +
+    "LEFT JOIN rvbbit.tables t ON t.table_oid = c.oid " +
+    "LEFT JOIN pg_stat_user_tables s ON s.relid = c.oid " +
+    "LEFT JOIN pg_statio_user_tables io ON io.relid = c.oid " +
+    "WHERE c.relkind IN ('r','p','m') " +
+    "AND n.nspname NOT IN ('pg_catalog','information_schema','rvbbit') " +
+    "AND n.nspname NOT LIKE 'pg_toast%' AND n.nspname NOT LIKE 'pg_temp_%' " +
+    "AND NOT coalesce(t.acceleration_enabled, false) " +
+    "), " +
+    matched +
+    ", scored AS ( " +
+    "SELECT h.*, coalesce(m.slow_queries, 0)::bigint AS slow_queries, coalesce(m.query_calls, 0)::bigint AS query_calls, " +
+    "coalesce(m.total_ms, 0)::double precision AS total_ms, m.max_mean_ms, coalesce(m.query_samples, ARRAY[]::text[]) AS query_samples, " +
+    "(h.writes::double precision / GREATEST(h.row_estimate, 1)) AS mutation_ratio, " +
+    "(h.seq_rows::double precision / GREATEST(h.writes, 1)) AS read_write_ratio, " +
+    "LEAST(95.0, GREATEST(0.0, " +
+    "LEAST(35.0, ln(1 + GREATEST(h.seq_rows, 0)) * 2.2) + " +
+    "LEAST(25.0, GREATEST(h.seq_scans, 0) * 2.0) + " +
+    "LEAST(30.0, coalesce(m.total_ms, 0) / 1000.0) + " +
+    "LEAST(15.0, coalesce(m.slow_queries, 0) * 5.0) + " +
+    "CASE WHEN h.row_estimate >= 100000 THEN 8.0 WHEN h.row_estimate >= 10000 THEN 4.0 ELSE 0.0 END - " +
+    "LEAST(45.0, (h.writes::double precision / GREATEST(h.row_estimate, 1)) * 100.0) - " +
+    "CASE WHEN h.mod_since_analyze::double precision > GREATEST(h.row_estimate, 1) * 0.25 THEN 12.0 ELSE 0.0 END " +
+    "))::double precision AS score " +
+    "FROM heap_tables h LEFT JOIN matched m ON m.oid = h.oid " +
+    ") " +
+    "SELECT table_name, schema, name, row_estimate, size_bytes, seq_scans, seq_rows, idx_scans, writes, " +
+    "inserts, updates, deletes, mod_since_analyze, heap_blks_read, heap_blks_hit, slow_queries, query_calls, " +
+    "total_ms, max_mean_ms, query_samples, mutation_ratio, read_write_ratio, score, registered, last_maintenance_at, " +
+    "CASE WHEN score >= 70 THEN 'strong' WHEN score >= 35 THEN 'watch' ELSE 'low' END AS recommendation, " +
+    "CASE WHEN writes = 0 AND mod_since_analyze = 0 THEN 'stable' " +
+    "WHEN mutation_ratio < 0.02 AND mod_since_analyze::double precision < GREATEST(row_estimate, 1) * 0.05 THEN 'low churn' " +
+    "WHEN mutation_ratio < 0.15 THEN 'moderate churn' ELSE 'high churn' END AS write_profile, " +
+    "concat_ws(' · ', " +
+    "CASE WHEN slow_queries > 0 THEN slow_queries || ' slow query sample' || CASE WHEN slow_queries = 1 THEN '' ELSE 's' END END, " +
+    "CASE WHEN seq_scans > 0 THEN seq_scans || ' sequential scan' || CASE WHEN seq_scans = 1 THEN '' ELSE 's' END END, " +
+    "CASE WHEN seq_rows > 0 THEN seq_rows || ' rows read by seq scans' END, " +
+    "CASE WHEN writes = 0 THEN 'no observed writes' WHEN mutation_ratio < 0.02 THEN 'low write ratio' ELSE 'write-heavy' END " +
+    ") AS reason " +
+    "FROM scored " +
+    "WHERE score >= 5 OR slow_queries > 0 OR seq_scans > 0 " +
+    "ORDER BY score DESC, total_ms DESC, seq_rows DESC LIMIT 80"
+  )
+}
+
+export async function fetchAccelerationCandidates(
+  connectionId: string,
+): Promise<{ rows: AccelerationCandidate[]; error?: string; pgStatStatements: boolean }> {
+  const catalog = await runQuery(
+    connectionId,
+    "SELECT to_regclass('rvbbit.tables') IS NOT NULL AS rvbbit_present, " +
+      "to_regclass('pg_stat_statements') IS NOT NULL AS pgss_present",
+  )
+  if (!catalog.ok) return { rows: [], error: catalog.error, pgStatStatements: false }
+  if (!bool(catalog.rows[0]?.rvbbit_present)) {
+    return { rows: [], error: "rvbbit registry is not installed on this connection", pgStatStatements: false }
+  }
+
+  const wantsPgss = bool(catalog.rows[0]?.pgss_present)
+  let res = await runQuery(connectionId, accelerationCandidateSql(wantsPgss))
+  let usedPgss = wantsPgss
+  if (!res.ok && wantsPgss) {
+    res = await runQuery(connectionId, accelerationCandidateSql(false))
+    usedPgss = false
+  }
+  if (!res.ok) return { rows: [], error: res.error, pgStatStatements: usedPgss }
+
+  return {
+    pgStatStatements: usedPgss,
+    rows: res.rows.map((r) => ({
+      tableName: String(r.table_name ?? ""),
+      schema: String(r.schema ?? ""),
+      name: String(r.name ?? ""),
+      rowEstimate: num(r.row_estimate),
+      sizeBytes: num(r.size_bytes),
+      seqScans: num(r.seq_scans),
+      seqRows: num(r.seq_rows),
+      idxScans: num(r.idx_scans),
+      writes: num(r.writes),
+      inserts: num(r.inserts),
+      updates: num(r.updates),
+      deletes: num(r.deletes),
+      modSinceAnalyze: num(r.mod_since_analyze),
+      heapBlocksRead: num(r.heap_blks_read),
+      heapBlocksHit: num(r.heap_blks_hit),
+      slowQueries: num(r.slow_queries),
+      queryCalls: num(r.query_calls),
+      totalMs: num(r.total_ms),
+      maxMeanMs: numOrNull(r.max_mean_ms),
+      querySamples: pgArray(r.query_samples),
+      mutationRatio: num(r.mutation_ratio),
+      readWriteRatio: num(r.read_write_ratio),
+      score: num(r.score),
+      recommendation: String(r.recommendation ?? "low") as AccelerationCandidate["recommendation"],
+      writeProfile: String(r.write_profile ?? ""),
+      reason: String(r.reason ?? ""),
+      registered: bool(r.registered),
+      lastMaintenanceAt: r.last_maintenance_at ? epoch(r.last_maintenance_at) : null,
+    })),
+  }
+}
+
+export async function enableAccelerationCandidate(
+  connectionId: string,
+  tableName: string,
+  build: boolean,
+): Promise<{ ok: boolean; message: string; error?: string }> {
+  const sql = build
+    ? `WITH enabled AS (SELECT rvbbit.enable_table(${qIdent(tableName)}) AS enabled) ` +
+      `SELECT enabled.enabled AS enabled, rvbbit.refresh_acceleration(${qIdent(tableName)}, true) AS refresh FROM enabled`
+    : `SELECT rvbbit.enable_table(${qIdent(tableName)}) AS enabled`
+  const res = await runQuery(connectionId, sql)
+  if (!res.ok) return { ok: false, message: "failed", error: res.error }
+  const row = res.rows[0] ?? {}
+  const enabled = (row.enabled as Record<string, unknown> | null) ?? {}
+  const refresh = (row.refresh as Record<string, unknown> | null) ?? null
+  const enableStatus = String(enabled.status ?? "enabled")
+  const refreshStatus = refresh ? String(refresh.status ?? "ok") : null
+  const rowsWritten = refresh ? numOrNull(refresh.rows_written ?? refresh.visible_rows_estimate) : null
+  const message = build
+    ? `${enableStatus} · refresh ${refreshStatus}${rowsWritten != null ? ` · ${compactCount(rowsWritten)} rows` : ""}`
+    : enableStatus
+  return { ok: true, message }
 }
 
 export async function fetchWorkloadLayoutTables(

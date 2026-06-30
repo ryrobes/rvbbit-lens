@@ -1,6 +1,6 @@
 {
   "name": "rvbbit-lens",
-  "version": "2.7.6",
+  "version": "2.7.8",
   "private": true,
   "description": "A focused, local-first SQL desktop client for Postgres — with optional rvbbit semantic SQL layer.",
   "scripts": {
