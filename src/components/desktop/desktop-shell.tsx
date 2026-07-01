@@ -36,6 +36,7 @@ import {
   Table2,
   Trash2,
   TreeStructure,
+  Upload,
   Wand2,
   ZoomIn,
   ZoomOut,
@@ -52,6 +53,7 @@ import { DesktopParamsSurface } from "./desktop-params-surface"
 import { DesktopWindow } from "./desktop-window"
 import { FinderWindow } from "./finder-window"
 import { DataGridWindow } from "./data-grid-window"
+import { DataMoverWindow } from "./data-mover-window"
 import { RowInspectorWindow } from "./row-inspector-window"
 import { CsvImportWindow } from "./csv-import-window"
 import { SemanticOpPalette } from "./semantic-op-palette"
@@ -148,6 +150,7 @@ import type {
   CsvImportPayload,
   ArtifactPayload,
   DataPayload,
+  DataMoverPayload,
   DashboardsPayload,
   DataSearchPayload,
   DriftPayload,
@@ -286,6 +289,7 @@ import { invalidateSemanticOps, loadSemanticOps } from "@/lib/desktop/semantic-o
 import { detectDagsterStorage } from "@/lib/dagster/metadata"
 import type { DashboardRow } from "@/lib/rvbbit/dashboards"
 import { detectHindsight } from "@/lib/rvbbit/hindsight"
+import { detectDataMover } from "@/lib/rvbbit/data-mover"
 import { fetchKgEvidenceBySource, fetchPrimaryKeyColumn } from "@/lib/rvbbit/kg"
 import { broadcastTargetWindowIds, buildDesktopRuntimeGraph, paramKey, resolveParamTableTarget, sameParamValue, sourceSqlForPayload, uniqueBlockName } from "@/lib/desktop/reactive-sql"
 import {
@@ -454,6 +458,7 @@ export function DesktopShell() {
   // Read-only Hindsight memory observer: visible only when the active database
   // has the Hindsight schema created by the slim memory capability.
   const [hindsightDetected, setHindsightDetected] = useState(false)
+  const [dataMoverDetected, setDataMoverDetected] = useState(false)
   // Multi-arg semantic op awaiting its literal args (the drop-site bind step).
   const [pendingBind, setPendingBind] = useState<{
     payload: DesktopColumnDragPayload
@@ -994,6 +999,22 @@ export function DesktopShell() {
       if (!cancelled) setHindsightDetected(availability.ready)
     }).catch(() => {
       if (!cancelled) setHindsightDetected(false)
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [activeConnectionId, hasRvbbit])
+
+  useEffect(() => {
+    if (!activeConnectionId || !hasRvbbit) {
+      queueMicrotask(() => setDataMoverDetected(false))
+      return
+    }
+    let cancelled = false
+    detectDataMover(activeConnectionId).then((availability) => {
+      if (!cancelled) setDataMoverDetected(availability.ready)
+    }).catch(() => {
+      if (!cancelled) setDataMoverDetected(false)
     })
     return () => {
       cancelled = true
@@ -2281,6 +2302,18 @@ export function DesktopShell() {
       title: "Temporal Mirror",
       x: 128, y: 68, width: 920, height: 640,
       payload: { kind: "sync-mirror" } satisfies SyncMirrorPayload,
+    })
+  }, [focus, openWindow, liveWindows])
+
+  const openDataMover = useCallback(() => {
+    const existing = liveWindows().find((w) => w.kind === "data-mover")
+    if (existing) return focus(existing.id)
+    openWindow({
+      id: randomUUID(),
+      kind: "data-mover",
+      title: "Data Mover",
+      x: 126, y: 70, width: 1120, height: 720,
+      payload: { kind: "data-mover" } satisfies DataMoverPayload,
     })
   }, [focus, openWindow, liveWindows])
 
@@ -4044,6 +4077,7 @@ export function DesktopShell() {
     { id: "cache", label: "Cache", icon: Database, color: "var(--brand-cache)", description: "Compiler & operator result caches", activate: openCache, folder: "system", rvbbit: true },
     { id: "receipts", label: "Receipts", icon: FileText, color: "var(--brand-rvbbit-cache)", sublabel: rvbbitVersion ?? undefined, description: "Per-call LLM receipts & audit", activate: openRvbbitCache, folder: "system", rvbbit: true },
     { id: "costs", label: "Costs", icon: DollarSign, color: "var(--brand-costs)", description: "LLM/sidecar spend breakdown", activate: () => openCosts(), folder: "system", rvbbit: true },
+    { id: "data-mover", label: "Data Mover", icon: Upload, color: "var(--rvbbit-accent)", sublabel: "detected", description: "ADBC import/export", activate: openDataMover, folder: "system", rvbbit: true, visible: dataMoverDetected },
     { id: "sync-mirror", label: "Temporal Mirror", icon: Database, color: "var(--brand-cache)", description: "Sync Postgres sources into time-travel tables", activate: openSyncMirror, folder: "system", rvbbit: true },
     // Semantic
     { id: "operators", label: "Operators", icon: FlowArrow, color: "var(--brand-operators)", description: "Semantic SQL operators", activate: openOperators, folder: "semantic", rvbbit: true },
@@ -4081,7 +4115,7 @@ export function DesktopShell() {
     viewAppCount, schema, rvbbitVersion,
     openFinder, openSqlScratch, openViewApps, openConnections, openDataSearch, openSystemLearning, openMcpIncoming,
     openSystemObjects, openExtensions, openPgMonitor, openPostgresAdmin, openCache, openRvbbitCache,
-    openCosts, openAgentMessages, openSyncMirror, openOperators, openModelSettings, openSpecialists, openRouting,
+    openCosts, openAgentMessages, openDataMover, dataMoverDetected, openSyncMirror, openOperators, openModelSettings, openSpecialists, openRouting,
     openMcpServers, openCapabilities, openHfDeploy, openWarren, openModelStudio,
     openDuck, openDagster, dagsterDetected, openMetricCatalog, openMetricCreator, openMetricInspector, openVizBlocks, openMetricBoard, openDashboards, openAlerts, openBrain,
     openCubeCatalog, openCubeCreator, openCubeInspector, openCubeProposals,
@@ -5504,6 +5538,14 @@ function renderWindowContent(
       )
     case "dagster":
       return <DagsterWindow activeConnectionId={ctx.activeConnectionId} workspaceActive={ctx.workspaceActive} />
+    case "data-mover":
+      return (
+        <DataMoverWindow
+          activeConnectionId={ctx.activeConnectionId}
+          hasRvbbit={ctx.hasRvbbit}
+          workspaceActive={ctx.workspaceActive}
+        />
+      )
     case "folder": {
       const folderId = (w.payload as FolderPayload).folderId
       const items = ctx.launchers.filter((l) => l.visible !== false && l.folder === folderId && (!l.rvbbit || ctx.hasRvbbit))
@@ -5746,6 +5788,7 @@ function iconForKind(kind: DesktopWindowState["kind"]) {
       return Rocket
     case "costs": return DollarSign
     case "agent-messages": return Quote
+    case "data-mover": return Upload
     case "sync-mirror": return Database
     case "dashboards": return LayoutDashboard
     case "duck": return Boxes

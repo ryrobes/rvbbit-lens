@@ -5,6 +5,7 @@ import type { OpStep, RetryPlan, TakesPlan, WardsPlan } from "@/lib/rvbbit/opera
 export type DesktopWindowKind =
   | "finder"
   | "data"
+  | "data-mover"
   | "dashboards"
   | "csv-import"
   | "query-document"
@@ -93,6 +94,7 @@ export interface DesktopWindowState {
 export type WindowPayload =
   | FinderPayload
   | DataPayload
+  | DataMoverPayload
   | DashboardsPayload
   | BrainPayload
   | CsvImportPayload
@@ -744,6 +746,10 @@ export interface CachePayload {
 
 export interface SyncMirrorPayload {
   kind?: "sync-mirror"
+}
+
+export interface DataMoverPayload {
+  kind?: "data-mover"
 }
 
 export interface DashboardsPayload {
