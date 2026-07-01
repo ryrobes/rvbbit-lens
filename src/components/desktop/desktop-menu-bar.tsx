@@ -44,6 +44,7 @@ interface DesktopMenuBarProps {
   onOpenCache: () => void
   onOpenOperators: () => void
   onOpenSpecialists: () => void
+  onOpenSystemLearning: () => void
   onOpenRouting: () => void
   onOpenMcpServers: () => void
   onOpenCapabilities: () => void
@@ -148,6 +149,7 @@ export function DesktopMenuBar({
   onOpenCache,
   onOpenOperators,
   onOpenSpecialists,
+  onOpenSystemLearning,
   onOpenRouting,
   onOpenMcpServers,
   onOpenCapabilities,
@@ -252,6 +254,7 @@ export function DesktopMenuBar({
           { label: "Costs", onClick: onOpenCosts },
           { label: "Operator Studio", onClick: onOpenOperators },
           { label: "Specialists", onClick: onOpenSpecialists },
+          { label: "System Learning", onClick: onOpenSystemLearning },
           { label: "Adaptive Routing", onClick: onOpenRouting },
           { label: "MCP Servers", onClick: onOpenMcpServers },
           { label: "Capabilities", onClick: onOpenCapabilities },

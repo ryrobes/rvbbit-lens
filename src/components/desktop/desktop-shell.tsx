@@ -81,6 +81,7 @@ import { DuckWindow } from "./duck-window"
 import { OperatorFlowWindow } from "./operator-flow-window"
 import { SpecialistsWindow } from "./specialists-window"
 import { SpecialistDetailWindow } from "./specialist-detail-window"
+import { SystemLearningWindow } from "./system-learning-window"
 import { RoutingWindow } from "./routing-window"
 import { McpServersWindow } from "./mcp-servers-window"
 import { McpIncomingWindow } from "./mcp-incoming-window"
@@ -173,6 +174,7 @@ import type {
   ModelSettingsPayload,
   SpecialistsPayload,
   SpecialistDetailPayload,
+  SystemLearningPayload,
   RoutingPayload,
   McpServersPayload,
   McpIncomingPayload,
@@ -2757,6 +2759,18 @@ export function DesktopShell() {
     })
   }, [focus, openWindow, liveWindows])
 
+  const openSystemLearning = useCallback(() => {
+    const existing = liveWindows().find((w) => w.kind === "system-learning")
+    if (existing) return focus(existing.id)
+    openWindow({
+      id: randomUUID(),
+      kind: "system-learning",
+      title: "System Learning",
+      x: 132, y: 70, width: 1120, height: 740,
+      payload: { kind: "system-learning" } satisfies SystemLearningPayload,
+    })
+  }, [focus, openWindow, liveWindows])
+
   const openKgExtractionRuns = useCallback(
     (graphId?: string | null, runId?: number | null) => {
       const existing = liveWindows().find((w) => w.kind === "kg-extraction-runs")
@@ -3927,6 +3941,7 @@ export function DesktopShell() {
     { id: "view-apps", label: "Saved Views", icon: Boxes, color: "var(--brand-view-apps)", sublabel: viewAppCount ? `${viewAppCount} saved` : undefined, activate: openViewApps },
     { id: "connections", label: "Connections", icon: Plug, color: "var(--brand-connections)", activate: openConnections },
     { id: "data-search", label: "Data Search", icon: Search, color: "var(--brand-kg)", description: "Semantic search across data", activate: () => openDataSearch(), rvbbit: true },
+    { id: "system-learning", label: "System Learning", icon: Brain, color: "var(--rvbbit-accent)", description: "Learned routing, acceleration & operator state", activate: openSystemLearning, rvbbit: true },
     { id: "mcp-incoming", label: "MCP Incoming", icon: Activity, color: "oklch(71% 0.17 205)", description: "Warehouse MCP usage", activate: openMcpIncoming, rvbbit: true },
     { id: "dagster", label: "Dagster", icon: GitBranch, color: "oklch(70% 0.15 220)", sublabel: "detected", description: "Read-only runs, assets & checks", activate: openDagster, visible: dagsterDetected },
     // System
@@ -3955,7 +3970,7 @@ export function DesktopShell() {
     { id: "metric-inspector", label: "Metric Inspector", icon: LineChart, color: "oklch(78% 0.13 95)", description: "Run metrics across def-time & data-time", activate: () => openMetricInspector(), folder: "metrics", rvbbit: true },
     { id: "viz-blocks", label: "Viz Blocks", icon: LayoutDashboard, color: "oklch(78% 0.13 95)", description: "Author canonical SQL/viz building blocks", activate: () => openVizBlocks(), folder: "metrics", rvbbit: true },
     { id: "metric-board", label: "KPI Board", icon: Table2, color: "oklch(78% 0.13 95)", description: "Matrix of metric values & KPI verdicts over time", activate: () => openMetricBoard(), folder: "metrics", rvbbit: true },
-    { id: "dashboards", label: "Dashboards", icon: LayoutDashboard, color: "oklch(78% 0.13 95)", description: "Claude-built dashboards — live, inspectable, shareable", activate: () => openDashboards(), folder: "metrics", rvbbit: true },
+    { id: "dashboards", label: "Dashboards", icon: LayoutDashboard, color: "oklch(78% 0.13 95)", description: "Agent-built dashboards and live apps — inspectable, versioned", activate: () => openDashboards(), folder: "metrics", rvbbit: true },
     // Cubes — the curated subject-area mart layer (metrics → cubes → raw)
     { id: "cube-catalog", label: "Cube Catalog", icon: Boxes, color: "oklch(76% 0.15 100)", description: "Browse curated subject-area cubes", activate: () => openCubeCatalog(), folder: "cubes", rvbbit: true },
     { id: "cube-creator", label: "Cube Creator", icon: Calculator, color: "oklch(76% 0.15 100)", description: "Author cubes — manual, AI-propose, or from a pack", activate: () => openCubeCreator(), folder: "cubes", rvbbit: true },
@@ -3971,7 +3986,7 @@ export function DesktopShell() {
     { id: "drift", label: "Drift", icon: LineChart, color: "var(--brand-kg)", description: "Compare extraction runs", activate: () => openDrift(), folder: "knowledge", rvbbit: true },
   ], [
     viewAppCount, schema, rvbbitVersion,
-    openFinder, openSqlScratch, openViewApps, openConnections, openDataSearch, openMcpIncoming,
+    openFinder, openSqlScratch, openViewApps, openConnections, openDataSearch, openSystemLearning, openMcpIncoming,
     openSystemObjects, openExtensions, openPgMonitor, openCache, openRvbbitCache,
     openCosts, openAgentMessages, openSyncMirror, openOperators, openModelSettings, openSpecialists, openRouting,
     openMcpServers, openCapabilities, openHfDeploy, openWarren, openModelStudio,
@@ -4086,6 +4101,8 @@ export function DesktopShell() {
       onClearNotifications: clearNotifications,
       openOperatorFlow,
       openSpecialistDetail,
+      openBrain,
+      openMcpServers,
       openMcpServerDetail,
       openRouting,
       openQueryLens,
@@ -4123,7 +4140,7 @@ export function DesktopShell() {
       wallpaperUrl, onReExtractPalette, onReExtractWithRvbbit, setPaletteOverrides,
       notifications, watchedChannels, windowChannels, notifyStatus, addWatchedChannel,
       removeWatchedChannel, clearNotifications, openOperatorFlow, openSpecialistDetail,
-      openMcpServerDetail, openRouting, openQueryLens, openKgBrowser, openKgEntity,
+      openBrain, openMcpServers, openMcpServerDetail, openRouting, openQueryLens, openKgBrowser, openKgEntity,
       openSourceRow, openKgForSource, openKgExtractionRuns, openKgMergeReview, openKgExplorer, openHindsightMemory,
       openDataSearch, openDrift, openModelSettings, openModelStudio, openMetricCatalog, openMetricCreator,
       openMetricInspector, openCubeCreator, openCubeInspector, openCosts, openDuck, openCapabilities, openCapabilityDetail,
@@ -4219,6 +4236,7 @@ export function DesktopShell() {
         onOpenCache={openCache}
         onOpenOperators={openOperators}
         onOpenSpecialists={openSpecialists}
+        onOpenSystemLearning={openSystemLearning}
         onOpenRouting={openRouting}
         onOpenMcpServers={openMcpServers}
         onOpenCapabilities={() => openCapabilities()}
@@ -4584,6 +4602,8 @@ interface WindowContext {
   openConnections: () => void
   openOperatorFlow: (operatorName: string | null, receiptId?: string | null) => void
   openSpecialistDetail: (specialistName: string) => void
+  openBrain: () => void
+  openMcpServers: () => void
   openMcpServerDetail: (serverName: string) => void
   openRouting: () => void
   openQueryLens: (queryId?: string | null) => void
@@ -4935,6 +4955,18 @@ function renderWindowContent(
           hasRvbbit={ctx.hasRvbbit}
           onOpenCapability={ctx.openCapabilityDetail}
           onOpenWarrenJob={ctx.openWarrenJob}
+        />
+      )
+    case "system-learning":
+      return (
+        <SystemLearningWindow
+          activeConnectionId={ctx.activeConnectionId}
+          hasRvbbit={ctx.hasRvbbit}
+          onOpenRouting={ctx.openRouting}
+          onOpenBrain={ctx.openBrain}
+          onOpenMcpServers={ctx.openMcpServers}
+          onOpenOperator={(name) => ctx.openOperatorFlow(name)}
+          onOpenSql={ctx.openSqlData}
         />
       )
     case "routing":
@@ -5395,6 +5427,7 @@ function iconForKind(kind: DesktopWindowState["kind"]) {
       return Settings2
     case "specialists":
     case "specialist-detail":
+    case "system-learning":
       return Brain
     case "routing": return GitBranch
     case "mcp-incoming":

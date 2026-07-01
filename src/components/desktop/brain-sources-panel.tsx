@@ -238,7 +238,7 @@ export function SourcesPanel({
       {/* add source */}
       <div className="rounded p-2 flex flex-col gap-1.5" style={{ background: SOFTER }}>
         <div className="flex items-center gap-1 text-[11px] opacity-70">
-          <Plus size={12} /> Add a remote source (Google Drive)
+          <Plus size={12} /> Add a remote source (Google Drive docs or folders)
         </div>
         <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
           <input value={label} onChange={(e) => setLabel(e.target.value)} placeholder="label (e.g. hr_drive)"
@@ -249,8 +249,9 @@ export function SourcesPanel({
             className="px-1.5 py-0.5 rounded outline-none flex-1" style={{ background: SOFT, minWidth: 200 }} />
         </div>
         <div className="flex items-center gap-1.5 text-[11px]">
-          <input value={folders} onChange={(e) => setFolders(e.target.value)} placeholder="Drive folder IDs (comma/space separated)"
-            className="px-1.5 py-0.5 rounded outline-none flex-1" style={{ background: SOFT }} />
+          <input value={folders} onChange={(e) => setFolders(e.target.value)} placeholder="Drive doc/folder URLs or IDs (comma separated)"
+            className="px-1.5 py-0.5 rounded outline-none flex-1" style={{ background: SOFT }}
+            title="Paste one Google Doc or Drive folder URL/ID, or a comma-separated list mixing docs and folders." />
           <button onClick={() => void addSource()} disabled={!label.trim()}
             className="px-2 py-0.5 rounded disabled:opacity-40" style={{ background: "color-mix(in oklch, var(--chrome-text) 14%, transparent)" }}>
             Save
@@ -288,7 +289,7 @@ export function SourcesPanel({
                 <span className="opacity-50">
                   {s.provider
                     ? `query · global · ${s.docs} docs · synced ${ago(s.lastSyncedMs)}`
-                    : `${s.folders.length} folder${s.folders.length === 1 ? "" : "s"} · ${s.docs} docs · synced ${ago(s.lastSyncedMs)}`}
+                    : `${s.folders.length} Drive location${s.folders.length === 1 ? "" : "s"} · ${s.docs} docs · synced ${ago(s.lastSyncedMs)}`}
                 </span>
               </div>
               <div className="ml-auto flex items-center gap-2">

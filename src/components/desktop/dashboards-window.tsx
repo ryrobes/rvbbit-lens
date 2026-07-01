@@ -46,9 +46,24 @@ function StatusDot({ status }: { status: string }) {
   const live = status === "live"
   return (
     <span
-      title={live ? "live (catalog-linked)" : "static — no live data / inspectability"}
+      title={live ? "live data dependencies detected" : "stored or static"}
       className={`inline-block h-1.5 w-1.5 rounded-full ${live ? "bg-emerald-400" : "bg-amber-500/70"}`}
     />
+  )
+}
+
+function RuntimePill({ runtime }: { runtime?: string | null }) {
+  const label = runtime || "html"
+  const python = label === "python-fastapi"
+  return (
+    <span
+      title={python ? "Python FastAPI source bundle" : "Hosted HTML live app"}
+      className={`rounded px-1.5 py-0.5 text-[10px] ${
+        python ? "bg-sky-500/12 text-sky-300" : "bg-emerald-500/10 text-emerald-300"
+      }`}
+    >
+      {python ? "python" : "html"}
+    </span>
   )
 }
 
@@ -73,19 +88,20 @@ export function DashboardsWindow({ activeConnectionId, hasRvbbit, onOpenSqlData 
     resetKey: activeConnectionId,
   })
 
-  // load the selected dashboard's html + sources
+  // load the selected live app's html + sources
   useEffect(() => {
     let cancelled = false
-    if (!activeConnectionId || !selected) {
-      setDetail(null)
-      return
-    }
-    setLoadingDetail(true)
-    fetchDashboard(activeConnectionId, selected).then((d) => {
+    if (!activeConnectionId || !selected) return
+
+    async function loadDetail() {
+      setLoadingDetail(true)
+      const d = await fetchDashboard(activeConnectionId!, selected!)
       if (cancelled) return
       setDetail(d.dashboard ?? null)
       setLoadingDetail(false)
-    })
+    }
+
+    void loadDetail()
     return () => {
       cancelled = true
     }
@@ -113,7 +129,8 @@ export function DashboardsWindow({ activeConnectionId, hasRvbbit, onOpenSqlData 
     return () => window.removeEventListener("message", onMsg)
   }, [activeConnectionId])
 
-  const srcdoc = useMemo(() => (detail ? buildSrcdoc(detail.html) : ""), [detail])
+  const activeDetail = detail?.slug === selected ? detail : null
+  const srcdoc = useMemo(() => (activeDetail ? buildSrcdoc(activeDetail.html) : ""), [activeDetail])
   const byTeam = useMemo(() => {
     const m = new Map<string, DashboardRow[]>()
     for (const d of rows) {
@@ -123,9 +140,9 @@ export function DashboardsWindow({ activeConnectionId, hasRvbbit, onOpenSqlData 
     return [...m.entries()].sort((a, b) => a[0].localeCompare(b[0]))
   }, [rows])
 
-  const queries = (detail?.sources ?? []).filter((s) => s.kind === "query")
-  const tables = (detail?.sources ?? []).filter((s) => s.kind === "table")
-  const metrics = (detail?.sources ?? []).filter((s) => s.kind === "metric")
+  const queries = (activeDetail?.sources ?? []).filter((s) => s.kind === "query")
+  const tables = (activeDetail?.sources ?? []).filter((s) => s.kind === "table")
+  const metrics = (activeDetail?.sources ?? []).filter((s) => s.kind === "metric")
 
   if (!hasRvbbit) {
     return (
@@ -148,7 +165,7 @@ export function DashboardsWindow({ activeConnectionId, hasRvbbit, onOpenSqlData 
             <div className="px-3 py-3 text-xs text-danger">{error}</div>
           ) : rows.length === 0 ? (
             <div className="px-3 py-3 text-xs text-chrome-text/45">
-              No dashboards yet. Publish one from Claude (Cowork) with <code>publish_dashboard</code>.
+              No live apps yet. Use <code>live_app_template</code> and <code>create_live_app</code> from the warehouse MCP.
             </div>
           ) : (
             byTeam.map(([team, list]) => (
@@ -164,6 +181,12 @@ export function DashboardsWindow({ activeConnectionId, hasRvbbit, onOpenSqlData 
                   >
                     <StatusDot status={d.status} />
                     <span className="min-w-0 flex-1 truncate" title={d.description ?? d.name}>{d.name}</span>
+                    <RuntimePill runtime={d.runtime_kind} />
+                    {!!((d.queries ?? 0) + (d.tables ?? 0) + (d.metrics ?? 0)) && (
+                      <span className="text-[10px] text-chrome-text/40" title="Detected data edges">
+                        {(d.queries ?? 0) + (d.tables ?? 0) + (d.metrics ?? 0)}
+                      </span>
+                    )}
                     <span className="text-[10px] text-chrome-text/40">v{d.latest_version}</span>
                   </button>
                 ))}
@@ -175,18 +198,19 @@ export function DashboardsWindow({ activeConnectionId, hasRvbbit, onOpenSqlData 
 
       {/* viewer */}
       <div className="flex min-w-0 flex-1 flex-col">
-        {!detail ? (
+        {!activeDetail ? (
           <div className="flex flex-1 items-center justify-center text-sm text-chrome-text/45">
-            {loadingDetail ? "Loading…" : "Select a dashboard to view it live."}
+            {selected && loadingDetail ? "Loading…" : "Select a live app to view it."}
           </div>
         ) : (
           <>
             <div className="flex items-center gap-2 border-b border-chrome-border px-3 py-1.5 text-[12px]">
-              <StatusDot status={detail.status} />
-              <span className="font-medium">{detail.name}</span>
-              <span className="text-chrome-text/40">/{detail.slug}</span>
-              {detail.status !== "live" && (
-                <span className="rounded bg-amber-500/15 px-1.5 py-0.5 text-[10px] text-amber-400">static</span>
+              <StatusDot status={activeDetail.status} />
+              <span className="font-medium">{activeDetail.name}</span>
+              <span className="text-chrome-text/40">/{activeDetail.slug}</span>
+              <RuntimePill runtime={activeDetail.runtime_kind} />
+              {activeDetail.status !== "live" && (
+                <span className="rounded bg-amber-500/15 px-1.5 py-0.5 text-[10px] text-amber-400">stored</span>
               )}
               <button
                 onClick={() => setSelected(null)}
@@ -196,17 +220,17 @@ export function DashboardsWindow({ activeConnectionId, hasRvbbit, onOpenSqlData 
               </button>
             </div>
             <iframe
-              key={detail.slug}
+              key={activeDetail.slug}
               ref={iframeRef}
               srcDoc={srcdoc}
               sandbox="allow-scripts"
-              title={detail.name}
+              title={activeDetail.name}
               className="min-h-0 flex-1 border-0 bg-[#15110d]"
             />
             {/* Sources strip — the data edges, explorable */}
             <div className="max-h-44 shrink-0 overflow-auto border-t border-chrome-border bg-foreground/[0.02] px-3 py-2">
               <div className="mb-1 text-[10px] uppercase tracking-wider text-chrome-text/45">Sources</div>
-              {detail.sources.length === 0 ? (
+              {activeDetail.sources.length === 0 ? (
                 <div className="text-[11px] text-chrome-text/40">
                   No data edges extracted — a “dead tree” (static), or not crawled yet.
                 </div>
@@ -219,7 +243,7 @@ export function DashboardsWindow({ activeConnectionId, hasRvbbit, onOpenSqlData 
                       </code>
                       <span className="text-[9px] text-chrome-text/35">{s.source}</span>
                       <button
-                        onClick={() => onOpenSqlData?.(s.base_sql ?? "", `${detail.name} — query ${i + 1}`)}
+                        onClick={() => onOpenSqlData?.(s.base_sql ?? "", `${activeDetail.name} — query ${i + 1}`)}
                         className="shrink-0 rounded border border-chrome-border px-1.5 py-0.5 text-[10px] text-chrome-text/70 hover:border-rvbbit-accent hover:text-rvbbit-accent"
                       >
                         open SQL ↗

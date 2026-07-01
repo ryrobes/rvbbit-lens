@@ -700,7 +700,7 @@ function BrainSyncPreset({ job, busy, onSchedule }: { job?: CronJob; busy: boole
     <div className="flex items-center gap-2 rounded-md border border-chrome-border bg-secondary-background/40 px-2.5 py-1.5">
       <Database className="h-3.5 w-3.5 shrink-0 text-chrome-text/60" />
       <span className="text-[11px] text-chrome-text/70">
-        Scan configured Drive/remote folders, re-ingest changed docs, refresh folder permissions.
+        Scan configured Drive docs/folders and remote sources, re-ingest changed docs, refresh permissions.
       </span>
       <button
         type="button"

@@ -43,6 +43,14 @@ export interface DashboardRow {
   team: string | null
   owner_email: string | null
   status: string
+  runtime_kind?: string | null
+  app_kind?: string | null
+  manifest?: Record<string, unknown> | null
+  last_health?: Record<string, unknown> | null
+  last_debug_at?: string | null
+  queries?: number | null
+  tables?: number | null
+  metrics?: number | null
   latest_version: number
   updated_at: string
 }
@@ -59,6 +67,10 @@ export interface DashboardDetail {
   name: string
   html: string
   status: string
+  runtime_kind?: string | null
+  app_kind?: string | null
+  manifest?: Record<string, unknown> | null
+  last_health?: Record<string, unknown> | null
   sources: SourceRow[]
 }
 
@@ -67,10 +79,20 @@ export async function fetchDashboards(
 ): Promise<{ dashboards: DashboardRow[]; error?: string }> {
   const r = await runQuery(
     connectionId,
-    `SELECT slug, name, description, team, owner_email, status, latest_version, updated_at::text AS updated_at
-     FROM rvbbit.dashboards ORDER BY updated_at DESC`,
+    `SELECT slug, name, description, team, owner_email, status, runtime_kind, app_kind,
+            latest_version, manifest, last_health, last_debug_at::text AS last_debug_at,
+            queries, tables, metrics, updated_at::text AS updated_at
+     FROM rvbbit.live_apps ORDER BY updated_at DESC`,
   )
-  if (!r.ok) return { dashboards: [], error: r.error }
+  if (!r.ok) {
+    const fallback = await runQuery(
+      connectionId,
+      `SELECT slug, name, description, team, owner_email, status, latest_version, updated_at::text AS updated_at
+       FROM rvbbit.dashboards ORDER BY updated_at DESC`,
+    )
+    if (!fallback.ok) return { dashboards: [], error: r.error }
+    return { dashboards: fallback.rows as unknown as DashboardRow[] }
+  }
   return { dashboards: r.rows as unknown as DashboardRow[] }
 }
 
@@ -81,15 +103,25 @@ export async function fetchDashboard(
   const s = esc(slug)
   const meta = await runQuery(
     connectionId,
-    `SELECT d.slug, d.name, d.status, v.html
+    `SELECT d.slug, d.name, d.status, d.runtime_kind, d.app_kind, d.manifest, d.last_health, v.html
      FROM rvbbit.dashboards d
      JOIN rvbbit.dashboard_versions v ON v.dashboard_id = d.id AND v.version = d.latest_version
      WHERE d.slug = '${s}'`,
     1,
   )
-  if (!meta.ok) return { error: meta.error }
-  if (!meta.rows.length) return { error: "dashboard not found" }
-  const m = meta.rows[0] as Record<string, unknown>
+  const resolvedMeta = meta.ok
+    ? meta
+    : await runQuery(
+        connectionId,
+        `SELECT d.slug, d.name, d.status, v.html
+         FROM rvbbit.dashboards d
+         JOIN rvbbit.dashboard_versions v ON v.dashboard_id = d.id AND v.version = d.latest_version
+         WHERE d.slug = '${s}'`,
+        1,
+      )
+  if (!resolvedMeta.ok) return { error: resolvedMeta.error }
+  if (!resolvedMeta.rows.length) return { error: "live app not found" }
+  const m = resolvedMeta.rows[0] as Record<string, unknown>
   const src = await runQuery(
     connectionId,
     `SELECT kind, object_ref, base_sql, source FROM rvbbit.dashboard_sources
@@ -101,6 +133,10 @@ export async function fetchDashboard(
       name: String(m.name),
       html: m.html ? String(m.html) : "",
       status: String(m.status),
+      runtime_kind: m.runtime_kind ? String(m.runtime_kind) : null,
+      app_kind: m.app_kind ? String(m.app_kind) : null,
+      manifest: (m.manifest as Record<string, unknown> | null) ?? null,
+      last_health: (m.last_health as Record<string, unknown> | null) ?? null,
       sources: (src.ok ? src.rows : []) as unknown as SourceRow[],
     },
   }

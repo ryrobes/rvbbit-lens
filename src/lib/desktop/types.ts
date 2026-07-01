@@ -26,6 +26,7 @@ export type DesktopWindowKind =
   | "operator-flow"
   | "specialists"
   | "specialist-detail"
+  | "system-learning"
   | "routing"
   | "mcp-servers"
   | "mcp-incoming"
@@ -113,6 +114,7 @@ export type WindowPayload =
   | OperatorFlowPayload
   | SpecialistsPayload
   | SpecialistDetailPayload
+  | SystemLearningPayload
   | RoutingPayload
   | McpServersPayload
   | McpIncomingPayload
@@ -898,6 +900,10 @@ export interface SpecialistsPayload {
 export interface SpecialistDetailPayload {
   kind?: "specialist-detail"
   specialistName: string
+}
+
+export interface SystemLearningPayload {
+  kind?: "system-learning"
 }
 
 export interface RoutingPayload {

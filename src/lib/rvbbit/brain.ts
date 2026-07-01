@@ -1,7 +1,7 @@
 /**
  * Data layer for the Document Intelligence brain (rvbbit.brain_*) — role-gated docs.
  * Every read is parameterized by a "View as <email>" identity, so the file explorer
- * doubles as an ACL inspector: switch identity → watch folders/docs appear & vanish.
+ * doubles as an ACL inspector: switch identity → watch Drive docs/folders appear & vanish.
  * Mirrors alerts.ts: a run() POST to /api/db/query, q() literal builder, {…,error} returns.
  */
 
@@ -442,7 +442,7 @@ export async function addQuerySource(
   return { sourceId: r.rows[0]?.id == null ? null : Number(r.rows[0].id), error: null }
 }
 
-/** Create/update a remote source (gdrive, …). config carries endpoint + folders. */
+/** Create/update a remote source (gdrive, …). config carries endpoint + Drive doc/folder locations. */
 export async function configureSource(
   connectionId: string,
   s: { label: string; kind: string; endpoint: string; folders: string[]; credsRef?: string | null; connector?: string | null },
@@ -524,6 +524,164 @@ export interface SystemLearningBrainSync {
   skipped: number
   removed: number
   error?: string
+}
+
+export interface SystemLearningPrompt {
+  label: string
+  query: string
+  useWhen: string
+}
+
+export const SYSTEM_LEARNING_PROMPTS: SystemLearningPrompt[] = [
+  {
+    label: "Acceleration next steps",
+    query: "Which heap tables should I consider adding to RVBBIT acceleration next, and why?",
+    useWhen: "heap tables show repeated sequential scans or large read volume",
+  },
+  {
+    label: "Slow query explanation",
+    query: "Which observed route shapes are still slow, which engine wins, and what should I test next?",
+    useWhen: "routing traces disagree or a shape needs exploration",
+  },
+  {
+    label: "Layout payoff",
+    query: "Which accepted or proposed workload layouts look most valuable, and are they built?",
+    useWhen: "cluster or hive variants were recommended from workload evidence",
+  },
+  {
+    label: "Operator trust",
+    query: "Which SQL operators are getting real usage, cost, retries, or cache hits worth reviewing?",
+    useWhen: "semantic operators need an audit trail before promotion",
+  },
+  {
+    label: "What changed",
+    query: "Summarize what RVBBIT learned recently about this database with exact artifact handles.",
+    useWhen: "you want the latest learned state across routing, acceleration, and operators",
+  },
+]
+
+export interface SystemLearningArtifact {
+  uri: string
+  title: string
+  objectType: string
+  occurredAt: number | null
+  body: string
+  tableName: string | null
+  columnName: string | null
+  layout: string | null
+  layoutKind: string | null
+  layoutStatus: string | null
+  shapeKey: string | null
+  shapeFamily: string | null
+  engine: string | null
+  operatorName: string | null
+  status: string | null
+  score: number | null
+  observations: number | null
+  seqScans: number | null
+  seqRows: number | null
+  writes: number | null
+  sizeBytes: number | null
+  rowEstimate: number | null
+  inspectSql: string
+  askQuery: string
+}
+
+export function systemLearningInspectSql(uri: string): string {
+  return `SELECT uri, title, occurred_at, props, body\nFROM rvbbit.system_learning_items\nWHERE uri = ${q(uri)}`
+}
+
+function systemLearningAskQuery(row: Pick<SystemLearningArtifact, "objectType" | "title" | "tableName" | "operatorName" | "layout" | "shapeKey">): string {
+  const subject =
+    row.tableName ??
+    row.operatorName ??
+    row.layout ??
+    (row.shapeKey ? `shape ${row.shapeKey.slice(0, 48)}` : row.title)
+  if (row.objectType === "heap_acceleration_candidate") {
+    return `Should I accelerate ${subject}? Cite the exact artifact and explain the read/write evidence.`
+  }
+  if (row.objectType === "workload_layout") {
+    return `Is workload layout ${subject} worth building or maintaining? Cite the exact artifact.`
+  }
+  if (row.objectType === "route_shape") {
+    return `Why does ${subject} route this way, and what should I test next? Cite the exact artifact.`
+  }
+  if (row.objectType === "operator") {
+    return `What should I know about SQL operator ${subject}? Cite usage, cost, and trust signals.`
+  }
+  return `Explain ${row.title} with exact RVBBIT system learning handles.`
+}
+
+export async function fetchSystemLearningArtifacts(
+  connectionId: string,
+  options: { objectTypes?: string[]; limit?: number } = {},
+): Promise<{ rows: SystemLearningArtifact[]; error: string | null }> {
+  const objectTypes = (options.objectTypes ?? []).map((s) => s.trim()).filter(Boolean)
+  const limit = Math.max(1, Math.min(200, Math.floor(options.limit ?? 24)))
+  const where = objectTypes.length
+    ? `WHERE coalesce(props->>'object_type', 'unknown') IN (${objectTypes.map(q).join(",")})`
+    : ""
+  const res = await runRead(
+    connectionId,
+    `SELECT uri, title,
+            coalesce(props->>'object_type', 'unknown') AS object_type,
+            extract(epoch FROM occurred_at) * 1000 AS occurred_ms,
+            left(coalesce(body, ''), 1400) AS body,
+            props->>'table' AS table_name,
+            props->>'column' AS column_name,
+            props->>'layout' AS layout,
+            props->>'layout_kind' AS layout_kind,
+            props->>'layout_status' AS layout_status,
+            props->>'shape_key' AS shape_key,
+            props->>'shape_family' AS shape_family,
+            props->>'engine' AS engine,
+            props->>'operator' AS operator_name,
+            props->>'status' AS status,
+            (props->>'score')::double precision AS score,
+            (props->>'observations')::double precision AS observations,
+            (props->>'seq_scans')::double precision AS seq_scans,
+            (props->>'seq_rows')::double precision AS seq_rows,
+            (props->>'writes')::double precision AS writes,
+            (props->>'size_bytes')::double precision AS size_bytes,
+            (props->>'row_estimate')::double precision AS row_estimate
+       FROM rvbbit.system_learning_items
+       ${where}
+       ORDER BY occurred_at DESC, title
+       LIMIT ${limit}`,
+    limit,
+  )
+  if (!res.ok) return { rows: [], error: res.error }
+  const rows = res.rows.map((row) => {
+    const artifact: SystemLearningArtifact = {
+      uri: String(row.uri ?? ""),
+      title: String(row.title ?? ""),
+      objectType: String(row.object_type ?? "unknown"),
+      occurredAt: num(row.occurred_ms),
+      body: String(row.body ?? ""),
+      tableName: str(row.table_name),
+      columnName: str(row.column_name),
+      layout: str(row.layout),
+      layoutKind: str(row.layout_kind),
+      layoutStatus: str(row.layout_status),
+      shapeKey: str(row.shape_key),
+      shapeFamily: str(row.shape_family),
+      engine: str(row.engine),
+      operatorName: str(row.operator_name),
+      status: str(row.status),
+      score: num(row.score),
+      observations: num(row.observations),
+      seqScans: num(row.seq_scans),
+      seqRows: num(row.seq_rows),
+      writes: num(row.writes),
+      sizeBytes: num(row.size_bytes),
+      rowEstimate: num(row.row_estimate),
+      inspectSql: systemLearningInspectSql(String(row.uri ?? "")),
+      askQuery: "",
+    }
+    artifact.askQuery = systemLearningAskQuery(artifact)
+    return artifact
+  })
+  return { rows, error: null }
 }
 
 function emptySystemLearningBrainStatus(error?: string): SystemLearningBrainStatus {
