@@ -1,8 +1,10 @@
 "use client"
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent } from "react"
 
 import { usePolling } from "@/lib/desktop/use-polling"
+import { Plus } from "@/lib/icons"
+import type { DashboardsPayload } from "@/lib/desktop/types"
 import {
   fetchDashboard,
   fetchDashboards,
@@ -10,13 +12,18 @@ import {
   type DashboardDetail,
   type DashboardRow,
 } from "@/lib/rvbbit/dashboards"
+import { ContextMenu, type ContextMenuState } from "./context-menu"
 import { useWorkspaceActive } from "./workspace-active-context"
 
 interface Props {
+  payload?: DashboardsPayload
   activeConnectionId: string | null
   hasRvbbit: boolean
   onOpenSqlData?: (sql: string, title: string) => void
+  onCreateShortcut?: (dashboard: DashboardRow) => void
 }
+
+export const DASHBOARD_SELECT_EVENT = "rvbbit-lens:dashboard-select"
 
 // Injected into the sandboxed iframe: defines rvbbitQuery(sql) over a postMessage
 // bridge to the parent (lens runs it read-only via /api/db/query). The stored artifact
@@ -67,13 +74,14 @@ function RuntimePill({ runtime }: { runtime?: string | null }) {
   )
 }
 
-export function DashboardsWindow({ activeConnectionId, hasRvbbit, onOpenSqlData }: Props) {
+export function DashboardsWindow({ payload, activeConnectionId, hasRvbbit, onOpenSqlData, onCreateShortcut }: Props) {
   const workspaceActive = useWorkspaceActive()
   const [rows, setRows] = useState<DashboardRow[]>([])
   const [error, setError] = useState<string | null>(null)
-  const [selected, setSelected] = useState<string | null>(null)
+  const [selected, setSelected] = useState<string | null>(payload?.selectedSlug ?? null)
   const [detail, setDetail] = useState<DashboardDetail | null>(null)
   const [loadingDetail, setLoadingDetail] = useState(false)
+  const [menu, setMenu] = useState<ContextMenuState | null>(null)
   const iframeRef = useRef<HTMLIFrameElement>(null)
 
   const reload = useCallback(async () => {
@@ -87,6 +95,15 @@ export function DashboardsWindow({ activeConnectionId, hasRvbbit, onOpenSqlData 
     enabled: !!activeConnectionId && hasRvbbit && workspaceActive,
     resetKey: activeConnectionId,
   })
+
+  useEffect(() => {
+    const onSelect = (event: Event) => {
+      const slug = (event as CustomEvent<{ slug?: unknown }>).detail?.slug
+      if (typeof slug === "string" && slug.trim()) setSelected(slug)
+    }
+    window.addEventListener(DASHBOARD_SELECT_EVENT, onSelect)
+    return () => window.removeEventListener(DASHBOARD_SELECT_EVENT, onSelect)
+  }, [])
 
   // load the selected live app's html + sources
   useEffect(() => {
@@ -144,6 +161,22 @@ export function DashboardsWindow({ activeConnectionId, hasRvbbit, onOpenSqlData 
   const tables = (activeDetail?.sources ?? []).filter((s) => s.kind === "table")
   const metrics = (activeDetail?.sources ?? []).filter((s) => s.kind === "metric")
 
+  const openDashboardMenu = (event: MouseEvent, dashboard: DashboardRow) => {
+    if (!onCreateShortcut) return
+    event.preventDefault()
+    event.stopPropagation()
+    setMenu({
+      x: event.clientX,
+      y: event.clientY,
+      items: [{
+        id: "add-shortcut",
+        label: "Add to Desktop",
+        icon: Plus,
+        onSelect: () => onCreateShortcut(dashboard),
+      }],
+    })
+  }
+
   if (!hasRvbbit) {
     return (
       <div className="flex h-full items-center justify-center bg-doc-bg text-sm text-chrome-text/55">
@@ -175,6 +208,7 @@ export function DashboardsWindow({ activeConnectionId, hasRvbbit, onOpenSqlData 
                   <button
                     key={d.slug}
                     onClick={() => setSelected(d.slug)}
+                    onContextMenu={(event) => openDashboardMenu(event, d)}
                     className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-[13px] hover:bg-foreground/5 ${
                       selected === d.slug ? "bg-foreground/10 text-rvbbit-accent" : "text-foreground/85"
                     }`}
@@ -270,6 +304,7 @@ export function DashboardsWindow({ activeConnectionId, hasRvbbit, onOpenSqlData 
           </>
         )}
       </div>
+      <ContextMenu state={menu} onClose={() => setMenu(null)} />
     </div>
   )
 }

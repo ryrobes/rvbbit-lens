@@ -61,7 +61,7 @@ export function PaletteWindow(props: PaletteWindowProps) {
         <PaletteIcon className="h-7 w-7 text-rvbbit-accent" />
         <div className="text-sm text-foreground">No palette derived yet.</div>
         <p className="max-w-sm">
-          Set a wallpaper from <span className="font-medium text-foreground">Desktop → Set wallpaper</span> and rvbbit-lens
+          Set a wallpaper from <span className="font-medium text-foreground">Desktop → Set wallpaper</span> and Data Rabbit
           will extract the palette automatically. The theme will retint live as you swap images.
         </p>
       </div>
@@ -103,7 +103,7 @@ function PaletteEditor({
   const rvbbitButtonTitle = !vision.available
     ? "Register an rvbbit vision specialist named 'vision' to enable AI palette curation"
     : !vision.authEnvSet && vision.specialistName
-      ? `Vision specialist '${vision.specialistName}' is registered but its auth env var isn't set on the rvbbit-lens server`
+      ? `Vision specialist '${vision.specialistName}' is registered but its auth env var isn't set on the Data Rabbit server`
       : `Re-curate the palette using ${vision.model ?? "the vision specialist"}`
 
   const rvbbitDisabled = !vision.available || !hasWallpaper || rvbbitBusy

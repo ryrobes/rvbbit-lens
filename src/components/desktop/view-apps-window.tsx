@@ -1,24 +1,26 @@
 "use client"
 
-import { useCallback, useEffect, useState } from "react"
+import { useCallback, useEffect, useState, type MouseEvent } from "react"
 import { Boxes, Pencil, Play, Plus, Trash2 } from "@/lib/icons"
 import { Button } from "@/components/ui/button"
 import type { ViewApp } from "@/lib/desktop/types"
 import { deleteViewApp, listViewApps } from "@/lib/desktop/view-apps"
 import { iconFor } from "@/lib/desktop/icon-glyphs"
 import { cn } from "@/lib/utils"
+import { ContextMenu, type ContextMenuState } from "./context-menu"
 
 interface ViewAppsWindowProps {
   onOpen: (id: string) => void
   onCreate: () => void
   onEdit: (id: string) => void
+  onCreateShortcut?: (app: ViewApp) => void
 }
 
-export function ViewAppsWindow({ onOpen, onCreate, onEdit }: ViewAppsWindowProps) {
-  const [apps, setApps] = useState<ViewApp[]>([])
+export function ViewAppsWindow({ onOpen, onCreate, onEdit, onCreateShortcut }: ViewAppsWindowProps) {
+  const [apps, setApps] = useState<ViewApp[]>(() => listViewApps())
+  const [menu, setMenu] = useState<ContextMenuState | null>(null)
 
   const refresh = useCallback(() => setApps(listViewApps()), [])
-  useEffect(() => { refresh() }, [refresh])
 
   // Re-load when any window updates the local store.
   useEffect(() => {
@@ -26,6 +28,22 @@ export function ViewAppsWindow({ onOpen, onCreate, onEdit }: ViewAppsWindowProps
     window.addEventListener("rvbbit-lens:apps-changed", handler as EventListener)
     return () => window.removeEventListener("rvbbit-lens:apps-changed", handler as EventListener)
   }, [refresh])
+
+  const openAppMenu = (event: MouseEvent, app: ViewApp) => {
+    if (!onCreateShortcut) return
+    event.preventDefault()
+    event.stopPropagation()
+    setMenu({
+      x: event.clientX,
+      y: event.clientY,
+      items: [{
+        id: "add-shortcut",
+        label: "Add to Desktop",
+        icon: Plus,
+        onSelect: () => onCreateShortcut(app),
+      }],
+    })
+  }
 
   return (
     <div className="flex h-full flex-col">
@@ -59,6 +77,7 @@ export function ViewAppsWindow({ onOpen, onCreate, onEdit }: ViewAppsWindowProps
               return (
                 <div
                   key={app.id}
+                  onContextMenu={(event) => openAppMenu(event, app)}
                   className="group flex flex-col items-center rounded-md border border-chrome-border/60 bg-secondary-background p-2 text-center transition-colors hover:border-main/50"
                 >
                   <button
@@ -114,6 +133,7 @@ export function ViewAppsWindow({ onOpen, onCreate, onEdit }: ViewAppsWindowProps
           </div>
         )}
       </div>
+      <ContextMenu state={menu} onClose={() => setMenu(null)} />
     </div>
   )
 }

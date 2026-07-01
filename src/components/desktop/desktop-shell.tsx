@@ -33,6 +33,7 @@ import {
   Sparkles,
   Settings2,
   Table2,
+  Trash2,
   TreeStructure,
   Wand2,
   ZoomIn,
@@ -76,7 +77,7 @@ import { ModelSettingsWindow } from "./model-settings-window"
 import { CostsWindow } from "./costs-window"
 import { AgentMessagesWindow } from "./agent-messages-window"
 import { SyncMirrorWindow } from "./sync-mirror-window"
-import { DashboardsWindow } from "./dashboards-window"
+import { DASHBOARD_SELECT_EVENT, DashboardsWindow } from "./dashboards-window"
 import { DuckWindow } from "./duck-window"
 import { OperatorFlowWindow } from "./operator-flow-window"
 import { SpecialistsWindow } from "./specialists-window"
@@ -251,6 +252,7 @@ function cloneCanvas(c: WorkspaceCanvas): WorkspaceCanvas {
 import { randomUUID } from "@/lib/uuid"
 import { putImportFile } from "@/lib/import/file-store"
 import { getViewApp, listViewApps, upsertViewApp } from "@/lib/desktop/view-apps"
+import { iconFor } from "@/lib/desktop/icon-glyphs"
 import {
   buildSceneBundle,
   contentHashOf,
@@ -279,6 +281,7 @@ import {
 import { fetchObjectDdl } from "@/lib/db/object-ddl"
 import { invalidateSemanticOps, loadSemanticOps } from "@/lib/desktop/semantic-ops"
 import { detectDagsterStorage } from "@/lib/dagster/metadata"
+import type { DashboardRow } from "@/lib/rvbbit/dashboards"
 import { detectHindsight } from "@/lib/rvbbit/hindsight"
 import { fetchKgEvidenceBySource, fetchPrimaryKeyColumn } from "@/lib/rvbbit/kg"
 import { broadcastTargetWindowIds, buildDesktopRuntimeGraph, paramKey, resolveParamTableTarget, sameParamValue, sourceSqlForPayload, uniqueBlockName } from "@/lib/desktop/reactive-sql"
@@ -326,10 +329,68 @@ import {
   type MonoFont,
   type SansFont,
 } from "@/lib/desktop/fonts"
+import { APP_NAME, APP_VERSION } from "@/lib/version"
 
 const DEFAULT_Z = 20
 const MAX_WORLD = 20000
 const MIN_WORLD = -20000
+const DESKTOP_SHORTCUTS_KEY = "rvbbit-lens:desktop-shortcuts:v1"
+const DESKTOP_SHORTCUTS_CHANGED_EVENT = "rvbbit-lens:desktop-shortcuts-changed"
+
+type DesktopShortcutKind = "launcher" | "view-app" | "dashboard"
+
+interface DesktopShortcut {
+  id: string
+  kind: DesktopShortcutKind
+  targetId: string
+  label: string
+  sublabel?: string
+  iconKey?: string
+  iconColor?: string
+  createdAt: string
+}
+
+function shortcutId(kind: DesktopShortcutKind, targetId: string): string {
+  return `${kind}:${targetId}`
+}
+
+function isDesktopShortcut(value: unknown): value is DesktopShortcut {
+  const v = value as Partial<DesktopShortcut> | null
+  return !!v
+    && typeof v.id === "string"
+    && (v.kind === "launcher" || v.kind === "view-app" || v.kind === "dashboard")
+    && typeof v.targetId === "string"
+    && typeof v.label === "string"
+}
+
+function dedupeShortcuts(shortcuts: DesktopShortcut[]): DesktopShortcut[] {
+  const byId = new Map<string, DesktopShortcut>()
+  for (const shortcut of shortcuts) byId.set(shortcut.id, shortcut)
+  return [...byId.values()]
+}
+
+function loadDesktopShortcuts(): DesktopShortcut[] {
+  if (typeof window === "undefined") return []
+  try {
+    const raw = window.localStorage.getItem(DESKTOP_SHORTCUTS_KEY)
+    if (!raw) return []
+    const parsed = JSON.parse(raw)
+    if (!Array.isArray(parsed)) return []
+    return dedupeShortcuts(parsed.filter(isDesktopShortcut))
+  } catch {
+    return []
+  }
+}
+
+function saveDesktopShortcuts(shortcuts: DesktopShortcut[]): void {
+  if (typeof window === "undefined") return
+  try {
+    window.localStorage.setItem(DESKTOP_SHORTCUTS_KEY, JSON.stringify(dedupeShortcuts(shortcuts)))
+    window.dispatchEvent(new Event(DESKTOP_SHORTCUTS_CHANGED_EVENT))
+  } catch {
+    // best-effort
+  }
+}
 
 /** Present mode v1 — geometry for the fit-to-screen transform. */
 type PresentFit = { x: number; y: number; scale: number }
@@ -430,6 +491,7 @@ export function DesktopShell() {
   const [runSignals, setRunSignals] = useState<Record<string, number>>({})
   const [viewport, setViewport] = useState<DesktopViewportState>(DEFAULT_VIEWPORT)
   const [ctxMenu, setCtxMenu] = useState<ContextMenuState | null>(null)
+  const [desktopShortcuts, setDesktopShortcuts] = useState<DesktopShortcut[]>(() => loadDesktopShortcuts())
   const [paletteOpen, setPaletteOpen] = useState(false)
   // Present (read-only) mode v1: chrome-off windows (handled per-window) plus a
   // fit-to-screen framing applied to the active layer. `presentFit` is local —
@@ -440,6 +502,16 @@ export function DesktopShell() {
   useEffect(() => {
     const timer = window.setTimeout(() => setBootOverlayVisible(false), 1450)
     return () => window.clearTimeout(timer)
+  }, [])
+
+  useEffect(() => {
+    const refresh = () => setDesktopShortcuts(loadDesktopShortcuts())
+    window.addEventListener("storage", refresh)
+    window.addEventListener(DESKTOP_SHORTCUTS_CHANGED_EVENT, refresh)
+    return () => {
+      window.removeEventListener("storage", refresh)
+      window.removeEventListener(DESKTOP_SHORTCUTS_CHANGED_EVENT, refresh)
+    }
   }, [])
 
   // ── LISTEN/NOTIFY feed ──────────────────────────────────────────────
@@ -2197,15 +2269,20 @@ export function DesktopShell() {
     })
   }, [focus, openWindow, liveWindows])
 
-  const openDashboards = useCallback(() => {
+  const openDashboards = useCallback((selectedSlug?: string | null) => {
     const existing = liveWindows().find((w) => w.kind === "dashboards")
-    if (existing) return focus(existing.id)
+    if (existing) {
+      if (selectedSlug) {
+        window.dispatchEvent(new CustomEvent(DASHBOARD_SELECT_EVENT, { detail: { slug: selectedSlug } }))
+      }
+      return focus(existing.id)
+    }
     openWindow({
       id: randomUUID(),
       kind: "dashboards",
       title: "Dashboards",
       x: 140, y: 76, width: 1060, height: 680,
-      payload: { kind: "dashboards" } satisfies DashboardsPayload,
+      payload: { kind: "dashboards", selectedSlug: selectedSlug ?? null } satisfies DashboardsPayload,
     })
   }, [focus, openWindow, liveWindows])
 
@@ -3995,6 +4072,137 @@ export function DesktopShell() {
     openKgBrowser, openKgExplorer, openHindsightMemory, hindsightDetected, openQueryLens, openDrift,
   ])
 
+  const upsertDesktopShortcut = useCallback((shortcut: DesktopShortcut) => {
+    setDesktopShortcuts((prev) => {
+      const next = dedupeShortcuts([...prev.filter((s) => s.id !== shortcut.id), shortcut])
+      saveDesktopShortcuts(next)
+      return next
+    })
+  }, [])
+
+  const removeDesktopShortcut = useCallback((shortcutIdValue: string) => {
+    setDesktopShortcuts((prev) => {
+      const next = prev.filter((s) => s.id !== shortcutIdValue)
+      saveDesktopShortcuts(next)
+      return next
+    })
+  }, [])
+
+  const addLauncherShortcut = useCallback((launcher: LauncherItem) => {
+    const folderLabel = launcher.folder ? FOLDERS.find((f) => f.id === launcher.folder)?.label : null
+    const id = shortcutId("launcher", launcher.id)
+    upsertDesktopShortcut({
+      id,
+      kind: "launcher",
+      targetId: launcher.id,
+      label: launcher.label,
+      sublabel: launcher.sublabel ?? folderLabel ?? "Shortcut",
+      iconColor: launcher.color,
+      createdAt: new Date().toISOString(),
+    })
+  }, [upsertDesktopShortcut])
+
+  const addViewAppShortcut = useCallback((app: ViewApp) => {
+    const id = shortcutId("view-app", app.id)
+    upsertDesktopShortcut({
+      id,
+      kind: "view-app",
+      targetId: app.id,
+      label: app.name || "Saved View",
+      sublabel: app.kind === "scry" ? "Scry view" : "Saved view",
+      iconKey: app.iconKey,
+      iconColor: app.iconColor,
+      createdAt: new Date().toISOString(),
+    })
+  }, [upsertDesktopShortcut])
+
+  const addDashboardShortcut = useCallback((dashboard: DashboardRow) => {
+    const id = shortcutId("dashboard", dashboard.slug)
+    upsertDesktopShortcut({
+      id,
+      kind: "dashboard",
+      targetId: dashboard.slug,
+      label: dashboard.name || dashboard.slug,
+      sublabel: dashboard.team ? `Dashboard · ${dashboard.team}` : "Dashboard",
+      iconColor: "oklch(78% 0.13 95)",
+      createdAt: new Date().toISOString(),
+    })
+  }, [upsertDesktopShortcut])
+
+  const viewAppsById = useMemo(() => new Map(listViewApps().map((app) => [app.id, app])), [viewAppCount])
+
+  const desktopShortcutItems = useMemo(() => {
+    // Launcher activate handlers read live refs only when clicked. Resolving
+    // their labels/icons here does not invoke those handlers.
+    // eslint-disable-next-line react-hooks/refs
+    return desktopShortcuts.flatMap((shortcut) => {
+      if (shortcut.kind === "launcher") {
+        const launcher = launchers.find((l) => l.id === shortcut.targetId)
+        if (!launcher || launcher.visible === false || (launcher.rvbbit && !hasRvbbit)) return []
+        return [{
+          shortcut,
+          label: launcher.label,
+          sublabel: shortcut.sublabel ?? launcher.sublabel,
+          icon: launcher.icon,
+          color: launcher.color,
+          activate: launcher.activate,
+        }]
+      }
+      if (shortcut.kind === "view-app") {
+        const app = viewAppsById.get(shortcut.targetId)
+        if (!app) return []
+        return [{
+          shortcut,
+          label: app.name || shortcut.label,
+          sublabel: app.kind === "scry" ? "Scry view" : "Saved view",
+          icon: iconFor(app.iconKey),
+          color: app.iconColor || shortcut.iconColor || "var(--brand-view-apps)",
+          activate: () => openViewApp(app.id),
+        }]
+      }
+      if (shortcut.kind === "dashboard") {
+        if (!hasRvbbit) return []
+        return [{
+          shortcut,
+          label: shortcut.label,
+          sublabel: shortcut.sublabel ?? "Dashboard",
+          icon: LayoutDashboard,
+          color: shortcut.iconColor ?? "oklch(78% 0.13 95)",
+          activate: () => openDashboards(shortcut.targetId),
+        }]
+      }
+      return []
+    })
+  }, [desktopShortcuts, launchers, hasRvbbit, viewAppsById, openViewApp, openDashboards])
+
+  const openShortcutMenu = useCallback(
+    (event: React.MouseEvent, item: (typeof desktopShortcutItems)[number]) => {
+      event.preventDefault()
+      event.stopPropagation()
+      setCtxMenu({
+        x: event.clientX,
+        y: event.clientY,
+        items: [
+          {
+            id: "open-shortcut",
+            label: "Open",
+            icon: item.icon,
+            onSelect: item.activate,
+          },
+          {
+            id: "remove-shortcut",
+            label: "Remove from Desktop",
+            icon: Trash2,
+            danger: true,
+            separatorBefore: true,
+            onSelect: () => removeDesktopShortcut(item.shortcut.id),
+          },
+        ],
+      })
+    },
+    [removeDesktopShortcut],
+  )
+
   // ── Command palette (⌘P) item groups ───────────────────────────────
   // Reuses the launcher registry wholesale (already rvbbit-gated) and adds the
   // schema tables, saved views, and a few verbs the registry doesn't cover.
@@ -4069,6 +4277,9 @@ export function DesktopShell() {
       openField,
       openViewAppBuilder,
       openViewApp,
+      addLauncherShortcut,
+      addViewAppShortcut,
+      addDashboardShortcut,
       openArtifact,
       openQueryDocument,
       openSqlData,
@@ -4133,7 +4344,8 @@ export function DesktopShell() {
     }),
     [
       activeConnectionId, hasRvbbit, launchers, schema, semanticOps, schemaLoading, busy, setBusy,
-      openTableFromFinder, openSqlInWindow, viewObjectDdl, openField, openViewAppBuilder, openViewApp, openArtifact,
+      openTableFromFinder, openSqlInWindow, viewObjectDdl, openField, openViewAppBuilder, openViewApp,
+      addLauncherShortcut, addViewAppShortcut, addDashboardShortcut, openArtifact,
       openQueryDocument, openSqlData, openRowInspector, openCsvImport, openExtensions, openRvbbitCache, openCache, openConnections,
       loadSchema, loadConnections, updatePayload, emitParam, subscribeParam,
       editRollupSpec, repivotWindow, probeColumnValues, activePalette, paletteOverrides,
@@ -4398,6 +4610,26 @@ export function DesktopShell() {
         </div>
       </div>
 
+      {/* User-pinned desktop shortcuts. These sit on the right so they do not
+          reshape the default launcher column. */}
+      {desktopShortcutItems.length > 0 ? (
+        <div className="pointer-events-none absolute top-12 right-2 bottom-3 z-0 flex flex-col flex-wrap content-end items-end gap-1">
+          <div className="pointer-events-auto contents">
+            {desktopShortcutItems.map((item) => (
+              <DesktopIcon
+                key={item.shortcut.id}
+                label={item.label}
+                sublabel={item.sublabel}
+                icon={item.icon}
+                iconColor={item.color}
+                onActivate={item.activate}
+                onContextMenu={(event) => openShortcutMenu(event, item)}
+              />
+            ))}
+          </div>
+        </div>
+      ) : null}
+
       {/* Workspace layers — all canvases (five scratch + the Scene slot)
           stay mounted at once so switching preserves window state and the
           slide animation has real windows to move. Inactive layers are
@@ -4538,7 +4770,10 @@ function BootOverlay() {
         <div className="relative flex w-full items-center gap-2">
           <span className="h-px flex-1 bg-chrome-border/70" />
           <span className="font-mono text-[10px] uppercase tracking-[0.35em] text-chrome-text/65">
-            rvbbit lens
+            {APP_NAME.toLowerCase()}
+          </span>
+          <span className="font-mono text-[10px] uppercase tracking-[0.22em] text-chrome-text/45">
+            v{APP_VERSION}
           </span>
           <span className="h-px flex-1 bg-chrome-border/70" />
         </div>
@@ -4557,7 +4792,7 @@ function EmptyStateOverlay({ onAddConnection }: { onAddConnection: () => void })
         <div className="mx-auto mb-4 grid h-14 w-14 place-items-center rounded-md border border-rvbbit-accent/40 bg-rvbbit-bg/60">
           <Database className="h-7 w-7 text-rvbbit-accent" />
         </div>
-        <h2 className="mb-1 text-lg font-semibold">Welcome to rvbbit-lens</h2>
+        <h2 className="mb-1 text-lg font-semibold">Welcome to {APP_NAME}</h2>
         <p className="mb-4 text-sm text-chrome-text">
           A local SQL desktop for Postgres. Add a connection to your local database — we&apos;ll
           opportunistically light up the rvbbit semantic surface if we find the extension.
@@ -4591,6 +4826,9 @@ interface WindowContext {
   openField: (schema: string, rel: string, col: string) => void
   openViewAppBuilder: (seed?: ViewAppBuilderPayload) => void
   openViewApp: (appId: string) => void
+  addLauncherShortcut: (launcher: LauncherItem) => void
+  addViewAppShortcut: (app: ViewApp) => void
+  addDashboardShortcut: (dashboard: DashboardRow) => void
   openArtifact: (artifactId: string) => void
   openQueryDocument: (payload: QueryDocumentPayload) => void
   openSqlData: (sql: string, title: string, options?: OpenSqlDataOptions) => void
@@ -4850,6 +5088,7 @@ function renderWindowContent(
           onOpen={ctx.openViewApp}
           onCreate={() => ctx.openViewAppBuilder()}
           onEdit={(id) => ctx.openViewAppBuilder({ appId: id })}
+          onCreateShortcut={ctx.addViewAppShortcut}
         />
       )
     case "view-app-builder":
@@ -5243,7 +5482,7 @@ function renderWindowContent(
     case "folder": {
       const folderId = (w.payload as FolderPayload).folderId
       const items = ctx.launchers.filter((l) => l.visible !== false && l.folder === folderId && (!l.rvbbit || ctx.hasRvbbit))
-      return <FolderWindow folderId={folderId} items={items} />
+      return <FolderWindow folderId={folderId} items={items} onCreateShortcut={ctx.addLauncherShortcut} />
     }
     case "capabilities":
       return (
@@ -5327,9 +5566,11 @@ function renderWindowContent(
       return (
         <DashboardsWindow
           key={ctx.activeConnectionId ?? "none"}
+          payload={w.payload as DashboardsPayload}
           activeConnectionId={ctx.activeConnectionId}
           hasRvbbit={ctx.hasRvbbit}
           onOpenSqlData={ctx.openSqlData}
+          onCreateShortcut={ctx.addDashboardShortcut}
         />
       )
     case "duck":
@@ -5488,9 +5729,8 @@ function iconForKind(kind: DesktopWindowState["kind"]) {
 }
 
 function useViewAppCount(): number {
-  const [count, setCount] = useState(0)
+  const [count, setCount] = useState(() => listViewApps().length)
   useEffect(() => {
-    setCount(listViewApps().length)
     const onStorage = () => setCount(listViewApps().length)
     window.addEventListener("storage", onStorage)
     window.addEventListener("rvbbit-lens:apps-changed", onStorage as EventListener)

@@ -1,8 +1,9 @@
 "use client"
 
-import { useState } from "react"
-import { Boxes, Table2, type LucideIcon } from "@/lib/icons"
+import { useState, type MouseEvent } from "react"
+import { Boxes, Plus, Table2, type LucideIcon } from "@/lib/icons"
 import { cn } from "@/lib/utils"
+import { ContextMenu, type ContextMenuState } from "./context-menu"
 import { DesktopIcon } from "./desktop-icon"
 
 /**
@@ -56,11 +57,35 @@ function saveFolderView(folderId: string, view: FolderView): void {
  * view (toggle in the toolbar, persisted per folder). Reused for grouped
  * launchers now and saved queries / arranged artifacts later.
  */
-export function FolderWindow({ folderId, items }: { folderId: string; items: LauncherItem[] }) {
+export function FolderWindow({
+  folderId,
+  items,
+  onCreateShortcut,
+}: {
+  folderId: string
+  items: LauncherItem[]
+  onCreateShortcut?: (item: LauncherItem) => void
+}) {
   const [view, setViewState] = useState<FolderView>(() => loadFolderView(folderId))
+  const [menu, setMenu] = useState<ContextMenuState | null>(null)
   const setView = (v: FolderView) => {
     setViewState(v)
     saveFolderView(folderId, v)
+  }
+  const openItemMenu = (event: MouseEvent, item: LauncherItem) => {
+    if (!onCreateShortcut) return
+    event.preventDefault()
+    event.stopPropagation()
+    setMenu({
+      x: event.clientX,
+      y: event.clientY,
+      items: [{
+        id: "add-shortcut",
+        label: "Add to Desktop",
+        icon: Plus,
+        onSelect: () => onCreateShortcut(item),
+      }],
+    })
   }
   return (
     <div className="flex h-full flex-col bg-doc-bg group-data-[focused=false]/window:bg-doc-bg/70">
@@ -87,6 +112,7 @@ export function FolderWindow({ folderId, items }: { folderId: string; items: Lau
                 icon={it.icon}
                 iconColor={it.color}
                 onActivate={it.activate}
+                onContextMenu={(event) => openItemMenu(event, it)}
               />
             ))}
           </div>
@@ -101,6 +127,7 @@ export function FolderWindow({ folderId, items }: { folderId: string; items: Lau
                   type="button"
                   onClick={it.activate}
                   onDoubleClick={it.activate}
+                  onContextMenu={(event) => openItemMenu(event, it)}
                   className="flex items-center gap-2.5 rounded px-2 py-1.5 text-left transition-colors hover:bg-foreground/[0.06] focus:bg-foreground/[0.08] focus:outline-none"
                 >
                   <span className="grid h-7 w-7 shrink-0 place-items-center rounded border border-icon-tile-border bg-icon-tile-bg">
@@ -121,6 +148,7 @@ export function FolderWindow({ folderId, items }: { folderId: string; items: Lau
           </div>
         )}
       </div>
+      <ContextMenu state={menu} onClose={() => setMenu(null)} />
     </div>
   )
 }

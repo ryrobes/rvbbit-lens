@@ -1005,6 +1005,10 @@ interface ChromeColors {
   hue: number
 }
 
+// Temporary visual test: keep per-kind accent icons/drop targets, but remove
+// the colored frame/ring around normal windows.
+const WINDOW_ACCENT_FRAME_ENABLED = false
+
 // Per-kind identity hue (oklch degrees). The hue is baked in here rather
 // than read from a --win-<kind>-h CSS var so a window's frame can never
 // fall back to an invalid color (which paints as white) if a token is
@@ -1071,10 +1075,19 @@ const KIND_HUE: Record<string, number> = {
 
 function buildChrome(hue: number): ChromeColors {
   const h = String(hue)
+  const border = WINDOW_ACCENT_FRAME_ENABLED
+    ? `oklch(var(--win-l) var(--win-c) ${h} / 0.34)`
+    : "color-mix(in oklch, var(--chrome-border) 68%, transparent)"
+  const ring = WINDOW_ACCENT_FRAME_ENABLED
+    ? `oklch(var(--win-l) var(--win-c) ${h} / 0.18)`
+    : "color-mix(in oklch, var(--chrome-border) 54%, transparent)"
+  const headerBorder = WINDOW_ACCENT_FRAME_ENABLED
+    ? `oklch(var(--win-l) var(--win-c) ${h} / 0.16)`
+    : "color-mix(in oklch, var(--chrome-border) 46%, transparent)"
   return {
-    border: `oklch(var(--win-l) var(--win-c) ${h} / 0.34)`,
-    ring: `oklch(var(--win-l) var(--win-c) ${h} / 0.18)`,
-    headerBorder: `oklch(var(--win-l) var(--win-c) ${h} / 0.16)`,
+    border,
+    ring,
+    headerBorder,
     icon: `oklch(var(--win-l-icon) var(--win-c) ${h} / 0.86)`,
     hue,
   }

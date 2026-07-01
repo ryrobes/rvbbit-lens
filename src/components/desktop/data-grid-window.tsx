@@ -1005,6 +1005,7 @@ export function DataGridWindow({
   const [explainState, setExplainState] = useState<ExplainState>({ kind: "idle" })
   const [explainBusy, setExplainBusy] = useState(false)
   const [activeTab, setActiveTab] = useState<NonNullable<DataPayload["view"]>["activeTab"]>(view.activeTab ?? (isSemanticProjection ? "explain" : payload.origin === "table" ? "rows" : "sql"))
+  const [rowsTransposed, setRowsTransposed] = useState<boolean>(view.rowsTransposed ?? false)
   const [sqlRailOpen, setSqlRailOpen] = useState<boolean>(view.sqlRailOpen ?? (payload.origin !== "table"))
   const [sqlRailWidthPx, setSqlRailWidthPx] = useState<number>(
     Math.max(SQL_RAIL_MIN_WIDTH, view.sqlRailWidthPx ?? SQL_RAIL_DEFAULT_WIDTH),
@@ -1133,11 +1134,11 @@ export function DataGridWindow({
     const handle = setTimeout(() => {
       onChangePayloadRef.current((p) => ({
         ...p,
-        view: { ...(p.view ?? {}), sqlDraft: draftSql, sqlRailOpen, sqlRailWidthPx, activeTab, queryMode, askDraft },
+        view: { ...(p.view ?? {}), sqlDraft: draftSql, sqlRailOpen, sqlRailWidthPx, activeTab, rowsTransposed, queryMode, askDraft },
       }))
     }, 250)
     return () => clearTimeout(handle)
-  }, [draftSql, sqlRailOpen, sqlRailWidthPx, activeTab, queryMode, askDraft])
+  }, [draftSql, sqlRailOpen, sqlRailWidthPx, activeTab, rowsTransposed, queryMode, askDraft])
 
   const clampSqlRailWidth = useCallback((rawWidth: number) => {
     const containerWidth = rootRef.current?.getBoundingClientRect().width ?? 0
@@ -2931,6 +2932,8 @@ export function DataGridWindow({
               <ResultGrid
                 columns={result.columns}
                 rows={result.rows}
+                transposed={rowsTransposed}
+                onTransposedChange={setRowsTransposed}
                 columnDragSource={columnDragSource}
                 activeParams={blockParams}
                 onOpenRow={({ row, rowIndex, column }) => {
@@ -2991,6 +2994,10 @@ export function DataGridWindow({
                     result={result}
                     userSpec={payload.chartSpec ?? null}
                     onChangeUserSpec={(spec) => onChangePayload((p) => ({ ...p, chartSpec: spec }))}
+                    chartRenderer={payload.chartRenderer}
+                    onChangeChartRenderer={(renderer) => onChangePayload((p) => ({ ...p, chartRenderer: renderer }))}
+                    chartTheme={payload.chartTheme ?? null}
+                    onChangeChartTheme={(theme) => onChangePayload((p) => ({ ...p, chartTheme: theme }))}
                     seedSpec={chartSeedSpec}
                     activeParams={blockParams}
                     onEmitParam={(field, value, dataTypeId) => {

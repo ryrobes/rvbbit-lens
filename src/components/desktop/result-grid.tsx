@@ -1,6 +1,6 @@
 "use client"
 
-import { useMemo, useRef, useState } from "react"
+import { useEffect, useMemo, useRef, useState } from "react"
 import { useVirtualizer } from "@tanstack/react-virtual"
 import { ClipboardCopy, Eye, GripVertical, Search, Table2 } from "@/lib/icons"
 import type { QueryResultColumn } from "@/lib/db/types"
@@ -26,6 +26,9 @@ interface ResultGridProps {
   columns: QueryResultColumn[]
   rows: Record<string, unknown>[]
   className?: string
+  /** Rotate the native grid so fields are vertical and result rows become columns. */
+  transposed?: boolean
+  onTransposedChange?: (next: boolean) => void
   /** When provided, headers become draggable and emit a column-drag payload. */
   columnDragSource?: ColumnDragSource | null
   /** When provided, clicking a cell emits a param. cascade=true (plain/⌘) is a
@@ -61,11 +64,15 @@ interface ResultGridProps {
 
 const ROW_HEIGHT = 24
 const MIN_COL_WIDTH = 80
+const TRANSPOSED_FIELD_KEY = "__rvbbit_transposed_field"
+const TRANSPOSED_ROW_WIDTH = 152
 
 export function ResultGrid({
   columns,
   rows,
   className,
+  transposed = false,
+  onTransposedChange,
   columnDragSource,
   onEmitCellParam,
   activeParams,
@@ -86,6 +93,10 @@ export function ResultGrid({
   // multi-select, and width-resize are authoring affordances — turn them off.
   const present = usePresentMode()
   const dragEnabled = !!columnDragSource && !present
+
+  useEffect(() => {
+    parentRef.current?.scrollTo({ left: 0, top: 0 })
+  }, [transposed])
 
   // Per-column lookup of values that are an active param for this block, so the
   // matching cells can be highlighted (cascade = the live filter; otherwise a
@@ -190,16 +201,16 @@ export function ResultGrid({
   }, [colWidths, columns, rows])
 
   // Rows actually shown: filtered (any cell contains the text) then sorted.
+  // In transposed mode, a field-name filter keeps all row columns visible and
+  // narrows the vertical field list instead.
   const viewRows = useMemo(() => {
     let out = rows
     const f = filter.trim().toLowerCase()
     if (f) {
-      out = out.filter((r) =>
-        columns.some((c) => {
-          const v = r[c.name]
-          return v != null && String(formatCellValue(v)).toLowerCase().includes(f)
-        }),
-      )
+      const matchedFieldName = transposed && columns.some((c) => columnMatchesFilter(c, f))
+      if (!matchedFieldName) {
+        out = out.filter((r) => columns.some((c) => cellMatchesFilter(r[c.name], f)))
+      }
     }
     if (sort) {
       const { col, dir } = sort
@@ -220,20 +231,39 @@ export function ResultGrid({
       })
     }
     return out
-  }, [rows, columns, filter, sort])
+  }, [rows, columns, filter, sort, transposed])
+
+  const transposedColumns = useMemo(() => {
+    if (!transposed) return columns
+    const f = filter.trim().toLowerCase()
+    if (!f) return columns
+    return columns.filter((c) => columnMatchesFilter(c, f) || viewRows.some((r) => cellMatchesFilter(r[c.name], f)))
+  }, [columns, filter, transposed, viewRows])
+
+  const fieldColumnWidth = colWidths[TRANSPOSED_FIELD_KEY] ?? estimateFieldWidth(columns)
 
   const virtualizer = useVirtualizer({
-    count: viewRows.length,
+    count: transposed ? transposedColumns.length : viewRows.length,
     getScrollElement: () => parentRef.current,
     estimateSize: () => ROW_HEIGHT,
     overscan: 16,
+  })
+
+  const rowColumnVirtualizer = useVirtualizer({
+    horizontal: true,
+    count: transposed ? viewRows.length : 0,
+    getScrollElement: () => parentRef.current,
+    estimateSize: () => TRANSPOSED_ROW_WIDTH,
+    overscan: 8,
   })
 
   function startResize(name: string, e: React.PointerEvent<HTMLDivElement>) {
     e.preventDefault()
     e.stopPropagation()
     const startX = e.clientX
-    const startW = colWidths[name] ?? estimateWidth(columns.find((c) => c.name === name)!, rows)
+    const startW = colWidths[name] ?? (name === TRANSPOSED_FIELD_KEY
+      ? estimateFieldWidth(columns)
+      : estimateWidth(columns.find((c) => c.name === name)!, rows))
     function onMove(ev: PointerEvent) {
       const next = Math.max(MIN_COL_WIDTH, startW + (ev.clientX - startX))
       setColWidths((w) => ({ ...w, [name]: next }))
@@ -255,6 +285,15 @@ export function ResultGrid({
   }
 
   const totalWidth = columnWidths.reduce((a, b) => a + b, 0)
+  const transposedRowsWidth = rowColumnVirtualizer.getTotalSize()
+  const transposedTotalWidth = fieldColumnWidth + transposedRowsWidth
+  const rowVirtualItems = rowColumnVirtualizer.getVirtualItems()
+
+  const countLabel = transposed
+    ? (filter.trim() || sort
+      ? `${transposedColumns.length} fields × ${viewRows.length} rows`
+      : `${columns.length} fields × ${rows.length} rows`)
+    : (filter.trim() || sort ? `${viewRows.length} of ${rows.length}` : `${rows.length} ${rows.length === 1 ? "row" : "rows"}`)
 
   function openCellContextMenu(
     e: React.MouseEvent<HTMLDivElement>,
@@ -299,18 +338,190 @@ export function ResultGrid({
         <input
           value={filter}
           onChange={(e) => setFilter(e.target.value)}
-          placeholder="filter rows…"
+          placeholder={transposed ? "filter fields or values…" : "filter rows…"}
           spellCheck={false}
           className="h-5 min-w-0 flex-1 bg-transparent text-[11px] text-foreground outline-none placeholder:text-chrome-text/35"
         />
         <span className="shrink-0 text-[10px] tabular-nums text-chrome-text/45">
-          {filter.trim() || sort ? `${viewRows.length} of ${rows.length}` : `${rows.length} ${rows.length === 1 ? "row" : "rows"}`}
+          {countLabel}
         </span>
+        {onTransposedChange && !present ? (
+          <span className="inline-flex shrink-0 overflow-hidden rounded border border-chrome-border/60 text-[10px]">
+            <button
+              type="button"
+              onClick={() => onTransposedChange(false)}
+              title="Show rows as rows"
+              className={cn(
+                "px-1.5 py-0.5 transition-colors",
+                !transposed ? "bg-main/15 text-foreground" : "text-chrome-text/55 hover:text-foreground",
+              )}
+            >
+              Rows
+            </button>
+            <button
+              type="button"
+              onClick={() => onTransposedChange(true)}
+              title="Show fields on the left and rows as columns"
+              className={cn(
+                "border-l border-chrome-border/50 px-1.5 py-0.5 transition-colors",
+                transposed ? "bg-main/15 text-foreground" : "text-chrome-text/55 hover:text-foreground",
+              )}
+            >
+              Fields
+            </button>
+          </span>
+        ) : null}
       </div>
       <div
         ref={parentRef}
         className="flex flex-1 flex-col overflow-auto bg-doc-bg group-data-[focused=false]/window:bg-doc-bg/70"
       >
+      {transposed ? (
+        <>
+      <div className="sticky top-0 z-20 flex border-b border-chrome-border bg-chrome-bg/95 backdrop-blur" style={{ minWidth: transposedTotalWidth }}>
+        <div
+          className="sticky left-0 z-30 flex items-center border-r border-chrome-border/70 bg-chrome-bg/95 px-2 py-1 text-[11px] uppercase tracking-wider text-chrome-text"
+          style={{ width: fieldColumnWidth }}
+        >
+          <span className="truncate text-foreground">Field</span>
+          {present ? null : (
+            <div
+              onPointerDown={(e) => startResize(TRANSPOSED_FIELD_KEY, e)}
+              className="absolute right-0 top-0 h-full w-1.5 cursor-col-resize hover:bg-main/50"
+            />
+          )}
+        </div>
+        <div className="relative h-full" style={{ width: transposedRowsWidth }}>
+          {rowVirtualItems.map((vcol) => {
+            const row = viewRows[vcol.index]
+            const sourceIndex = rows.indexOf(row)
+            return (
+              <div
+                key={vcol.key}
+                className="absolute top-0 flex h-full items-center border-r border-chrome-border/60 px-2 py-1 text-[11px] uppercase tracking-wider text-chrome-text"
+                style={{ transform: `translateX(${vcol.start}px)`, width: vcol.size }}
+                title={`Result row ${sourceIndex >= 0 ? sourceIndex + 1 : vcol.index + 1}`}
+              >
+                <span className="truncate text-foreground">row {sourceIndex >= 0 ? sourceIndex + 1 : vcol.index + 1}</span>
+              </div>
+            )
+          })}
+        </div>
+      </div>
+
+      <div style={{ height: virtualizer.getTotalSize(), minWidth: transposedTotalWidth }} className="relative">
+        {virtualizer.getVirtualItems().map((vrow) => {
+          const c = transposedColumns[vrow.index]
+          if (!c) return null
+          const role = columnDragSource?.columns.find((col) => col.name === c.name)?.role
+          const isSelected = selectedHeaders.has(c.name)
+          const isNumeric = isNumericType(c)
+          return (
+            <div
+              key={vrow.key}
+              className={cn(
+                "absolute left-0 right-0 flex border-b border-chrome-border/30",
+                vrow.index % 2 === 0 ? "bg-transparent" : "bg-foreground/[0.025]",
+              )}
+              style={{ transform: `translateY(${vrow.start}px)`, height: ROW_HEIGHT, minWidth: transposedTotalWidth }}
+            >
+              <div
+                draggable={dragEnabled}
+                onDragStart={(e) => onHeaderDragStart(e, c.name)}
+                onDragEnd={() => setActiveColumnDragSource(null)}
+                onClick={(e) => onHeaderClick(e, c.name)}
+                className={cn(
+                  "group sticky left-0 z-10 flex select-none items-center border-r border-chrome-border/70 bg-doc-bg px-2 py-0.5 text-[12px] group-data-[focused=false]/window:bg-doc-bg/90",
+                  dragEnabled && "cursor-grab active:cursor-grabbing hover:bg-foreground/[0.05]",
+                  isSelected && "bg-main/15 text-foreground",
+                )}
+                style={{ width: fieldColumnWidth }}
+                title={dragEnabled ? "Drag onto canvas to GROUP BY this field. Cmd/Ctrl-click to multi-select." : undefined}
+              >
+                {dragEnabled ? (
+                  <GripVertical className={cn("mr-1 h-3 w-3 shrink-0", role === "metric" ? "text-chart-3" : "text-main/70")} />
+                ) : null}
+                <span className="min-w-0 flex-1 truncate text-foreground">{c.name}</span>
+                <span className="ml-2 truncate text-[10px] text-chrome-text/70">
+                  {c.dataTypeName ?? `oid:${c.dataTypeId}`}
+                </span>
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    cycleSort(c.name)
+                  }}
+                  title="Sort row columns by this field"
+                  className={cn(
+                    "ml-1 shrink-0 px-0.5 text-[10px] leading-none hover:text-foreground",
+                    sort?.col === c.name
+                      ? "text-main"
+                      : "text-chrome-text/40 opacity-0 group-hover:opacity-100",
+                  )}
+                >
+                  {sort?.col === c.name ? (sort.dir === "asc" ? "▲" : "▼") : "↕"}
+                </button>
+              </div>
+              <div className="relative" style={{ width: transposedRowsWidth }}>
+                {rowVirtualItems.map((vcol) => {
+                  const row = viewRows[vcol.index]
+                  const value = row?.[c.name]
+                  const hl = paramHighlights.get(c.name)
+                  const picked = hl ? hl.values.has(String(value)) : false
+                  const crossPicked = crossHighlights.get(c.name)?.has(String(value)) ?? false
+                  return (
+                    <div
+                      key={`${c.name}:${vcol.key}`}
+                      onClick={(e) => {
+                        if (onCellFilter) {
+                          e.preventDefault()
+                          e.stopPropagation()
+                          onCellFilter(c, value)
+                          return
+                        }
+                        if (!onEmitCellParam) return
+                        e.preventDefault()
+                        e.stopPropagation()
+                        const cascade = e.metaKey || e.ctrlKey
+                        onEmitCellParam(c.name, value, c.dataTypeId, "in", cascade, {
+                          schema: c.sourceSchema,
+                          table: c.sourceTable,
+                          column: c.sourceColumn,
+                        })
+                      }}
+                      onContextMenu={(e) => openCellContextMenu(e, row, rows.indexOf(row), c)}
+                      className={cn(
+                        "absolute top-0 h-full truncate border-r border-chrome-border/30 px-2 py-0.5 text-[12px]",
+                        isNumeric ? "text-right tabular-nums" : "text-left",
+                        value == null ? "text-chrome-text/40 italic" : "text-foreground",
+                        (onEmitCellParam || onCellFilter) && "cursor-pointer hover:bg-main/10",
+                        picked &&
+                          (hl!.cascade
+                            ? "bg-main/25 text-foreground"
+                            : "bg-main/15 text-foreground ring-1 ring-inset ring-main/55"),
+                        crossPicked && "bg-rvbbit-accent/20 text-foreground ring-1 ring-inset ring-rvbbit-accent/60",
+                      )}
+                      style={{ transform: `translateX(${vcol.start}px)`, width: vcol.size }}
+                      title={
+                        onCellFilter
+                          ? `${value == null ? "null" : String(formatCellValue(value))} — click to filter the dashboard`
+                          : onEmitCellParam
+                            ? `${value == null ? "null" : String(formatCellValue(value))} — click to select · ⌘ filter`
+                            : value == null ? "null" : String(formatCellValue(value))
+                      }
+                    >
+                      {value == null ? "∅" : formatCellValue(value)}
+                    </div>
+                  )
+                })}
+              </div>
+            </div>
+          )
+        })}
+      </div>
+        </>
+      ) : (
+        <>
       <div className="sticky top-0 z-10 flex border-b border-chrome-border bg-chrome-bg/95 backdrop-blur" style={{ minWidth: totalWidth }}>
         {columns.map((c, i) => {
           const role = columnDragSource?.columns.find((col) => col.name === c.name)?.role
@@ -438,9 +649,22 @@ export function ResultGrid({
           )
         })}
       </div>
+        </>
+      )}
       </div>
       <ContextMenu state={contextMenu} onClose={() => setContextMenu(null)} />
     </div>
+  )
+}
+
+function cellMatchesFilter(value: unknown, filter: string): boolean {
+  return value != null && String(formatCellValue(value)).toLowerCase().includes(filter)
+}
+
+function columnMatchesFilter(column: QueryResultColumn, filter: string): boolean {
+  return (
+    column.name.toLowerCase().includes(filter) ||
+    (column.dataTypeName ?? `oid:${column.dataTypeId}`).toLowerCase().includes(filter)
   )
 }
 
@@ -467,6 +691,11 @@ function estimateWidth(column: QueryResultColumn, rows: Record<string, unknown>[
     return Math.max(max, len)
   }, column.name.length)
   return Math.min(360, Math.max(MIN_COL_WIDTH, sampleMax * 7 + 24))
+}
+
+function estimateFieldWidth(columns: QueryResultColumn[]): number {
+  const max = columns.reduce((n, c) => Math.max(n, c.name.length + (c.dataTypeName?.length ?? 0) + 4), 12)
+  return Math.min(360, Math.max(180, max * 7 + 28))
 }
 
 async function copyToClipboard(text: string) {

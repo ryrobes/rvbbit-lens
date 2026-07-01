@@ -3,7 +3,7 @@ import "./globals.css"
 import { GOOGLE_FONTS_HREF } from "@/lib/desktop/fonts"
 
 export const metadata: Metadata = {
-  title: "rvbbit-lens",
+  title: "Data Rabbit",
   description: "Local-first SQL desktop for Postgres + rvbbit",
 }
 

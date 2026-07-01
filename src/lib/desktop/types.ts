@@ -210,6 +210,22 @@ export interface ArrangeTile {
   w: number
 }
 
+export type ChartRendererKind = "vega-lite" | "flint-vega-lite" | "flint-echarts" | "flint-chartjs"
+
+export interface ChartThemeOverrides {
+  palette?: string[]
+  accent?: string
+  background?: string
+  foreground?: string
+  axisColor?: string
+  gridColor?: string
+  grid?: boolean
+  legend?: boolean
+  labels?: boolean
+  points?: boolean
+  roundedBars?: boolean
+}
+
 export interface DataPayload {
   kind?: "data"
   title: string
@@ -282,6 +298,10 @@ export interface DataPayload {
    * null and the auto-inferrer takes over again.
    */
   chartSpec?: Record<string, unknown> | null
+  /** Renderer used by the Chart tab. The spec remains Vega-Lite-ish for authoring. */
+  chartRenderer?: ChartRendererKind
+  /** Per-chart presentation overrides layered over the active Lens theme. */
+  chartTheme?: ChartThemeOverrides | null
   /**
    * How the "View" tab renders this block: a Vega chart (default) or an
    * interactive control that publishes a pick param. `controlField` is the
@@ -625,6 +645,7 @@ export type RollupOp =
 
 export interface DataWindowViewState {
   activeTab?: "rows" | "profile" | "chart" | "sql" | "explain" | "steps"
+  rowsTransposed?: boolean
   sqlRailOpen?: boolean
   sqlRailWidthPx?: number
   sqlDraft?: string

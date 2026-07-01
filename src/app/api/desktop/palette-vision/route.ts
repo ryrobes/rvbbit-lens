@@ -117,7 +117,7 @@ export async function POST(req: Request) {
   const apiKey = specialist.auth_header_env ? process.env[specialist.auth_header_env] : null
   if (specialist.auth_header_env && !apiKey) {
     return NextResponse.json(
-      { error: `env var ${specialist.auth_header_env} is not set on the rvbbit-lens server` },
+      { error: `env var ${specialist.auth_header_env} is not set on the Data Rabbit server` },
       { status: 503 },
     )
   }

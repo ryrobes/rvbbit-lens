@@ -4,4 +4,4 @@ import pkg from "../../package.json"
 export const APP_VERSION: string = pkg.version
 
 /** Product name shown in the menu bar / About dialog. */
-export const APP_NAME = "rvbbit-lens"
+export const APP_NAME = "Data Rabbit"
