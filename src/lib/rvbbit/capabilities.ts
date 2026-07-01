@@ -606,19 +606,37 @@ function normalizeCatalogEntry(e: CatalogEntry | Record<string, unknown>): Catal
  */
 export async function fetchCatalog(connectionId?: string | null): Promise<{
   doc: CatalogDoc | null
-  source?: "db" | "file"
+  source?: "db" | "db+file" | "file"
   error?: string
 }> {
+  let dbDoc: CatalogDoc | null = null
+  let dbError: string | undefined
   if (connectionId) {
     const res = await runQuery(connectionId, CAPABILITY_CATALOG_SQL)
     if (res.ok && res.rows.length > 0) {
-      return {
-        doc: { schema_version: 1, capabilities: res.rows.map(parseCatalogRow) },
-        source: "db",
-      }
+      dbDoc = { schema_version: 1, capabilities: res.rows.map(parseCatalogRow) }
+    } else if (!res.ok) {
+      dbError = res.error
     }
     // res not ok (table missing) or empty → fall through to the JSON file.
   }
+
+  const fileResult = await fetchFileCatalog()
+  if (dbDoc) {
+    if (fileResult.doc) {
+      const merged = mergeCatalogDocs(dbDoc, fileResult.doc)
+      return {
+        doc: merged.doc,
+        source: merged.addedFileRows > 0 ? "db+file" : "db",
+      }
+    }
+    return { doc: dbDoc, source: "db" }
+  }
+  if (fileResult.doc) return { doc: fileResult.doc, source: "file" }
+  return { doc: null, error: fileResult.error ?? dbError ?? "failed to load catalog" }
+}
+
+async function fetchFileCatalog(): Promise<{ doc: CatalogDoc | null; error?: string }> {
   try {
     const res = await fetch("/api/rvbbit/capabilities?action=catalog")
     const body = (await res.json()) as { ok: boolean; doc?: CatalogDoc; error?: string }
@@ -632,10 +650,36 @@ export async function fetchCatalog(connectionId?: string | null): Promise<{
               .filter((c) => c.catalog_visibility === "public"),
           }
         : null,
-      source: "file",
     }
   } catch (e) {
     return { doc: null, error: e instanceof Error ? e.message : String(e) }
+  }
+}
+
+function mergeCatalogDocs(primary: CatalogDoc, fallback: CatalogDoc): { doc: CatalogDoc; addedFileRows: number } {
+  const byId = new Map<string, CatalogEntry>()
+  for (const entry of primary.capabilities) {
+    if (entry.id) byId.set(entry.id, entry)
+  }
+  let addedFileRows = 0
+  for (const entry of fallback.capabilities) {
+    if (!entry.id || byId.has(entry.id)) continue
+    byId.set(entry.id, entry)
+    addedFileRows += 1
+  }
+  const capabilities = [...byId.values()].sort(
+    (a, b) =>
+      a.kind.localeCompare(b.kind) ||
+      a.name.localeCompare(b.name) ||
+      a.title.localeCompare(b.title),
+  )
+  return {
+    doc: {
+      schema_version: Math.max(primary.schema_version ?? 1, fallback.schema_version ?? 1),
+      generated_at: primary.generated_at ?? fallback.generated_at,
+      capabilities,
+    },
+    addedFileRows,
   }
 }
 

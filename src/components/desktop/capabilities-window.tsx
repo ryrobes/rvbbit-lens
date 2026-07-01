@@ -112,7 +112,7 @@ export function CapabilitiesWindow({
   const [updatedAt, setUpdatedAt] = useState(0)
   const [warrenAvail, setWarrenAvail] = useState<WarrenAvailability | null>(null)
   const [warrenInventory, setWarrenInventory] = useState<WarrenInventoryRow[]>([])
-  const [catalogOrigin, setCatalogOrigin] = useState<"db" | "file" | null>(null)
+  const [catalogOrigin, setCatalogOrigin] = useState<"db" | "db+file" | "file" | null>(null)
   const [selectedSources, setSelectedSources] = useState<Set<string>>(() => new Set())
   const [importOpen, setImportOpen] = useState(false)
   const [importUrl, setImportUrl] = useState("")
@@ -387,7 +387,13 @@ export function CapabilitiesWindow({
         {catalogOrigin ? (
           <span
             className="rounded bg-foreground/[0.05] px-1.5 py-0.5 text-[9px] uppercase tracking-wider text-chrome-text/60"
-            title={catalogOrigin === "db" ? "Browsing rvbbit.capability_catalog" : "Fallback catalog.json"}
+            title={
+              catalogOrigin === "db"
+                ? "Browsing rvbbit.capability_catalog"
+                : catalogOrigin === "db+file"
+                  ? "Browsing rvbbit.capability_catalog plus packaged catalog.json entries missing from the DB"
+                  : "Fallback catalog.json"
+            }
           >
             {catalogOrigin}
           </span>

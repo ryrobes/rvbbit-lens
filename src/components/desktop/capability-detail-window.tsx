@@ -429,7 +429,7 @@ export function CapabilityDetailWindow({
             warrenAvail={warrenAvail}
             setMode={setInstallMode}
             activeConnectionId={activeConnectionId}
-            catalogId={catalog!.id}
+            catalogId={catalog!.catalog_source === "file" ? null : catalog!.id}
             manifestPath={catalog!.manifest_path}
             manifest={manifest!}
             knobs={knobs!}
@@ -1876,7 +1876,7 @@ function InstallTabDispatcher({
   warrenAvail: WarrenAvailability | null
   setMode: (m: "warren" | "local") => void
   activeConnectionId: string | null
-  catalogId: string
+  catalogId: string | null
   manifestPath: string
   manifest: Manifest
   knobs: InstallKnobs
