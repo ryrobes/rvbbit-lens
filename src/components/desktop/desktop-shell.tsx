@@ -30,6 +30,7 @@ import {
   Quote,
   Rocket,
   Search,
+  Shield,
   Sparkles,
   Settings2,
   Table2,
@@ -70,6 +71,7 @@ import { QueryDocumentWindow } from "./query-document-window"
 import { PaletteWindow } from "./palette-window"
 import { CommandPalette, type PaletteGroup, type PaletteItem } from "./command-palette"
 import { PgMonitorWindow } from "./pg-monitor-window"
+import { PostgresAdminWindow } from "./postgres-admin-window"
 import { NotificationToasts } from "./notification-toasts"
 import { NotificationCenterWindow } from "./notification-center-window"
 import { OperatorsWindow } from "./operators-window"
@@ -196,6 +198,7 @@ import type {
   WarrenJobDetailPayload,
   PalettePayload,
   PgMonitorPayload,
+  PostgresAdminPayload,
   QueryDocumentPayload,
   ReactiveBlockState,
   SemanticArg,
@@ -2088,6 +2091,18 @@ export function DesktopShell() {
       title: "Postgres Monitor",
       x: 120, y: 80, width: 940, height: 720,
       payload: { kind: "pg-monitor" } satisfies PgMonitorPayload,
+    })
+  }, [focus, openWindow, liveWindows])
+
+  const openPostgresAdmin = useCallback((initialTab?: PostgresAdminPayload["initialTab"]) => {
+    const existing = liveWindows().find((w) => w.kind === "postgres-admin")
+    if (existing) return focus(existing.id)
+    openWindow({
+      id: randomUUID(),
+      kind: "postgres-admin",
+      title: "Postgres Admin",
+      x: 140, y: 90, width: 980, height: 720,
+      payload: { kind: "postgres-admin", initialTab } satisfies PostgresAdminPayload,
     })
   }, [focus, openWindow, liveWindows])
 
@@ -4025,6 +4040,7 @@ export function DesktopShell() {
     { id: "system-objects", label: "System Objects", icon: Layers, color: "var(--brand-system-objects)", description: "Tables, indexes, roles, activity", activate: () => openSystemObjects("tables"), folder: "system" },
     { id: "extensions", label: "Extensions", icon: Settings2, color: "var(--brand-extensions)", description: "Installed Postgres extensions", activate: openExtensions, folder: "system" },
     { id: "monitor", label: "Monitor", icon: Activity, color: "var(--brand-pg-monitor)", description: "Live server activity & stats", activate: openPgMonitor, folder: "system" },
+    { id: "postgres-admin", label: "Postgres Admin", icon: Shield, color: "var(--brand-pg-monitor)", description: "Locks, grants, indexes, objects & backup plans", activate: () => openPostgresAdmin(), folder: "system" },
     { id: "cache", label: "Cache", icon: Database, color: "var(--brand-cache)", description: "Compiler & operator result caches", activate: openCache, folder: "system", rvbbit: true },
     { id: "receipts", label: "Receipts", icon: FileText, color: "var(--brand-rvbbit-cache)", sublabel: rvbbitVersion ?? undefined, description: "Per-call LLM receipts & audit", activate: openRvbbitCache, folder: "system", rvbbit: true },
     { id: "costs", label: "Costs", icon: DollarSign, color: "var(--brand-costs)", description: "LLM/sidecar spend breakdown", activate: () => openCosts(), folder: "system", rvbbit: true },
@@ -4064,7 +4080,7 @@ export function DesktopShell() {
   ], [
     viewAppCount, schema, rvbbitVersion,
     openFinder, openSqlScratch, openViewApps, openConnections, openDataSearch, openSystemLearning, openMcpIncoming,
-    openSystemObjects, openExtensions, openPgMonitor, openCache, openRvbbitCache,
+    openSystemObjects, openExtensions, openPgMonitor, openPostgresAdmin, openCache, openRvbbitCache,
     openCosts, openAgentMessages, openSyncMirror, openOperators, openModelSettings, openSpecialists, openRouting,
     openMcpServers, openCapabilities, openHfDeploy, openWarren, openModelStudio,
     openDuck, openDagster, dagsterDetected, openMetricCatalog, openMetricCreator, openMetricInspector, openVizBlocks, openMetricBoard, openDashboards, openAlerts, openBrain,
@@ -4442,6 +4458,7 @@ export function DesktopShell() {
         canRunSqlBlocksOnScreen={canRunSqlBlocksOnScreen}
         onOpenSystemObjects={() => openSystemObjects("tables")}
         onOpenPgMonitor={openPgMonitor}
+        onOpenPostgresAdmin={() => openPostgresAdmin()}
         onOpenNotifications={openNotifications}
         onOpenExtensions={openExtensions}
         onOpenRvbbitCache={openRvbbitCache}
@@ -5150,6 +5167,14 @@ function renderWindowContent(
           workspaceActive={ctx.workspaceActive}
         />
       )
+    case "postgres-admin":
+      return (
+        <PostgresAdminWindow
+          payload={w.payload as PostgresAdminPayload}
+          activeConnectionId={ctx.activeConnectionId}
+          onOpenSql={ctx.openSqlInWindow}
+        />
+      )
     case "operators":
       return (
         <OperatorsWindow
@@ -5660,6 +5685,7 @@ function iconForKind(kind: DesktopWindowState["kind"]) {
     case "query-document": return FileCode2
     case "palette": return PaletteIcon
     case "pg-monitor": return Activity
+    case "postgres-admin": return Shield
     case "notifications": return Bell
     case "operators":
     case "operator-flow":

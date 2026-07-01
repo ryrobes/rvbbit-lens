@@ -1032,6 +1032,7 @@ const KIND_HUE: Record<string, number> = {
   connections: 290,
   palette: 320,
   "pg-monitor": 150,
+  "postgres-admin": 150,
   duck: 210,
   routing: 255,
   operators: 168,

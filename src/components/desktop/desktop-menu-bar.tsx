@@ -38,6 +38,7 @@ interface DesktopMenuBarProps {
   canRunSqlBlocksOnScreen: boolean
   onOpenSystemObjects: () => void
   onOpenPgMonitor: () => void
+  onOpenPostgresAdmin: () => void
   onOpenNotifications: () => void
   onOpenExtensions: () => void
   onOpenRvbbitCache: () => void
@@ -143,6 +144,7 @@ export function DesktopMenuBar({
   canRunSqlBlocksOnScreen,
   onOpenSystemObjects,
   onOpenPgMonitor,
+  onOpenPostgresAdmin,
   onOpenNotifications,
   onOpenExtensions,
   onOpenRvbbitCache,
@@ -244,6 +246,7 @@ export function DesktopMenuBar({
   const databaseItems: MenuEntry[] = [
     { label: "Connections...", onClick: onOpenConnections },
     { label: "Postgres Monitor", onClick: onOpenPgMonitor },
+    { label: "Postgres Admin", onClick: onOpenPostgresAdmin },
     { label: "Notification Center", onClick: onOpenNotifications },
     { label: "System Objects", onClick: onOpenSystemObjects },
     { label: "Extensions", onClick: onOpenExtensions },

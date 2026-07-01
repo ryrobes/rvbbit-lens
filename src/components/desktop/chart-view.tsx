@@ -112,8 +112,8 @@ export function ChartView({
 
   const baseSpec = userSpec ?? seedSpec ?? inferred?.spec ?? null
   const displaySpec = useMemo(
-    () => applyChartSpecPresentation(baseSpec, chartTheme),
-    [baseSpec, chartTheme],
+    () => applyChartSpecPresentation(baseSpec, chartTheme, result.rows),
+    [baseSpec, chartTheme, result.rows],
   )
   const baseXField = useMemo(
     () => vegaEncodingField(baseSpec, "x") || inferred?.xField || "",
@@ -351,7 +351,7 @@ export function ChartView({
     try {
       if (chartRenderer === "flint-vega-lite") {
         const raw = assembleVegaLite(flintBuild.input) as Record<string, unknown>
-        const themedRaw = applyChartSpecPresentation(raw, chartTheme) ?? raw
+        const themedRaw = applyChartSpecPresentation(raw, chartTheme, result.rows) ?? raw
         return {
           kind: "vega" as const,
           spec: fitFlintVegaSpec(themedRaw, themeConfig, chartTheme),
@@ -374,7 +374,7 @@ export function ChartView({
       console.warn("[ChartView] Flint compile failed", error)
       return { kind: "error" as const, message: error instanceof Error ? error.message : String(error) }
     }
-  }, [chartRenderer, chartTheme, flintBuild, themeConfig, wantsFlint])
+  }, [chartRenderer, chartTheme, flintBuild, result.rows, themeConfig, wantsFlint])
   const canRenderFlint = !!flintCompiled && flintCompiled.kind !== "error"
   const rendererStatus = wantsFlint && !canRenderFlint ? "fallback" : null
 
@@ -537,6 +537,8 @@ export function ChartView({
         <ChartThemePanel
           theme={chartTheme}
           config={themeConfig}
+          spec={baseSpec}
+          rows={result.rows}
           onChange={onChangeChartTheme}
         />
       ) : null}
@@ -664,14 +666,24 @@ function ChartHeader({
 function ChartThemePanel({
   theme,
   config,
+  spec,
+  rows,
   onChange,
 }: {
   theme: ChartThemeOverrides | null
   config: Record<string, unknown>
+  spec: Record<string, unknown> | null
+  rows: Record<string, unknown>[]
   onChange: (theme: ChartThemeOverrides | null) => void
 }) {
   const defaults = themeDefaultsFromConfig(config)
   const palette = normalizedPalette(theme?.palette, defaults.palette)
+  const colorField = chartColorField(spec)
+  const colorValues = useMemo(() => collectCategoryValues(rows, colorField), [colorField, rows])
+  const mappingRows = mergeCategoryMappingRows(colorValues, theme, palette)
+  const [presetName, setPresetName] = useState("")
+  const [selectedPreset, setSelectedPreset] = useState("")
+  const [savedPresets, setSavedPresets] = useState<ChartThemePreset[]>(() => readChartThemePresets())
   const update = (patch: Partial<ChartThemeOverrides>) => {
     onChange(cleanChartTheme({ ...(theme ?? {}), ...patch }))
   }
@@ -682,6 +694,39 @@ function ChartThemePanel({
   }
   const setDefaultedToggle = (key: keyof Pick<ChartThemeOverrides, "grid" | "legend" | "labels" | "points" | "roundedBars">, checked: boolean, defaultValue: boolean) => {
     update({ [key]: checked === defaultValue ? undefined : checked })
+  }
+  const setCategoryColor = (category: string, color: string) => {
+    const currentDomain = theme?.colorDomain ?? []
+    const currentRange = theme?.colorRange ?? []
+    const index = currentDomain.indexOf(category)
+    const nextDomain = index >= 0 ? [...currentDomain] : [...currentDomain, category]
+    const nextRange = index >= 0 ? [...currentRange] : [...currentRange, palette[nextDomain.length - 1] ?? DEFAULT_PICKER_PALETTE[(nextDomain.length - 1) % DEFAULT_PICKER_PALETTE.length]]
+    nextRange[index >= 0 ? index : nextDomain.length - 1] = color
+    update({ colorMode: "category", colorDomain: nextDomain, colorRange: nextRange })
+  }
+  const resetCategoryMapping = () => {
+    update({ colorDomain: undefined, colorRange: undefined })
+  }
+  const savePreset = () => {
+    const cleaned = cleanChartTheme(theme ?? {})
+    if (!cleaned) return
+    const name = (presetName || `Chart theme ${savedPresets.length + 1}`).trim()
+    const next = upsertChartThemePreset(savedPresets, { name, theme: cleaned })
+    writeChartThemePresets(next)
+    setSavedPresets(next)
+    setSelectedPreset(name)
+    setPresetName("")
+  }
+  const applyPreset = () => {
+    const preset = savedPresets.find((item) => item.name === selectedPreset)
+    if (preset) onChange(cleanChartTheme(preset.theme))
+  }
+  const deletePreset = () => {
+    if (!selectedPreset) return
+    const next = savedPresets.filter((item) => item.name !== selectedPreset)
+    writeChartThemePresets(next)
+    setSavedPresets(next)
+    setSelectedPreset("")
   }
 
   return (
@@ -730,6 +775,51 @@ function ChartThemePanel({
           </div>
         </div>
 
+        <div className="min-w-[280px] flex-1">
+          <div className="mb-1 font-mono uppercase tracking-wider text-chrome-text/75">Color mode</div>
+          <SegmentedChoice
+            value={theme?.colorMode ?? "auto"}
+            options={[
+              { id: "auto", label: "Auto" },
+              { id: "series", label: "Series" },
+              { id: "category", label: "Category" },
+              { id: "single", label: "Single" },
+            ]}
+            onChange={(value) => update({ colorMode: value === "auto" ? undefined : value as ChartThemeOverrides["colorMode"] })}
+          />
+          {colorField ? (
+            <div className="mt-2 rounded border border-chrome-border/50 bg-doc-bg/50 p-1.5">
+              <div className="mb-1 flex items-center gap-2">
+                <span className="font-mono text-[10px] uppercase text-chrome-text/65">Pinned {colorField}</span>
+                <button
+                  type="button"
+                  onClick={resetCategoryMapping}
+                  className="ml-auto rounded border border-chrome-border/60 px-1.5 py-0.5 font-mono text-[10px] text-chrome-text/70 hover:text-foreground"
+                >
+                  reset
+                </button>
+              </div>
+              <div className="grid max-h-36 grid-cols-1 gap-1 overflow-auto pr-1 xl:grid-cols-2">
+                {mappingRows.length > 0 ? mappingRows.map((row, index) => (
+                  <CategoryColorRow
+                    key={row.category}
+                    category={row.category}
+                    color={row.color}
+                    fallback={DEFAULT_PICKER_PALETTE[index % DEFAULT_PICKER_PALETTE.length]}
+                    onChange={(color) => setCategoryColor(row.category, color)}
+                  />
+                )) : (
+                  <div className="px-1 py-2 text-[10px] text-chrome-text/60">Run rows with color values to pin them.</div>
+                )}
+              </div>
+            </div>
+          ) : (
+            <div className="mt-2 rounded border border-chrome-border/50 bg-doc-bg/50 px-2 py-2 text-[10px] text-chrome-text/60">
+              Add a color field to pin category colors.
+            </div>
+          )}
+        </div>
+
         <div className="grid min-w-[280px] flex-1 grid-cols-2 gap-1">
           <ColorField
             label="accent"
@@ -766,6 +856,30 @@ function ChartThemePanel({
             pickerFallback="#334155"
             onChange={(value) => update({ gridColor: value || undefined })}
           />
+          <SelectField
+            label="number"
+            value={theme?.numberFormat ?? "auto"}
+            options={[
+              { id: "auto", label: "Auto" },
+              { id: "compact", label: "Compact" },
+              { id: "currency", label: "Currency" },
+              { id: "percent", label: "Percent" },
+              { id: "integer", label: "Integer" },
+            ]}
+            onChange={(value) => update({ numberFormat: value === "auto" ? undefined : value as ChartThemeOverrides["numberFormat"] })}
+          />
+          <SelectField
+            label="date"
+            value={theme?.dateFormat ?? "auto"}
+            options={[
+              { id: "auto", label: "Auto" },
+              { id: "short", label: "Short" },
+              { id: "month", label: "Month" },
+              { id: "day", label: "Day" },
+              { id: "time", label: "Time" },
+            ]}
+            onChange={(value) => update({ dateFormat: value === "auto" ? undefined : value as ChartThemeOverrides["dateFormat"] })}
+          />
           <button
             type="button"
             onClick={() => onChange(null)}
@@ -778,6 +892,31 @@ function ChartThemePanel({
         <div className="min-w-[220px]">
           <div className="mb-1 font-mono uppercase tracking-wider text-chrome-text/75">Render</div>
           <div className="grid grid-cols-2 gap-1">
+            <SelectField
+              label="legend"
+              value={theme?.legendPlacement ?? "auto"}
+              options={[
+                { id: "auto", label: "Auto" },
+                { id: "right", label: "Right" },
+                { id: "bottom", label: "Bottom" },
+                { id: "left", label: "Left" },
+                { id: "top", label: "Top" },
+                { id: "hidden", label: "Hidden" },
+              ]}
+              onChange={(value) => update({
+                legendPlacement: value === "auto" ? undefined : value as ChartThemeOverrides["legendPlacement"],
+                legend: value === "hidden" ? false : undefined,
+              })}
+            />
+            <SelectField
+              label="density"
+              value={theme?.legendDensity ?? "normal"}
+              options={[
+                { id: "normal", label: "Normal" },
+                { id: "compact", label: "Compact" },
+              ]}
+              onChange={(value) => update({ legendDensity: value === "normal" ? undefined : value as ChartThemeOverrides["legendDensity"] })}
+            />
             <ThemeToggle
               label="Grid"
               checked={theme?.grid ?? true}
@@ -803,6 +942,32 @@ function ChartThemePanel({
               checked={theme?.roundedBars ?? false}
               onChange={(checked) => setDefaultedToggle("roundedBars", checked, false)}
             />
+          </div>
+          <div className="mt-2 rounded border border-chrome-border/50 bg-doc-bg/50 p-1.5">
+            <div className="mb-1 font-mono text-[10px] uppercase text-chrome-text/65">Presets</div>
+            <div className="flex gap-1">
+              <select
+                value={selectedPreset}
+                onChange={(event) => setSelectedPreset(event.currentTarget.value)}
+                className="min-w-0 flex-1 rounded border border-chrome-border/60 bg-doc-bg px-1.5 py-1 font-mono text-[10px] text-foreground outline-none"
+              >
+                <option value="">Select</option>
+                {savedPresets.map((preset) => (
+                  <option key={preset.name} value={preset.name}>{preset.name}</option>
+                ))}
+              </select>
+              <button type="button" onClick={applyPreset} disabled={!selectedPreset} className="rounded border border-chrome-border/60 px-1.5 py-1 font-mono text-[10px] text-chrome-text/75 hover:text-foreground disabled:opacity-40">Apply</button>
+              <button type="button" onClick={deletePreset} disabled={!selectedPreset} className="rounded border border-chrome-border/60 px-1.5 py-1 font-mono text-[10px] text-chrome-text/75 hover:text-danger disabled:opacity-40">Del</button>
+            </div>
+            <div className="mt-1 flex gap-1">
+              <input
+                value={presetName}
+                onChange={(event) => setPresetName(event.currentTarget.value)}
+                placeholder="preset name"
+                className="min-w-0 flex-1 rounded border border-chrome-border/60 bg-doc-bg px-1.5 py-1 font-mono text-[10px] text-foreground outline-none placeholder:text-chrome-text/45"
+              />
+              <button type="button" onClick={savePreset} disabled={!theme} className="rounded border border-chrome-border/60 px-1.5 py-1 font-mono text-[10px] text-chrome-text/75 hover:text-foreground disabled:opacity-40">Save</button>
+            </div>
           </div>
         </div>
       </div>
@@ -866,6 +1031,89 @@ function ThemeToggle({
         className="h-3 w-3 accent-rvbbit-accent"
       />
       <span>{label}</span>
+    </label>
+  )
+}
+
+function SegmentedChoice<T extends string>({
+  value,
+  options,
+  onChange,
+}: {
+  value: T
+  options: { id: T; label: string }[]
+  onChange: (value: T) => void
+}) {
+  return (
+    <div className="flex flex-wrap items-center rounded border border-chrome-border/60 bg-doc-bg p-0.5 text-[10px]">
+      {options.map((option) => (
+        <button
+          key={option.id}
+          type="button"
+          onClick={() => onChange(option.id)}
+          className={cn(
+            "rounded px-1.5 py-0.5 font-mono",
+            value === option.id ? "bg-main/20 text-foreground" : "text-chrome-text/65 hover:text-foreground",
+          )}
+        >
+          {option.label}
+        </button>
+      ))}
+    </div>
+  )
+}
+
+function SelectField<T extends string>({
+  label,
+  value,
+  options,
+  onChange,
+}: {
+  label: string
+  value: T
+  options: { id: T; label: string }[]
+  onChange: (value: T) => void
+}) {
+  return (
+    <label className="flex min-w-0 items-center gap-1 rounded border border-chrome-border/50 bg-doc-bg/60 px-1.5 py-1">
+      <span className="w-12 shrink-0 font-mono text-[10px] uppercase text-chrome-text/65">{label}</span>
+      <select
+        value={value}
+        onChange={(event) => onChange(event.currentTarget.value as T)}
+        className="min-w-0 flex-1 bg-transparent font-mono text-[10px] text-foreground outline-none"
+      >
+        {options.map((option) => (
+          <option key={option.id} value={option.id}>{option.label}</option>
+        ))}
+      </select>
+    </label>
+  )
+}
+
+function CategoryColorRow({
+  category,
+  color,
+  fallback,
+  onChange,
+}: {
+  category: string
+  color: string
+  fallback: string
+  onChange: (color: string) => void
+}) {
+  const display = color || fallback
+  return (
+    <label className="flex min-w-0 items-center gap-1 rounded border border-chrome-border/50 bg-chrome-bg/30 px-1.5 py-1">
+      <span className="relative h-4 w-4 shrink-0 overflow-hidden rounded border border-chrome-border/70" style={{ background: display }}>
+        <input
+          type="color"
+          value={colorPickerValue(display, fallback)}
+          onChange={(event) => onChange(event.currentTarget.value)}
+          className="absolute inset-0 h-full w-full cursor-pointer opacity-0"
+          aria-label={`Color for ${category}`}
+        />
+      </span>
+      <span className="min-w-0 flex-1 truncate font-mono text-[10px] text-foreground" title={category}>{category}</span>
     </label>
   )
 }
@@ -1115,6 +1363,13 @@ const PALETTE_PRESETS: { name: string; colors: string[] }[] = [
   { name: "cool", colors: ["#06b6d4", "#3b82f6", "#10b981", "#8b5cf6", "#14b8a6", "#93c5fd"] },
 ]
 
+const CHART_THEME_PRESET_STORAGE_KEY = "rvbbit.chartThemePresets.v1"
+
+interface ChartThemePreset {
+  name: string
+  theme: ChartThemeOverrides
+}
+
 function normalizedPalette(value: unknown, fallback: string[] = DEFAULT_PICKER_PALETTE): string[] {
   const colors = stringArray(value).map((item) => item.trim()).filter(Boolean)
   const base = colors.length > 0 ? colors : fallback
@@ -1130,8 +1385,15 @@ function cleanColor(value: unknown): string | undefined {
 
 function cleanChartTheme(value: ChartThemeOverrides): ChartThemeOverrides | null {
   const palette = normalizedPalette(value.palette, []).filter(Boolean)
+  const colorDomain = stringArray(value.colorDomain).map((item) => item.trim()).filter(Boolean)
+  const colorRange = stringArray(value.colorRange).map((item) => item.trim()).filter(Boolean)
   const next: ChartThemeOverrides = {}
   if (palette.length > 0) next.palette = palette
+  if (value.colorMode && value.colorMode !== "auto") next.colorMode = value.colorMode
+  if (colorDomain.length > 0 && colorRange.length > 0) {
+    next.colorDomain = colorDomain
+    next.colorRange = colorRange.slice(0, colorDomain.length)
+  }
   const accent = cleanColor(value.accent)
   const background = cleanColor(value.background)
   const foreground = cleanColor(value.foreground)
@@ -1142,12 +1404,45 @@ function cleanChartTheme(value: ChartThemeOverrides): ChartThemeOverrides | null
   if (foreground) next.foreground = foreground
   if (axisColor) next.axisColor = axisColor
   if (gridColor) next.gridColor = gridColor
+  if (value.numberFormat && value.numberFormat !== "auto") next.numberFormat = value.numberFormat
+  if (value.dateFormat && value.dateFormat !== "auto") next.dateFormat = value.dateFormat
   if (typeof value.grid === "boolean") next.grid = value.grid
   if (typeof value.legend === "boolean") next.legend = value.legend
+  if (value.legendPlacement && value.legendPlacement !== "auto") next.legendPlacement = value.legendPlacement
+  if (value.legendDensity && value.legendDensity !== "normal") next.legendDensity = value.legendDensity
   if (typeof value.labels === "boolean") next.labels = value.labels
   if (typeof value.points === "boolean") next.points = value.points
   if (typeof value.roundedBars === "boolean") next.roundedBars = value.roundedBars
   return Object.keys(next).length > 0 ? next : null
+}
+
+function readChartThemePresets(): ChartThemePreset[] {
+  if (typeof window === "undefined") return []
+  try {
+    const raw = window.localStorage.getItem(CHART_THEME_PRESET_STORAGE_KEY)
+    const parsed = raw ? JSON.parse(raw) : null
+    if (!Array.isArray(parsed)) return []
+    return parsed.flatMap((item): ChartThemePreset[] => {
+      const rec = asRecord(item)
+      const name = typeof rec.name === "string" ? rec.name.trim() : ""
+      const theme = cleanChartTheme(asRecord(rec.theme) as ChartThemeOverrides)
+      return name && theme ? [{ name, theme }] : []
+    })
+  } catch {
+    return []
+  }
+}
+
+function writeChartThemePresets(presets: ChartThemePreset[]): void {
+  if (typeof window === "undefined") return
+  window.localStorage.setItem(CHART_THEME_PRESET_STORAGE_KEY, JSON.stringify(presets.slice(0, 40)))
+}
+
+function upsertChartThemePreset(presets: ChartThemePreset[], preset: ChartThemePreset): ChartThemePreset[] {
+  return [
+    preset,
+    ...presets.filter((item) => item.name !== preset.name),
+  ].slice(0, 40)
 }
 
 function hasChartThemeOverrides(value: ChartThemeOverrides | null | undefined): boolean {
@@ -1164,6 +1459,63 @@ function explicitChartAccent(theme: ChartThemeOverrides | null | undefined): str
 
 function chartThemeAccent(theme: ChartThemeOverrides | null | undefined): string | undefined {
   return explicitChartAccent(theme) ?? explicitChartPalette(theme)[0]
+}
+
+function chartColorMode(theme: ChartThemeOverrides | null | undefined): NonNullable<ChartThemeOverrides["colorMode"]> {
+  return cleanChartTheme(theme ?? {})?.colorMode ?? "auto"
+}
+
+function chartNumberFormat(theme: ChartThemeOverrides | null | undefined): NonNullable<ChartThemeOverrides["numberFormat"]> {
+  return cleanChartTheme(theme ?? {})?.numberFormat ?? "auto"
+}
+
+function chartDateFormat(theme: ChartThemeOverrides | null | undefined): NonNullable<ChartThemeOverrides["dateFormat"]> {
+  return cleanChartTheme(theme ?? {})?.dateFormat ?? "auto"
+}
+
+function chartLegendPlacement(theme: ChartThemeOverrides | null | undefined): NonNullable<ChartThemeOverrides["legendPlacement"]> {
+  return cleanChartTheme(theme ?? {})?.legendPlacement ?? "auto"
+}
+
+function chartLegendDensity(theme: ChartThemeOverrides | null | undefined): NonNullable<ChartThemeOverrides["legendDensity"]> {
+  return cleanChartTheme(theme ?? {})?.legendDensity ?? "normal"
+}
+
+function chartColorField(spec: Record<string, unknown> | null | undefined): string {
+  return vegaEncodingField(spec, "color") || vegaEncodingField(spec, "fill") || vegaEncodingField(spec, "stroke")
+}
+
+function collectCategoryValues(rows: Record<string, unknown>[], field: string): string[] {
+  if (!field) return []
+  const values: string[] = []
+  const seen = new Set<string>()
+  for (const row of rows) {
+    const value = row[field]
+    if (value === undefined || value === null) continue
+    const label = String(value)
+    if (!label || seen.has(label)) continue
+    seen.add(label)
+    values.push(label)
+    if (values.length >= 24) break
+  }
+  return values
+}
+
+function mergeCategoryMappingRows(
+  observed: string[],
+  theme: ChartThemeOverrides | null | undefined,
+  palette: string[],
+): { category: string; color: string }[] {
+  const domain = stringArray(theme?.colorDomain)
+  const range = stringArray(theme?.colorRange)
+  const categories = [...domain]
+  for (const category of observed) {
+    if (!categories.includes(category)) categories.push(category)
+  }
+  return categories.slice(0, 24).map((category, index) => ({
+    category,
+    color: range[domain.indexOf(category)] ?? palette[index % Math.max(1, palette.length)] ?? DEFAULT_PICKER_PALETTE[index % DEFAULT_PICKER_PALETTE.length],
+  }))
 }
 
 function themeDefaultsFromConfig(config: Record<string, unknown>): {
@@ -1207,11 +1559,12 @@ function applyChartThemeOverrides(config: Record<string, unknown>, theme: ChartT
   if (!cleaned) return config
   const explicitPalette = explicitChartPalette(cleaned)
   const palette = normalizedPalette(cleaned.palette, stringArray(asRecord(config.range).category))
-  const accent = cleanColor(cleaned.accent) ?? explicitPalette[0]
+  const accent = chartColorMode(cleaned) === "single" ? chartThemeAccent(cleaned) : cleanColor(cleaned.accent) ?? explicitPalette[0]
   const foreground = cleanColor(cleaned.foreground)
   const axisColor = cleanColor(cleaned.axisColor) ?? foreground
   const gridColor = cleanColor(cleaned.gridColor)
   const background = cleanColor(cleaned.background)
+  const legendPatch = vegaLegendConfig(cleaned)
   const range = asRecord(config.range)
   const axis = asRecord(config.axis)
   const legend = asRecord(config.legend)
@@ -1248,7 +1601,7 @@ function applyChartThemeOverrides(config: Record<string, unknown>, theme: ChartT
     axisY: { ...asRecord(config.axisY), ...axisPatch },
     legend: {
       ...legend,
-      ...(cleaned.legend === false ? { disable: true } : {}),
+      ...legendPatch,
       ...(foreground ? { labelColor: foreground, titleColor: foreground } : {}),
     },
     title: foreground ? { ...title, color: foreground, subtitleColor: foreground } : title,
@@ -1265,26 +1618,34 @@ function applyChartThemeOverrides(config: Record<string, unknown>, theme: ChartT
   }
 }
 
-function applyChartSpecPresentation(spec: Record<string, unknown> | null, theme: ChartThemeOverrides | null | undefined): Record<string, unknown> | null {
+function applyChartSpecPresentation(
+  spec: Record<string, unknown> | null,
+  theme: ChartThemeOverrides | null | undefined,
+  rows: Record<string, unknown>[] = [],
+): Record<string, unknown> | null {
   const cleaned = cleanChartTheme(theme ?? {})
   if (!spec || !cleaned) return spec
   const next: Record<string, unknown> = { ...spec }
   const encoding = asRecord(next.encoding)
   const hasEncoding = encoding === next.encoding
   next.mark = decorateSpecMark(next.mark, cleaned, hasEncoding ? hasEncodedColorChannel(encoding) : false)
-  if (!hasEncoding) return decorateConcatSpecs(next, cleaned)
-  next.encoding = decorateEncodingPresentation(encoding, cleaned)
-  return decorateConcatSpecs(next, cleaned)
+  if (!hasEncoding) return decorateConcatSpecs(next, cleaned, rows)
+  next.encoding = decorateEncodingPresentation(encoding, cleaned, rows)
+  return decorateConcatSpecs(next, cleaned, rows)
 }
 
-function decorateConcatSpecs(spec: Record<string, unknown>, theme: ChartThemeOverrides): Record<string, unknown> {
+function decorateConcatSpecs(
+  spec: Record<string, unknown>,
+  theme: ChartThemeOverrides,
+  rows: Record<string, unknown>[] = [],
+): Record<string, unknown> {
   const next = { ...spec }
   for (const key of ["vconcat", "hconcat", "layer"] as const) {
     const items = next[key]
     if (Array.isArray(items)) {
       next[key] = items.map((item) => (
         item && typeof item === "object" && !Array.isArray(item)
-          ? applyChartSpecPresentation(item as Record<string, unknown>, theme)
+          ? applyChartSpecPresentation(item as Record<string, unknown>, theme, rows)
           : item
       ))
     }
@@ -1332,32 +1693,148 @@ function isDataBoundEncoding(value: unknown): boolean {
   return typeof enc.field === "string" || typeof enc.aggregate === "string"
 }
 
-function decorateEncodingPresentation(encoding: Record<string, unknown>, theme: ChartThemeOverrides): Record<string, unknown> {
+function decorateEncodingPresentation(
+  encoding: Record<string, unknown>,
+  theme: ChartThemeOverrides,
+  rows: Record<string, unknown>[],
+): Record<string, unknown> {
   const next = { ...encoding }
   const palette = explicitChartPalette(theme)
-  for (const channel of ["color", "fill", "stroke", "shape", "size", "opacity", "strokeDash"]) {
+  for (const channel of ["x", "y", "color", "fill", "stroke", "shape", "size", "opacity", "strokeDash"] as const) {
     const enc = asRecord(next[channel])
     if (Object.keys(enc).length === 0) continue
-    let patched = { ...enc }
-    if (palette.length > 0 && (channel === "color" || channel === "fill" || channel === "stroke") && isDataBoundEncoding(enc)) {
-      patched = {
-        ...patched,
-        scale: paletteScale(asRecord(patched.scale), palette),
+    let patched = decorateEncodingFormat({ ...enc }, channel, theme)
+    if ((channel === "color" || channel === "fill" || channel === "stroke") && isDataBoundEncoding(enc)) {
+      const scale = colorScaleForEncoding(enc, theme, palette, rows)
+      if (scale) {
+        patched = {
+          ...patched,
+          scale,
+        }
       }
     }
-    if (theme.legend === false) patched.legend = null
+    if ((theme.legend === false || chartLegendPlacement(theme) === "hidden") && ["color", "fill", "stroke", "shape", "size", "opacity", "strokeDash"].includes(channel)) {
+      patched.legend = null
+    } else if (["color", "fill", "stroke", "shape", "size", "opacity", "strokeDash"].includes(channel)) {
+      patched = {
+        ...patched,
+        legend: decorateLegendDef(asRecord(patched.legend), theme),
+      }
+    }
     next[channel] = patched
   }
+  next.tooltip = decorateTooltipEncoding(next.tooltip, theme)
   return next
 }
 
-function paletteScale(scale: Record<string, unknown>, palette: string[]): Record<string, unknown> {
+function paletteScale(scale: Record<string, unknown>, palette: string[], domain?: string[]): Record<string, unknown> {
   const next = { ...scale }
   delete next.scheme
   return {
     ...next,
+    ...(domain && domain.length > 0 ? { domain } : {}),
     range: palette,
   }
+}
+
+function colorScaleForEncoding(
+  enc: Record<string, unknown>,
+  theme: ChartThemeOverrides,
+  palette: string[],
+  rows: Record<string, unknown>[],
+): Record<string, unknown> | null {
+  const mode = chartColorMode(theme)
+  const field = typeof enc.field === "string" ? enc.field : ""
+  const explicitPalette = palette.length > 0
+  const domain = stringArray(theme.colorDomain)
+  const range = stringArray(theme.colorRange)
+  const observed = field ? collectCategoryValues(rows, field) : []
+  if (mode === "single") {
+    const color = chartThemeAccent(theme)
+    return color ? paletteScale(asRecord(enc.scale), [color]) : null
+  }
+  if ((mode === "category" || domain.length > 0) && (domain.length > 0 || observed.length > 0)) {
+    const stableDomain = domain.length > 0 ? domain : observed
+    const stableRange = stableDomain.map((category, index) => {
+      const pinned = range[domain.indexOf(category)]
+      return pinned ?? palette[index % Math.max(1, palette.length)] ?? DEFAULT_PICKER_PALETTE[index % DEFAULT_PICKER_PALETTE.length]
+    })
+    return paletteScale(asRecord(enc.scale), stableRange, stableDomain)
+  }
+  if (explicitPalette) return paletteScale(asRecord(enc.scale), palette)
+  return null
+}
+
+function decorateEncodingFormat(
+  enc: Record<string, unknown>,
+  channel: string,
+  theme: ChartThemeOverrides,
+): Record<string, unknown> {
+  const type = typeof enc.type === "string" ? enc.type : ""
+  const next = { ...enc }
+  const format = vegaFormatForEncoding(type, theme)
+  if (format) {
+    next.format = next.format ?? format
+    if (channel === "x" || channel === "y") {
+      next.axis = { ...asRecord(next.axis), format }
+    } else if (channel === "color" || channel === "fill" || channel === "stroke" || channel === "size") {
+      next.legend = { ...asRecord(next.legend), format }
+    }
+  }
+  return next
+}
+
+function decorateTooltipEncoding(value: unknown, theme: ChartThemeOverrides): unknown {
+  if (Array.isArray(value)) {
+    return value.map((item) => {
+      const enc = asRecord(item)
+      return Object.keys(enc).length > 0 ? decorateEncodingFormat(enc, "tooltip", theme) : item
+    })
+  }
+  const enc = asRecord(value)
+  return Object.keys(enc).length > 0 ? decorateEncodingFormat(enc, "tooltip", theme) : value
+}
+
+function vegaFormatForEncoding(type: string, theme: ChartThemeOverrides): string | undefined {
+  if (type === "quantitative") return vegaNumberFormat(chartNumberFormat(theme))
+  if (type === "temporal") return vegaDateFormat(chartDateFormat(theme))
+  return undefined
+}
+
+function vegaNumberFormat(format: NonNullable<ChartThemeOverrides["numberFormat"]>): string | undefined {
+  if (format === "compact") return "~s"
+  if (format === "currency") return "$,.2s"
+  if (format === "percent") return ".1%"
+  if (format === "integer") return ",.0f"
+  return undefined
+}
+
+function vegaDateFormat(format: NonNullable<ChartThemeOverrides["dateFormat"]>): string | undefined {
+  if (format === "short") return "%b %d, %Y"
+  if (format === "month") return "%b %Y"
+  if (format === "day") return "%Y-%m-%d"
+  if (format === "time") return "%H:%M"
+  return undefined
+}
+
+function decorateLegendDef(legend: Record<string, unknown>, theme: ChartThemeOverrides): Record<string, unknown> {
+  const patch = vegaLegendConfig(theme)
+  return Object.keys(patch).length > 0 ? { ...legend, ...patch } : legend
+}
+
+function vegaLegendConfig(theme: ChartThemeOverrides): Record<string, unknown> {
+  const placement = chartLegendPlacement(theme)
+  const density = chartLegendDensity(theme)
+  const patch: Record<string, unknown> = {}
+  if (theme.legend === false || placement === "hidden") patch.disable = true
+  else if (placement !== "auto") patch.orient = placement
+  if (density === "compact") {
+    patch.labelFontSize = 10
+    patch.titleFontSize = 10
+    patch.symbolSize = 48
+    patch.labelLimit = 120
+  }
+  return patch
 }
 
 function dropFixedSizing(value: Record<string, unknown>): Record<string, unknown> {
@@ -1449,6 +1926,10 @@ function themeEChartsAxis(axis: unknown, config: Record<string, unknown>, theme?
   const t = themeTokens(config)
   const apply = (item: unknown) => {
     const current = asRecord(item)
+    const axisType = typeof current.type === "string" ? current.type : ""
+    const formatter = axisType === "time"
+      ? eChartsDateFormatter(chartDateFormat(theme))
+      : eChartsNumberFormatter(chartNumberFormat(theme))
     return {
       ...current,
       axisLine: { ...asRecord(current.axisLine), lineStyle: { color: t.chromeBorder } },
@@ -1461,6 +1942,7 @@ function themeEChartsAxis(axis: unknown, config: Record<string, unknown>, theme?
       axisLabel: {
         ...asRecord(current.axisLabel),
         show: theme?.labels === false ? false : asRecord(current.axisLabel).show,
+        ...(formatter ? { formatter } : {}),
         color: t.chromeText,
         fontFamily: t.font,
       },
@@ -1470,9 +1952,15 @@ function themeEChartsAxis(axis: unknown, config: Record<string, unknown>, theme?
   return Array.isArray(axis) ? axis.map(apply) : apply(axis)
 }
 
-function themeEChartsSeries(series: unknown, theme: ChartThemeOverrides | null | undefined, palette: string[]): unknown {
+function themeEChartsSeries(
+  series: unknown,
+  theme: ChartThemeOverrides | null | undefined,
+  palette: string[],
+  categories: string[],
+): unknown {
   const explicitPalette = explicitChartPalette(theme)
-  const accent = explicitChartAccent(theme)
+  const mode = chartColorMode(theme)
+  const accent = explicitChartAccent(theme) ?? (mode === "single" ? chartThemeAccent(theme) : undefined)
   const forceAccent = !!accent
   const seriesCount = Array.isArray(series) ? series.length : 1
   const apply = (item: unknown, index: number) => {
@@ -1487,8 +1975,16 @@ function themeEChartsSeries(series: unknown, theme: ChartThemeOverrides | null |
       } else if (type === "bar" || type === "scatter" || type === "effectScatter" || type === "pie") {
         next.itemStyle = { ...asRecord(current.itemStyle), color }
       }
-    } else if (explicitPalette.length > 0 && seriesCount === 1 && (type === "bar" || type === "scatter" || type === "effectScatter" || type === "pie")) {
+    } else if ((explicitPalette.length > 0 || mode === "category") && seriesCount === 1 && (type === "bar" || type === "scatter" || type === "effectScatter" || type === "pie")) {
       next.colorBy = "data"
+      next.data = colorizeEChartsData(current.data, categories, theme, palette)
+    } else if ((explicitPalette.length > 0 || mode === "category" || mode === "series") && seriesCount > 1) {
+      const name = typeof current.name === "string" ? current.name : String(index)
+      const mapped = chartCategoryColor(name, theme, palette, index)
+      if (mapped) {
+        if (type === "line") next.lineStyle = { ...asRecord(current.lineStyle), color: mapped }
+        next.itemStyle = { ...asRecord(next.itemStyle), color: mapped }
+      }
     }
     if (type === "line" && typeof theme?.points === "boolean") next.showSymbol = theme.points
     if ((type === "scatter" || type === "effectScatter") && theme?.points === false) next.symbolSize = 0
@@ -1505,6 +2001,8 @@ function themeEChartsSeries(series: unknown, theme: ChartThemeOverrides | null |
 
 function themeEChartsOption(option: Record<string, unknown>, config: Record<string, unknown>, theme?: ChartThemeOverrides | null): Record<string, unknown> {
   const t = themeTokens(config)
+  const categories = eChartsCategoryValues(option)
+  const tooltip = asRecord(option.tooltip)
   return {
     ...option,
     backgroundColor: t.background,
@@ -1514,10 +2012,16 @@ function themeEChartsOption(option: Record<string, unknown>, config: Record<stri
     yAxis: themeEChartsAxis(option.yAxis, config, theme),
     legend: {
       ...asRecord(option.legend),
-      show: theme?.legend === false ? false : asRecord(option.legend).show,
+      ...eChartsLegendPatch(theme),
       textStyle: { ...asRecord(asRecord(option.legend).textStyle), color: t.chromeText, fontFamily: t.font },
     },
-    series: themeEChartsSeries(option.series, theme, t.palette),
+    tooltip: {
+      ...tooltip,
+      ...(chartNumberFormat(theme) !== "auto" || chartDateFormat(theme) !== "auto"
+        ? { valueFormatter: (value: unknown) => formatChartValue(value, theme) }
+        : {}),
+    },
+    series: themeEChartsSeries(option.series, theme, t.palette, categories),
   }
 }
 
@@ -1526,22 +2030,27 @@ function themeChartjsConfig(config: Record<string, unknown>, themeConfig: Record
   const options = asRecord(config.options)
   const plugins = asRecord(options.plugins)
   const legend = asRecord(plugins.legend)
+  const tooltip = asRecord(plugins.tooltip)
   const scales = asRecord(options.scales)
   const data = asRecord(config.data)
   const datasets = Array.isArray(config.data) ? [] : Array.isArray(data.datasets) ? data.datasets as unknown[] : []
-  const labelCount = Array.isArray(data.labels) ? data.labels.length : 0
-  const forceColor = explicitChartPalette(theme).length > 0 || !!explicitChartAccent(theme)
+  const labels = Array.isArray(data.labels) ? data.labels.map((item) => String(item)) : []
+  const labelCount = labels.length
+  const forceColor = explicitChartPalette(theme).length > 0 || !!explicitChartAccent(theme) || chartColorMode(theme) !== "auto"
   const themedDatasets = datasets.map((dataset, index) => {
     const current = asRecord(dataset)
     const color = chartjsDatasetColor({
       chartType: typeof config.type === "string" ? config.type : "",
       datasetType: typeof current.type === "string" ? current.type : "",
       palette: t.palette,
+      theme,
+      labels,
       index,
       labelCount,
       datasetCount: datasets.length,
       forceColor,
       accent: explicitChartAccent(theme),
+      datasetLabel: typeof current.label === "string" ? current.label : String(index),
       existingBackground: current.backgroundColor,
       existingBorder: current.borderColor,
     })
@@ -1556,12 +2065,14 @@ function themeChartjsConfig(config: Record<string, unknown>, themeConfig: Record
   const themedScales = Object.fromEntries(
     Object.entries(scales).map(([key, scale]) => {
       const current = asRecord(scale)
+      const tickFormatter = chartjsTickFormatter(current, theme)
       return [key, {
         ...current,
         grid: { ...asRecord(current.grid), display: theme?.grid === false ? false : asRecord(current.grid).display, color: t.chromeBorder },
         ticks: {
           ...asRecord(current.ticks),
           display: theme?.labels === false ? false : asRecord(current.ticks).display,
+          ...(tickFormatter ? { callback: tickFormatter } : {}),
           color: t.chromeText,
           font: { ...asRecord(asRecord(current.ticks).font), family: t.font },
         },
@@ -1582,8 +2093,26 @@ function themeChartjsConfig(config: Record<string, unknown>, themeConfig: Record
         ...plugins,
         legend: {
           ...legend,
-          display: theme?.legend === false ? false : legend.display,
-          labels: { ...asRecord(legend.labels), color: t.chromeText, font: { ...asRecord(asRecord(legend.labels).font), family: t.font } },
+          ...chartjsLegendPatch(theme),
+          labels: {
+            ...asRecord(legend.labels),
+            ...(chartLegendDensity(theme) === "compact" ? { boxWidth: 10, boxHeight: 8, padding: 8 } : {}),
+            color: t.chromeText,
+            font: {
+              ...asRecord(asRecord(legend.labels).font),
+              family: t.font,
+              ...(chartLegendDensity(theme) === "compact" ? { size: 10 } : {}),
+            },
+          },
+        },
+        tooltip: {
+          ...tooltip,
+          callbacks: {
+            ...asRecord(tooltip.callbacks),
+            ...(chartNumberFormat(theme) !== "auto" || chartDateFormat(theme) !== "auto"
+              ? { label: (ctx: unknown) => chartjsTooltipLabel(ctx, theme) }
+              : {}),
+          },
         },
       },
       elements: {
@@ -1606,26 +2135,33 @@ function chartjsDatasetColor({
   chartType,
   datasetType,
   palette,
+  theme,
+  labels,
   index,
   labelCount,
   datasetCount,
   forceColor,
   accent,
+  datasetLabel,
   existingBackground,
   existingBorder,
 }: {
   chartType: string
   datasetType: string
   palette: string[]
+  theme: ChartThemeOverrides | null | undefined
+  labels: string[]
   index: number
   labelCount: number
   datasetCount: number
   forceColor: boolean
   accent?: string
+  datasetLabel: string
   existingBackground: unknown
   existingBorder: unknown
 }): { backgroundColor?: unknown; borderColor?: unknown } {
-  const color = accent ?? palette[index % Math.max(1, palette.length)]
+  const mode = chartColorMode(theme)
+  const color = accent ?? (mode === "single" ? chartThemeAccent(theme) : chartCategoryColor(datasetLabel, theme, palette, index))
   if (!color) return {}
   if (!forceColor) {
     return {
@@ -1634,11 +2170,171 @@ function chartjsDatasetColor({
     }
   }
   const type = datasetType || chartType
-  if (type !== "line" && !accent && labelCount > 1 && datasetCount === 1) {
-    const colors = Array.from({ length: labelCount }, (_, i) => palette[i % Math.max(1, palette.length)])
+  if (mode === "single" && color) {
+    return { backgroundColor: color, borderColor: color }
+  }
+  if (type !== "line" && !accent && labelCount > 1 && datasetCount === 1 && mode !== "series") {
+    const colors = Array.from({ length: labelCount }, (_, i) => chartCategoryColor(labels[i] ?? String(i), theme, palette, i))
     return { backgroundColor: colors, borderColor: colors }
   }
   return { backgroundColor: color, borderColor: color }
+}
+
+function chartCategoryColor(
+  category: string,
+  theme: ChartThemeOverrides | null | undefined,
+  palette: string[],
+  index: number,
+): string {
+  const domain = stringArray(theme?.colorDomain)
+  const range = stringArray(theme?.colorRange)
+  const pinnedIndex = domain.indexOf(category)
+  if (pinnedIndex >= 0 && range[pinnedIndex]) return range[pinnedIndex]
+  return palette[index % Math.max(1, palette.length)] ?? DEFAULT_PICKER_PALETTE[index % DEFAULT_PICKER_PALETTE.length]
+}
+
+function colorizeEChartsData(
+  data: unknown,
+  categories: string[],
+  theme: ChartThemeOverrides | null | undefined,
+  palette: string[],
+): unknown {
+  if (!Array.isArray(data)) return data
+  return data.map((item, index) => {
+    const category = eChartsDataName(item) ?? categories[index] ?? String(index)
+    const color = chartCategoryColor(category, theme, palette, index)
+    if (item && typeof item === "object" && !Array.isArray(item)) {
+      const current = item as Record<string, unknown>
+      return {
+        ...current,
+        itemStyle: { ...asRecord(current.itemStyle), color },
+      }
+    }
+    return { value: item, itemStyle: { color } }
+  })
+}
+
+function eChartsDataName(item: unknown): string | null {
+  const rec = asRecord(item)
+  if (typeof rec.name === "string") return rec.name
+  if (Array.isArray(item) && item.length > 0 && item[0] !== null && item[0] !== undefined) return String(item[0])
+  return null
+}
+
+function eChartsCategoryValues(option: Record<string, unknown>): string[] {
+  const axisValues = (axis: unknown): string[] => {
+    const axisRecord = Array.isArray(axis) ? asRecord(axis[0]) : asRecord(axis)
+    const data = axisRecord.data
+    return Array.isArray(data) ? data.map((item) => String(item)) : []
+  }
+  return axisValues(option.xAxis).length > 0 ? axisValues(option.xAxis) : axisValues(option.yAxis)
+}
+
+function eChartsLegendPatch(theme: ChartThemeOverrides | null | undefined): Record<string, unknown> {
+  const placement = chartLegendPlacement(theme)
+  const density = chartLegendDensity(theme)
+  const hidden = theme?.legend === false || placement === "hidden"
+  const patch: Record<string, unknown> = hidden ? { show: false } : {}
+  if (!hidden && placement !== "auto") {
+    if (placement === "left" || placement === "right") {
+      patch.orient = "vertical"
+      patch[placement] = 8
+      patch.top = "middle"
+    } else {
+      patch.orient = "horizontal"
+      patch[placement] = 4
+      patch.left = "center"
+    }
+  }
+  if (density === "compact") {
+    patch.itemWidth = 10
+    patch.itemHeight = 8
+    patch.itemGap = 6
+  }
+  return patch
+}
+
+function chartjsLegendPatch(theme: ChartThemeOverrides | null | undefined): Record<string, unknown> {
+  const placement = chartLegendPlacement(theme)
+  const hidden = theme?.legend === false || placement === "hidden"
+  return {
+    ...(hidden ? { display: false } : {}),
+    ...(placement !== "auto" && placement !== "hidden" ? { position: placement } : {}),
+  }
+}
+
+function eChartsNumberFormatter(format: NonNullable<ChartThemeOverrides["numberFormat"]>): ((value: unknown) => string) | undefined {
+  return format === "auto" ? undefined : (value: unknown) => formatNumberValue(value, format)
+}
+
+function eChartsDateFormatter(format: NonNullable<ChartThemeOverrides["dateFormat"]>): ((value: unknown) => string) | undefined {
+  return format === "auto" ? undefined : (value: unknown) => formatDateValue(value, format)
+}
+
+function chartjsTickFormatter(
+  scale: Record<string, unknown>,
+  theme: ChartThemeOverrides | null | undefined,
+): ((value: unknown) => string) | undefined {
+  const type = typeof scale.type === "string" ? scale.type : ""
+  if ((type === "time" || type === "timeseries") && chartDateFormat(theme) !== "auto") {
+    return (value: unknown) => formatDateValue(value, chartDateFormat(theme))
+  }
+  if ((type === "linear" || type === "logarithmic" || type === "") && chartNumberFormat(theme) !== "auto") {
+    return (value: unknown) => formatNumberValue(value, chartNumberFormat(theme))
+  }
+  return undefined
+}
+
+function formatChartValue(value: unknown, theme: ChartThemeOverrides | null | undefined): string {
+  if (isNumberish(value) && chartNumberFormat(theme) !== "auto") {
+    return formatNumberValue(value, chartNumberFormat(theme))
+  }
+  if (chartDateFormat(theme) !== "auto") {
+    return formatDateValue(value, chartDateFormat(theme))
+  }
+  return value === null || value === undefined ? "" : String(value)
+}
+
+function chartjsTooltipLabel(ctx: unknown, theme: ChartThemeOverrides | null | undefined): string {
+  const rec = asRecord(ctx)
+  const label = typeof rec.dataset === "object" && rec.dataset
+    ? typeof asRecord(rec.dataset).label === "string" ? `${asRecord(rec.dataset).label}: ` : ""
+    : typeof rec.label === "string" ? `${rec.label}: ` : ""
+  const parsed = asRecord(rec.parsed)
+  const value = parsed.y ?? parsed.x ?? rec.raw
+  return `${label}${formatChartValue(value, theme)}`
+}
+
+function isNumberish(value: unknown): boolean {
+  return typeof value === "number" || (typeof value === "string" && value.trim() !== "" && Number.isFinite(Number(value)))
+}
+
+function formatNumberValue(value: unknown, format: NonNullable<ChartThemeOverrides["numberFormat"]>): string {
+  const n = typeof value === "number" ? value : Number(value)
+  if (!Number.isFinite(n)) return value === null || value === undefined ? "" : String(value)
+  if (format === "currency") {
+    return new Intl.NumberFormat(undefined, { style: "currency", currency: "USD", notation: "compact", maximumFractionDigits: 1 }).format(n)
+  }
+  if (format === "compact") {
+    return new Intl.NumberFormat(undefined, { notation: "compact", maximumFractionDigits: 1 }).format(n)
+  }
+  if (format === "percent") {
+    return new Intl.NumberFormat(undefined, { style: "percent", maximumFractionDigits: 1 }).format(n)
+  }
+  if (format === "integer") {
+    return new Intl.NumberFormat(undefined, { maximumFractionDigits: 0 }).format(n)
+  }
+  return String(value)
+}
+
+function formatDateValue(value: unknown, format: NonNullable<ChartThemeOverrides["dateFormat"]>): string {
+  const date = value instanceof Date ? value : new Date(typeof value === "number" || typeof value === "string" ? value : "")
+  if (Number.isNaN(date.getTime())) return value === null || value === undefined ? "" : String(value)
+  if (format === "time") return new Intl.DateTimeFormat(undefined, { hour: "2-digit", minute: "2-digit" }).format(date)
+  if (format === "month") return new Intl.DateTimeFormat(undefined, { month: "short", year: "numeric" }).format(date)
+  if (format === "day") return new Intl.DateTimeFormat(undefined, { year: "numeric", month: "2-digit", day: "2-digit" }).format(date)
+  if (format === "short") return new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric", year: "numeric" }).format(date)
+  return String(value)
 }
 
 function eChartsPickValue(params: unknown, rows: Record<string, unknown>[], xField: string): unknown {

@@ -1,7 +1,7 @@
 "use client"
 
 import { useCallback, useEffect, useState } from "react"
-import { CheckCircle2, Plus, Trash2, XCircle, Plug, Loader2 } from "@/lib/icons"
+import { Activity, CheckCircle2, Plus, Trash2, XCircle, Plug, Loader2 } from "@/lib/icons"
 import type { ConnectionTestResult, SslMode } from "@/lib/db/types"
 import type { SanitizedConnection } from "@/lib/db/registry"
 import { Input } from "@/components/ui/input"
@@ -38,6 +38,8 @@ interface DraftConnection {
   hasSshPassword: boolean
 }
 
+type ConnectionHealthResult = ConnectionTestResult & { checkedAt: number }
+
 const EMPTY_DRAFT: DraftConnection = {
   label: "",
   host: "localhost",
@@ -68,6 +70,8 @@ export function ConnectionsWindow({ onChanged }: ConnectionsWindowProps) {
   const [testResult, setTestResult] = useState<ConnectionTestResult | null>(null)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [healthById, setHealthById] = useState<Record<string, ConnectionHealthResult>>({})
+  const [testingIds, setTestingIds] = useState<Set<string>>(() => new Set())
 
   const reload = useCallback(async () => {
     const res = await fetch("/api/db/connections", { cache: "no-store" })
@@ -76,7 +80,12 @@ export function ConnectionsWindow({ onChanged }: ConnectionsWindowProps) {
     setConnections(body.connections)
   }, [])
 
-  useEffect(() => { void reload() }, [reload])
+  useEffect(() => {
+    const timeout = window.setTimeout(() => {
+      void reload()
+    }, 0)
+    return () => window.clearTimeout(timeout)
+  }, [reload])
 
   function loadIntoDraft(c: SanitizedConnection | null) {
     setTestResult(null)
@@ -156,6 +165,36 @@ export function ConnectionsWindow({ onChanged }: ConnectionsWindowProps) {
     }
   }
 
+  async function runConnectionTest(connectionId: string): Promise<ConnectionTestResult> {
+    try {
+      const res = await fetch("/api/db/test", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ connectionId }),
+      })
+      return (await res.json()) as ConnectionTestResult
+    } catch (e) {
+      return { ok: false, durationMs: 0, error: e instanceof Error ? e.message : String(e) }
+    }
+  }
+
+  async function probeConnection(connectionId: string, mirrorSelected = false) {
+    setTestingIds((ids) => new Set(ids).add(connectionId))
+    const body = await runConnectionTest(connectionId)
+    setHealthById((h) => ({ ...h, [connectionId]: { ...body, checkedAt: Date.now() } }))
+    if (mirrorSelected) setTestResult(body)
+    setTestingIds((ids) => {
+      const next = new Set(ids)
+      next.delete(connectionId)
+      return next
+    })
+    return body
+  }
+
+  async function probeAll() {
+    await Promise.all(connections.map((c) => probeConnection(c.id, c.id === draft.id)))
+  }
+
   async function test() {
     if (!draft.id) {
       setError("Save the connection first to test it.")
@@ -165,15 +204,7 @@ export function ConnectionsWindow({ onChanged }: ConnectionsWindowProps) {
     setTestResult(null)
     setError(null)
     try {
-      const res = await fetch("/api/db/test", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ connectionId: draft.id }),
-      })
-      const body = (await res.json()) as ConnectionTestResult
-      setTestResult(body)
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e))
+      await probeConnection(draft.id, true)
     } finally {
       setTesting(false)
     }
@@ -198,38 +229,54 @@ export function ConnectionsWindow({ onChanged }: ConnectionsWindowProps) {
       <aside className="flex w-56 flex-col border-r border-chrome-border bg-chrome-bg/30">
         <div className="flex items-center justify-between border-b border-chrome-border px-3 py-2 text-[11px] uppercase tracking-wider text-chrome-text">
           <span>Saved</span>
-          <button
-            type="button"
-            onClick={() => loadIntoDraft(null)}
-            className="grid h-5 w-5 place-items-center rounded text-chrome-text hover:bg-foreground/[0.06] hover:text-foreground"
-            title="New connection"
-          >
-            <Plus className="h-3.5 w-3.5" />
-          </button>
+          <div className="flex items-center gap-1">
+            <button
+              type="button"
+              onClick={() => void probeAll()}
+              className="grid h-5 w-5 place-items-center rounded text-chrome-text hover:bg-foreground/[0.06] hover:text-foreground"
+              title="Probe saved connections"
+            >
+              <Activity className="h-3.5 w-3.5" />
+            </button>
+            <button
+              type="button"
+              onClick={() => loadIntoDraft(null)}
+              className="grid h-5 w-5 place-items-center rounded text-chrome-text hover:bg-foreground/[0.06] hover:text-foreground"
+              title="New connection"
+            >
+              <Plus className="h-3.5 w-3.5" />
+            </button>
+          </div>
         </div>
         <div className="flex-1 overflow-y-auto p-1">
           {connections.length === 0 ? (
             <div className="px-2 py-3 text-[11px] text-chrome-text/70">No connections yet.</div>
           ) : (
-            connections.map((c) => (
-              <button
-                key={c.id}
-                type="button"
-                onClick={() => loadIntoDraft(c)}
-                className={cn(
-                  "block w-full rounded px-2 py-1.5 text-left text-[12px] hover:bg-foreground/[0.06]",
-                  c.id === selectedId ? "bg-foreground/[0.08] text-foreground" : "text-chrome-text",
-                )}
-              >
-                <div className="flex items-center gap-1.5 truncate">
-                  <Plug className="h-3 w-3 shrink-0 text-main" />
-                  <span className="truncate">{c.label}</span>
-                </div>
-                <div className="ml-4 truncate text-[10px] text-chrome-text/70">
-                  {c.user}@{c.host}:{c.port}/{c.database}
-                </div>
-              </button>
-            ))
+            connections.map((c) => {
+              const health = healthById[c.id]
+              const probing = testingIds.has(c.id)
+              return (
+                <button
+                  key={c.id}
+                  type="button"
+                  onClick={() => loadIntoDraft(c)}
+                  className={cn(
+                    "block w-full rounded px-2 py-1.5 text-left text-[12px] hover:bg-foreground/[0.06]",
+                    c.id === selectedId ? "bg-foreground/[0.08] text-foreground" : "text-chrome-text",
+                  )}
+                >
+                  <div className="flex items-center gap-1.5 truncate">
+                    <Plug className="h-3 w-3 shrink-0 text-main" />
+                    <span className="truncate">{c.label}</span>
+                    {probing ? <Loader2 className="ml-auto h-3 w-3 animate-spin text-chrome-text/55" /> : null}
+                  </div>
+                  <div className="ml-4 truncate text-[10px] text-chrome-text/70">
+                    {c.user}@{c.host}:{c.port}/{c.database}
+                  </div>
+                  <ConnectionHealthStrip health={health} probing={probing} />
+                </button>
+              )
+            })
           )}
         </div>
       </aside>
@@ -413,6 +460,74 @@ export function ConnectionsWindow({ onChanged }: ConnectionsWindowProps) {
           ) : null}
         </div>
       </section>
+    </div>
+  )
+}
+
+function ConnectionHealthStrip({
+  health,
+  probing,
+}: {
+  health?: ConnectionHealthResult
+  probing: boolean
+}) {
+  const latency = health?.durationMs ?? 0
+  const barWidth = health ? Math.max(8, Math.min(100, (Math.min(latency, 1200) / 1200) * 100)) : 0
+  const tone =
+    !health
+      ? "idle"
+      : !health.ok
+        ? "down"
+        : latency > 800
+          ? "slow"
+          : latency > 250
+            ? "warm"
+            : "ok"
+  const label = probing
+    ? "probing"
+    : !health
+      ? "not probed"
+      : health.ok
+        ? `${latency}ms / ${health.tableCount ?? 0} tables`
+        : "offline"
+  return (
+    <div className="ml-4 mt-1">
+      <div className="flex items-center gap-1.5">
+        <div className="relative h-1.5 min-w-0 flex-1 overflow-hidden rounded-sm bg-foreground/[0.06]">
+          {health ? (
+            <span
+              className={cn(
+                "absolute inset-y-0 left-0 rounded-sm",
+                tone === "down"
+                  ? "bg-danger"
+                  : tone === "slow" || tone === "warm"
+                    ? "bg-warning"
+                    : "bg-success",
+              )}
+              style={{ width: `${barWidth}%` }}
+            />
+          ) : null}
+        </div>
+        <span
+          className={cn(
+            "shrink-0 font-mono text-[9px] tabular-nums",
+            tone === "down"
+              ? "text-danger"
+              : tone === "slow" || tone === "warm"
+                ? "text-warning"
+                : health?.ok
+                  ? "text-success"
+                  : "text-chrome-text/45",
+          )}
+        >
+          {label}
+        </span>
+      </div>
+      {health?.ok && health.hasRvbbit ? (
+        <div className="mt-0.5 text-[9px] uppercase tracking-wide text-rvbbit-accent">
+          data rabbit v{health.rvbbitVersion ?? "detected"}
+        </div>
+      ) : null}
     </div>
   )
 }

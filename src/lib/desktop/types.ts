@@ -20,6 +20,7 @@ export type DesktopWindowKind =
   | "connections"
   | "palette"
   | "pg-monitor"
+  | "postgres-admin"
   | "notifications"
   | "operators"
   | "model-settings"
@@ -108,6 +109,7 @@ export type WindowPayload =
   | ConnectionsPayload
   | PalettePayload
   | PgMonitorPayload
+  | PostgresAdminPayload
   | NotificationsPayload
   | OperatorsPayload
   | ModelSettingsPayload
@@ -214,13 +216,20 @@ export type ChartRendererKind = "vega-lite" | "flint-vega-lite" | "flint-echarts
 
 export interface ChartThemeOverrides {
   palette?: string[]
+  colorMode?: "auto" | "series" | "category" | "single"
+  colorDomain?: string[]
+  colorRange?: string[]
   accent?: string
   background?: string
   foreground?: string
   axisColor?: string
   gridColor?: string
+  numberFormat?: "auto" | "compact" | "currency" | "percent" | "integer"
+  dateFormat?: "auto" | "short" | "month" | "day" | "time"
   grid?: boolean
   legend?: boolean
+  legendPlacement?: "auto" | "right" | "bottom" | "left" | "top" | "hidden"
+  legendDensity?: "normal" | "compact"
   labels?: boolean
   points?: boolean
   roundedBars?: boolean
@@ -887,6 +896,11 @@ export interface PalettePayload {
 
 export interface PgMonitorPayload {
   kind?: "pg-monitor"
+}
+
+export interface PostgresAdminPayload {
+  kind?: "postgres-admin"
+  initialTab?: "overview" | "activity" | "indexes" | "permissions" | "objects" | "backup"
 }
 
 export interface NotificationsPayload {
