@@ -169,6 +169,15 @@ function inlineScaffoldAllowed(overrides?: Record<string, string>): boolean {
   return !composeNeedsSourceBuild(overrides)
 }
 
+function manifestRuntimeTemplate(manifest: Record<string, unknown>): string | null {
+  const runtime = asRecord(manifest.runtime)
+  return stringValue(runtime?.template)
+}
+
+function resolveTemplateDir(template: string): string {
+  return path.resolve(/*turbopackIgnore: true*/ capabilityRoot(), "templates", template)
+}
+
 async function applyOverrides(
   outAbs: string,
   overrides?: Record<string, string>,
@@ -537,6 +546,78 @@ async function writeInlineScaffold(
   }
 }
 
+async function writeTemplateScaffold(
+  outAbs: string,
+  manifestAbs: string,
+  manifest: Record<string, unknown>,
+  force: boolean,
+  overrides?: Record<string, string>,
+): Promise<
+  | { ok: true; overridesApplied: string[]; stdout: string; stderr: string }
+  | { ok: false; error: string; overridesApplied: string[] }
+> {
+  const template = manifestRuntimeTemplate(manifest)
+  if (!template) {
+    return {
+      ok: false,
+      error: "source-build manifest does not declare runtime.template",
+      overridesApplied: [],
+    }
+  }
+  const templateDir = resolveTemplateDir(template)
+  if (!(await fileExists(templateDir))) {
+    return {
+      ok: false,
+      error: `runtime template not found at ${templateDir}`,
+      overridesApplied: [],
+    }
+  }
+
+  await fs.mkdir(/*turbopackIgnore: true*/ outAbs, { recursive: true })
+  await fs.cp(/*turbopackIgnore: true*/ templateDir, /*turbopackIgnore: true*/ outAbs, {
+    recursive: true,
+    force,
+    errorOnExist: !force,
+  })
+  await fs.copyFile(
+    /*turbopackIgnore: true*/ manifestAbs,
+    /*turbopackIgnore: true*/ path.join(/*turbopackIgnore: true*/ outAbs, "capability.yaml"),
+  )
+
+  const applied = await applyOverrides(outAbs, overrides)
+  if (!applied.ok) return applied
+
+  const readme = [
+    "# Rvbbit capability install bundle",
+    "",
+    `Generated from Lens by copying packaged runtime template \`${template}\`.`,
+    "No rvbbit-capability CLI was required.",
+    "",
+    "## Run",
+    "",
+    "```bash",
+    "docker compose up -d --build",
+    "```",
+    "",
+    "## Register",
+    "",
+    "```bash",
+    "psql \"$RVBBIT_DSN\" -f register.sql",
+    "psql \"$RVBBIT_DSN\" -f operator.sql",
+    "psql \"$RVBBIT_DSN\" -f smoke.sql",
+    "```",
+    "",
+  ].join("\n")
+  await fs.writeFile(/*turbopackIgnore: true*/ path.join(/*turbopackIgnore: true*/ outAbs, "README.md"), readme, "utf8")
+
+  return {
+    ok: true,
+    overridesApplied: applied.overridesApplied,
+    stdout: `copied packaged runtime template ${template}; wrote rendered scaffold artifacts\n`,
+    stderr: "",
+  }
+}
+
 async function listScaffoldFiles(outAbs: string, overridesApplied: string[]): Promise<ScaffoldedFile[]> {
   let files: ScaffoldedFile[] = []
   try {
@@ -622,29 +703,48 @@ export async function POST(req: Request) {
 
   if (!cliExists) {
     if (!inlineScaffoldAllowed(overrides)) {
-      const reason = composeNeedsSourceBuild(overrides)
-        ? "this source-build pack needs Dockerfile/template files"
-        : "no rendered scaffold artifacts were provided"
-      return NextResponse.json(
-        {
-          ok: false,
-          error:
-            `rvbbit-capability CLI not found at ${cli}; ${reason}. ` +
-            `Use Warren/catalog deploy for SQL-only deployment, install the CLI, or set ` +
-            `RVBBIT_CAPABILITY_CLI / RVBBIT_REPO_PATH / RVBBIT_CAPABILITY_ROOT.`,
-        },
-        { status: 500 },
-      )
+      if (composeNeedsSourceBuild(overrides)) {
+        const manifestObj = await readManifestObject(manifestAbs, overrides)
+        const templated = await writeTemplateScaffold(out.path, manifestAbs, manifestObj, !!body.force, overrides)
+        if (templated.ok) {
+          result = { ...templated, stdout: prepareStdout + templated.stdout }
+          overridesApplied = templated.overridesApplied
+        } else {
+          return NextResponse.json(
+            {
+              ok: false,
+              error:
+                `rvbbit-capability CLI not found at ${cli}; ${templated.error}. ` +
+                `Use Warren/catalog deploy for SQL-backed deployment, install the CLI, or set ` +
+                `RVBBIT_CAPABILITY_CLI / RVBBIT_REPO_PATH / RVBBIT_CAPABILITY_ROOT.`,
+              overridesApplied: templated.overridesApplied,
+            },
+            { status: 500 },
+          )
+        }
+      } else {
+        return NextResponse.json(
+          {
+            ok: false,
+            error:
+              `rvbbit-capability CLI not found at ${cli}; no rendered scaffold artifacts were provided. ` +
+              `Use Warren/catalog deploy for SQL-backed deployment, install the CLI, or set ` +
+              `RVBBIT_CAPABILITY_CLI / RVBBIT_REPO_PATH / RVBBIT_CAPABILITY_ROOT.`,
+          },
+          { status: 500 },
+        )
+      }
+    } else {
+      const inline = await writeInlineScaffold(out.path, manifestAbs, overrides)
+      if (!inline.ok) {
+        return NextResponse.json(
+          { ok: false, error: inline.error, overridesApplied: inline.overridesApplied },
+          { status: 500 },
+        )
+      }
+      result = { ...inline, stdout: prepareStdout + inline.stdout }
+      overridesApplied = inline.overridesApplied
     }
-    const inline = await writeInlineScaffold(out.path, manifestAbs, overrides)
-    if (!inline.ok) {
-      return NextResponse.json(
-        { ok: false, error: inline.error, overridesApplied: inline.overridesApplied },
-        { status: 500 },
-      )
-    }
-    result = { ...inline, stdout: prepareStdout + inline.stdout }
-    overridesApplied = inline.overridesApplied
   } else {
     result = await runScaffoldCli(manifestAbs, out.path, !!body.force)
     result.stdout = prepareStdout + result.stdout
