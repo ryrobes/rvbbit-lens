@@ -79,6 +79,7 @@
   --viz-engine-datafusion-vector: color-mix(in oklch, var(--brand-routing) 52%, var(--chart-1));
   --viz-engine-datafusion-vortex: color-mix(in oklch, var(--brand-routing) 48%, var(--chart-6));
   --viz-engine-datafusion-hive: color-mix(in oklch, var(--brand-routing) 52%, var(--info));
+  --viz-engine-gpu-gqe: color-mix(in oklch, var(--brand-specialists) 58%, var(--chart-2));
   --viz-engine-pg-rowstore: color-mix(in oklch, var(--brand-pg-monitor) 52%, var(--chart-4));
 
   --viz-op-llm: color-mix(in oklch, var(--rvbbit-accent) 76%, var(--main));

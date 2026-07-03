@@ -23,6 +23,7 @@ export type EngineId =
   | "datafusion_vector"
   | "datafusion_vortex"
   | "datafusion_hive"
+  | "gpu_gqe"
   | "pg_rowstore"
 
 export interface EngineMeta {
@@ -75,6 +76,12 @@ export const ENGINES: EngineMeta[] = [
     label: "datafusion hive",
     color: "var(--viz-engine-datafusion-hive)",
     blurb: "DataFusion over hive-partitioned parquet variants",
+  },
+  {
+    id: "gpu_gqe",
+    label: "gpu gqe",
+    color: "var(--viz-engine-gpu-gqe)",
+    blurb: "GPU/GQE over authoritative rvbbit parquet row groups",
   },
   {
     id: "pg_rowstore",
@@ -155,6 +162,11 @@ const CANDIDATE_ALIASES: Record<string, EngineId> = {
   "datafusion-vortex": "datafusion_vortex",
   df_vortex: "datafusion_vortex",
   vortex: "datafusion_vortex",
+  gqe: "gpu_gqe",
+  "gpu-gqe": "gpu_gqe",
+  rvbbit_gpu_gqe: "gpu_gqe",
+  gpu_gqe_forced: "gpu_gqe",
+  rvbbit_gpu_gqe_forced: "gpu_gqe",
   native: "rvbbit_native",
   df_hive: "datafusion_hive",
   pg_heap: "pg_rowstore",
@@ -177,6 +189,7 @@ function engineMsFromRow(r: Record<string, unknown>): EngineMs {
     datafusion_vector: numOrNull(r.datafusion_ms),
     datafusion_vortex: numOrNull(r.datafusion_vortex_ms),
     datafusion_hive: numOrNull(r.datafusion_hive_ms),
+    gpu_gqe: numOrNull(r.gpu_gqe_ms),
     pg_rowstore: numOrNull(r.pg_ms),
   }
 }
@@ -190,6 +203,7 @@ function engineMediansFromRow(r: Record<string, unknown>): EngineMs {
     datafusion_vector: numOrNull(r.datafusion_median_ms),
     datafusion_vortex: numOrNull(r.datafusion_vortex_median_ms),
     datafusion_hive: numOrNull(r.datafusion_hive_median_ms),
+    gpu_gqe: numOrNull(r.gpu_gqe_median_ms),
     pg_rowstore: numOrNull(r.pg_median_ms),
   }
 }
@@ -203,6 +217,7 @@ function engineObservationsFromRow(r: Record<string, unknown>): Record<EngineId,
     datafusion_vector: numOrNull(r.datafusion_observations),
     datafusion_vortex: numOrNull(r.datafusion_vortex_observations),
     datafusion_hive: numOrNull(r.datafusion_hive_observations),
+    gpu_gqe: numOrNull(r.gpu_gqe_observations),
     pg_rowstore: numOrNull(r.pg_observations),
   }
 }
@@ -567,7 +582,7 @@ export async function fetchProfileEntries(connectionId: string): Promise<Profile
     connectionId,
     "SELECT shape_key, choice, confidence, observations, native_ms, duck_ms, " +
       "duck_vortex_ms, duck_hive_ms, datafusion_ms, datafusion_vortex_ms, " +
-      "datafusion_hive_ms, pg_ms, reason " +
+      "datafusion_hive_ms, gpu_gqe_ms, pg_ms, reason " +
       "FROM rvbbit.route_profile_entries " +
       `WHERE profile_name = ${ACTIVE_PROFILE_SUBQUERY} ` +
       "ORDER BY confidence DESC NULLS LAST",
@@ -589,11 +604,11 @@ export async function fetchShapeSummary(connectionId: string): Promise<ShapeSumm
     "SELECT shape_family, observations, best_candidate, best_median_ms, " +
       "native_median_ms, duck_median_ms, duck_vortex_median_ms, duck_hive_median_ms, " +
       "datafusion_median_ms, datafusion_vortex_median_ms, datafusion_hive_median_ms, " +
-      "pg_median_ms, " +
+      "gpu_gqe_median_ms, pg_median_ms, " +
       "native_observations, duck_observations, duck_vortex_observations, " +
       "duck_hive_observations, " +
       "datafusion_observations, datafusion_vortex_observations, " +
-      "datafusion_hive_observations, pg_observations, " +
+      "datafusion_hive_observations, gpu_gqe_observations, pg_observations, " +
       "observed_gain, needs_exploration FROM rvbbit.route_shape_summary " +
       "ORDER BY observations DESC",
   )
@@ -614,7 +629,7 @@ export async function fetchProfilePoints(connectionId: string): Promise<ProfileP
   const res = await runQuery(
     connectionId,
     "SELECT shape_family, table_rows, native_ms, duck_ms, duck_vortex_ms, duck_hive_ms, " +
-      "datafusion_ms, datafusion_vortex_ms, datafusion_hive_ms, pg_ms " +
+      "datafusion_ms, datafusion_vortex_ms, datafusion_hive_ms, gpu_gqe_ms, pg_ms " +
       `FROM rvbbit.route_profile_points WHERE profile_name = ${ACTIVE_PROFILE_SUBQUERY}`,
   )
   if (!res.ok) return []
