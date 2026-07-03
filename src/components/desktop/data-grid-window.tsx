@@ -40,6 +40,7 @@ import { ModelField } from "./operator-inspector"
 import { ResultGrid } from "./result-grid"
 import { ResultTranscript, defaultKind, statementKeys } from "./result-transcript"
 import { ArrangeGrid } from "./arrange-grid"
+import { AppBlockView, type AppBlockFilterInput } from "./app-block-view"
 import { extractUiArtifacts, UiArtifactView, type UiArtifactActionInput, type UiArtifactActionResult, type UiArtifactParamInput, type UiArtifactRow } from "./ui-artifact-view"
 import { ContextMenu, type ContextMenuState } from "./context-menu"
 import { listQueryHistory, pushQueryHistory } from "@/lib/desktop/query-history"
@@ -89,6 +90,7 @@ import {
   buildDesktopRuntimeGraph,
   crossFilterAppliesToStatement,
   injectStatementFilters,
+  paramKey,
   predicateForParam,
   quoteSqlIdent,
   resolveParamPlacement,
@@ -106,6 +108,15 @@ import { usePresentMode } from "@/lib/desktop/present-mode"
 import { hasParamDragPayload, readParamDragPayload } from "@/lib/desktop/param-drag"
 import { attachDragGhost } from "@/lib/desktop/drag-ghost"
 import { defineVizBlock } from "@/lib/rvbbit/viz-blocks"
+import {
+  appendHtmlBlockTurn,
+  buildHtmlBlockSql,
+  extractHtmlBlockTurnResult,
+  fallbackHtmlBlockTurn,
+  normalizeHtmlBlockSpec,
+  type HtmlBlockSpec,
+  type HtmlBlockTurnResult,
+} from "@/lib/desktop/app-block"
 
 interface DataGridWindowProps {
   window: DesktopWindowState
@@ -130,6 +141,7 @@ interface DataGridWindowProps {
     statementLayout?: DataPayload["statementLayout"]
     viewKind?: DataPayload["viewKind"]
     controlField?: string
+    htmlBlock?: HtmlBlockSpec | null
   }) => void
   onOpenRow: (payload: RowInspectorPayload) => void
   onEmitParam: (input: {
@@ -578,6 +590,15 @@ function saveAskModel(model: string): void {
   try { window.localStorage.setItem(ASK_MODEL_KEY, model) } catch { /* ignore */ }
 }
 
+function sqlJsonLiteral(value: unknown): string {
+  return `${sqlLiteral(JSON.stringify(value ?? null))}::jsonb`
+}
+
+function firstCellValue(result: QueryResult): unknown {
+  const firstCol = result.columns[0]?.name
+  return firstCol ? result.rows[0]?.[firstCol] : undefined
+}
+
 type VizExportRenderer = "current" | "vega_lite" | "basic_chart" | "table_view" | "metric_card" | "filter_control"
 type MaterializedVizRenderer = Exclude<VizExportRenderer, "current">
 
@@ -938,12 +959,14 @@ export function DataGridWindow({
   // EXPLAIN (SEMANTIC) shows the cost estimate before the user materializes it.
   const isSemanticProjection = ((payload.lineage ? effectiveRollup(payload.lineage) : null)?.projections?.length ?? 0) > 0
   const [draftSql, setDraftSql] = useState<string>(view.sqlDraft ?? payload.sql ?? "")
+  const htmlBlock = useMemo(() => normalizeHtmlBlockSpec(payload.htmlBlock) ?? null, [payload.htmlBlock])
   // Editor input mode + the plain-English question (Ask mode). In "ask" mode the
   // editor edits `askDraft`; Run calls rvbbit.synth_sql to generate SQL, drops it
   // into `draftSql`, flips back to "sql", and runs it. `draftSql` therefore always
   // holds real SQL; `askDraft` always holds the question.
-  const [queryMode, setQueryMode] = useState<"sql" | "ask">(view.queryMode ?? "sql")
+  const [queryMode, setQueryMode] = useState<"sql" | "ask" | "app">(view.queryMode ?? (htmlBlock ? "app" : "sql"))
   const [askDraft, setAskDraft] = useState<string>(view.askDraft ?? "")
+  const [appDraft, setAppDraft] = useState<string>(view.appDraft ?? "")
   // Model for Ask generation — persisted globally; "" = synth's default model.
   const [askModel, setAskModelState] = useState<string>(() => loadAskModel())
   const setAskModel = (m: string) => { setAskModelState(m); saveAskModel(m) }
@@ -1004,7 +1027,7 @@ export function DataGridWindow({
   const workspaceActive = useWorkspaceActive()
   const [explainState, setExplainState] = useState<ExplainState>({ kind: "idle" })
   const [explainBusy, setExplainBusy] = useState(false)
-  const [activeTab, setActiveTab] = useState<NonNullable<DataPayload["view"]>["activeTab"]>(view.activeTab ?? (isSemanticProjection ? "explain" : payload.origin === "table" ? "rows" : "sql"))
+  const [activeTab, setActiveTab] = useState<NonNullable<DataPayload["view"]>["activeTab"]>(view.activeTab ?? (htmlBlock ? "app" : isSemanticProjection ? "explain" : payload.origin === "table" ? "rows" : "sql"))
   const [rowsTransposed, setRowsTransposed] = useState<boolean>(view.rowsTransposed ?? false)
   const [sqlRailOpen, setSqlRailOpen] = useState<boolean>(view.sqlRailOpen ?? (payload.origin !== "table"))
   const [sqlRailWidthPx, setSqlRailWidthPx] = useState<number>(
@@ -1116,10 +1139,23 @@ export function DataGridWindow({
   // Compile this window's SQL through the runtime graph so block.X and
   // param.X.Y references rewrite, and subscriptions become WHERE clauses.
   const compiledSql = useMemo(() => {
-    const graph = buildDesktopRuntimeGraph(allWindows, params, schema)
+    const graphWindows = htmlBlock
+      ? allWindows.map((win) => {
+          if (win.id !== w.id || win.kind !== "data") return win
+          const p = win.payload as DataPayload
+          return {
+            ...win,
+            payload: {
+              ...p,
+              reactive: p.reactive ? { ...p.reactive, paramSubscriptions: [] } : p.reactive,
+            } satisfies DataPayload,
+          }
+        })
+      : allWindows
+    const graph = buildDesktopRuntimeGraph(graphWindows, params, schema)
     const block = graph.blocks.get(w.id)
     return block?.compiledSql ?? payload.sql
-  }, [allWindows, params, payload.sql, w.id, schema])
+  }, [allWindows, htmlBlock, params, payload.sql, w.id, schema])
 
   const subscriptions = payload.reactive?.paramSubscriptions ?? []
 
@@ -1134,11 +1170,11 @@ export function DataGridWindow({
     const handle = setTimeout(() => {
       onChangePayloadRef.current((p) => ({
         ...p,
-        view: { ...(p.view ?? {}), sqlDraft: draftSql, sqlRailOpen, sqlRailWidthPx, activeTab, rowsTransposed, queryMode, askDraft },
+        view: { ...(p.view ?? {}), sqlDraft: draftSql, sqlRailOpen, sqlRailWidthPx, activeTab, rowsTransposed, queryMode, askDraft, appDraft },
       }))
     }, 250)
     return () => clearTimeout(handle)
-  }, [draftSql, sqlRailOpen, sqlRailWidthPx, activeTab, rowsTransposed, queryMode, askDraft])
+  }, [draftSql, sqlRailOpen, sqlRailWidthPx, activeTab, rowsTransposed, queryMode, askDraft, appDraft])
 
   const clampSqlRailWidth = useCallback((rawWidth: number) => {
     const containerWidth = rootRef.current?.getBoundingClientRect().width ?? 0
@@ -1196,13 +1232,13 @@ export function DataGridWindow({
   // Lazily load the LLM model list the first time Ask mode is opened (drives the
   // model picker under the editor). Cheap; kept in state for the window's life.
   useEffect(() => {
-    if (queryMode !== "ask" || !activeConnectionId || llmModels.length > 0) return
+    if ((queryMode !== "ask" && queryMode !== "app") || !activeConnectionId || llmModels.length > 0) return
     let cancelled = false
     fetchLlmModels(activeConnectionId).then((r) => { if (!cancelled) setLlmModels(r.models) })
     return () => { cancelled = true }
   }, [queryMode, activeConnectionId, llmModels.length])
 
-  const runSql = useCallback(async (sourceSql: string, userInitiated = false) => {
+  const runSql = useCallback(async (sourceSql: string, userInitiated = false, options?: { readOnly?: boolean }) => {
     if (!activeConnectionId) return
     const trimmedSource = sourceSql.trim()
     if (!trimmedSource) return
@@ -1233,6 +1269,7 @@ export function DataGridWindow({
                   ...((win.payload as DataPayload).reactive ?? { blockName, paramSubscriptions: subscriptions, version: 1 }),
                   sourceSql: trimmedSource,
                   blockName,
+                  paramSubscriptions: htmlBlock ? [] : subscriptions,
                 },
               } satisfies DataPayload,
             }
@@ -1242,9 +1279,25 @@ export function DataGridWindow({
       schema,
     )
     const compiled = graph.blocks.get(w.id)?.compiledSql ?? trimmedSource
+    const subscriptionFilters: CrossFilter[] = htmlBlock
+      ? subscriptions.flatMap((s) => {
+          const p = params.find((param) => paramKey(param.sourceBlockName, param.field).toLowerCase() === s.key.toLowerCase())
+          if (!p) return []
+          return [{
+            sourceSchema: p.sourceSchema,
+            sourceTable: p.sourceTable,
+            column: p.sourceColumn || s.targetField,
+            value: p.value,
+            operator: p.operator,
+          } satisfies CrossFilter]
+        })
+      : []
+    const runCrossFilters = subscriptionFilters.length > 0
+      ? [...crossFiltersRef.current, ...subscriptionFilters]
+      : crossFiltersRef.current
     const compiledForPipelines =
-      crossFiltersRef.current.length > 0
-        ? injectPipelineHeadFilters(compiled, crossFiltersRef.current, schema)
+      runCrossFilters.length > 0
+        ? injectPipelineHeadFilters(compiled, runCrossFilters, schema)
         : compiled
     // Pipeline cascade sugar: each bare `select ... then op(...)` statement is
     // wrapped as rvbbit.flow($$...$$) so THEN never reaches the PG parser. Per-
@@ -1266,8 +1319,8 @@ export function DataGridWindow({
         ? lastStmtColsRef.current.cols
         : undefined
     const toRun =
-      crossFiltersRef.current.length > 0
-        ? injectStatementFilters(compiledRun, crossFiltersRef.current, schema, stmtCols)
+      runCrossFilters.length > 0
+        ? injectStatementFilters(compiledRun, runCrossFilters, schema, stmtCols)
         : compiledRun
     lastExecutedSqlRef.current = toRun
     // rvbbit.synth(…) is a text-to-SQL source returning one jsonb column per row;
@@ -1314,7 +1367,7 @@ export function DataGridWindow({
                 connectionId: activeConnectionId,
                 sql: toRun,
                 rowLimit: 5000,
-                readOnly: false,
+                readOnly: options?.readOnly ?? false,
                 cancelToken,
                 database: targetDb ?? undefined,
               },
@@ -1431,7 +1484,7 @@ export function DataGridWindow({
     } finally {
       if (runControlRef.current?.token === cancelToken) runControlRef.current = null
     }
-  }, [activeConnectionId, activeTab, allWindows, blockName, onChangePayload, params, subscriptions, w.id, targetDb, txnSessionId, schema])
+  }, [activeConnectionId, activeTab, allWindows, blockName, htmlBlock, onChangePayload, params, subscriptions, w.id, targetDb, txnSessionId, schema])
 
   // First mount: auto-run for windows that already have a real SQL body
   // (table previews, drag-out aggregations, block-ref spawns). Skip the
@@ -1446,7 +1499,7 @@ export function DataGridWindow({
     if (hasTopLevelThen(payload.sql) && !payload.autoRun) return
     const isAutoRunOrigin = payload.origin === "table" || payload.origin === "derived"
     if (!isAutoRunOrigin && !payload.autoRun) return
-    void runSql(payload.sql)
+    void runSql(payload.sql, false, { readOnly: !!htmlBlock })
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
@@ -1675,8 +1728,113 @@ export function DataGridWindow({
     }
   }, [activeConnectionId, askModel, runSql])
 
+  const runHtmlBlockAgentTurn = useCallback(async (message: string, current: HtmlBlockSpec | null): Promise<HtmlBlockTurnResult> => {
+    if (!activeConnectionId) throw new Error("No connection selected.")
+    const tableContext = schema?.tables.slice(0, 30).map((t) => ({
+      schema: t.schema,
+      name: t.name,
+      kind: t.kind,
+      columns: t.columns.slice(0, 18).map((c) => ({ name: c.name, type: c.dataType })),
+    })) ?? []
+    const desktopContext = {
+      blockName,
+      title: payload.title || w.title,
+      currentSql: payload.sql,
+      tables: tableContext,
+      lastResult: runState.kind === "done"
+        ? {
+            columns: runState.result.columns.map((c) => c.name),
+            rows: runState.result.rows.length,
+            statements: runState.result.results?.map((r) => ({ index: r.index, columns: r.columns.map((c) => c.name), rows: r.rows.length })),
+          }
+        : null,
+    }
+    const conversation = current?.messages?.slice(-12) ?? []
+    const opts = askModel ? { model: askModel } : {}
+    const sql =
+      "SELECT rvbbit.html_block_turn(" +
+      [
+        sqlLiteral(message),
+        sqlJsonLiteral(current),
+        sqlJsonLiteral(conversation),
+        sqlJsonLiteral(desktopContext),
+        sqlJsonLiteral(opts),
+      ].join(", ") +
+      ") AS artifact"
+    const res = await fetch("/api/db/query", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        connectionId: activeConnectionId,
+        sql,
+        rowLimit: 1,
+        readOnly: false,
+        database: targetDb ?? undefined,
+      }),
+    })
+    const body = (await res.json()) as
+      | (QueryResult & { ok: true })
+      | { ok: false; error: string; code?: string; detail?: string; hint?: string }
+    if (body.ok === false) {
+      throw new Error([body.error, body.detail, body.hint].filter(Boolean).join("\n"))
+    }
+    const raw = firstCellValue(body)
+    const parsed = typeof raw === "string" ? JSON.parse(raw) as unknown : raw
+    const extracted = extractHtmlBlockTurnResult(parsed)
+    if (!extracted) throw new Error("html_block_turn did not return a valid HTML Block artifact.")
+    return { ...extracted, source: "agent" }
+  }, [activeConnectionId, askModel, blockName, payload.sql, payload.title, runState, schema, targetDb, w.title])
+
+  const runAppTurn = useCallback(async (message: string) => {
+    if (!activeConnectionId) return
+    const text = message.trim()
+    if (!text) return
+    const current = htmlBlock
+    const myNonce = ++runNonceRef.current
+    setProgress(null)
+    setRunState({ kind: "running", sql: "rvbbit.html_block_turn(…)", startedAt: Date.now() })
+    let turn: HtmlBlockTurnResult
+    try {
+      turn = await runHtmlBlockAgentTurn(text, current)
+    } catch (error) {
+      if (runNonceRef.current !== myNonce) return
+      const local = fallbackHtmlBlockTurn({ prompt: text, current, schema, draftSql })
+      const reason = error instanceof Error ? error.message : String(error)
+      turn = { ...local, summary: `${local.summary}${reason ? ` (${reason})` : ""}` }
+    }
+    if (runNonceRef.current !== myNonce) return
+    const next = appendHtmlBlockTurn({ current, turn, userMessage: text })
+    const nextSql = buildHtmlBlockSql(next)
+    setDraftSql(nextSql)
+    setAppDraft("")
+    setQueryMode("app")
+    setActiveTab("app")
+    lastSyncedSqlRef.current = nextSql
+    onChangePayload((p) => ({
+      ...p,
+      title: next.title || p.title,
+      sql: nextSql,
+      htmlBlock: next,
+      view: { ...(p.view ?? {}), queryMode: "app", appDraft: "", activeTab: "app", sqlDraft: nextSql },
+      reactive: {
+        blockName,
+        sourceSql: nextSql,
+        paramSubscriptions: p.reactive?.paramSubscriptions ?? [],
+        version: (p.reactive?.version ?? 1) + 1,
+      },
+    }))
+    void runSql(nextSql, true, { readOnly: true })
+  }, [activeConnectionId, blockName, draftSql, htmlBlock, onChangePayload, runHtmlBlockAgentTurn, runSql, schema])
+
   const onRun = useCallback(() => {
     if (queryMode === "ask") return void runAsk(askDraft)
+    if (queryMode === "app") {
+      if (appDraft.trim()) return void runAppTurn(appDraft)
+      if (!htmlBlock) return
+      const sql = buildHtmlBlockSql(htmlBlock)
+      setDraftSql(sql)
+      return void runSql(sql, true, { readOnly: true })
+    }
     // A manual run of EDITED SQL invalidates the block-local cross-filters: their
     // POSITIONAL sourceStmtIndex is tied to the previous statement order, so after an
     // edit that inserts/removes/reorders statements they would spare/filter the wrong
@@ -1686,7 +1844,7 @@ export function DataGridWindow({
       setCrossFilters([])
     }
     void runSql(draftSql || payload.sql, true)
-  }, [queryMode, askDraft, draftSql, payload.sql, runAsk, runSql])
+  }, [queryMode, askDraft, appDraft, draftSql, payload.sql, runAsk, runAppTurn, runSql, htmlBlock])
 
   // Lazily load per-step rowsets for the Steps inspector when that tab opens.
   useEffect(() => {
@@ -1762,8 +1920,8 @@ export function DataGridWindow({
       setActiveTab("explain")
       return
     }
-    if (payload.sql) void runSql(payload.sql)
-  }, [payload.sql, payload.autoRun, compiledSql, runSql, isSemanticProjection, queryMode])
+    if (payload.sql) void runSql(payload.sql, false, { readOnly: queryMode === "app" || !!htmlBlock })
+  }, [payload.sql, payload.autoRun, compiledSql, runSql, isSemanticProjection, queryMode, htmlBlock])
 
   // ── EXPLAIN ───────────────────────────────────────────────────────
   // Plan-only EXPLAIN (FORMAT JSON) never executes the query, so it is
@@ -1915,7 +2073,7 @@ export function DataGridWindow({
     // In Ask mode draftSql is empty (the editor holds the question), so this
     // would re-run stale payload.sql — skip it.
     if (runSignal === 0 || isSemanticProjection || queryMode === "ask") return
-    void runSql(draftSql || payload.sql)
+    void runSql(draftSql || payload.sql, false, { readOnly: queryMode === "app" })
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [runSignal])
 
@@ -1931,7 +2089,7 @@ export function DataGridWindow({
     }
     if (prevCompiledRef.current === compiledSql) return
     prevCompiledRef.current = compiledSql
-    void runSql(draftSql || payload.sql)
+    void runSql(draftSql || payload.sql, false, { readOnly: queryMode === "app" })
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [compiledSql])
 
@@ -2028,8 +2186,8 @@ export function DataGridWindow({
   useEffect(() => {
     if (prevTargetDbRef.current === targetDb) return
     prevTargetDbRef.current = targetDb
-    if (queryMode === "sql" && (runState.kind === "done" || runState.kind === "error")) {
-      void runSql(draftSql || payload.sql)
+    if ((queryMode === "sql" || queryMode === "app") && (runState.kind === "done" || runState.kind === "error")) {
+      void runSql(draftSql || payload.sql, false, { readOnly: queryMode === "app" })
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [targetDb])
@@ -2039,8 +2197,8 @@ export function DataGridWindow({
   useEffect(() => {
     if (prevCrossRef.current === crossFilters) return
     prevCrossRef.current = crossFilters
-    if (queryMode === "sql" && (runState.kind === "done" || runState.kind === "error")) {
-      void runSql(draftSql || payload.sql)
+    if ((queryMode === "sql" || queryMode === "app") && (runState.kind === "done" || runState.kind === "error")) {
+      void runSql(draftSql || payload.sql, false, { readOnly: queryMode === "app" })
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [crossFilters])
@@ -2072,8 +2230,9 @@ export function DataGridWindow({
 
   const onReset = useCallback(() => {
     if (queryMode === "ask") setAskDraft(view.askDraft ?? "")
+    else if (queryMode === "app") setAppDraft(view.appDraft ?? "")
     else setDraftSql(payload.sql || "")
-  }, [queryMode, payload.sql, view.askDraft])
+  }, [queryMode, payload.sql, view.askDraft, view.appDraft])
 
   const onHistory = useCallback(
     (e: React.MouseEvent) => {
@@ -2150,6 +2309,81 @@ export function DataGridWindow({
   const effectiveStatementLayout = payload.statementLayout ?? sqlStatementLayout ?? undefined
   const uiArtifacts = result && !rawMultiResults ? extractUiArtifacts(result.rows) : null
   const arrangeMode = !!multiResults && effectiveStatementLayout?.mode === "arrange"
+  const runAppReadOnlySql = useCallback(async (sql: string): Promise<QueryResult> => {
+    if (!activeConnectionId) throw new Error("No connection selected.")
+    const res = await fetch("/api/db/query", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        connectionId: activeConnectionId,
+        sql,
+        rowLimit: 5000,
+        readOnly: true,
+        database: targetDb ?? undefined,
+      }),
+    })
+    const body = (await res.json()) as (QueryResult & { ok?: true }) | { ok: false; error: string; detail?: string; hint?: string }
+    if ((body as { ok?: boolean }).ok === false) {
+      const err = body as { error: string; detail?: string; hint?: string }
+      throw new Error([err.error, err.detail, err.hint].filter(Boolean).join("\n"))
+    }
+    return body as QueryResult
+  }, [activeConnectionId, targetDb])
+  const emitAppFilter = useCallback((input: AppBlockFilterInput) => {
+    if (!htmlBlock) return
+    const sourceIdx = input.queryId ? htmlBlock.queries.findIndex((q) => q.id === input.queryId) : 0
+    const sourceResult = sourceIdx >= 0
+      ? result?.results?.[sourceIdx] ?? (htmlBlock.queries.length === 1 ? result : null)
+      : null
+    const sourceCol = sourceResult?.columns.find((c) => c.name === input.field || c.sourceColumn === input.field)
+    const sourceQueryId = sourceIdx >= 0 ? htmlBlock.queries[sourceIdx]?.id : input.queryId
+    const boundTargets = htmlBlock.bindings?.filter((b) => b.sourceQueryId === sourceQueryId && b.field === input.field) ?? []
+    const explicitTarget: Array<{ targetQueryId?: string; targetField?: string; operator?: CrossFilter["operator"] }> = input.targetQueryId
+      ? [{ targetQueryId: input.targetQueryId, targetField: input.field, operator: input.operator }]
+      : []
+    const targets: Array<{ targetQueryId?: string; targetField?: string; operator?: CrossFilter["operator"] }> =
+      explicitTarget.length > 0
+        ? explicitTarget
+        : boundTargets.length > 0
+          ? boundTargets.map((b) => ({ targetQueryId: b.targetQueryId, targetField: b.targetField, operator: b.operator }))
+          : [{ targetField: input.field, operator: input.operator }]
+    const clear =
+      input.value === null ||
+      input.value === undefined ||
+      (Array.isArray(input.value) && input.value.length === 0)
+    const filters: CrossFilter[] = targets.map((target) => {
+      const targetIdx = target.targetQueryId
+        ? htmlBlock.queries.findIndex((q) => q.id === target.targetQueryId)
+        : undefined
+      const operator = target.operator ?? input.operator ?? (Array.isArray(input.value) ? "in" : "eq")
+      return {
+        sourceSchema: sourceCol?.sourceSchema,
+        sourceTable: sourceCol?.sourceTable,
+        column: target.targetField || sourceCol?.sourceColumn || input.field,
+        value: input.value,
+        operator,
+        sourceStmtIndex: sourceIdx >= 0 ? sourceIdx : undefined,
+        targetStmtIndex: typeof targetIdx === "number" && targetIdx >= 0 ? targetIdx : undefined,
+      }
+    })
+    setCrossFilters((prev) => {
+      let next = prev
+      for (const filter of filters) {
+        const key = crossFilterKey(filter)
+        const without = next.filter((p) => crossFilterKey(p) !== key)
+        next = clear ? without : [...without, filter]
+      }
+      crossFiltersRef.current = next
+      return next
+    })
+  }, [htmlBlock, result])
+  const appColumnDragSource = useMemo(() => htmlBlock ? {
+    parentWindowId: w.id,
+    parentBlockName: blockName,
+    parentTitle: payload.title || w.title,
+    parentSql: buildHtmlBlockSql(htmlBlock),
+    relationKey: `${relationKeyFor(payload)}:html-block`,
+  } : null, [blockName, htmlBlock, payload, w.id, w.title])
   useEffect(() => {
     const sql = payload.sql ?? ""
     if (seededUiDefaultSqlRef.current === sql) return
@@ -2594,12 +2828,22 @@ export function DataGridWindow({
             onCommit={() => void endTxn("commit")}
             onRollback={() => void endTxn("rollback")}
             queryMode={queryMode}
-            onToggleMode={() => setQueryMode((m) => (m === "ask" ? "sql" : "ask"))}
+            onSetQueryMode={(mode) => {
+              setQueryMode(mode)
+              if (mode === "app") setActiveTab("app")
+            }}
             askable={hasRvbbit}
           />
           <div className="min-h-0 flex-1 overflow-hidden">
             {queryMode === "ask" ? (
               <SqlEditor value={askDraft} onChange={setAskDraft} onRun={onRun} language="plain" />
+            ) : queryMode === "app" ? (
+              <AppChatPanel
+                spec={htmlBlock}
+                draft={appDraft}
+                onDraftChange={setAppDraft}
+                onRun={onRun}
+              />
             ) : (
               <SqlEditor
                 value={draftSql}
@@ -2613,7 +2857,7 @@ export function DataGridWindow({
               />
             )}
           </div>
-          {queryMode === "ask" ? (
+          {queryMode === "ask" || queryMode === "app" ? (
             <div className="shrink-0 border-t border-chrome-border bg-chrome-bg/30 px-2 py-1.5">
               <ModelField value={askModel} models={llmModels} onChange={setAskModel} />
             </div>
@@ -2667,6 +2911,9 @@ export function DataGridWindow({
               </button>
             ) : null}
             <Tab label="Rows" icon={Table2} active={activeTab === "rows"} onClick={() => setActiveTab("rows")} />
+            {htmlBlock || queryMode === "app" ? (
+              <Tab label="App" icon={FileCode2} active={activeTab === "app"} onClick={() => setActiveTab("app")} />
+            ) : null}
             <Tab label="Profile" icon={Sigma} active={activeTab === "profile"} onClick={() => setActiveTab("profile")} />
             <Tab label="View" icon={BarChart3} active={activeTab === "chart"} onClick={() => setActiveTab("chart")} />
             <Tab label="SQL" icon={FileCode2} active={activeTab === "sql"} onClick={() => setActiveTab("sql")} />
@@ -2817,6 +3064,7 @@ export function DataGridWindow({
                     statementLayout: effectiveStatementLayout,
                     viewKind: payload.viewKind,
                     controlField: payload.controlField,
+                    htmlBlock,
                   })
                 }
                 title="Save as a view (rows + chart)"
@@ -2840,6 +3088,19 @@ export function DataGridWindow({
         ) : null}
 
         <div className="min-h-0 flex-1 overflow-hidden">
+          {bodyTab === "app" ? (
+            <AppBlockView
+              spec={htmlBlock}
+              result={result}
+              running={isRunning}
+              error={error?.error ?? null}
+              activeConnectionId={activeConnectionId}
+              columnDragSource={appColumnDragSource}
+              onRun={onRun}
+              onRunSql={runAppReadOnlySql}
+              onEmitFilter={emitAppFilter}
+            />
+          ) : null}
           {bodyTab === "rows" && result ? (
             multiResults ? (
               <div className="flex h-full flex-col">
@@ -3055,6 +3316,9 @@ export function DataGridWindow({
             />
           ) : null}
           {bodyTab === "sql" ? (
+            queryMode === "app" ? (
+              <GeneratedSqlView sql={draftSql || payload.sql || buildHtmlBlockSql(htmlBlock)} />
+            ) :
             sqlRailOpen && !present ? (
               <SqlDockedPlaceholder />
             ) : (
@@ -3094,7 +3358,7 @@ export function DataGridWindow({
           ) : null}
         </div>
       </section>
-      {present ? null : (
+      {present || queryMode === "app" ? null : (
         <TimeTravelStrip
           sql={draftSql}
           detectSql={compiledSql}
@@ -3114,6 +3378,85 @@ function SqlDockedPlaceholder() {
       <div className="flex items-center gap-2 rounded-md border border-chrome-border/50 bg-chrome-bg/35 px-3 py-2">
         <PanelLeftOpen className="h-3.5 w-3.5" />
         SQL editor is open in the side panel
+      </div>
+    </div>
+  )
+}
+
+function GeneratedSqlView({ sql }: { sql: string }) {
+  return (
+    <div className="h-full overflow-auto bg-doc-bg p-3">
+      <pre className="min-h-full whitespace-pre-wrap rounded-md border border-chrome-border bg-chrome-bg/35 p-3 font-mono text-[12px] leading-relaxed text-chrome-text">
+        {sql || "SELECT 1 AS value;"}
+      </pre>
+    </div>
+  )
+}
+
+function AppChatPanel({
+  spec,
+  draft,
+  onDraftChange,
+  onRun,
+}: {
+  spec: HtmlBlockSpec | null
+  draft: string
+  onDraftChange: (next: string) => void
+  onRun: () => void
+}) {
+  const messages = spec?.messages ?? []
+  return (
+    <div className="flex h-full flex-col bg-doc-bg/70">
+      <div className="min-h-0 flex-1 overflow-auto p-2">
+        {messages.length === 0 ? (
+          <div className="rounded-md border border-chrome-border/60 bg-chrome-bg/35 px-2 py-2 text-[11px] text-chrome-text/55">
+            No turns yet.
+          </div>
+        ) : (
+          <div className="space-y-2">
+            {messages.slice(-16).map((m) => (
+              <div
+                key={m.id}
+                className={cn(
+                  "rounded-md border px-2 py-1.5 text-[11px] leading-snug",
+                  m.role === "user"
+                    ? "border-main/30 bg-main/10 text-foreground"
+                    : "border-chrome-border/60 bg-chrome-bg/45 text-chrome-text",
+                )}
+              >
+                <div className="mb-1 flex items-center justify-between gap-2 text-[9px] uppercase tracking-wide text-chrome-text/55">
+                  <span>{m.role}</span>
+                  {m.agentRunId ? <span className="truncate font-mono">{m.agentRunId}</span> : null}
+                </div>
+                <div className="whitespace-pre-wrap break-words">{m.content}</div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+      <div className="shrink-0 border-t border-chrome-border p-2">
+        <textarea
+          value={draft}
+          onChange={(event) => onDraftChange(event.target.value)}
+          onKeyDown={(event) => {
+            if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
+              event.preventDefault()
+              onRun()
+            }
+          }}
+          rows={5}
+          className="h-28 w-full resize-none rounded-md border border-chrome-border bg-background px-2 py-1.5 text-[12px] text-foreground outline-none placeholder:text-chrome-text/35 focus:border-main/60"
+          placeholder={spec ? "Follow up..." : "Describe the HTML Block..."}
+        />
+        <div className="mt-2 flex items-center justify-between gap-2">
+          <span className="min-w-0 truncate text-[10px] text-chrome-text/45">
+            {spec?.queries.length ? `${spec.queries.length} quer${spec.queries.length === 1 ? "y" : "ies"}` : "draft"}
+          </span>
+          <Button size="sm" onClick={onRun} disabled={!draft.trim() && !spec}>
+            <Sparkles className="h-3 w-3" />
+            Send
+          </Button>
+        </div>
       </div>
     </div>
   )
@@ -3250,7 +3593,7 @@ function Toolbar({
   onCommit,
   onRollback,
   queryMode,
-  onToggleMode,
+  onSetQueryMode,
   askable,
 }: {
   isRunning: boolean
@@ -3268,31 +3611,32 @@ function Toolbar({
   onToggleAutocommit?: () => void
   onCommit?: () => void
   onRollback?: () => void
-  queryMode: "sql" | "ask"
-  onToggleMode: () => void
+  queryMode: "sql" | "ask" | "app"
+  onSetQueryMode: (mode: "sql" | "ask" | "app") => void
   /** Whether the Ask (NL→SQL) toggle is offered — only on rvbbit connections. */
   askable: boolean
 }) {
   const ask = queryMode === "ask"
+  const app = queryMode === "app"
   return (
     <div className="flex h-9 shrink-0 items-center gap-1 overflow-x-auto border-b border-chrome-border bg-chrome-bg/40 px-1.5 [&>*]:shrink-0 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
       {/* Fixed height + no-shrink children: when the window is narrow the rail
           stays one row at a static height (overflow is swipe-scrollable but the
           scrollbar is hidden — matches the tab strip below). */}
-      {/* SQL | Ask query-type toggle (rvbbit only). */}
+      {/* SQL | Ask | HTML query-type toggle (rvbbit only). */}
       {askable ? (
         <div className="mr-0.5 inline-flex overflow-hidden rounded border border-chrome-border/70">
           <button
             type="button"
-            onClick={() => { if (ask) onToggleMode() }}
-            aria-pressed={!ask}
-            className={cn("px-1.5 py-0.5 text-[10px] transition-colors", !ask ? "bg-foreground/[0.12] text-foreground" : "text-chrome-text/55 hover:bg-foreground/[0.06]")}
+            onClick={() => onSetQueryMode("sql")}
+            aria-pressed={queryMode === "sql"}
+            className={cn("px-1.5 py-0.5 text-[10px] transition-colors", queryMode === "sql" ? "bg-foreground/[0.12] text-foreground" : "text-chrome-text/55 hover:bg-foreground/[0.06]")}
           >
             SQL
           </button>
           <button
             type="button"
-            onClick={() => { if (!ask) onToggleMode() }}
+            onClick={() => onSetQueryMode("ask")}
             aria-pressed={ask}
             title="Ask in plain English — generates SQL with rvbbit.synth_sql"
             className={cn("inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] transition-colors", ask ? "bg-rvbbit-accent/20 text-rvbbit-accent" : "text-chrome-text/55 hover:bg-foreground/[0.06]")}
@@ -3300,13 +3644,23 @@ function Toolbar({
             <Sparkles className="h-2.5 w-2.5" />
             Ask
           </button>
+          <button
+            type="button"
+            onClick={() => onSetQueryMode("app")}
+            aria-pressed={app}
+            title="HTML Block — chat-authored HTML backed by named SQL queries"
+            className={cn("inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] transition-colors", app ? "bg-main/20 text-main" : "text-chrome-text/55 hover:bg-foreground/[0.06]")}
+          >
+            <FileCode2 className="h-2.5 w-2.5" />
+            HTML
+          </button>
         </div>
       ) : null}
-      <Button size="sm" onClick={onRun} disabled={isRunning} title={ask ? "Generate SQL from your question (⌘↩)" : "Run (⌘↩)"}>
-        {ask ? <Sparkles className="h-3 w-3" /> : <Play className="h-3 w-3" />}
-        {ask ? "Ask" : "Run"}
+      <Button size="sm" onClick={onRun} disabled={isRunning} title={ask ? "Generate SQL from your question (⌘↩)" : app ? "Send HTML Block turn or run its queries (⌘↩)" : "Run (⌘↩)"}>
+        {ask || app ? <Sparkles className="h-3 w-3" /> : <Play className="h-3 w-3" />}
+        {ask ? "Ask" : app ? "Send" : "Run"}
       </Button>
-      {!ask && onToggleAutocommit ? (
+      {!ask && !app && onToggleAutocommit ? (
         <button
           type="button"
           onClick={onToggleAutocommit}
@@ -3324,7 +3678,7 @@ function Toolbar({
           {txnMode ? "txn" : "auto"}
         </button>
       ) : null}
-      {!ask && txnMode && txnActive && onCommit && onRollback ? (
+      {!ask && !app && txnMode && txnActive && onCommit && onRollback ? (
         <>
           <Button size="sm" variant="neutral" onClick={onCommit} title="COMMIT the transaction">
             Commit
@@ -3334,20 +3688,20 @@ function Toolbar({
           </Button>
         </>
       ) : null}
-      {!ask ? (
+      {!ask && !app ? (
         <Button size="sm" variant="neutral" onClick={onFormat} title="Format">
           Aa
         </Button>
       ) : null}
-      <Button size="sm" variant="ghost" onClick={onReset} title={ask ? "Reset question" : "Reset to saved"}>
+      <Button size="sm" variant="ghost" onClick={onReset} title={ask ? "Reset question" : app ? "Reset message" : "Reset to saved"}>
         <RotateCcw className="h-3 w-3" />
       </Button>
-      {!ask && onHistory ? (
+      {!ask && !app && onHistory ? (
         <Button size="sm" variant="ghost" onClick={onHistory} title="Query history">
           <Clock className="h-3 w-3" />
         </Button>
       ) : null}
-      {!ask && onLoadFile ? (
+      {!ask && !app && onLoadFile ? (
         <Button
           size="sm"
           variant="ghost"
@@ -3366,7 +3720,7 @@ function Toolbar({
           <FolderOpen className="h-3 w-3" />
         </Button>
       ) : null}
-      {!ask && onSetDb && databases && databases.length > 1 ? (
+      {!ask && !app && onSetDb && databases && databases.length > 1 ? (
         <select
           value={targetDb ?? currentDb ?? ""}
           // Re-selecting the connection's own database clears the override (null) so
@@ -3388,13 +3742,13 @@ function Toolbar({
           ))}
         </select>
       ) : null}
-      {ask ? (
+      {ask || app ? (
         <span
           className="ml-auto inline-flex items-center gap-1 text-[10px] text-chrome-text/55"
-          title="Generates SQL via one grounded LLM call (rvbbit.synth_sql) over your schema; cached after the first run."
+          title={ask ? "Generates SQL via one grounded LLM call (rvbbit.synth_sql) over your schema; cached after the first run." : "Runs an agent-backed HTML Block turn when rvbbit.html_block_turn is installed."}
         >
           <Sparkles className="h-2.5 w-2.5" style={{ color: "var(--rvbbit-accent)" }} />
-          ≈1 LLM call · cached after first
+          {ask ? "≈1 LLM call · cached after first" : "agent turn"}
         </span>
       ) : null}
     </div>

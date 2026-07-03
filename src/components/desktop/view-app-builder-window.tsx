@@ -29,6 +29,7 @@ export function ViewAppBuilderWindow({ payload, activeConnectionId }: ViewAppBui
   const statementLayout = existing?.statementLayout ?? payload.initialStatementLayout
   const viewKind = existing?.viewKind ?? payload.initialViewKind
   const controlField = existing?.controlField ?? payload.initialControlField
+  const htmlBlock = existing?.htmlBlock ?? payload.initialHtmlBlock ?? null
   const [saved, setSaved] = useState(false)
 
   function save() {
@@ -45,6 +46,8 @@ export function ViewAppBuilderWindow({ payload, activeConnectionId }: ViewAppBui
       statementLayout,
       viewKind,
       controlField,
+      kind: htmlBlock ? "html-block" : existing?.kind ?? "query",
+      htmlBlock,
     })
     setSaved(true)
     window.dispatchEvent(new Event("rvbbit-lens:apps-changed"))

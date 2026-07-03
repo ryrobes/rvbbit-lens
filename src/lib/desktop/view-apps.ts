@@ -65,7 +65,7 @@ export interface ViewAppInput {
   id?: string
   name: string
   description?: string
-  kind?: "query" | "scry"
+  kind?: "query" | "scry" | "html-block"
   sql?: string
   iconKey?: string
   iconColor?: string
@@ -75,6 +75,7 @@ export interface ViewAppInput {
   statementLayout?: DataPayload["statementLayout"]
   viewKind?: DataPayload["viewKind"]
   controlField?: string
+  htmlBlock?: DataPayload["htmlBlock"]
   scry?: ScryViewState | null
 }
 
@@ -97,6 +98,7 @@ export function upsertViewApp(input: ViewAppInput): ViewApp {
     statementLayout: input.statementLayout ?? existing?.statementLayout,
     viewKind: input.viewKind ?? existing?.viewKind,
     controlField: input.controlField ?? existing?.controlField,
+    htmlBlock: input.htmlBlock ?? existing?.htmlBlock ?? null,
     scry: input.scry ?? existing?.scry ?? null,
     createdAt: existing?.createdAt ?? now,
     updatedAt: now,

@@ -1,6 +1,7 @@
 import type { ExtensionInfo, QueryResultColumn, SchemaColumn, SchemaTable } from "@/lib/db/types"
 import type { DataSearchHit } from "@/lib/rvbbit/data-search"
 import type { OpStep, RetryPlan, TakesPlan, WardsPlan } from "@/lib/rvbbit/operators"
+import type { HtmlBlockSpec } from "./app-block"
 
 export type DesktopWindowKind =
   | "finder"
@@ -313,6 +314,13 @@ export interface DataPayload {
   chartRenderer?: ChartRendererKind
   /** Per-chart presentation overrides layered over the active Lens theme. */
   chartTheme?: ChartThemeOverrides | null
+  /**
+   * Agent-authored HTML surface backed by named SQL queries. The HTML is the
+   * primary artifact; `sql` stores the manifest's native multi-query body so the
+   * block still participates in SQL Desktop execution, lineage, params, drag/drop,
+   * scene save/restore, and Saved Views.
+   */
+  htmlBlock?: HtmlBlockSpec | null
   /**
    * How the "View" tab renders this block: a Vega chart (default) or an
    * interactive control that publishes a pick param. `controlField` is the
@@ -655,16 +663,18 @@ export type RollupOp =
   | { kind: "semantic-op"; operator: SemanticOpMeta; args?: SemanticArg[] }
 
 export interface DataWindowViewState {
-  activeTab?: "rows" | "profile" | "chart" | "sql" | "explain" | "steps"
+  activeTab?: "rows" | "profile" | "chart" | "sql" | "explain" | "steps" | "app"
   rowsTransposed?: boolean
   sqlRailOpen?: boolean
   sqlRailWidthPx?: number
   sqlDraft?: string
   autoRunIntervalMs?: number | null
-  /** Editor input mode: "sql" (write SQL) or "ask" (plain-English → synth_sql). */
-  queryMode?: "sql" | "ask"
+  /** Editor input mode: SQL, one-shot SQL Ask, or chat-authored HTML Block. */
+  queryMode?: "sql" | "ask" | "app"
   /** The natural-language question, kept so toggling back to Ask restores it. */
   askDraft?: string
+  /** Current chat draft for HTML Block mode. HTML itself is edited only by turns. */
+  appDraft?: string
 }
 
 export interface QueryDocumentPayload {
@@ -704,6 +714,7 @@ export interface ViewAppBuilderPayload {
   initialStatementLayout?: DataPayload["statementLayout"]
   initialViewKind?: DataPayload["viewKind"]
   initialControlField?: string
+  initialHtmlBlock?: HtmlBlockSpec | null
 }
 
 export interface ViewAppsPayload {
@@ -1204,7 +1215,7 @@ export interface ViewApp {
   id: string
   name: string
   description?: string
-  kind?: "query" | "scry"
+  kind?: "query" | "scry" | "html-block"
   sql: string
   iconKey: string
   iconColor: string
@@ -1216,6 +1227,7 @@ export interface ViewApp {
   statementLayout?: DataPayload["statementLayout"]
   viewKind?: DataPayload["viewKind"]
   controlField?: string
+  htmlBlock?: HtmlBlockSpec | null
   /** Saved Scry exploration (scry views). */
   scry?: ScryViewState | null
   createdAt: string

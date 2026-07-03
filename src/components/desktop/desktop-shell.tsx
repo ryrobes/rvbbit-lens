@@ -1964,9 +1964,12 @@ export function DesktopShell() {
           statementLayout: app.statementLayout,
           viewKind: app.viewKind,
           controlField: app.controlField,
+          htmlBlock: app.htmlBlock ?? null,
           view: {
-            activeTab: app.chartSpec && !app.statementLayout ? "chart" : "rows",
-            sqlRailOpen: false,
+            activeTab: app.htmlBlock ? "app" : app.chartSpec && !app.statementLayout ? "chart" : "rows",
+            queryMode: app.htmlBlock ? "app" : "sql",
+            sqlDraft: app.sql ?? "",
+            sqlRailOpen: !!app.htmlBlock,
             sqlRailWidthPx: 360,
           },
         } satisfies DataPayload,
@@ -5117,6 +5120,7 @@ function renderWindowContent(
               initialStatementLayout: seed.statementLayout,
               initialViewKind: seed.viewKind,
               initialControlField: seed.controlField,
+              initialHtmlBlock: seed.htmlBlock,
             })
           }
           onOpenRow={ctx.openRowInspector}

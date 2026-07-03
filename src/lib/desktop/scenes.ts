@@ -159,6 +159,7 @@ export function restoreSceneBundle(bundle?: SceneBundle): void {
       statementLayout: a.statementLayout,
       viewKind: a.viewKind,
       controlField: a.controlField,
+      htmlBlock: a.htmlBlock,
     })
   }
   for (const a of bundle.artifacts ?? []) {
