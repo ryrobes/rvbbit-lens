@@ -54,6 +54,38 @@ async function writeAll(connections: ConnectionRecord[]): Promise<void> {
   await fs.rename(tmp, file)
 }
 
+/**
+ * Blank the password in a connection string so it can be shown to clients. Handles
+ * both URL form (`postgresql://user:pass@host/db`) and libpq keyword form
+ * (`host=… password=secret …`). Reports whether a password was present so
+ * `hasPassword` can reflect a URL-embedded secret too.
+ */
+export function redactConnString(cs: string | undefined): { redacted: string | undefined; hadPassword: boolean } {
+  if (!cs) return { redacted: cs, hadPassword: false }
+  try {
+    const url = new URL(cs)
+    const hadPassword = url.password.length > 0
+    if (hadPassword) url.password = "***"
+    return { redacted: hadPassword ? url.toString() : cs, hadPassword }
+  } catch {
+    const pwRe = /(\bpassword\s*=\s*)('(?:[^']|'')*'|\S+)/i
+    const hadPassword = pwRe.test(cs)
+    return { redacted: hadPassword ? cs.replace(pwRe, "$1***") : cs, hadPassword }
+  }
+}
+
+/**
+ * The UI is shown a redacted connection string. If it echoes that exact
+ * redaction back on save (i.e. the user didn't retype it), keep the stored
+ * secret instead of overwriting the password with the `***` sentinel.
+ */
+function chooseConnString(incoming: string | undefined, existing: string | undefined): string | undefined {
+  const trimmed = incoming?.trim()
+  if (!trimmed) return existing
+  if (existing && redactConnString(existing).redacted === trimmed) return existing
+  return trimmed
+}
+
 function normalizeInput(input: ConnectionInput, existing?: ConnectionRecord): ConnectionRecord {
   const now = new Date().toISOString()
   return {
@@ -65,7 +97,7 @@ function normalizeInput(input: ConnectionInput, existing?: ConnectionRecord): Co
     user: input.user?.trim() || existing?.user || "postgres",
     password: input.password ?? existing?.password,
     sslMode: input.sslMode ?? existing?.sslMode ?? "prefer",
-    connectionString: input.connectionString?.trim() || existing?.connectionString,
+    connectionString: chooseConnString(input.connectionString, existing?.connectionString),
     isDefault: input.isDefault ?? existing?.isDefault ?? false,
     // SSH tunnel. Non-secret fields fall back to existing; secrets use `??` so an
     // edit that omits them (the form sends undefined when left blank) keeps the
@@ -149,9 +181,13 @@ export type SanitizedConnection = Omit<
 export function sanitize(c: ConnectionRecord): SanitizedConnection {
   const { password, sshPrivateKey, sshPassphrase, sshPassword, ...rest } = c
   const set = (v: unknown) => typeof v === "string" && v.length > 0
+  // A password can hide inside connectionString (`postgresql://u:pass@host`);
+  // redact it and fold it into hasPassword so the secret never reaches the client.
+  const { redacted, hadPassword } = redactConnString(rest.connectionString)
   return {
     ...rest,
-    hasPassword: set(password),
+    connectionString: redacted,
+    hasPassword: set(password) || hadPassword,
     hasSshPrivateKey: set(sshPrivateKey),
     hasSshPassphrase: set(sshPassphrase),
     hasSshPassword: set(sshPassword),

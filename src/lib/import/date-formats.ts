@@ -171,7 +171,9 @@ function pad(n: number, w = 2): string {
 }
 
 function buildIso(y: number, mo: number, d: number, time: Time | null, hasTime: boolean): string | null {
-  if (mo < 1 || mo > 12 || d < 1 || d > daysInMonth(y, mo)) return null
+  // Year 0 (and negatives) are out of range for a Postgres date/timestamp and
+  // would abort COPY (`date/time field value out of range`) — quarantine instead.
+  if (y < 1 || mo < 1 || mo > 12 || d < 1 || d > daysInMonth(y, mo)) return null
   const date = `${pad(y, 4)}-${pad(mo)}-${pad(d)}`
   if (!hasTime) return date
   const t = time ?? { h: 0, mi: 0, s: 0, frac: "", tz: null }

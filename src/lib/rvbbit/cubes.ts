@@ -962,9 +962,11 @@ export async function discoveryCandidates(
   connectionId: string,
   opts: { days?: number; minQueries?: number; limit?: number } = {},
 ): Promise<{ candidates: DiscoveryCandidate[]; error: string | null }> {
-  const days = opts.days ?? 14
-  const minQ = opts.minQueries ?? 3
-  const limit = opts.limit ?? 20
+  // Finite-guard: a NaN here would interpolate `discovery_candidates(NaN, …)` → a
+  // syntax error rather than fall back to the intended default.
+  const days = Number.isFinite(opts.days) ? Math.floor(opts.days as number) : 14
+  const minQ = Number.isFinite(opts.minQueries) ? Math.floor(opts.minQueries as number) : 3
+  const limit = Number.isFinite(opts.limit) ? Math.floor(opts.limit as number) : 20
   const r = await run(
     connectionId,
     `SELECT tables, query_count, users, covered, already_proposed

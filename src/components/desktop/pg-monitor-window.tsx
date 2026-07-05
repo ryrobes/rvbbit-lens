@@ -462,7 +462,7 @@ function ActiveQueriesPanel({ rows }: { rows: ActivityRow[] }) {
   if (rows.length === 0) {
     return (
       <Panel icon={Activity} title="Active queries" className="mt-3">
-        <div className="text-[10px] text-chrome-text">No other client backends. The desktop's pool reuses one connection.</div>
+        <div className="text-[10px] text-chrome-text">No other client backends. The desktop&apos;s pool reuses one connection.</div>
       </Panel>
     )
   }

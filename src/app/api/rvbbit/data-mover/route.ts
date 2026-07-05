@@ -95,14 +95,23 @@ async function proxy(endpoint: string, path: string, method: "GET" | "POST", pay
   return NextResponse.json({ ok: true, installed: true, result: body })
 }
 
-async function proxyWithFallback(endpoint: string, path: string, method: "GET" | "POST", payload?: unknown) {
+async function proxyWithFallback(
+  endpoint: string,
+  path: string,
+  method: "GET" | "POST",
+  payload?: unknown,
+  // Only retry idempotent calls on the fallback endpoint. A `transfer` (or driver
+  // install) that timed out may still be running on the sidecar — re-POSTing it
+  // duplicates rows in append mode. Non-idempotent actions fail without retry.
+  allowFallback = true,
+) {
   try {
     return await proxy(endpoint, path, method, payload)
   } catch (err) {
     const fallback =
       process.env.RVBBIT_FLETCH_DATA_MOVER_URL ||
       `http://127.0.0.1:${process.env.RVBBIT_FLETCH_DATA_MOVER_PORT || "9181"}`
-    if (fallback && fallback !== endpoint) {
+    if (allowFallback && fallback && fallback !== endpoint) {
       try {
         return await proxy(fallback, path, method, payload)
       } catch {
@@ -144,11 +153,11 @@ export async function POST(req: Request) {
     case "drivers":
       return proxyWithFallback(endpoint, "/drivers", "GET")
     case "install-driver":
-      return proxyWithFallback(endpoint, "/drivers/install", "POST", payload)
+      return proxyWithFallback(endpoint, "/drivers/install", "POST", payload, false)
     case "probe":
       return proxyWithFallback(endpoint, "/probe", "POST", payload)
     case "transfer":
-      return proxyWithFallback(endpoint, "/transfer", "POST", payload)
+      return proxyWithFallback(endpoint, "/transfer", "POST", payload, false)
     default:
       return NextResponse.json({ ok: false, error: "unknown action" }, { status: 400 })
   }

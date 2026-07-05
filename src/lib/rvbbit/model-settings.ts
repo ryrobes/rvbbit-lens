@@ -432,13 +432,21 @@ export async function saveOperatorModel(
   operator: string,
   model: string,
 ): Promise<{ changed: number; purged: number; error?: string }> {
+  // Purge the operator's judgment cache in the same statement, exactly as the
+  // scope save does — otherwise memoized outputs from the OLD model keep serving.
+  const op = sqlStr(operator)
   const res = await runQuery<Record<string, unknown>>(
     connectionId,
-    `SELECT rvbbit.set_operator_model(${sqlStr(operator)}, ${sqlStr(model)}) AS model`,
+    `WITH changed AS (
+       SELECT rvbbit.set_operator_model(${op}, ${sqlStr(model)}) AS model
+     )
+     SELECT 1 AS changed,
+            coalesce(rvbbit.judgment_purge(${op})::bigint, 0) AS purged
+       FROM changed`,
   )
   if (!res.ok) return { changed: 0, purged: 0, error: res.error }
   return {
     changed: 1,
-    purged: 0,
+    purged: Number(res.rows[0]?.purged ?? 0),
   }
 }

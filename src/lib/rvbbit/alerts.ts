@@ -15,12 +15,12 @@ interface Err {
   error: string
 }
 
-async function run(connectionId: string, sql: string, rowLimit = 5000): Promise<Ok | Err> {
+async function run(connectionId: string, sql: string, rowLimit = 5000, readOnly = false): Promise<Ok | Err> {
   try {
     const res = await fetch("/api/db/query", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ connectionId, sql, rowLimit }),
+      body: JSON.stringify({ connectionId, sql, rowLimit, readOnly }),
     })
     return (await res.json()) as Ok | Err
   } catch (e) {
@@ -143,7 +143,11 @@ export async function fetchAlertRules(
     pending: Number(row.pending ?? 0),
     lastFiredMs: num(row.last_fired_ms),
   }))
-  const enabled = r.rows.length > 0 ? r.rows[0].alerts_on === true || r.rows[0].alerts_on === "t" : true
+  // alerts_enabled() must be read independently: selecting it as a per-rule column
+  // yields ZERO rows (and a fabricated "enabled: true") when the catalog is empty.
+  const e = await run(connectionId, `SELECT rvbbit.alerts_enabled() AS alerts_on`)
+  const enabled =
+    e.ok && e.rows.length > 0 ? e.rows[0].alerts_on === true || e.rows[0].alerts_on === "t" : true
   return { rules, enabled, error: null }
 }
 
@@ -329,7 +333,9 @@ export async function previewCondition(
 ): Promise<{ rows: PreviewRow[]; error: string | null }> {
   const trimmed = query.trim().replace(/;+\s*$/, "")
   if (!trimmed) return { rows: [], error: null }
-  const r = await run(connectionId, `SELECT to_jsonb(q) AS j FROM (${trimmed}) q LIMIT 500`, 500)
+  // readOnly: this runs user-authored condition SQL during rule authoring — a
+  // condition containing DML must not execute for real.
+  const r = await run(connectionId, `SELECT to_jsonb(q) AS j FROM (${trimmed}) q LIMIT 500`, 500, true)
   if (!r.ok) return { rows: [], error: r.error }
   return {
     rows: r.rows.map((row) => {
@@ -356,7 +362,7 @@ export async function previewExprCondition(
   const e = expr.trim()
   if (!trimmed || !e) return { rows: [], error: null }
   const wrapped = `SELECT q2.*, CASE WHEN (${e}) THEN 'fail' ELSE 'pass' END AS _alert_status FROM (${trimmed}) q2`
-  const r = await run(connectionId, `SELECT to_jsonb(q) AS j FROM (${wrapped}) q LIMIT 500`, 500)
+  const r = await run(connectionId, `SELECT to_jsonb(q) AS j FROM (${wrapped}) q LIMIT 500`, 500, true)
   if (!r.ok) return { rows: [], error: r.error }
   return {
     rows: r.rows.map((row) => {
@@ -380,7 +386,7 @@ export async function fetchExprColumns(
 ): Promise<{ columns: string[]; error: string | null }> {
   const trimmed = query.trim().replace(/;+\s*$/, "")
   if (!trimmed) return { columns: [], error: null }
-  const r = await run(connectionId, `SELECT * FROM (${trimmed}) q LIMIT 1`, 1)
+  const r = await run(connectionId, `SELECT * FROM (${trimmed}) q LIMIT 1`, 1, true)
   if (!r.ok) return { columns: [], error: r.error }
   return { columns: r.columns.map((c) => c.name), error: null }
 }

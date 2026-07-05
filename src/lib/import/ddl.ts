@@ -23,6 +23,19 @@ export function includedColumns(columns: ImportColumn[]): ImportColumn[] {
   return columns.filter((c) => c.include)
 }
 
+// `c.type` is interpolated verbatim into CREATE TABLE (identifiers are quoted, a
+// type is not). TypeScript types it as PgType, but the API accepts raw JSON, so
+// validate against the closed set — an arbitrary string ("text); DROP …") would
+// otherwise be executed. Keep in sync with PgType in ./types.
+const ALLOWED_TYPES: ReadonlySet<string> = new Set([
+  "text", "boolean", "integer", "bigint", "double precision", "numeric", "date", "timestamptz",
+])
+
+function safeColumnType(type: string): string {
+  if (!ALLOWED_TYPES.has(type)) throw new Error(`Unsupported column type: ${JSON.stringify(type)}`)
+  return type
+}
+
 export function buildCreateTableSql(args: {
   schema: string
   table: string
@@ -32,7 +45,7 @@ export function buildCreateTableSql(args: {
   const cols = includedColumns(args.columns)
   const lines = cols.map((c) => {
     const notNull = c.nullable ? "" : " NOT NULL"
-    return `  ${quoteIdent(c.targetName)} ${c.type}${notNull}`
+    return `  ${quoteIdent(c.targetName)} ${safeColumnType(c.type)}${notNull}`
   })
   // Default access method (heap) needs no clause; only rvbbit is explicit.
   const using = args.accessMethod === "rvbbit" ? " USING rvbbit" : ""

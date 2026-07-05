@@ -352,6 +352,19 @@ export function projectionSpecFromOp(
  *        LATERAL rvbbit.<op>(b."col"::text) AS t(label)
  *   GROUP BY 1 ORDER BY n DESC
  */
+/**
+ * rvbbit operator names are interpolated unquoted into `rvbbit.<op>(…)`. They
+ * come from catalog rows, so validate they are bare lowercase SQL identifiers —
+ * an op with uppercase/hyphens/quotes would break the SQL (or be an injection
+ * vector from a hostile catalog row). Throw a clear error rather than emit it.
+ */
+function safeOperatorName(op: string): string {
+  if (!/^[a-z_][a-z0-9_]*$/.test(op)) {
+    throw new Error(`Invalid rvbbit operator name: ${JSON.stringify(op)}`)
+  }
+  return op
+}
+
 export function buildDimensionRollup(
   operator: string,
   column: DesktopColumnRef,
@@ -364,7 +377,7 @@ export function buildDimensionRollup(
     `SELECT t.label AS ${out}, count(*) AS n`,
     `FROM (SELECT * FROM {${args.parentBlockName}}`,
     `      WHERE ${col} IS NOT NULL AND ${col}::text <> '' LIMIT ${PROJECTION_PREVIEW_LIMIT}) b,`,
-    `     LATERAL rvbbit.${operator}(b.${col}::text) AS t(label)`,
+    `     LATERAL rvbbit.${safeOperatorName(operator)}(b.${col}::text) AS t(label)`,
     `GROUP BY 1`,
     `ORDER BY n DESC;`,
   ].join("\n")
@@ -817,7 +830,7 @@ function renderTopN(spec: RollupSpec, measures: RollupMeasure[]): { orderBy: str
   const rank = rankingMeasure(measures, spec.limit.byMeasureId)
   const dir = (spec.limit.dir ?? "desc").toUpperCase()
   const orderBy = rank ? `\nORDER BY ${measureExpr(rank)} ${dir}` : ""
-  const n = Math.max(1, Math.floor(spec.limit.n))
+  const n = Number.isFinite(spec.limit.n) ? Math.max(1, Math.floor(spec.limit.n)) : 100
   return { orderBy, limit: `\nLIMIT ${n}` }
 }
 
@@ -842,7 +855,7 @@ function projectionExpr(p: SemanticProjection): string {
     a.kind === "column" ? `${quoteSqlIdent(a.column)}::text` : sqlLiteral(a.value),
   )
   const argExprs = [`${quoteSqlIdent(p.column.name)}::text`, ...extra]
-  return `rvbbit.${p.operator}(${argExprs.join(", ")}) AS ${quoteSqlIdent(p.alias)}`
+  return `rvbbit.${safeOperatorName(p.operator)}(${argExprs.join(", ")}) AS ${quoteSqlIdent(p.alias)}`
 }
 function renderProjection(p: SemanticProjection): string {
   return `  ${projectionExpr(p)}`

@@ -181,9 +181,14 @@ export function parseAsOfComment(sql: string): ParsedAsOf {
  * `asOf` is null, any existing rvbbit comment is stripped — putting the
  * editor back into "live" mode.
  */
+// Only ISO-timestamp characters — no single quote (would break the '…' literal)
+// and no newline (would escape the leading comment into live SQL).
+const SAFE_AS_OF = /^[0-9T :.+\-Z]+$/
 export function withAsOf(sql: string, asOf: string | null): string {
   const { body } = parseAsOfComment(sql)
-  if (!asOf) return body
+  // An unsafe/malformed asOf falls back to live mode rather than being embedded
+  // verbatim (a `'` or newline would corrupt the comment or inject SQL).
+  if (!asOf || !SAFE_AS_OF.test(asOf)) return body
   return `-- rvbbit: as_of = '${asOf}'\n${body}`
 }
 

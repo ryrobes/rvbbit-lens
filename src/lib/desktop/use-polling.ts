@@ -23,7 +23,12 @@ export function usePolling(
 ): void {
   const { enabled = true, resetKey } = opts
   const fnRef = useRef(fn)
-  fnRef.current = fn
+  // Keep the ref current in a passive effect (not during render — that trips the
+  // react-compiler ref rule). This effect is declared before the polling effect,
+  // so on mount fnRef is set before the first tick reads it.
+  useEffect(() => {
+    fnRef.current = fn
+  })
 
   useEffect(() => {
     if (!enabled || intervalMs <= 0) return

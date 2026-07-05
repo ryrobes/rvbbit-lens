@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect, useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import { Activity, AlertTriangle, CaretRight, ChevronDown, Database, Layers, Plug, Plus } from "@/lib/icons"
 import { cn } from "@/lib/utils"
 import { RvbbitLogo } from "./rvbbit-logo"
@@ -209,16 +209,20 @@ export function DesktopMenuBar({
 }: DesktopMenuBarProps) {
   const active = connections.find((c) => c.id === activeConnectionId) ?? null
   const [aboutOpen, setAboutOpen] = useState(false)
+  const headerRef = useRef<HTMLElement>(null)
 
-  // Auto-dismiss any open <details> dropdown when the user clicks
-  // outside of it — matches every other desktop menu bar, and stops
-  // left-behind menus from blocking other clicks.
+  // Auto-dismiss the menu bar's own open <details> dropdowns when the user clicks
+  // outside of them. Scoped to the menu bar (headerRef) — a document-wide query
+  // would also snap shut <details> disclosure sections inside KG/capability
+  // windows on any outside click.
   useEffect(() => {
     function close(e: MouseEvent) {
       const target = e.target as HTMLElement | null
-      if (!target) return
-      if (target.closest("details[open]")) return
-      document.querySelectorAll("details[open]").forEach((d) => d.removeAttribute("open"))
+      const root = headerRef.current
+      if (!target || !root) return
+      // Click inside a menu-bar dropdown → leave it open.
+      if (root.contains(target) && target.closest("details[open]")) return
+      root.querySelectorAll("details[open]").forEach((d) => d.removeAttribute("open"))
     }
     document.addEventListener("mousedown", close, true)
     return () => document.removeEventListener("mousedown", close, true)
@@ -331,6 +335,7 @@ export function DesktopMenuBar({
   return (
     <>
     <header
+      ref={headerRef}
       className="pointer-events-auto fixed top-0 left-0 right-0 z-50 flex h-8 items-center justify-between border-b border-chrome-border bg-chrome-bg/90 px-3 text-[12px] text-chrome-text backdrop-blur"
       style={{ WebkitAppRegion: "drag" } as React.CSSProperties}
     >

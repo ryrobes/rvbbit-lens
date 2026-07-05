@@ -169,6 +169,20 @@ export function inferChartSpec(
   if (numeric && categorical) {
     const xField = categorical.col.name
     const yField = numeric.col.name
+    const colorField = secondCategorical?.col.name
+    // Pre-aggregate to sum(y) per category FIRST, then rank categories and keep
+    // the top 30 (mirrors the bar-counts path). The old code summed with a WINDOW
+    // — a *running* sum (default cumulative frame) — and ranked rows, not
+    // categories, so raw un-aggregated input produced a couple of undercounted
+    // bars. When a color split is present we aggregate per (category, color) and
+    // skip the cap: collapsing to one row per category would lose the breakdown.
+    const transform = colorField
+      ? [{ aggregate: [{ op: "sum" as const, field: yField, as: "__agg" }], groupby: [xField, colorField] }]
+      : [
+          { aggregate: [{ op: "sum" as const, field: yField, as: "__agg" }], groupby: [xField] },
+          { window: [{ op: "row_number" as const, as: "__rank" }], sort: [{ field: "__agg", order: "descending" as const }] },
+          { filter: "datum.__rank <= 30" },
+        ]
     return {
       markType: "bar",
       xField,
@@ -178,28 +192,18 @@ export function inferChartSpec(
         $schema: "https://vega.github.io/schema/vega-lite/v6.json",
         mark: { type: "bar" },
         params: pointSelectionParams(xField),
-        transform: [
-          {
-            window: [{ op: "sum", field: yField, as: "__agg" }],
-            groupby: [xField],
-          },
-          {
-            window: [{ op: "row_number", as: "__rank" }],
-            sort: [{ field: "__agg", order: "descending" }],
-          },
-          { filter: "datum.__rank <= 30" },
-        ],
+        transform,
         encoding: {
+          // y is the pre-summed __agg, so no encoding-level aggregate (that would
+          // double-aggregate); title keeps the axis readable.
           x: { field: xField, type: vegaType(categorical.role), sort: "-y" },
-          y: { field: yField, type: "quantitative", aggregate: "sum" },
-          ...(secondCategorical
-            ? { color: { field: secondCategorical.col.name, type: "nominal" } }
-            : {}),
+          y: { field: "__agg", type: "quantitative", title: yField },
+          ...(colorField ? { color: { field: colorField, type: "nominal" } } : {}),
           opacity: selectionOpacity(),
           tooltip: [
             { field: xField, type: vegaType(categorical.role) },
-            { field: yField, type: "quantitative", aggregate: "sum" },
-            ...(secondCategorical ? [{ field: secondCategorical.col.name, type: "nominal" as const }] : []),
+            { field: "__agg", type: "quantitative", title: yField },
+            ...(colorField ? [{ field: colorField, type: "nominal" as const }] : []),
           ],
         },
       },

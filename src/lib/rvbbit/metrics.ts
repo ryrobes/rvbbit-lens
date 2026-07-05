@@ -594,7 +594,10 @@ export async function fetchMetricBoard(
     opts.metrics && opts.metrics.length
       ? `ARRAY[${opts.metrics.map((m) => q(m)).join(",")}]::text[]`
       : opts.kpisOnly
-        ? `(SELECT array_agg(name ORDER BY name) FROM rvbbit.metric_catalog WHERE check_sql IS NOT NULL)::text[]`
+        ? // COALESCE to an empty array: array_agg over zero KPIs is NULL, which the
+          // `metricsArg IS NULL OR …` guard reads as "no filter" → shows ALL metrics.
+          // An empty array instead filters to nothing, the correct kpisOnly result.
+          `COALESCE((SELECT array_agg(name ORDER BY name) FROM rvbbit.metric_catalog WHERE check_sql IS NOT NULL), '{}')::text[]`
       : "NULL::text[]"
   // Raw mode reads the observation log directly, keying each column by the
   // exact data-instant (no date_trunc). DISTINCT ON the instant still folds

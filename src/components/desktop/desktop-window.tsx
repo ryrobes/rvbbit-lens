@@ -645,7 +645,7 @@ export function DesktopWindow({
     const d = dragRef.current
     if (!d || d.pointerId !== e.pointerId) return
     dragRef.current = null
-    e.currentTarget.releasePointerCapture(e.pointerId)
+    try { e.currentTarget.releasePointerCapture(e.pointerId) } catch { /* already released (e.g. pointercancel) */ }
     const p = livePosRef.current
     if (p) onMove(w.id, p.x, p.y) // commit once; batched with applyLivePos(null) below
     applyLivePos(null)
@@ -677,7 +677,7 @@ export function DesktopWindow({
     const r = resizeRef.current
     if (!r || r.pointerId !== e.pointerId) return
     resizeRef.current = null
-    e.currentTarget.releasePointerCapture(e.pointerId)
+    try { e.currentTarget.releasePointerCapture(e.pointerId) } catch { /* already released (e.g. pointercancel) */ }
     const sz = liveSizeRef.current
     if (sz) onResize(w.id, sz.width, sz.height) // commit once
     applyLiveSize(null)
@@ -731,6 +731,7 @@ export function DesktopWindow({
         onPointerDown={present ? undefined : onHeaderDown}
         onPointerMove={present ? undefined : onHeaderMove}
         onPointerUp={present ? undefined : onHeaderUp}
+        onPointerCancel={present ? undefined : onHeaderUp}
       >
         <div className="flex min-w-0 flex-1 items-center gap-2">
           <Icon className="h-4 w-4 shrink-0" style={{ color: chrome.icon }} />
@@ -967,6 +968,7 @@ export function DesktopWindow({
           onPointerDown={onResizeDown}
           onPointerMove={onResizeMove}
           onPointerUp={onResizeUp}
+          onPointerCancel={onResizeUp}
         >
           <Grip className="h-3.5 w-3.5 rotate-45" />
         </button>

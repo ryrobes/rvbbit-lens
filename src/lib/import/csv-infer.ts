@@ -84,6 +84,11 @@ export function inferColumn(
   // boolean — textual only (0/1 stay integer so we don't hijack int columns)
   if (vals.every(isBoolish)) return { type: "boolean" }
 
+  // Leading-zero codes (ZIP, account/routing numbers) look like integers but must
+  // stay text — coercing "00501" to 501 silently corrupts the data. A single "0"
+  // or a decimal like "0.5" is fine; only a significant leading zero forces text.
+  if (vals.some((v) => /^[+-]?0\d+/.test(v))) return { type: "text" }
+
   // integers
   if (vals.every((v) => INT_RE.test(v))) {
     if (vals.every((v) => fitsRange(v, INT4_MIN, INT4_MAX))) return { type: "integer" }

@@ -141,12 +141,33 @@ export async function addListenSubscriber(
   const wanted = [...new Set(channels.filter((c) => c.length > 0))]
 
   hub.subscribers.add(onNotify)
-  for (const ch of wanted) {
-    const count = hub.channels.get(ch) ?? 0
-    if (count === 0) {
-      await hub.client.query(`LISTEN ${quoteIdent(ch)}`)
+  const applied: string[] = []
+  try {
+    for (const ch of wanted) {
+      const count = hub.channels.get(ch) ?? 0
+      if (count === 0) {
+        await hub.client.query(`LISTEN ${quoteIdent(ch)}`)
+      }
+      hub.channels.set(ch, count + 1)
+      applied.push(ch)
     }
-    hub.channels.set(ch, count + 1)
+  } catch (err) {
+    // A LISTEN failed partway. Undo the subscriber + the counts already bumped so
+    // a flaky subscribe (e.g. reconnect storm) doesn't leak a dead handler or
+    // inflate refcounts (which would keep channels LISTENed forever). Then rethrow
+    // — the caller's catch disposes the stream.
+    hub.subscribers.delete(onNotify)
+    for (const ch of applied) {
+      const count = hub.channels.get(ch) ?? 0
+      if (count <= 1) {
+        hub.channels.delete(ch)
+        hub.client.query(`UNLISTEN ${quoteIdent(ch)}`).catch(() => {})
+      } else {
+        hub.channels.set(ch, count - 1)
+      }
+    }
+    if (hub.subscribers.size === 0) closeHub(connectionId)
+    throw err
   }
 
   let disposed = false

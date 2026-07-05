@@ -527,7 +527,7 @@ export async function fetchWarrenJobs(
   connectionId: string,
   opts: { limit?: number; status?: WarrenJobStatus[] } = {},
 ): Promise<{ jobs: WarrenJob[]; error?: string }> {
-  const limit = opts.limit ?? 200
+  const limit = Number.isFinite(opts.limit) ? Math.floor(opts.limit as number) : 200
   const where =
     opts.status && opts.status.length > 0
       ? `WHERE status IN (${opts.status.map(sqlLit).join(",")})`
@@ -538,7 +538,7 @@ export async function fetchWarrenJobs(
      FROM rvbbit.warren_jobs
      ${where}
      ORDER BY created_at DESC
-     LIMIT ${Number(limit)}`,
+     LIMIT ${limit}`,
   )
   if (!res.ok) return { jobs: [], error: res.error }
   return { jobs: res.rows.map(parseJob) }
@@ -592,13 +592,13 @@ export async function fetchWarrenDeployments(
   connectionId: string,
   opts: { limit?: number } = {},
 ): Promise<{ deployments: WarrenDeployment[]; error?: string }> {
-  const limit = opts.limit ?? 200
+  const limit = Number.isFinite(opts.limit) ? Math.floor(opts.limit as number) : 200
   const res = await runQuery(
     connectionId,
     `SELECT ${DEPLOYMENT_COLS}
      FROM rvbbit.warren_deployments
      ORDER BY updated_at DESC
-     LIMIT ${Number(limit)}`,
+     LIMIT ${limit}`,
   )
   if (!res.ok) return { deployments: [], error: res.error }
   return { deployments: res.rows.map(parseDeployment) }

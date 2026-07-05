@@ -134,7 +134,15 @@ export interface ColorTokens {
  * `tokens.foreground` value.
  */
 export function tokenKey(camel: keyof ColorTokens): string {
-  return `--${camel.replace(/[A-Z]/g, (m) => `-${m.toLowerCase()}`)}`
+  // Insert a hyphen at camel humps AND at letter→digit boundaries, so `chart1`
+  // and `ambient1` become `--chart-1` / `--ambient-1` — the names globals.css and
+  // every chart consumer actually read. Without the digit rule these token writes
+  // hit dead `--chart1` vars and the whole wallpaper-derived chart palette never
+  // reached a single chart.
+  return `--${camel
+    .replace(/([a-z0-9])([A-Z])/g, "$1-$2")
+    .replace(/([a-zA-Z])([0-9])/g, "$1-$2")
+    .toLowerCase()}`
 }
 
 /**

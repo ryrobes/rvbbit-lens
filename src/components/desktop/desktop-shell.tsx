@@ -636,6 +636,8 @@ export function DesktopShell() {
   const [scrySeed, setScrySeed] = useState<ScryViewState | null>(null)
   const scrySpawnCountRef = useRef(0)
   const stateLoadedRef = useRef(false)
+  const pendingSaveRef = useRef<Parameters<typeof saveDesktopState>[0] | null>(null)
+  const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const wallpaperInputRef = useRef<HTMLInputElement | null>(null)
   const wallpaperObjectUrlRef = useRef<string | null>(null)
   const themeCleanupRef = useRef<(() => void) | null>(null)
@@ -1085,10 +1087,40 @@ export function DesktopShell() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
+  // Persist desktop state, DEBOUNCED. saveDesktopState synchronously stringifies
+  // all six workspaces (SQL drafts, HTML blocks, scry hits) to localStorage; doing
+  // that on every focus click / move / 250ms draft sync is a lot of blocking work.
+  // Coalesce bursts into one write ~400ms after activity settles.
   useEffect(() => {
     if (!stateLoadedRef.current) return
-    saveDesktopState({ workspaces, activeWorkspace, viewport, activeConnectionId, currentSceneId })
+    pendingSaveRef.current = { workspaces, activeWorkspace, viewport, activeConnectionId, currentSceneId }
+    if (saveTimerRef.current) clearTimeout(saveTimerRef.current)
+    saveTimerRef.current = setTimeout(() => {
+      if (pendingSaveRef.current) saveDesktopState(pendingSaveRef.current)
+      pendingSaveRef.current = null
+      saveTimerRef.current = null
+    }, 400)
   }, [workspaces, activeWorkspace, viewport, activeConnectionId, currentSceneId])
+
+  // Flush any pending debounced save on unmount / tab hide so the most recent
+  // state is never lost between the last edit and the timer firing.
+  useEffect(() => {
+    const flush = () => {
+      if (saveTimerRef.current) {
+        clearTimeout(saveTimerRef.current)
+        saveTimerRef.current = null
+      }
+      if (pendingSaveRef.current) {
+        saveDesktopState(pendingSaveRef.current)
+        pendingSaveRef.current = null
+      }
+    }
+    window.addEventListener("pagehide", flush)
+    return () => {
+      window.removeEventListener("pagehide", flush)
+      flush()
+    }
+  }, [])
 
   // Phase 1 homebase: seed the durable server shadow once on mount, so existing
   // browser data — especially saved scenes, which otherwise only shadow on

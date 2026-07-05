@@ -174,10 +174,17 @@ export function stripTrailingLimitOffset(sql: string): string {
 }
 
 export function stripTrailingSqlTerminator(sql: string): string {
-  // Walk the string so we don't trim a ; that lives inside a string/comment.
+  // Walk the string so we don't trim a ; that lives inside a string/comment, and
+  // so a block ending in `SELECT 1; -- note` (a real terminator followed by a
+  // trailing comment) still strips to a bare `SELECT 1` we can safely wrap. We
+  // track the last top-level `;` and whether any real content follows it; only
+  // strip when nothing but whitespace/comments trails — never collapse a genuine
+  // two-statement block (`SELECT 1; SELECT 2`).
   let quote: "'" | "\"" | null = null
   let lineComment = false
   let blockComment = false
+  let lastSemi = -1
+  let contentAfterSemi = false
   for (let i = 0; i < sql.length; i += 1) {
     const c = sql[i]
     const n = sql[i + 1]
@@ -185,14 +192,17 @@ export function stripTrailingSqlTerminator(sql: string): string {
     if (blockComment) { if (c === "*" && n === "/") { blockComment = false; i += 1 } ; continue }
     if (quote) {
       if (c === quote) { if (n === quote) i += 1; else quote = null }
+      contentAfterSemi = true
       continue
     }
     if (c === "-" && n === "-") { lineComment = true; i += 1; continue }
     if (c === "/" && n === "*") { blockComment = true; i += 1; continue }
-    if (c === "'" || c === "\"") quote = c
+    if (c === "'" || c === "\"") { quote = c; contentAfterSemi = true; continue }
+    if (c === ";") { lastSemi = i; contentAfterSemi = false; continue }
+    if (!/\s/.test(c)) contentAfterSemi = true
   }
-  const trimmed = sql.trim()
-  return trimmed.endsWith(";") ? trimmed.slice(0, -1).trim() : trimmed
+  if (lastSemi >= 0 && !contentAfterSemi) return sql.slice(0, lastSemi).trimEnd()
+  return sql.trim()
 }
 
 export function buildDesktopRuntimeGraph(
@@ -240,6 +250,14 @@ export function buildDesktopRuntimeGraph(
         return m[0]
       }
       const upstreamCompiled = compile(upstream.windowId, [...stack, block.windowId])
+      if (upstreamCompiled.missingRefs.length > 0) {
+        // The upstream couldn't fully resolve (a dangling ref, or a cycle that was
+        // broken one level deeper). Inlining its body would ship a literal `{ref}`
+        // to Postgres while THIS block still reported healthy — propagate the
+        // missing-ness so both ends surface as broken, and leave the ref unresolved.
+        missingRefs.push(refName, ...upstreamCompiled.missingRefs)
+        return m[0]
+      }
       refs.push({ windowId: upstream.windowId, blockName: upstream.blockName, title: upstream.title })
       // Synth/flow blocks expose a single jsonb column; inline their *projection*
       // (real, typed columns) so this block can reference fields like season/n.
@@ -419,6 +437,20 @@ function applyParamSubscriptions(
     else wrapPreds.push(pred)
   }
 
+  // Param injection (surgical FROM-item rewrite OR whole-result wrap) is only
+  // provably valid for a SINGLE SELECT/WITH statement. Bail out and emit the
+  // unfiltered SQL — rather than something Postgres can't parse — when the block
+  // is multi-statement (`SELECT …; SELECT …` → wrap around a `;` = syntax error)
+  // or is DML (`DELETE FROM (SELECT …)` from the surgical path). The verb test
+  // runs on the MASKED text so a leading `-- comment` / `/* */` before a real
+  // SELECT no longer silently skips filtering (it did when tested on raw text).
+  const maskedRewritten = maskSql(rewritten)
+  const isSelect = /^\s*(SELECT|WITH)\b/i.test(maskedRewritten)
+  const isSingleStatement = splitStatements(rewritten).filter((s) => s.trim().length > 0).length <= 1
+  if (!isSelect || !isSingleStatement) {
+    return { sql: `${rewritten};`, missingParams: missing }
+  }
+
   // Surgical: wrap the single FROM-item in a filtered subquery — `FROM x` →
   // `FROM (SELECT * FROM x WHERE <preds>) a`. Postgres flattens it and pushes
   // the predicate to the base scan (before any aggregation). `x` is whatever the
@@ -436,7 +468,6 @@ function applyParamSubscriptions(
   }
 
   if (wrapPreds.length === 0) return { sql: `${rewritten};`, missingParams: missing }
-  if (!/^\s*(SELECT|WITH)\b/i.test(rewritten)) return { sql: `${rewritten};`, missingParams: missing }
   return {
     sql: [
       "SELECT *",
@@ -452,13 +483,19 @@ function applyParamSubscriptions(
 function quoteSqlLiteral(value: unknown): string {
   if (value === null || value === undefined) return "NULL"
   if (Array.isArray(value)) return `(${value.map(quoteSqlLiteral).join(", ") || "NULL"})`
-  if (typeof value === "number" && Number.isFinite(value)) return String(value)
+  if (typeof value === "number") return Number.isFinite(value) ? String(value) : "NULL"
   if (typeof value === "boolean") return value ? "TRUE" : "FALSE"
+  // Objects (e.g. a clicked jsonb/composite cell) must not stringify to the
+  // literal "[object Object]" — serialize to a jsonb literal instead.
+  if (typeof value === "object") return `'${JSON.stringify(value).replace(/'/g, "''")}'::jsonb`
   return `'${String(value).replace(/'/g, "''")}'`
 }
 
 export function predicateForParam(field: string, value: unknown, operator?: string): string {
   const q = quoteSqlIdent(field)
+  // A non-finite number (NaN/Infinity) is not a meaningful filter value and would
+  // cast-error against a numeric column — drop the predicate rather than filter.
+  if (typeof value === "number" && !Number.isFinite(value)) return "TRUE"
   // Range/threshold comparison (datepicker / slider). `col >= v` matches whole
   // timestamps correctly (no exact-midnight problem of `col = date`).
   if (operator === "gte" || operator === "lte") {
@@ -562,9 +599,14 @@ function replaceMasked(
 ): string {
   const out: string[] = []
   let cursor = 0
-  pattern.lastIndex = 0
+  // Clone the pattern so this call owns its own `lastIndex`. The replacer may
+  // recursively re-enter replaceMasked with the SAME module-level regex object
+  // (compile() → {ref} inline → compile()); a shared regex would have its cursor
+  // reset by the nested loop and re-emit the outer match, duplicating the inlined
+  // body. A per-call clone makes re-entrancy safe.
+  const re = new RegExp(pattern.source, pattern.flags)
   let m: RegExpExecArray | null
-  while ((m = pattern.exec(masked)) !== null) {
+  while ((m = re.exec(masked)) !== null) {
     out.push(source.slice(cursor, m.index))
     out.push(replacer(m))
     cursor = m.index + m[0].length

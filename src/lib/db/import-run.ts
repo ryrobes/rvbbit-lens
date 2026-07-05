@@ -3,7 +3,7 @@ import "server-only"
 import { Client } from "pg"
 import { from as copyFrom } from "pg-copy-streams"
 import { parse } from "csv-parse"
-import { Readable, Transform } from "node:stream"
+import { Readable, Transform, pipeline } from "node:stream"
 import { once } from "node:events"
 import type { ConnectionRecord } from "./types"
 import { buildClientConfig } from "./pool"
@@ -95,8 +95,21 @@ export async function runImport({ record, config, body, signal, onProgress }: Ru
       config.columns,
     )} FROM STDIN WITH (FORMAT csv, NULL '')`
     copyStream = client.query(copyFrom(copySql))
+    // COPY can reject a row *asynchronously* — a value Node accepted but Postgres'
+    // input function rejects (float8 overflow, NUL byte, year-zero date). Without a
+    // persistent 'error' listener that surfaces as an uncaughtException that kills
+    // the process before ROLLBACK runs. Route it into the async iterator below by
+    // destroying the parser with the same error so the `for await` rejects.
+    copyStream.on("error", (e: Error) => { parser.destroy(e) })
 
-    body.pipe(counter).pipe(parser)
+    // pipeline (not raw pipe) propagates a body.destroy()/abort downstream so the
+    // `for await` actually rejects and unwinds. A plain `pipe` neither forwards the
+    // source error nor listens for it — on cancel/tab-close the iterator would hang
+    // forever, stranding the import inside an open transaction holding locks.
+    pipeline(body, counter, parser, () => {
+      /* errors surface through the async iterator (parser is destroyed); this
+         callback just absorbs the pipeline result and guarantees teardown. */
+    })
 
     for await (const record of parser as AsyncIterable<string[]>) {
       if (signal.aborted) throw new Error("import aborted by client")

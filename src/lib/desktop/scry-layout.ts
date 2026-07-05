@@ -88,8 +88,8 @@ export function relaxLayout(
       const ia = idx.get(e.from)
       const ib = idx.get(e.to)
       if (ia == null || ib == null || ia === ib) continue
-      let dx = pos[ia].x - pos[ib].x
-      let dy = pos[ia].y - pos[ib].y
+      const dx = pos[ia].x - pos[ib].x
+      const dy = pos[ia].y - pos[ib].y
       let dist = Math.hypot(dx, dy)
       if (dist < 0.01) dist = 0.01
       const force = (dist * dist) / K

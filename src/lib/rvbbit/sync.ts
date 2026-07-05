@@ -100,7 +100,7 @@ export async function listSyncJobs(connectionId: string): Promise<{ jobs: SyncJo
     jobs: r.rows.map((row) => ({
       jobName: String(row.job_name),
       enabled: row.enabled === true || row.enabled === "t",
-      spec: (typeof row.spec === "string" ? JSON.parse(row.spec) : row.spec) as SyncSpec,
+      spec: (typeof row.spec === "string" ? safeJson(row.spec) : row.spec) as SyncSpec,
       lastRunAt: num(row.last_run),
     })),
   }

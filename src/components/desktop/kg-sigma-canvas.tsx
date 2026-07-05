@@ -1970,12 +1970,28 @@ function clusterLayout(graph: KgGraph, groupBy: (node: KgGraphNode) => string): 
   return positions
 }
 
+// Deterministic PRNG (mulberry32). louvain defaults to Math.random, which makes
+// community assignment — and therefore topic colors/groupings — differ on every
+// identical load. A fixed-seed rng keeps the same graph mapping to the same
+// communities each time.
+function makeSeededRng(seed: number): () => number {
+  let a = seed >>> 0
+  return () => {
+    a = (a + 0x6d2b79f5) | 0
+    let t = Math.imul(a ^ (a >>> 15), 1 | a)
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296
+  }
+}
+
 function assignCommunities(graph: Graph<KgSigmaNodeAttributes, KgSigmaEdgeAttributes>) {
   let communities: Record<string, number> = {}
   try {
     communities = louvain(graph, {
       getEdgeWeight: "weight",
       resolution: graph.order > 250 ? 0.8 : 1,
+      rng: makeSeededRng(0x9e3779b1),
+      randomWalk: false,
     })
   } catch {
     let index = 0
