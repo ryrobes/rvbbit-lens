@@ -31,6 +31,27 @@ interface FolderWallpaperItem {
   url: string
 }
 
+interface FolderWallpaperCandidate {
+  file: File
+  path: string
+}
+
+interface FileSystemFileHandleLike {
+  kind: "file"
+  name: string
+  getFile: () => Promise<File>
+}
+
+interface FileSystemDirectoryHandleLike {
+  kind: "directory"
+  name: string
+  values: () => AsyncIterable<FileSystemFileHandleLike | FileSystemDirectoryHandleLike>
+}
+
+interface DirectoryPickerWindow extends Window {
+  showDirectoryPicker?: (options?: { id?: string; mode?: "read" }) => Promise<FileSystemDirectoryHandleLike>
+}
+
 interface AppearanceWindowProps extends PaletteWindowProps {
   wallpaperUrl: string | null
   onPickWallpaper: () => void
@@ -55,6 +76,8 @@ export function AppearanceWindow({
   const [folderItems, setFolderItems] = useState<FolderWallpaperItem[]>([])
   const [selectedFolderId, setSelectedFolderId] = useState<string | null>(null)
   const [folderFilter, setFolderFilter] = useState("")
+  const [folderLoading, setFolderLoading] = useState(false)
+  const [folderError, setFolderError] = useState<string | null>(null)
   const [applying, setApplying] = useState(false)
   const folderInputRef = useRef<HTMLInputElement | null>(null)
   const folderUrlsRef = useRef<string[]>([])
@@ -122,29 +145,55 @@ export function AppearanceWindow({
         ? selectedLibrary?.label ?? "No library image"
         : "Current wallpaper"
 
-  const chooseFolder = useCallback(() => folderInputRef.current?.click(), [])
-
-  const onFolderChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
-    const files = Array.from(e.currentTarget.files ?? []).filter(isLikelyImageFile)
-    e.currentTarget.value = ""
+  const setFolderSelection = useCallback((candidates: FolderWallpaperCandidate[]) => {
     revokeFolderUrls()
-    const next = files
-      .sort((a, b) => filePath(a).localeCompare(filePath(b), undefined, { numeric: true, sensitivity: "base" }))
-      .map((file, index) => {
+    const next = candidates
+      .filter(({ file }) => isLikelyImageFile(file))
+      .sort((a, b) => a.path.localeCompare(b.path, undefined, { numeric: true, sensitivity: "base" }))
+      .map(({ file, path }, index) => {
         const url = URL.createObjectURL(file)
         folderUrlsRef.current.push(url)
         return {
-          id: `${index}:${filePath(file)}`,
+          id: `${index}:${path}`,
           name: file.name,
-          path: filePath(file),
+          path,
           file,
           url,
         }
       })
     setFolderItems(next)
     setSelectedFolderId(next[0]?.id ?? null)
+    setFolderError(next.length === 0 ? "No supported images found in that folder." : null)
     setTab("folder")
   }, [revokeFolderUrls])
+
+  const chooseFolder = useCallback(async () => {
+    const directoryPicker = (window as DirectoryPickerWindow).showDirectoryPicker
+    if (!directoryPicker) {
+      folderInputRef.current?.click()
+      return
+    }
+
+    setFolderLoading(true)
+    setFolderError(null)
+    try {
+      const directory = await directoryPicker.call(window, { id: "rvbbit-wallpapers", mode: "read" })
+      const files = await collectDirectoryImages(directory)
+      setFolderSelection(files)
+    } catch (err) {
+      if (err instanceof DOMException && err.name === "AbortError") return
+      setFolderError(err instanceof Error ? err.message : "Could not read that folder.")
+    } finally {
+      setFolderLoading(false)
+    }
+  }, [setFolderSelection])
+
+  const onFolderChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(e.currentTarget.files ?? [])
+      .map((file) => ({ file, path: filePath(file) }))
+    e.currentTarget.value = ""
+    setFolderSelection(files)
+  }, [setFolderSelection])
 
   const applySelected = useCallback(async () => {
     const target = tab === "folder" ? selectedFolder : selectedLibrary
@@ -206,12 +255,13 @@ export function AppearanceWindow({
                   type="file"
                   accept={WALLPAPER_FILE_ACCEPT}
                   multiple
+                  {...DIRECTORY_INPUT_PROPS}
                   className="hidden"
                   onChange={onFolderChange}
                 />
                 <div className="mb-3 flex items-center gap-2">
-                  <Button size="sm" variant="neutral" onClick={chooseFolder}>
-                    <FolderOpen className="h-3.5 w-3.5" />
+                  <Button size="sm" variant="neutral" disabled={folderLoading} onClick={chooseFolder}>
+                    {folderLoading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <FolderOpen className="h-3.5 w-3.5" />}
                     Choose folder
                   </Button>
                   <div className="relative min-w-0 flex-1">
@@ -224,11 +274,21 @@ export function AppearanceWindow({
                     />
                   </div>
                 </div>
-                <FolderGrid
-                  items={filteredFolderItems}
-                  selectedId={selectedFolder?.id ?? null}
-                  onSelect={setSelectedFolderId}
-                />
+                {folderError ? (
+                  <div className="mb-3 flex items-start gap-2 rounded-md border border-chrome-border bg-secondary-background p-2 text-[11px] text-chrome-text">
+                    <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-rvbbit-accent" />
+                    <span>{folderError}</span>
+                  </div>
+                ) : null}
+                {folderLoading ? (
+                  <div className="grid h-[220px] place-items-center text-xs text-chrome-text">Reading folder...</div>
+                ) : (
+                  <FolderGrid
+                    items={filteredFolderItems}
+                    selectedId={selectedFolder?.id ?? null}
+                    onSelect={setSelectedFolderId}
+                  />
+                )}
               </>
             )}
           </div>
@@ -282,6 +342,11 @@ export function AppearanceWindow({
   )
 
 }
+
+const DIRECTORY_INPUT_PROPS = {
+  webkitdirectory: "",
+  directory: "",
+} as Record<string, string>
 
 function SegmentedButton({
   active,
@@ -416,6 +481,23 @@ function wildcardMatcher(input: string): (value: string) => boolean {
   })
 
   return (value) => regexes.some((pattern) => pattern.test(value))
+}
+
+async function collectDirectoryImages(
+  directory: FileSystemDirectoryHandleLike,
+  prefix = "",
+): Promise<FolderWallpaperCandidate[]> {
+  const images: FolderWallpaperCandidate[] = []
+  for await (const handle of directory.values()) {
+    if (handle.kind === "file") {
+      const file = await handle.getFile()
+      if (isLikelyImageFile(file)) images.push({ file, path: `${prefix}${file.name}` })
+      continue
+    }
+
+    images.push(...await collectDirectoryImages(handle, `${prefix}${handle.name}/`))
+  }
+  return images
 }
 
 function filePath(file: File): string {
