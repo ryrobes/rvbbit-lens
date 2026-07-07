@@ -42,3 +42,5 @@ next-env.d.ts
 
 # Lens homebase (server SQLite store)
 .lens-data/
+
+scratch/
