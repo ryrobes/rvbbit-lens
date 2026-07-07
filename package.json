@@ -55,6 +55,7 @@
     "react": "19.2.3",
     "react-dom": "19.2.3",
     "react-vega": "^8.0.0",
+    "sharp": "^0.35.3",
     "shiki": "^4.0.2",
     "sigma": "^3.0.3",
     "sql-formatter": "^15.7.3",

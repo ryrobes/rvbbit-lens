@@ -67,6 +67,7 @@ interface DesktopMenuBarProps {
   onOpenViewApps: () => void
   onPickWallpaper: () => void
   onClearWallpaper: () => void
+  onOpenAppearance: () => void
   onOpenPalette: () => void
   onSetTheme: (mode: "dark" | "light") => void
   themeMode: "dark" | "light"
@@ -171,6 +172,7 @@ export function DesktopMenuBar({
   onOpenViewApps,
   onPickWallpaper,
   onClearWallpaper,
+  onOpenAppearance,
   onOpenPalette,
   onSetTheme,
   themeMode,
@@ -282,6 +284,7 @@ export function DesktopMenuBar({
 
   // ── Desktop menu ─────────────────────────────────────────────────
   const desktopItems: MenuEntry[] = [
+    { label: "Appearance...", onClick: onOpenAppearance },
     { label: "Set wallpaper...", onClick: onPickWallpaper },
     ...(hasWallpaper ? [{ kind: "action" as const, label: "Clear wallpaper", onClick: onClearWallpaper }] : []),
     { label: "Palette...", onClick: onOpenPalette },

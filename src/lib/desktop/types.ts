@@ -21,6 +21,7 @@ export type DesktopWindowKind =
   | "cache"
   | "connections"
   | "palette"
+  | "appearance"
   | "pg-monitor"
   | "postgres-admin"
   | "notifications"
@@ -111,6 +112,7 @@ export type WindowPayload =
   | CachePayload
   | ConnectionsPayload
   | PalettePayload
+  | AppearancePayload
   | PgMonitorPayload
   | PostgresAdminPayload
   | NotificationsPayload
@@ -909,6 +911,10 @@ export interface ConnectionsPayload {
 
 export interface PalettePayload {
   kind?: "palette"
+}
+
+export interface AppearancePayload {
+  kind?: "appearance"
 }
 
 export interface PgMonitorPayload {

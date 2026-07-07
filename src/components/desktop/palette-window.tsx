@@ -10,7 +10,7 @@ import {
 } from "@/lib/desktop/palette-rvbbit-vision"
 import { cn } from "@/lib/utils"
 
-interface PaletteWindowProps {
+export interface PaletteWindowProps {
   palette: ImagePalette | null
   overrides: Partial<ImagePalette> | null
   hasWallpaper: boolean
@@ -93,11 +93,21 @@ function PaletteEditor({
   const [rvbbitBusy, setRvbbitBusy] = useState(false)
 
   useEffect(() => {
+    let alive = true
     if (!activeConnectionId) {
-      setVision({ available: false })
-      return
+      void Promise.resolve().then(() => {
+        if (alive) setVision({ available: false })
+      })
+      return () => {
+        alive = false
+      }
     }
-    void checkRvbbitVisionAvailability(activeConnectionId).then(setVision)
+    void checkRvbbitVisionAvailability(activeConnectionId).then((next) => {
+      if (alive) setVision(next)
+    })
+    return () => {
+      alive = false
+    }
   }, [activeConnectionId])
 
   const rvbbitButtonTitle = !vision.available

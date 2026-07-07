@@ -17,11 +17,16 @@ const DB_VERSION = 2 // bumped from 1 when palette fields were added
 const STORE_NAME = "wallpapers"
 const KEY = "wallpaper:default"
 
+export type DesktopWallpaperSource =
+  | { kind: "upload"; name?: string }
+  | { kind: "library"; id: string; label?: string; originalUrl?: string }
+
 interface WallpaperRecord {
   id: string
-  blob: Blob
-  type: string
+  blob?: Blob
+  type?: string
   updatedAt: string
+  source?: DesktopWallpaperSource
   palette?: ImagePalette
   /**
    * User overrides. Whatever's set here wins over the extractor's
@@ -69,12 +74,29 @@ export async function saveDesktopWallpaper(
   blob: Blob,
   palette?: ImagePalette,
   paletteOverrides?: Partial<ImagePalette>,
+  source: DesktopWallpaperSource = { kind: "upload" },
 ): Promise<void> {
   const record: WallpaperRecord = {
     id: KEY,
     blob,
     type: blob.type,
     updatedAt: new Date().toISOString(),
+    source,
+    palette,
+    paletteOverrides,
+  }
+  await withStore("readwrite", (s) => s.put(record))
+}
+
+export async function saveDesktopWallpaperSource(
+  source: DesktopWallpaperSource,
+  palette?: ImagePalette,
+  paletteOverrides?: Partial<ImagePalette>,
+): Promise<void> {
+  const record: WallpaperRecord = {
+    id: KEY,
+    updatedAt: new Date().toISOString(),
+    source,
     palette,
     paletteOverrides,
   }
@@ -88,13 +110,19 @@ export async function loadDesktopWallpaperBlob(): Promise<Blob | null> {
 
 /** Full record — blob + palette + overrides. Returns null if no wallpaper. */
 export async function loadDesktopWallpaperRecord(): Promise<{
-  blob: Blob
+  blob: Blob | null
+  source?: DesktopWallpaperSource
   palette?: ImagePalette
   paletteOverrides?: Partial<ImagePalette>
 } | null> {
   const r = await withStore<WallpaperRecord | undefined>("readonly", (s) => s.get(KEY))
   if (!r) return null
-  return { blob: r.blob, palette: r.palette, paletteOverrides: r.paletteOverrides }
+  return {
+    blob: r.blob ?? null,
+    source: r.source ?? (r.blob ? { kind: "upload" } : undefined),
+    palette: r.palette,
+    paletteOverrides: r.paletteOverrides,
+  }
 }
 
 export async function updateDesktopWallpaperPalette(

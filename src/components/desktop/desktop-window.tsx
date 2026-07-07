@@ -1033,6 +1033,7 @@ const KIND_HUE: Record<string, number> = {
   "rvbbit-cache": 175,
   connections: 290,
   palette: 320,
+  appearance: 320,
   "pg-monitor": 150,
   "postgres-admin": 150,
   "data-mover": 175,

@@ -71,6 +71,7 @@ import { CacheWindow } from "./cache-window"
 import { ArtifactWindow } from "./artifact-window"
 import { QueryDocumentWindow } from "./query-document-window"
 import { PaletteWindow } from "./palette-window"
+import { AppearanceWindow } from "./appearance-window"
 import { CommandPalette, type PaletteGroup, type PaletteItem } from "./command-palette"
 import { PgMonitorWindow } from "./pg-monitor-window"
 import { PostgresAdminWindow } from "./postgres-admin-window"
@@ -199,6 +200,7 @@ import type {
   HfDeployPayload,
   WarrenPayload,
   WarrenJobDetailPayload,
+  AppearancePayload,
   PalettePayload,
   PgMonitorPayload,
   PostgresAdminPayload,
@@ -310,8 +312,14 @@ import {
   isLikelyImageFile,
   loadDesktopWallpaperRecord,
   saveDesktopWallpaper,
+  saveDesktopWallpaperSource,
   updateDesktopWallpaperPalette,
 } from "@/lib/desktop/wallpaper-store"
+import {
+  selectWallpaperVariantForViewport,
+  wallpaperVariantUrl,
+  type WallpaperLibraryItem,
+} from "@/lib/desktop/wallpaper-library"
 import type { ImagePalette, ThemeMode } from "@/lib/desktop/palette"
 import { vibrantExtractor } from "@/lib/desktop/palette-vibrant"
 import { extractPaletteWithRvbbitVision } from "@/lib/desktop/palette-rvbbit-vision"
@@ -1069,7 +1077,11 @@ export function DesktopShell() {
       try {
         const record = await loadDesktopWallpaperRecord()
         if (record) {
-          setWallpaperObjectUrl(URL.createObjectURL(record.blob))
+          if (record.source?.kind === "library") {
+            setWallpaperDisplayUrl(wallpaperVariantUrl(record.source.id, selectWallpaperVariantForViewport()))
+          } else if (record.blob) {
+            setWallpaperDisplayUrl(URL.createObjectURL(record.blob), { objectUrl: true })
+          }
           if (record.palette) setActivePalette(record.palette)
           if (record.paletteOverrides) setPaletteOverrides(record.paletteOverrides)
         }
@@ -1133,11 +1145,11 @@ export function DesktopShell() {
 
   // ── Wallpaper ──────────────────────────────────────────────────────
 
-  const setWallpaperObjectUrl = useCallback((url: string | null) => {
+  const setWallpaperDisplayUrl = useCallback((url: string | null, options?: { objectUrl?: boolean }) => {
     if (wallpaperObjectUrlRef.current && wallpaperObjectUrlRef.current !== url) {
       URL.revokeObjectURL(wallpaperObjectUrlRef.current)
     }
-    wallpaperObjectUrlRef.current = url
+    wallpaperObjectUrlRef.current = options?.objectUrl ? url : null
     setWallpaperUrl(url)
   }, [])
 
@@ -1145,9 +1157,7 @@ export function DesktopShell() {
     wallpaperInputRef.current?.click()
   }, [])
 
-  const onWallpaperFileChange = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.currentTarget.files?.[0]
-    e.currentTarget.value = ""
+  const applyUploadedWallpaper = useCallback(async (file: File) => {
     if (!file) return
     if (!isLikelyImageFile(file)) {
       setWallpaperError("Choose an image file.")
@@ -1163,9 +1173,10 @@ export function DesktopShell() {
     try {
       // Run vibrant on the freshly-loaded image. Done in parallel with
       // the IndexedDB write so the visible swap is snappy.
-      const palette = await vibrantExtractor.extract(file).catch(() => null)
-      await saveDesktopWallpaper(file, palette ?? undefined)
-      setWallpaperObjectUrl(objectUrl)
+      const rawPalette = await vibrantExtractor.extract(file).catch(() => null)
+      const palette = rawPalette ? { ...rawPalette, source: file.name } : null
+      await saveDesktopWallpaper(file, palette ?? undefined, undefined, { kind: "upload", name: file.name })
+      setWallpaperDisplayUrl(objectUrl, { objectUrl: true })
       setActivePalette(palette)
       setPaletteOverrides(null) // fresh image → drop the previous overrides
       setWallpaperError(null)
@@ -1173,15 +1184,40 @@ export function DesktopShell() {
       URL.revokeObjectURL(objectUrl)
       setWallpaperError(err instanceof Error ? err.message : "Could not save wallpaper.")
     }
-  }, [setWallpaperObjectUrl])
+  }, [setWallpaperDisplayUrl])
+
+  const onWallpaperFileChange = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.currentTarget.files?.[0]
+    e.currentTarget.value = ""
+    if (!file) return
+    await applyUploadedWallpaper(file)
+  }, [applyUploadedWallpaper])
+
+  const onApplyLibraryWallpaper = useCallback(async (item: WallpaperLibraryItem) => {
+    const url = wallpaperVariantUrl(item.id, selectWallpaperVariantForViewport())
+    try {
+      const rawPalette = await vibrantExtractor.extract(url).catch(() => null)
+      const palette = rawPalette ? { ...rawPalette, source: item.label } : null
+      await saveDesktopWallpaperSource(
+        { kind: "library", id: item.id, label: item.label, originalUrl: item.urls.original },
+        palette ?? undefined,
+      )
+      setWallpaperDisplayUrl(url)
+      setActivePalette(palette)
+      setPaletteOverrides(null)
+      setWallpaperError(null)
+    } catch (err) {
+      setWallpaperError(err instanceof Error ? err.message : "Could not apply wallpaper.")
+    }
+  }, [setWallpaperDisplayUrl])
 
   const onClearWallpaper = useCallback(async () => {
-    setWallpaperObjectUrl(null)
+    setWallpaperDisplayUrl(null)
     setActivePalette(null)
     setPaletteOverrides(null)
     setWallpaperError(null)
     try { await clearDesktopWallpaper() } catch { /* ignore */ }
-  }, [setWallpaperObjectUrl])
+  }, [setWallpaperDisplayUrl])
 
   // Apply the derived theme whenever the palette (or its overrides)
   // changes. Releasing the previous overlay restores any token values
@@ -3132,6 +3168,18 @@ export function DesktopShell() {
     })
   }, [focus, openWindow, liveWindows])
 
+  const openAppearance = useCallback(() => {
+    const existing = liveWindows().find((w) => w.kind === "appearance")
+    if (existing) return focus(existing.id)
+    openWindow({
+      id: randomUUID(),
+      kind: "appearance",
+      title: "Desktop Appearance",
+      x: 160, y: 100, width: 940, height: 640,
+      payload: { kind: "appearance" } satisfies AppearancePayload,
+    })
+  }, [focus, openWindow, liveWindows])
+
   const onReExtractPalette = useCallback(async () => {
     if (!wallpaperUrl) return
     try {
@@ -3152,14 +3200,17 @@ export function DesktopShell() {
     }
     if (!wallpaperUrl) return
     try {
-      // Re-fetch the blob from IDB (the object URL has it but blob() is
-      // simpler than reverse-engineering the URL).
       const record = await loadDesktopWallpaperRecord()
-      if (!record) {
+      let blob = record?.blob ?? null
+      if (!blob && wallpaperUrl) {
+        const res = await fetch(wallpaperUrl)
+        if (res.ok) blob = await res.blob()
+      }
+      if (!blob) {
         setWallpaperError("No wallpaper found.")
         return
       }
-      const palette = await extractPaletteWithRvbbitVision(activeConnectionId, record.blob)
+      const palette = await extractPaletteWithRvbbitVision(activeConnectionId, blob)
       setActivePalette(palette)
     } catch (err) {
       setWallpaperError(err instanceof Error ? err.message : "AI re-curate failed.")
@@ -4065,6 +4116,12 @@ export function DesktopShell() {
             onSelect: onPickWallpaper,
           },
           {
+            id: "appearance",
+            label: "Desktop Appearance…",
+            icon: Settings2,
+            onSelect: openAppearance,
+          },
+          {
             id: "lineage",
             label: lineageVisible ? "Hide Dependency Lines" : "Show Dependency Lines",
             icon: GitBranch,
@@ -4074,7 +4131,7 @@ export function DesktopShell() {
         ],
       })
     },
-    [screenToWorld, openSqlScratchAtPos, openFinder, onPickWallpaper, lineageVisible, setLineage],
+    [screenToWorld, openSqlScratchAtPos, openFinder, onPickWallpaper, openAppearance, lineageVisible, setLineage],
   )
 
   // Open a folder window for a launcher group.
@@ -4384,7 +4441,12 @@ export function DesktopShell() {
       probeColumnValues,
       palette: activePalette,
       paletteOverrides,
+      wallpaperUrl,
       hasWallpaper: !!wallpaperUrl,
+      onPickWallpaper,
+      onClearWallpaper,
+      onApplyLibraryWallpaper,
+      onApplyLocalWallpaper: applyUploadedWallpaper,
       onReExtractPalette,
       onReExtractWithRvbbit,
       onChangePaletteOverrides: setPaletteOverrides,
@@ -4434,7 +4496,8 @@ export function DesktopShell() {
       openQueryDocument, openSqlData, openRowInspector, openCsvImport, openExtensions, openRvbbitCache, openCache, openConnections,
       loadSchema, loadConnections, updatePayload, emitParam, subscribeParam,
       editRollupSpec, repivotWindow, probeColumnValues, activePalette, paletteOverrides,
-      wallpaperUrl, onReExtractPalette, onReExtractWithRvbbit, setPaletteOverrides,
+      wallpaperUrl, onPickWallpaper, onClearWallpaper, onApplyLibraryWallpaper, applyUploadedWallpaper,
+      onReExtractPalette, onReExtractWithRvbbit, setPaletteOverrides,
       notifications, watchedChannels, windowChannels, notifyStatus, addWatchedChannel,
       removeWatchedChannel, clearNotifications, openOperatorFlow, openSpecialistDetail,
       openBrain, openMcpServers, openMcpServerDetail, openRouting, openQueryLens, openKgBrowser, openKgEntity,
@@ -4554,6 +4617,7 @@ export function DesktopShell() {
         onOpenViewApps={openViewApps}
         onPickWallpaper={onPickWallpaper}
         onClearWallpaper={onClearWallpaper}
+        onOpenAppearance={openAppearance}
         onOpenPalette={openPalette}
         onSetTheme={setTheme}
         themeMode={themeMode}
@@ -4995,7 +5059,12 @@ interface WindowContext {
   probeColumnValues: (targetWindowId: string, column: DesktopColumnRef, search?: string) => Promise<{ values: (string | number | null)[]; truncated: boolean }>
   palette: ImagePalette | null
   paletteOverrides: Partial<ImagePalette> | null
+  wallpaperUrl: string | null
   hasWallpaper: boolean
+  onPickWallpaper: () => void
+  onClearWallpaper: () => void
+  onApplyLibraryWallpaper: (item: WallpaperLibraryItem) => Promise<void>
+  onApplyLocalWallpaper: (file: File) => Promise<void>
   onReExtractPalette: () => void
   onReExtractWithRvbbit: () => Promise<void>
   onChangePaletteOverrides: (next: Partial<ImagePalette> | null) => void
@@ -5709,6 +5778,23 @@ function renderWindowContent(
           onChangeOverrides={ctx.onChangePaletteOverrides}
         />
       )
+    case "appearance":
+      return (
+        <AppearanceWindow
+          wallpaperUrl={ctx.wallpaperUrl}
+          palette={ctx.palette}
+          overrides={ctx.paletteOverrides}
+          hasWallpaper={ctx.hasWallpaper}
+          activeConnectionId={ctx.activeConnectionId}
+          onPickWallpaper={ctx.onPickWallpaper}
+          onClearWallpaper={ctx.onClearWallpaper}
+          onApplyLibraryWallpaper={ctx.onApplyLibraryWallpaper}
+          onApplyLocalWallpaper={ctx.onApplyLocalWallpaper}
+          onReExtract={ctx.onReExtractPalette}
+          onReExtractWithRvbbit={ctx.onReExtractWithRvbbit}
+          onChangeOverrides={ctx.onChangePaletteOverrides}
+        />
+      )
     default:
       return <div className="p-4 text-sm text-chrome-text">Unknown window kind: {w.kind}</div>
   }
@@ -5761,7 +5847,9 @@ function iconForKind(kind: DesktopWindowState["kind"]) {
     case "cache": return Database
     case "artifact": return Wand2
     case "query-document": return FileCode2
-    case "palette": return PaletteIcon
+    case "palette":
+    case "appearance":
+      return PaletteIcon
     case "pg-monitor": return Activity
     case "postgres-admin": return Shield
     case "notifications": return Bell
