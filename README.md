@@ -41,8 +41,14 @@ docker run --rm -p 3000:3000 \
   ghcr.io/ryrobes/rvbbit-lens:local
 ```
 
-For the all-in Rvbbit stack, use `docker/docker-compose.release.yml` from the
-`rvbbit-sql` repo.
+For the all-in Rvbbit stack (this UI + Postgres 18 + the rvbbit extension +
+the warren capability agent):
+
+```bash
+curl -fsSL https://rvbbit.ai/install.sh | bash
+```
+
+Docs: [rvbbit.ai/docs/data-rabbit](https://rvbbit.ai/docs/data-rabbit)
 
 ## Layout
 
