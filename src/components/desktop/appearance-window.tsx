@@ -17,7 +17,7 @@ import {
   fetchWallpaperLibrary,
   type WallpaperLibraryItem,
 } from "@/lib/desktop/wallpaper-library"
-import { isLikelyImageFile } from "@/lib/desktop/wallpaper-store"
+import { isLikelyImageFile, WALLPAPER_FILE_ACCEPT } from "@/lib/desktop/wallpaper-store"
 import { cn } from "@/lib/utils"
 import { PaletteWindow, type PaletteWindowProps } from "./palette-window"
 
@@ -204,7 +204,7 @@ export function AppearanceWindow({
                 <input
                   ref={folderInputRef}
                   type="file"
-                  accept="image/*"
+                  accept={WALLPAPER_FILE_ACCEPT}
                   multiple
                   className="hidden"
                   onChange={onFolderChange}
@@ -219,7 +219,7 @@ export function AppearanceWindow({
                     <Input
                       value={folderFilter}
                       onChange={(e) => setFolderFilter(e.target.value)}
-                      placeholder="*.jpg"
+                      placeholder="*.webp, *.png, sunset*"
                       className="h-8 pl-7 text-xs"
                     />
                   </div>
@@ -400,14 +400,22 @@ function WallpaperTile({
 }
 
 function wildcardMatcher(input: string): (value: string) => boolean {
-  const trimmed = input.trim()
-  if (!trimmed) return () => true
-  const escaped = trimmed
-    .split("*")
-    .map((part) => part.replace(/[|\\{}()[\]^$+?.]/g, "\\$&"))
-    .join(".*")
-  const pattern = new RegExp(`^${escaped}$`, "i")
-  return (value) => pattern.test(value)
+  const patterns = input
+    .split(/[\s,]+/)
+    .map((part) => part.trim())
+    .filter(Boolean)
+
+  if (patterns.length === 0) return () => true
+
+  const regexes = patterns.map((pattern) => {
+    const escaped = pattern
+      .split("*")
+      .map((part) => part.replace(/[|\\{}()[\]^$+?.]/g, "\\$&"))
+      .join(".*")
+    return new RegExp(`^${escaped}$`, "i")
+  })
+
+  return (value) => regexes.some((pattern) => pattern.test(value))
 }
 
 function filePath(file: File): string {

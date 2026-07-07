@@ -314,6 +314,7 @@ import {
   saveDesktopWallpaper,
   saveDesktopWallpaperSource,
   updateDesktopWallpaperPalette,
+  WALLPAPER_FILE_ACCEPT,
 } from "@/lib/desktop/wallpaper-store"
 import {
   selectWallpaperVariantForViewport,
@@ -4569,7 +4570,7 @@ export function DesktopShell() {
       <input
         ref={wallpaperInputRef}
         type="file"
-        accept="image/*"
+        accept={WALLPAPER_FILE_ACCEPT}
         className="hidden"
         onChange={onWallpaperFileChange}
       />

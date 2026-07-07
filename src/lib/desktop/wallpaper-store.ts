@@ -17,6 +17,31 @@ const DB_VERSION = 2 // bumped from 1 when palette fields were added
 const STORE_NAME = "wallpapers"
 const KEY = "wallpaper:default"
 
+export const WALLPAPER_IMAGE_EXTENSIONS = [
+  "avif",
+  "bmp",
+  "gif",
+  "heic",
+  "heif",
+  "ico",
+  "jfif",
+  "jpe",
+  "jpeg",
+  "jpg",
+  "pjp",
+  "pjpeg",
+  "png",
+  "svg",
+  "tif",
+  "tiff",
+  "webp",
+] as const
+
+export const WALLPAPER_FILE_ACCEPT = [
+  "image/*",
+  ...WALLPAPER_IMAGE_EXTENSIONS.map((ext) => `.${ext}`),
+].join(",")
+
 export type DesktopWallpaperSource =
   | { kind: "upload"; name?: string }
   | { kind: "library"; id: string; label?: string; originalUrl?: string }
@@ -147,7 +172,8 @@ export async function clearDesktopWallpaper(): Promise<void> {
 
 export function isLikelyImageFile(file: File): boolean {
   if (file.type.startsWith("image/")) return true
-  return /\.(avif|bmp|gif|jpe?g|png|svg|webp)$/i.test(file.name)
+  const ext = file.name.toLowerCase().split(".").pop()
+  return !!ext && (WALLPAPER_IMAGE_EXTENSIONS as readonly string[]).includes(ext)
 }
 
 export function canRenderImageUrl(url: string): Promise<boolean> {
