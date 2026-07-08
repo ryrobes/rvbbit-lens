@@ -4,13 +4,19 @@ import {
   upsertConnection,
   sanitize,
 } from "@/lib/db/registry"
+import { isContainerized } from "@/lib/db/server-context"
 import type { ConnectionInput } from "@/lib/db/types"
 
 export const runtime = "nodejs"
 
 export async function GET() {
   const all = await listConnections()
-  return NextResponse.json({ connections: all.map(sanitize) })
+  return NextResponse.json({
+    connections: all.map(sanitize),
+    // Server-side context: connections resolve from where THIS process runs,
+    // so the form can warn when "localhost" means the lens container itself.
+    server: { containerized: isContainerized() },
+  })
 }
 
 export async function POST(req: Request) {

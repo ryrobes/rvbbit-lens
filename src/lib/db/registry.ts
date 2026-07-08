@@ -15,6 +15,8 @@ import { disposeTunnel } from "./tunnel"
 const ENV_HOME = "RVBBIT_LENS_HOME"
 const DEFAULT_DIR_NAME = "rvbbit-lens"
 const FILE_NAME = "connections.json"
+const ENV_SEED_DSN = "RVBBIT_LENS_SEED_DSN"
+const ENV_SEED_LABEL = "RVBBIT_LENS_SEED_LABEL"
 
 function configDir(): string {
   const fromEnv = process.env[ENV_HOME]
@@ -118,11 +120,60 @@ function normalizeInput(input: ConnectionInput, existing?: ConnectionRecord): Co
   }
 }
 
+/**
+ * First-boot convenience: when the registry file does not exist yet and
+ * `RVBBIT_LENS_SEED_DSN` is set (the Docker ensemble points it at its own
+ * Postgres service), materialize that connection so the desktop works with
+ * zero typing. Runs once per process and never touches an existing registry,
+ * so user edits — including deleting the seeded connection — stick.
+ */
+let seedOnce: Promise<void> | null = null
+
+export function ensureSeeded(): Promise<void> {
+  if (!seedOnce) seedOnce = seedFromEnv()
+  return seedOnce
+}
+
+async function seedFromEnv(): Promise<void> {
+  const dsn = process.env[ENV_SEED_DSN]?.trim()
+  if (!dsn) return
+  try {
+    await fs.access(configPath())
+    return // registry exists — the user owns it now
+  } catch {
+    /* ENOENT: first boot, fall through to seed */
+  }
+  let url: URL
+  try {
+    url = new URL(dsn)
+  } catch {
+    console.warn(`rvbbit-lens: ${ENV_SEED_DSN} is not a parseable URL; skipping seed`)
+    return
+  }
+  if (!/^postgres(ql)?:$/.test(url.protocol)) {
+    console.warn(`rvbbit-lens: ${ENV_SEED_DSN} is not a postgres:// URL; skipping seed`)
+    return
+  }
+  const record = normalizeInput({
+    label: process.env[ENV_SEED_LABEL]?.trim() || "rvbbit (this stack)",
+    host: url.hostname || "postgres",
+    port: url.port ? Number(url.port) : 5432,
+    database: url.pathname.replace(/^\//, "") || "postgres",
+    user: url.username ? decodeURIComponent(url.username) : "postgres",
+    password: url.password ? decodeURIComponent(url.password) : undefined,
+    isDefault: true,
+  })
+  await writeAll([record])
+  console.log(`rvbbit-lens: seeded default connection '${record.label}' (${record.host}:${record.port}/${record.database}) from ${ENV_SEED_DSN}`)
+}
+
 export async function listConnections(): Promise<ConnectionRecord[]> {
+  await ensureSeeded()
   return readAll()
 }
 
 export async function getConnection(id: string): Promise<ConnectionRecord | null> {
+  await ensureSeeded()
   const all = await readAll()
   return all.find((c) => c.id === id) ?? null
 }

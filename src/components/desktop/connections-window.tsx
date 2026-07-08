@@ -72,12 +72,31 @@ export function ConnectionsWindow({ onChanged }: ConnectionsWindowProps) {
   const [error, setError] = useState<string | null>(null)
   const [healthById, setHealthById] = useState<Record<string, ConnectionHealthResult>>({})
   const [testingIds, setTestingIds] = useState<Set<string>>(() => new Set())
+  const [serverContainerized, setServerContainerized] = useState(false)
+  const [candidates, setCandidates] = useState<{ host: string; port: number }[] | null>(null)
+  const [detecting, setDetecting] = useState(false)
 
   const reload = useCallback(async () => {
     const res = await fetch("/api/db/connections", { cache: "no-store" })
     if (!res.ok) return
-    const body = (await res.json()) as { connections: SanitizedConnection[] }
+    const body = (await res.json()) as {
+      connections: SanitizedConnection[]
+      server?: { containerized?: boolean }
+    }
     setConnections(body.connections)
+    setServerContainerized(Boolean(body.server?.containerized))
+  }, [])
+
+  const detect = useCallback(async () => {
+    setDetecting(true)
+    try {
+      const res = await fetch("/api/db/discover", { cache: "no-store" })
+      if (!res.ok) return
+      const body = (await res.json()) as { candidates: { host: string; port: number }[] }
+      setCandidates(body.candidates)
+    } finally {
+      setDetecting(false)
+    }
   }, [])
 
   useEffect(() => {
@@ -288,6 +307,20 @@ export function ConnectionsWindow({ onChanged }: ConnectionsWindowProps) {
           </Field>
           <Field label="Host">
             <Input value={draft.host} onChange={(e) => setDraft({ ...draft, host: e.target.value })} placeholder="localhost" />
+            {serverContainerized && /^(localhost|127\.0\.0\.1)$/i.test(draft.host.trim()) ? (
+              <p className="mt-1 text-[10px] leading-snug text-amber-500/90">
+                Data Rabbit connects <em>server-side</em>, and this server runs inside a container —
+                &ldquo;localhost&rdquo; is the container itself, not the box. On the Docker ensemble use host{" "}
+                <button
+                  type="button"
+                  className="underline underline-offset-2"
+                  onClick={() => setDraft({ ...draft, host: "postgres", port: "5432" })}
+                >
+                  postgres
+                </button>
+                , port 5432.
+              </p>
+            ) : null}
           </Field>
           <Field label="Port">
             <Input value={draft.port} onChange={(e) => setDraft({ ...draft, port: e.target.value.replace(/[^0-9]/g, "") })} />
@@ -432,6 +465,29 @@ export function ConnectionsWindow({ onChanged }: ConnectionsWindowProps) {
               </div>
             </>
           ) : null}
+        </div>
+
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          <Button variant="neutral" onClick={detect} disabled={detecting}>
+            {detecting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Activity className="h-3.5 w-3.5" />}
+            Detect databases
+          </Button>
+          {candidates !== null && candidates.length === 0 ? (
+            <span className="text-[10px] text-chrome-text/60">
+              nothing reachable from the server on the usual hosts/ports
+            </span>
+          ) : null}
+          {candidates?.map((c) => (
+            <button
+              key={`${c.host}:${c.port}`}
+              type="button"
+              className="rounded-base border border-border bg-secondary-background px-2 py-1 font-mono text-[11px] text-chrome-text hover:ring-2 hover:ring-ring"
+              title="Use this host/port"
+              onClick={() => setDraft({ ...draft, host: c.host, port: String(c.port) })}
+            >
+              {c.host}:{c.port}
+            </button>
+          ))}
         </div>
 
         {error ? (
