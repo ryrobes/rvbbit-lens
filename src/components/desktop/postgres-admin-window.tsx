@@ -506,7 +506,7 @@ export function PostgresAdminWindow({
   }
 
   return (
-    <div className="flex h-full min-h-0 flex-col bg-background text-foreground">
+    <div className="flex h-full min-h-0 flex-col bg-block-bg/45 text-foreground backdrop-blur-md group-data-[focused=false]/window:bg-block-bg/25">
       <header className="shrink-0 border-b border-chrome-border/70 bg-secondary-background/55 px-3 py-2">
         <div className="flex flex-wrap items-center gap-2">
           <div className="grid h-8 w-8 place-items-center rounded-md border border-rvbbit-accent/35 bg-rvbbit-accent/10">
@@ -1304,7 +1304,7 @@ function BackupTab({
                 <input
                   value={schema}
                   onChange={(e) => setSchema(e.target.value)}
-                  className="mt-1 h-8 w-full rounded-sm border border-chrome-border bg-background px-2 font-mono text-[12px] text-foreground outline-none focus:border-rvbbit-accent/60"
+                  className="mt-1 h-8 w-full rounded-sm border border-chrome-border bg-secondary-background px-2 font-mono text-[12px] text-foreground outline-none focus:border-rvbbit-accent/60"
                 />
               </label>
               <label className="text-[10px] uppercase tracking-wider text-chrome-text/60">
@@ -1312,7 +1312,7 @@ function BackupTab({
                 <input
                   value={table}
                   onChange={(e) => setTable(e.target.value)}
-                  className="mt-1 h-8 w-full rounded-sm border border-chrome-border bg-background px-2 font-mono text-[12px] text-foreground outline-none focus:border-rvbbit-accent/60"
+                  className="mt-1 h-8 w-full rounded-sm border border-chrome-border bg-secondary-background px-2 font-mono text-[12px] text-foreground outline-none focus:border-rvbbit-accent/60"
                 />
               </label>
             </div>
@@ -1481,7 +1481,7 @@ function CenteredState({
   detail: string
 }) {
   return (
-    <div className="grid h-full place-items-center bg-background p-6 text-center">
+    <div className="grid h-full place-items-center p-6 text-center">
       <div>
         <div className="mx-auto grid h-12 w-12 place-items-center rounded-md border border-rvbbit-accent/35 bg-rvbbit-accent/10">
           <Icon className="h-6 w-6 text-rvbbit-accent" />
