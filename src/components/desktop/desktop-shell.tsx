@@ -18,6 +18,7 @@ import {
   FileText,
   FlowArrow,
   Folder,
+  AppWindow,
   Bookmark,
   FolderOpen,
   GitBranch,
@@ -83,6 +84,7 @@ import { CostsWindow } from "./costs-window"
 import { AgentMessagesWindow } from "./agent-messages-window"
 import { SyncMirrorWindow } from "./sync-mirror-window"
 import { DASHBOARD_SELECT_EVENT, DashboardsWindow } from "./dashboards-window"
+import { AppsWindow } from "./apps-window"
 import { DuckWindow } from "./duck-window"
 import { OperatorFlowWindow } from "./operator-flow-window"
 import { SpecialistsWindow } from "./specialists-window"
@@ -153,6 +155,8 @@ import type {
   DataPayload,
   DataMoverPayload,
   DashboardsPayload,
+  AppsPayload,
+  DashboardAppPayload,
   DataSearchPayload,
   DriftPayload,
   RowInspectorPayload,
@@ -2406,6 +2410,35 @@ export function DesktopShell() {
     })
   }, [focus, openWindow, liveWindows])
 
+  const openApps = useCallback(() => {
+    const existing = liveWindows().find((w) => w.kind === "apps")
+    if (existing) return focus(existing.id)
+    openWindow({
+      id: randomUUID(),
+      kind: "apps",
+      title: "Apps",
+      x: 180, y: 96, width: 760, height: 520,
+      payload: { kind: "apps" } satisfies AppsPayload,
+    })
+  }, [focus, openWindow, liveWindows])
+
+  // One standalone window per app (focus if that slug is already open) — many
+  // apps can sit on the canvas together and cross-filter via desktop params.
+  const openDashboardApp = useCallback((slug: string, name?: string) => {
+    const existing = liveWindows().find(
+      (w) => w.kind === "dashboard-app" && (w.payload as DashboardAppPayload | undefined)?.slug === slug,
+    )
+    if (existing) return focus(existing.id)
+    const offset = (liveWindows().filter((w) => w.kind === "dashboard-app").length % 6) * 28
+    openWindow({
+      id: randomUUID(),
+      kind: "dashboard-app",
+      title: name || slug,
+      x: 200 + offset, y: 110 + offset, width: 920, height: 640,
+      payload: { kind: "dashboard-app", slug, name } satisfies DashboardAppPayload,
+    })
+  }, [focus, openWindow, liveWindows])
+
   const openDuck = useCallback(() => {
     const existing = liveWindows().find((w) => w.kind === "duck")
     if (existing) return focus(existing.id)
@@ -4191,6 +4224,7 @@ export function DesktopShell() {
     { id: "viz-blocks", label: "Viz Blocks", icon: LayoutDashboard, color: "oklch(78% 0.13 95)", description: "Author canonical SQL/viz building blocks", activate: () => openVizBlocks(), folder: "metrics", rvbbit: true },
     { id: "metric-board", label: "KPI Board", icon: Table2, color: "oklch(78% 0.13 95)", description: "Matrix of metric values & KPI verdicts over time", activate: () => openMetricBoard(), folder: "metrics", rvbbit: true },
     { id: "dashboards", label: "Dashboards", icon: LayoutDashboard, color: "oklch(78% 0.13 95)", description: "Agent-built dashboards and live apps — inspectable, versioned", activate: () => openDashboards(), folder: "metrics", rvbbit: true },
+    { id: "apps", label: "Apps", icon: AppWindow, color: "oklch(78% 0.13 95)", description: "Published live apps — folders by team, each opens as its own window", activate: () => openApps(), rvbbit: true },
     // Cubes — the curated subject-area mart layer (metrics → cubes → raw)
     { id: "cube-catalog", label: "Cube Catalog", icon: Boxes, color: "oklch(76% 0.15 100)", description: "Browse curated subject-area cubes", activate: () => openCubeCatalog(), folder: "cubes", rvbbit: true },
     { id: "cube-creator", label: "Cube Creator", icon: Calculator, color: "oklch(76% 0.15 100)", description: "Author cubes — manual, AI-propose, or from a pack", activate: () => openCubeCreator(), folder: "cubes", rvbbit: true },
@@ -4210,7 +4244,7 @@ export function DesktopShell() {
     openSystemObjects, openExtensions, openPgMonitor, openPostgresAdmin, openCache, openRvbbitCache,
     openCosts, openAgentMessages, openDataMover, dataMoverDetected, openSyncMirror, openOperators, openModelSettings, openSpecialists, openRouting,
     openMcpServers, openCapabilities, openHfDeploy, openWarren, openModelStudio,
-    openDuck, openDagster, dagsterDetected, openMetricCatalog, openMetricCreator, openMetricInspector, openVizBlocks, openMetricBoard, openDashboards, openAlerts, openBrain,
+    openDuck, openDagster, dagsterDetected, openMetricCatalog, openMetricCreator, openMetricInspector, openVizBlocks, openMetricBoard, openDashboards, openApps, openDashboardApp, openAlerts, openBrain,
     openCubeCatalog, openCubeCreator, openCubeInspector, openCubeProposals,
     openKgBrowser, openKgExplorer, openHindsightMemory, hindsightDetected, openQueryLens, openDrift,
   ])
@@ -4311,12 +4345,12 @@ export function DesktopShell() {
           sublabel: shortcut.sublabel ?? "Dashboard",
           icon: LayoutDashboard,
           color: shortcut.iconColor ?? "oklch(78% 0.13 95)",
-          activate: () => openDashboards(shortcut.targetId),
+          activate: () => openDashboardApp(shortcut.targetId, shortcut.label),
         }]
       }
       return []
     })
-  }, [desktopShortcuts, launchers, hasRvbbit, viewAppsById, openViewApp, openDashboards])
+  }, [desktopShortcuts, launchers, hasRvbbit, viewAppsById, openViewApp, openDashboardApp])
 
   const openShortcutMenu = useCallback(
     (event: React.MouseEvent, item: (typeof desktopShortcutItems)[number]) => {
@@ -4408,6 +4442,7 @@ export function DesktopShell() {
     () => ({
       activeConnectionId,
       hasRvbbit,
+      openDashboardApp,
       launchers,
       schema,
       semanticOps,
@@ -4493,7 +4528,7 @@ export function DesktopShell() {
     [
       activeConnectionId, hasRvbbit, launchers, schema, semanticOps, schemaLoading, busy, setBusy,
       openTableFromFinder, openSqlInWindow, viewObjectDdl, openField, openViewAppBuilder, openViewApp,
-      addLauncherShortcut, addViewAppShortcut, addDashboardShortcut, openArtifact,
+      addLauncherShortcut, addViewAppShortcut, addDashboardShortcut, openDashboardApp, openArtifact,
       openQueryDocument, openSqlData, openRowInspector, openCsvImport, openExtensions, openRvbbitCache, openCache, openConnections,
       loadSchema, loadConnections, updatePayload, emitParam, subscribeParam,
       editRollupSpec, repivotWindow, probeColumnValues, activePalette, paletteOverrides,
@@ -4964,6 +4999,7 @@ function EmptyStateOverlay({ onAddConnection }: { onAddConnection: () => void })
 interface WindowContext {
   activeConnectionId: string | null
   hasRvbbit: boolean
+  openDashboardApp: (slug: string, name?: string) => void
   /** The launcher registry — folder windows filter it by their folderId. */
   launchers: LauncherItem[]
   schema: SchemaSnapshot | null
@@ -5750,6 +5786,34 @@ function renderWindowContent(
           onCreateShortcut={ctx.addDashboardShortcut}
         />
       )
+    case "apps":
+      return (
+        <AppsWindow
+          key={ctx.activeConnectionId ?? "none"}
+          activeConnectionId={ctx.activeConnectionId}
+          hasRvbbit={ctx.hasRvbbit}
+          onOpenApp={ctx.openDashboardApp}
+          onCreateShortcut={ctx.addDashboardShortcut}
+        />
+      )
+    case "dashboard-app": {
+      const appPayload = w.payload as DashboardAppPayload
+      return (
+        <DashboardsWindow
+          key={`${ctx.activeConnectionId ?? "none"}:${appPayload.slug}`}
+          standalone
+          payload={{ kind: "dashboards", selectedSlug: appPayload.slug }}
+          activeConnectionId={ctx.activeConnectionId}
+          hasRvbbit={ctx.hasRvbbit}
+          windowId={w.id}
+          params={ctx.params}
+          schema={ctx.schema}
+          onEmitParam={ctx.emitParam}
+          onOpenSqlData={ctx.openSqlData}
+          onCreateShortcut={ctx.addDashboardShortcut}
+        />
+      )
+    }
     case "duck":
       return (
         <DuckWindow

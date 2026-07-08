@@ -32,6 +32,7 @@
 
 export {
   Anchor,
+  AppWindow,
   ArrowCounterClockwise as RotateCcw,
   ArrowsClockwise as RefreshCw,
   Bell,

@@ -8,6 +8,8 @@ export type DesktopWindowKind =
   | "data"
   | "data-mover"
   | "dashboards"
+  | "apps"
+  | "dashboard-app"
   | "csv-import"
   | "query-document"
   | "row-inspector"
@@ -98,6 +100,8 @@ export type WindowPayload =
   | DataPayload
   | DataMoverPayload
   | DashboardsPayload
+  | AppsPayload
+  | DashboardAppPayload
   | BrainPayload
   | CsvImportPayload
   | QueryDocumentPayload
@@ -768,6 +772,17 @@ export interface DataMoverPayload {
 export interface DashboardsPayload {
   kind?: "dashboards"
   selectedSlug?: string | null
+}
+
+export interface AppsPayload {
+  kind?: "apps"
+}
+
+/** A single published live app, standalone — its own window on the canvas. */
+export interface DashboardAppPayload {
+  kind?: "dashboard-app"
+  slug: string
+  name?: string
 }
 
 export interface BrainPayload {

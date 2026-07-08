@@ -35,6 +35,9 @@ interface Props {
   /** This desktop window's id — params emitted by the app carry it as source,
    *  and the inbound side excludes own params (narrow siblings, never self). */
   windowId?: string
+  /** Standalone: one pinned app, no gallery rail — feels like its own window.
+   *  The slug comes from payload.selectedSlug and never changes. */
+  standalone?: boolean
   /** Active desktop filter params — linked into the app's queries (see broker). */
   params?: DesktopParamValue[]
   schema?: SchemaSnapshot | null
@@ -105,7 +108,7 @@ function RuntimePill({ runtime }: { runtime?: string | null }) {
   )
 }
 
-export function DashboardsWindow({ payload, activeConnectionId, hasRvbbit, windowId, params, schema, onEmitParam, onOpenSqlData, onCreateShortcut }: Props) {
+export function DashboardsWindow({ payload, activeConnectionId, hasRvbbit, windowId, standalone, params, schema, onEmitParam, onOpenSqlData, onCreateShortcut }: Props) {
   const workspaceActive = useWorkspaceActive()
   const [rows, setRows] = useState<DashboardRow[]>([])
   const [error, setError] = useState<string | null>(null)
@@ -191,18 +194,19 @@ export function DashboardsWindow({ payload, activeConnectionId, hasRvbbit, windo
   }, [activeConnectionId])
 
   usePolling(reload, 8000, {
-    enabled: !!activeConnectionId && hasRvbbit && workspaceActive,
+    enabled: !!activeConnectionId && hasRvbbit && workspaceActive && !standalone,
     resetKey: activeConnectionId,
   })
 
   useEffect(() => {
+    if (standalone) return
     const onSelect = (event: Event) => {
       const slug = (event as CustomEvent<{ slug?: unknown }>).detail?.slug
       if (typeof slug === "string" && slug.trim()) setSelected(slug)
     }
     window.addEventListener(DASHBOARD_SELECT_EVENT, onSelect)
     return () => window.removeEventListener(DASHBOARD_SELECT_EVENT, onSelect)
-  }, [])
+  }, [standalone])
 
   // load the selected live app's html + sources
   useEffect(() => {
@@ -349,7 +353,8 @@ export function DashboardsWindow({ payload, activeConnectionId, hasRvbbit, windo
 
   return (
     <div className="flex h-full bg-doc-bg text-foreground">
-      {/* gallery rail */}
+      {/* gallery rail (hidden in standalone app windows) */}
+      {standalone ? null : (
       <div className="flex w-64 shrink-0 flex-col border-r border-chrome-border">
         <div className="flex items-center justify-between border-b border-chrome-border px-3 py-2 text-[11px] uppercase tracking-wider text-chrome-text/55">
           <span>Dashboards · {rows.length}</span>
@@ -391,12 +396,13 @@ export function DashboardsWindow({ payload, activeConnectionId, hasRvbbit, windo
           )}
         </div>
       </div>
+      )}
 
       {/* viewer */}
       <div className="flex min-w-0 flex-1 flex-col">
         {!activeDetail ? (
           <div className="flex flex-1 items-center justify-center text-sm text-chrome-text/45">
-            {selected && loadingDetail ? "Loading…" : "Select a live app to view it."}
+            {selected && loadingDetail ? "Loading…" : standalone ? "App not found." : "Select a live app to view it."}
           </div>
         ) : (
           <>
@@ -421,12 +427,16 @@ export function DashboardsWindow({ payload, activeConnectionId, hasRvbbit, windo
               >
                 {linkFilters ? (dashFilters.length > 0 ? `⛓ filters · ${dashFilters.length}` : "⛓ filters on") : "filters off"}
               </button>
-              <button
-                onClick={() => setSelected(null)}
-                className="ml-auto text-[11px] text-chrome-text/55 hover:text-rvbbit-accent"
-              >
-                ✕ close
-              </button>
+              {standalone ? (
+                <span className="ml-auto" />
+              ) : (
+                <button
+                  onClick={() => setSelected(null)}
+                  className="ml-auto text-[11px] text-chrome-text/55 hover:text-rvbbit-accent"
+                >
+                  ✕ close
+                </button>
+              )}
             </div>
             <iframe
               key={`${activeDetail.slug}:${bridgeNonce}`}
