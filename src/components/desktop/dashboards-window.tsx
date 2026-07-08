@@ -17,13 +17,29 @@ import {
 import { ContextMenu, type ContextMenuState } from "./context-menu"
 import { useWorkspaceActive } from "./workspace-active-context"
 
+interface EmitParamInput {
+  sourceWindowId: string
+  sourceBlockName: string
+  sourceTitle: string
+  field: string
+  value: unknown
+  operator?: "eq" | "in" | "gte" | "lte"
+  multiValueAction?: "add" | "remove" | "toggle" | "set" | "replace"
+  cascade?: boolean
+}
+
 interface Props {
   payload?: DashboardsPayload
   activeConnectionId: string | null
   hasRvbbit: boolean
+  /** This desktop window's id — params emitted by the app carry it as source,
+   *  and the inbound side excludes own params (narrow siblings, never self). */
+  windowId?: string
   /** Active desktop filter params — linked into the app's queries (see broker). */
   params?: DesktopParamValue[]
   schema?: SchemaSnapshot | null
+  /** Publish a filter param onto the workspace (the shell's emitParam). */
+  onEmitParam?: (input: EmitParamInput) => void
   onOpenSqlData?: (sql: string, title: string) => void
   onCreateShortcut?: (dashboard: DashboardRow) => void
 }
@@ -44,7 +60,17 @@ function buildSrcdoc(html: string): string {
     "window.addEventListener('message',h);parent.postMessage({__rvbbitQ:id,sql:String(sql),opts:opts||{}},'*');" +
     "});};" +
     "window.cowork=window.cowork||{};window.cowork.callMcpTool=async function(tool,args){" +
-    "var d=await window.rvbbitQuery((args&&args.sql)||'');return{structuredContent:{rows:(d&&d.rows)||[]}};};</script>"
+    "var d=await window.rvbbitQuery((args&&args.sql)||'');return{structuredContent:{rows:(d&&d.rows)||[]}};};" +
+    // Archipelago bridge: apps can PUSH filters onto the desktop param shelf
+    // (rvbbit.emitFilter) and SUBSCRIBE to desktop params (rvbbit.on('params')).
+    // Subscribed apps get pushed updates in place; unsubscribed ones are
+    // re-rendered by the host on param changes.
+    "window.rvbbit=window.rvbbit||{};window.rvbbit.query=window.rvbbitQuery;" +
+    "window.rvbbit.emitFilter=function(f){parent.postMessage({__rvbbitAppEvent:'filter',filter:f||{}},'*');};" +
+    "var _ph=[];window.rvbbit.on=function(topic,cb){if(topic!=='params'||typeof cb!=='function')return;" +
+    "_ph.push(cb);parent.postMessage({__rvbbitAppEvent:'subscribe',topic:'params'},'*');};" +
+    "window.addEventListener('message',function(e){var d=e.data||{};if(d.__rvbbitParams===undefined)return;" +
+    "for(var i=0;i<_ph.length;i++){try{_ph[i](d.params||[])}catch(_e){}}});</script>"
   return (
     "<!doctype html><meta charset=utf-8>" +
     "<style>html,body{margin:0;padding:14px;font-family:system-ui,-apple-system,sans-serif;" +
@@ -79,7 +105,7 @@ function RuntimePill({ runtime }: { runtime?: string | null }) {
   )
 }
 
-export function DashboardsWindow({ payload, activeConnectionId, hasRvbbit, params, schema, onOpenSqlData, onCreateShortcut }: Props) {
+export function DashboardsWindow({ payload, activeConnectionId, hasRvbbit, windowId, params, schema, onEmitParam, onOpenSqlData, onCreateShortcut }: Props) {
   const workspaceActive = useWorkspaceActive()
   const [rows, setRows] = useState<DashboardRow[]>([])
   const [error, setError] = useState<string | null>(null)
@@ -103,6 +129,9 @@ export function DashboardsWindow({ payload, activeConnectionId, hasRvbbit, param
     if (!linkFilters) return []
     const out: CrossFilter[] = []
     for (const p of params ?? []) {
+      // Never self-filter: params this app emitted narrow the SIBLINGS (grid
+      // semantics) — excluding them here also breaks any reload feedback loop.
+      if (windowId && p.sourceWindowId === windowId) continue
       if (p.cascade === false) continue
       if (p.value === undefined || p.value === null) continue
       if (Array.isArray(p.value) && p.value.length === 0) continue
@@ -115,11 +144,17 @@ export function DashboardsWindow({ payload, activeConnectionId, hasRvbbit, param
       })
     }
     return out
-  }, [params, linkFilters])
+  }, [params, linkFilters, windowId])
   const dashFiltersRef = useRef(dashFilters)
   dashFiltersRef.current = dashFilters
   const schemaRef = useRef<SchemaSnapshot | null>(schema ?? null)
   schemaRef.current = schema ?? null
+  const onEmitParamRef = useRef(onEmitParam)
+  onEmitParamRef.current = onEmitParam
+  const dashIdentityRef = useRef<{ slug: string; name: string } | null>(null)
+  // Set true when the CURRENT frame subscribes via rvbbit.on('params') — such
+  // apps get params pushed in place instead of a full re-render.
+  const paramsAwareRef = useRef(false)
 
   // Param changes re-render the app (fresh srcdoc → the artifact refetches its
   // queries through the broker, which now wraps with the new filters). Skip the
@@ -133,7 +168,18 @@ export function DashboardsWindow({ payload, activeConnectionId, hasRvbbit, param
     const prev = prevFilterKeyRef.current
     prevFilterKeyRef.current = filterKey
     if (prev === null || prev === filterKey || !selected) return
-    const t = setTimeout(() => setBridgeNonce((n) => n + 1), 250)
+    const t = setTimeout(() => {
+      if (paramsAwareRef.current) {
+        // The app listens (rvbbit.on('params')): push in place — its follow-up
+        // queries still flow through the wrapping broker.
+        iframeRef.current?.contentWindow?.postMessage(
+          { __rvbbitParams: true, params: dashFiltersRef.current.map((f) => ({ field: f.column, value: f.value, operator: f.operator ?? "eq" })) },
+          "*",
+        )
+      } else {
+        setBridgeNonce((n) => n + 1)
+      }
+    }, 250)
     return () => clearTimeout(t)
   }, [filterKey, selected])
 
@@ -177,12 +223,53 @@ export function DashboardsWindow({ payload, activeConnectionId, hasRvbbit, param
     }
   }, [activeConnectionId, selected])
 
-  // data-broker: the iframe's rvbbitQuery posts here; run read-only, post the result back
+  // data-broker: the iframe's rvbbitQuery posts here; run read-only, post the result back.
+  // Also the app-event inbox: rvbbit.emitFilter lands as a desktop param, and
+  // rvbbit.on('params') subscriptions mark the frame params-aware.
   useEffect(() => {
     function onMsg(e: MessageEvent) {
-      const d = (e.data ?? {}) as { __rvbbitQ?: string; sql?: string }
-      if (!d.__rvbbitQ || typeof d.sql !== "string") return
+      const d = (e.data ?? {}) as {
+        __rvbbitQ?: string
+        sql?: string
+        __rvbbitAppEvent?: string
+        topic?: string
+        filter?: { field?: unknown; value?: unknown; operator?: unknown; multiValueAction?: unknown }
+      }
       const frame = iframeRef.current
+      if (d.__rvbbitAppEvent) {
+        if (frame && e.source !== frame.contentWindow) return
+        if (d.__rvbbitAppEvent === "subscribe" && d.topic === "params") {
+          paramsAwareRef.current = true
+          // Sync the late-arriving subscriber with the current filter set.
+          frame?.contentWindow?.postMessage(
+            { __rvbbitParams: true, params: dashFiltersRef.current.map((f) => ({ field: f.column, value: f.value, operator: f.operator ?? "eq" })) },
+            "*",
+          )
+          return
+        }
+        if (d.__rvbbitAppEvent === "filter") {
+          const emit = onEmitParamRef.current
+          const identity = dashIdentityRef.current
+          const f = d.filter ?? {}
+          const field = typeof f.field === "string" ? f.field.trim() : ""
+          if (!emit || !identity || !field || !windowId) return
+          const operator = f.operator === "in" || f.operator === "gte" || f.operator === "lte" ? f.operator : "eq"
+          const mva = f.multiValueAction
+          emit({
+            sourceWindowId: windowId,
+            sourceBlockName: identity.slug,
+            sourceTitle: identity.name,
+            field,
+            value: f.value,
+            operator,
+            multiValueAction: mva === "add" || mva === "remove" || mva === "toggle" || mva === "set" || mva === "replace" ? mva : undefined,
+            cascade: true,
+          })
+          return
+        }
+        return
+      }
+      if (!d.__rvbbitQ || typeof d.sql !== "string") return
       if (frame && e.source !== frame.contentWindow) return
       if (!activeConnectionId) {
         frame?.contentWindow?.postMessage({ __rvbbitQ: d.__rvbbitQ, error: "no connection" }, "*")
@@ -212,9 +299,16 @@ export function DashboardsWindow({ payload, activeConnectionId, hasRvbbit, param
     }
     window.addEventListener("message", onMsg)
     return () => window.removeEventListener("message", onMsg)
-  }, [activeConnectionId])
+  }, [activeConnectionId, windowId])
 
   const activeDetail = detail?.slug === selected ? detail : null
+
+  // New frame (app switch or re-render) ⇒ the old rvbbit.on('params')
+  // subscription died with it; identity feeds outbound param attribution.
+  useEffect(() => {
+    paramsAwareRef.current = false
+    dashIdentityRef.current = activeDetail ? { slug: activeDetail.slug, name: activeDetail.name } : null
+  }, [activeDetail, bridgeNonce])
   const srcdoc = useMemo(() => (activeDetail ? buildSrcdoc(activeDetail.html) : ""), [activeDetail])
   const byTeam = useMemo(() => {
     const m = new Map<string, DashboardRow[]>()

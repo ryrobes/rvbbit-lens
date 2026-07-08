@@ -5742,8 +5742,10 @@ function renderWindowContent(
           payload={w.payload as DashboardsPayload}
           activeConnectionId={ctx.activeConnectionId}
           hasRvbbit={ctx.hasRvbbit}
+          windowId={w.id}
           params={ctx.params}
           schema={ctx.schema}
+          onEmitParam={ctx.emitParam}
           onOpenSqlData={ctx.openSqlData}
           onCreateShortcut={ctx.addDashboardShortcut}
         />
