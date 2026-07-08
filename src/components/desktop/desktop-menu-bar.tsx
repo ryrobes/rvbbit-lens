@@ -7,6 +7,7 @@ import { RvbbitLogo } from "./rvbbit-logo"
 import { HomeIndicator } from "./home-indicator"
 import { PresentToggle } from "./present-toggle"
 import { SchedulerTray } from "./scheduler-tray"
+import { GqeTray } from "./gqe-tray"
 import { SceneTray } from "./scene-tray"
 import { APP_NAME, APP_VERSION } from "@/lib/version"
 import {
@@ -399,6 +400,7 @@ export function DesktopMenuBar({
         />
         <HomeIndicator />
         <PresentToggle />
+        <GqeTray activeConnectionId={activeConnectionId} hasRvbbit={hasRvbbit} />
         <SchedulerTray
           activeConnectionId={activeConnectionId}
           hasRvbbit={hasRvbbit}

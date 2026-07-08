@@ -77,6 +77,7 @@ export {
   FloppyDisk as Save,
   Folder,
   FolderOpen,
+  GraphicsCard,
   Funnel as Filter,
   Gear as Settings,
   GitBranch,
