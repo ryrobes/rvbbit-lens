@@ -4,7 +4,9 @@ import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent } fr
 
 import { usePolling } from "@/lib/desktop/use-polling"
 import { Plus } from "@/lib/icons"
-import type { DashboardsPayload } from "@/lib/desktop/types"
+import type { DashboardsPayload, DesktopParamValue } from "@/lib/desktop/types"
+import type { QueryResultColumn, SchemaSnapshot } from "@/lib/db/types"
+import { injectStatementFilters, type CrossFilter } from "@/lib/desktop/reactive-sql"
 import {
   fetchDashboard,
   fetchDashboards,
@@ -19,6 +21,9 @@ interface Props {
   payload?: DashboardsPayload
   activeConnectionId: string | null
   hasRvbbit: boolean
+  /** Active desktop filter params — linked into the app's queries (see broker). */
+  params?: DesktopParamValue[]
+  schema?: SchemaSnapshot | null
   onOpenSqlData?: (sql: string, title: string) => void
   onCreateShortcut?: (dashboard: DashboardRow) => void
 }
@@ -74,7 +79,7 @@ function RuntimePill({ runtime }: { runtime?: string | null }) {
   )
 }
 
-export function DashboardsWindow({ payload, activeConnectionId, hasRvbbit, onOpenSqlData, onCreateShortcut }: Props) {
+export function DashboardsWindow({ payload, activeConnectionId, hasRvbbit, params, schema, onOpenSqlData, onCreateShortcut }: Props) {
   const workspaceActive = useWorkspaceActive()
   const [rows, setRows] = useState<DashboardRow[]>([])
   const [error, setError] = useState<string | null>(null)
@@ -83,6 +88,54 @@ export function DashboardsWindow({ payload, activeConnectionId, hasRvbbit, onOpe
   const [loadingDetail, setLoadingDetail] = useState(false)
   const [menu, setMenu] = useState<ContextMenuState | null>(null)
   const iframeRef = useRef<HTMLIFrameElement>(null)
+
+  // ── Linked filters: desktop params flow INTO the app's queries ──
+  // The broker executes every rvbbitQuery server-side anyway, so active filter
+  // params are applied by WRAPPING the artifact's SQL (injectStatementFilters —
+  // the same machinery grid clicks use), never by editing the artifact. Columns
+  // from each run are cached so the output-column wrap has provenance on the
+  // next run; a wrapped failure falls back to the untouched SQL.
+  const [linkFilters, setLinkFilters] = useState(true)
+  const [bridgeNonce, setBridgeNonce] = useState(0)
+  const colCacheRef = useRef<Map<string, QueryResultColumn[]>>(new Map())
+
+  const dashFilters = useMemo<CrossFilter[]>(() => {
+    if (!linkFilters) return []
+    const out: CrossFilter[] = []
+    for (const p of params ?? []) {
+      if (p.cascade === false) continue
+      if (p.value === undefined || p.value === null) continue
+      if (Array.isArray(p.value) && p.value.length === 0) continue
+      out.push({
+        sourceSchema: p.sourceSchema,
+        sourceTable: p.sourceTable,
+        column: p.sourceColumn || p.field,
+        value: p.value,
+        operator: p.operator,
+      })
+    }
+    return out
+  }, [params, linkFilters])
+  const dashFiltersRef = useRef(dashFilters)
+  dashFiltersRef.current = dashFilters
+  const schemaRef = useRef<SchemaSnapshot | null>(schema ?? null)
+  schemaRef.current = schema ?? null
+
+  // Param changes re-render the app (fresh srcdoc → the artifact refetches its
+  // queries through the broker, which now wraps with the new filters). Skip the
+  // mount tick; debounce rapid clicks.
+  const filterKey = useMemo(
+    () => JSON.stringify(dashFilters.map((f) => [f.sourceSchema, f.sourceTable, f.column, f.operator, f.value])),
+    [dashFilters],
+  )
+  const prevFilterKeyRef = useRef<string | null>(null)
+  useEffect(() => {
+    const prev = prevFilterKeyRef.current
+    prevFilterKeyRef.current = filterKey
+    if (prev === null || prev === filterKey || !selected) return
+    const t = setTimeout(() => setBridgeNonce((n) => n + 1), 250)
+    return () => clearTimeout(t)
+  }, [filterKey, selected])
 
   const reload = useCallback(async () => {
     if (!activeConnectionId) return
@@ -135,12 +188,27 @@ export function DashboardsWindow({ payload, activeConnectionId, hasRvbbit, onOpe
         frame?.contentWindow?.postMessage({ __rvbbitQ: d.__rvbbitQ, error: "no connection" }, "*")
         return
       }
-      runDashboardQuery(activeConnectionId, d.sql).then((r) => {
+      const original = d.sql
+      let effective = original
+      const filters = dashFiltersRef.current
+      if (filters.length > 0) {
+        const cached = colCacheRef.current.get(original)
+        try {
+          effective = injectStatementFilters(original, filters, schemaRef.current, cached ? [cached] : undefined)
+        } catch {
+          effective = original
+        }
+      }
+      void (async () => {
+        let r = await runDashboardQuery(activeConnectionId, effective)
+        // Linked filters must never break a dashboard that worked without them.
+        if (!r.ok && effective !== original) r = await runDashboardQuery(activeConnectionId, original)
+        if (r.ok && r.columns.length > 0) colCacheRef.current.set(original, r.columns)
         frame?.contentWindow?.postMessage(
           r.ok ? { __rvbbitQ: d.__rvbbitQ, result: r.result } : { __rvbbitQ: d.__rvbbitQ, error: r.error },
           "*",
         )
-      })
+      })()
     }
     window.addEventListener("message", onMsg)
     return () => window.removeEventListener("message", onMsg)
@@ -247,6 +315,19 @@ export function DashboardsWindow({ payload, activeConnectionId, hasRvbbit, onOpe
                 <span className="rounded bg-amber-500/15 px-1.5 py-0.5 text-[10px] text-amber-400">stored</span>
               )}
               <button
+                onClick={() => setLinkFilters((v) => !v)}
+                title="Linked filters — apply active desktop filter params to this app's queries (wrapped at the broker; a failing wrap falls back to the app's own SQL)"
+                className={`rounded border px-1.5 py-0.5 text-[10px] ${
+                  linkFilters
+                    ? dashFilters.length > 0
+                      ? "border-rvbbit-accent/60 text-rvbbit-accent"
+                      : "border-chrome-border text-chrome-text/60"
+                    : "border-chrome-border text-chrome-text/40"
+                }`}
+              >
+                {linkFilters ? (dashFilters.length > 0 ? `⛓ filters · ${dashFilters.length}` : "⛓ filters on") : "filters off"}
+              </button>
+              <button
                 onClick={() => setSelected(null)}
                 className="ml-auto text-[11px] text-chrome-text/55 hover:text-rvbbit-accent"
               >
@@ -254,7 +335,7 @@ export function DashboardsWindow({ payload, activeConnectionId, hasRvbbit, onOpe
               </button>
             </div>
             <iframe
-              key={activeDetail.slug}
+              key={`${activeDetail.slug}:${bridgeNonce}`}
               ref={iframeRef}
               srcDoc={srcdoc}
               sandbox="allow-scripts"

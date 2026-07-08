@@ -146,11 +146,14 @@ export async function fetchDashboard(
 export async function runDashboardQuery(
   connectionId: string,
   sql: string,
-): Promise<{ ok: true; result: unknown } | { ok: false; error: string }> {
+): Promise<{ ok: true; result: unknown; columns: QueryResultColumn[] } | { ok: false; error: string }> {
   const r = await runQuery(connectionId, sql, 10000)
   if (!r.ok) return { ok: false, error: r.error }
   return {
     ok: true,
+    // Rich columns (with pg provenance) ride along for the caller's own use —
+    // the linked-filters bridge caches them to wrap subsequent runs safely.
+    columns: r.columns ?? [],
     result: {
       columns: (r.columns ?? []).map((c) => ({ name: c.name, type: String(c.dataTypeId) })),
       rows: r.rows ?? [],
