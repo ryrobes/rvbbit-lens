@@ -26,6 +26,13 @@ export interface GqeGpu {
   available: number
 }
 
+export interface GqeTenant {
+  node: string
+  name: string
+  kind: string | null
+  vram: number | null
+}
+
 export interface GqeActivity {
   d1: number
   d7: number
@@ -35,6 +42,7 @@ export interface GqeActivity {
 export interface GqeDetails {
   status: GqeStatus | null
   gpus: GqeGpu[]
+  tenants: GqeTenant[]
   activity: GqeActivity | null
 }
 
@@ -99,17 +107,25 @@ export async function fetchGqeDetails(connectionId: string): Promise<GqeDetails>
             'total', gpu_mem_total_bytes, 'usable', gpu_mem_usable_bytes,
             'available', gpu_available_bytes)), '[]'::jsonb)
           FROM rvbbit.warren_gpu_capacity WHERE gpu_count > 0) AS gpus,
+       (SELECT coalesce(jsonb_agg(jsonb_build_object(
+            'node', d.node_name, 'name', d.name, 'kind', d.kind,
+            'vram', rvbbit.capability_vram_required_bytes(d.manifest))
+          ORDER BY rvbbit.capability_vram_required_bytes(d.manifest) DESC NULLS LAST), '[]'::jsonb)
+          FROM rvbbit.warren_deployments d
+          WHERE d.status IN ('starting','running')
+            AND rvbbit.capability_gpu_reserved(d.manifest)) AS tenants,
        (SELECT jsonb_build_object(
             'd1', count(*) FILTER (WHERE decided_at > now() - interval '24 hours'),
             'd7', count(*) FILTER (WHERE decided_at > now() - interval '7 days'),
             'total', count(*))
           FROM rvbbit.route_decisions WHERE route = 'gpu_gqe') AS activity`,
   )
-  if (!r.ok || r.rows.length === 0) return { status: null, gpus: [], activity: null }
+  if (!r.ok || r.rows.length === 0) return { status: null, gpus: [], tenants: [], activity: null }
   const row = r.rows[0]
   return {
     status: parseJson<GqeStatus>(row.gqe),
     gpus: parseJson<GqeGpu[]>(row.gpus) ?? [],
+    tenants: parseJson<GqeTenant[]>(row.tenants) ?? [],
     activity: parseJson<GqeActivity>(row.activity),
   }
 }

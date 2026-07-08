@@ -105,6 +105,7 @@ export function GqeTray({ activeConnectionId, hasRvbbit }: Props) {
   if (!available) return null
 
   const gpus = details?.gpus ?? []
+  const tenants = details?.tenants ?? []
   const activity = details?.activity
   const reason = details?.status?.reason
 
@@ -188,6 +189,27 @@ export function GqeTray({ activeConnectionId, hasRvbbit }: Props) {
                         <div className="mt-0.5 flex justify-between font-mono text-[9px] text-chrome-text/45">
                           <span>{fmtBytes(used)} provisioned</span>
                           <span>{fmtBytes(g.usable)} usable · {fmtBytes(g.total)} total</span>
+                        </div>
+                        {/* tenants: who is holding VRAM in this bucket */}
+                        <div className="mt-1.5 space-y-0.5">
+                          {running ? (
+                            <div className="flex items-center gap-1.5 text-[10px]">
+                              <span className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full" style={{ background: NVIDIA }} />
+                              <span className="min-w-0 flex-1 truncate text-foreground/80">GQE engine</span>
+                              <span className="shrink-0 rounded bg-foreground/[0.06] px-1 py-px text-[8px] uppercase tracking-wider text-chrome-text/45">query engine</span>
+                              <span className="shrink-0 font-mono text-[9px] text-chrome-text/50">resident</span>
+                            </div>
+                          ) : null}
+                          {tenants.filter((t) => t.node === g.node).map((t) => (
+                            <div key={`${t.node}:${t.name}`} className="flex items-center gap-1.5 text-[10px]">
+                              <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-sky-400/80" />
+                              <span className="min-w-0 flex-1 truncate text-foreground/80" title={t.name}>{t.name}</span>
+                              {t.kind ? (
+                                <span className="shrink-0 rounded bg-foreground/[0.06] px-1 py-px text-[8px] uppercase tracking-wider text-chrome-text/45">{t.kind}</span>
+                              ) : null}
+                              <span className="shrink-0 font-mono text-[9px] text-chrome-text/50">{fmtBytes(t.vram)}</span>
+                            </div>
+                          ))}
                         </div>
                       </div>
                     )
