@@ -115,8 +115,35 @@ export async function fetchGqeDetails(connectionId: string): Promise<GqeDetails>
 }
 
 export async function warmGqe(connectionId: string): Promise<{ ok: boolean; message: string }> {
+  // First choice: the extension's own warm probe.
   const r = await runQuery(connectionId, "SELECT rvbbit.warm_gpu_gqe() AS warm")
-  if (!r.ok) return { ok: false, message: r.error }
-  const payload = parseJson<Record<string, unknown>>(r.rows[0]?.warm)
-  return { ok: true, message: payload ? JSON.stringify(payload) : "warm requested" }
+  if (r.ok) {
+    const payload = parseJson<Record<string, unknown>>(r.rows[0]?.warm)
+    const status = String(payload?.status ?? "")
+    if (status === "warm") return { ok: true, message: "warm" }
+    if (status === "failed") return { ok: false, message: String(payload?.error ?? "warm failed") }
+    // 'disabled' (router prior off — the default) or 'unavailable'
+    // (e.g. smallest table is schema-qualified, which GQE refuses):
+    // fall through to the direct recipe below.
+  }
+  // Direct warm: a forced-GQE count over the smallest PUBLIC-schema
+  // accelerated table. Both statements must run top-level in one session —
+  // the route rewrite does not fire inside DO/SPI — and the table must be
+  // unqualified (GQE rejects schema-qualified references).
+  const t = await runQuery(
+    connectionId,
+    `SELECT rg.table_oid::regclass::text AS t
+     FROM rvbbit.row_groups rg
+     WHERE rg.table_oid::regclass::text NOT LIKE '%.%'
+     GROUP BY rg.table_oid
+     ORDER BY sum(rg.n_rows) ASC NULLS LAST LIMIT 1`,
+  )
+  if (!t.ok) return { ok: false, message: t.error }
+  if (t.rows.length === 0) return { ok: false, message: "no public-schema accelerated table to warm with" }
+  const table = String(t.rows[0].t)
+  const w = await runQuery(
+    connectionId,
+    `SET rvbbit.route_force_candidate = 'gpu_gqe'; SELECT count(*) FROM ${table}`,
+  )
+  return w.ok ? { ok: true, message: `warmed via ${table}` } : { ok: false, message: w.error }
 }
