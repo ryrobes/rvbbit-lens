@@ -110,13 +110,16 @@ import { attachDragGhost } from "@/lib/desktop/drag-ghost"
 import { defineVizBlock } from "@/lib/rvbbit/viz-blocks"
 import {
   appendHtmlBlockTurn,
+  buildAppBlockManifest,
   buildHtmlBlockSql,
+  buildPublishedAppHtml,
   extractHtmlBlockTurnResult,
   fallbackHtmlBlockTurn,
   normalizeHtmlBlockSpec,
   type HtmlBlockSpec,
   type HtmlBlockTurnResult,
 } from "@/lib/desktop/app-block"
+import { publishAppBlock } from "@/lib/rvbbit/dashboards"
 
 interface DataGridWindowProps {
   window: DesktopWindowState
@@ -1072,6 +1075,15 @@ export function DataGridWindow({
       if (!p) continue
       const name = p.reactive?.blockName || slugifyBlockName(p.title || win.title || win.id)
       if (name) map.set(name.toLowerCase(), { title: p.title || win.title || name, sql: sourceSqlForPayload(p) })
+      // App blocks: each named query is referenceable as {<block>_<query_id>}.
+      const hb = p.htmlBlock as { queries?: { id?: unknown; sql?: unknown; title?: unknown }[] } | null | undefined
+      for (const q of hb?.queries ?? []) {
+        if (typeof q.id !== "string" || typeof q.sql !== "string" || !q.sql.trim()) continue
+        map.set(`${name}_${q.id}`.toLowerCase(), {
+          title: `${p.title || win.title || name} · ${typeof q.title === "string" && q.title ? q.title : q.id}`,
+          sql: q.sql,
+        })
+      }
     }
     return map
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1238,7 +1250,7 @@ export function DataGridWindow({
     return () => { cancelled = true }
   }, [queryMode, activeConnectionId, llmModels.length])
 
-  const runSql = useCallback(async (sourceSql: string, userInitiated = false, options?: { readOnly?: boolean }) => {
+  const runSql = useCallback(async (sourceSql: string, userInitiated = false, options?: { readOnly?: boolean; quiet?: boolean }) => {
     if (!activeConnectionId) return
     const trimmedSource = sourceSql.trim()
     if (!trimmedSource) return
@@ -1471,7 +1483,9 @@ export function DataGridWindow({
             version: (p.reactive?.version ?? 1) + 1,
           },
         }))
-        if (activeTab === "sql") setActiveTab("rows")
+        // Scrub-driven re-runs stay on the SQL tab — yanking the editor out
+        // from under an in-flight drag would kill the gesture.
+        if (activeTab === "sql" && !options?.quiet) setActiveTab("rows")
       }
     } catch (e) {
       if (runNonceRef.current !== myNonce) return
@@ -1730,12 +1744,20 @@ export function DataGridWindow({
 
   const runHtmlBlockAgentTurn = useCallback(async (message: string, current: HtmlBlockSpec | null): Promise<HtmlBlockTurnResult> => {
     if (!activeConnectionId) throw new Error("No connection selected.")
-    const tableContext = schema?.tables.slice(0, 30).map((t) => ({
-      schema: t.schema,
-      name: t.name,
-      kind: t.kind,
-      columns: t.columns.slice(0, 18).map((c) => ({ name: c.name, type: c.dataType })),
-    })) ?? []
+    // Rank by size so the agent sees real tables first — a blind slice buried
+    // the 750k-row fact tables under tiny fixture schemas and the agent built
+    // apps on 3-row tables. Include row counts so it can tell them apart.
+    const tableContext = [...(schema?.tables ?? [])]
+      .filter((t) => t.kind === "table" || t.kind === "view" || t.kind === "matview" || t.kind === "foreign")
+      .sort((a, b) => (b.rowEstimate ?? 0) - (a.rowEstimate ?? 0))
+      .slice(0, 30)
+      .map((t) => ({
+        schema: t.schema,
+        name: t.name,
+        kind: t.kind,
+        rows: t.rowEstimate,
+        columns: t.columns.slice(0, 18).map((c) => ({ name: c.name, type: c.dataType })),
+      }))
     const desktopContext = {
       blockName,
       title: payload.title || w.title,
@@ -1845,6 +1867,13 @@ export function DataGridWindow({
     }
     void runSql(draftSql || payload.sql, true)
   }, [queryMode, askDraft, appDraft, draftSql, payload.sql, runAsk, runAppTurn, runSql, htmlBlock])
+
+  // Literal-scrub re-run: same as a manual run but quiet (no tab flip), so the
+  // editor survives the drag and the results chase the gesture in place.
+  const onScrubRun = useCallback(() => {
+    if (queryMode !== "sql") return
+    void runSql(draftSql || payload.sql, true, { quiet: true })
+  }, [queryMode, draftSql, payload.sql, runSql])
 
   // Lazily load per-step rowsets for the Steps inspector when that tab opens.
   useEffect(() => {
@@ -2384,6 +2413,22 @@ export function DataGridWindow({
     parentSql: buildHtmlBlockSql(htmlBlock),
     relationKey: `${relationKeyFor(payload)}:html-block`,
   } : null, [blockName, htmlBlock, payload, w.id, w.title])
+
+  // Publish arrow: block app (open form) → dashboards registry (closed form).
+  // The named queries ride in the manifest; the html gets a self-contained
+  // id→sql preamble so any host's inline-SQL rvbbitQuery bridge serves it.
+  const publishApp = useCallback(async (meta: { slug: string; name: string; description?: string }) => {
+    if (!activeConnectionId || !htmlBlock) return { ok: false, error: "no connection or app" }
+    return publishAppBlock({
+      connectionId: activeConnectionId,
+      slug: meta.slug,
+      name: meta.name,
+      description: meta.description,
+      html: buildPublishedAppHtml(htmlBlock),
+      manifest: buildAppBlockManifest(htmlBlock, blockName),
+      queries: htmlBlock.queries.map((q) => ({ id: q.id, sql: q.sql })),
+    })
+  }, [activeConnectionId, htmlBlock, blockName])
   useEffect(() => {
     const sql = payload.sql ?? ""
     if (seededUiDefaultSqlRef.current === sql) return
@@ -2849,6 +2894,7 @@ export function DataGridWindow({
                 value={draftSql}
                 onChange={setDraftSql}
                 onRun={onRun}
+                onScrubRun={onScrubRun}
                 schema={sqlCompletion?.namespace}
                 defaultSchema={sqlCompletion?.defaultSchema}
                 completionSources={completionSources}
@@ -3099,6 +3145,7 @@ export function DataGridWindow({
               onRun={onRun}
               onRunSql={runAppReadOnlySql}
               onEmitFilter={emitAppFilter}
+              onPublish={publishApp}
             />
           ) : null}
           {bodyTab === "rows" && result ? (
@@ -3327,6 +3374,7 @@ export function DataGridWindow({
                   value={draftSql}
                   onChange={setDraftSql}
                   onRun={onRun}
+                  onScrubRun={onScrubRun}
                   schema={sqlCompletion?.namespace}
                   defaultSchema={sqlCompletion?.defaultSchema}
                   completionSources={completionSources}
@@ -3446,7 +3494,7 @@ function AppChatPanel({
           }}
           rows={5}
           className="h-28 w-full resize-none rounded-md border border-chrome-border bg-background px-2 py-1.5 text-[12px] text-foreground outline-none placeholder:text-chrome-text/35 focus:border-main/60"
-          placeholder={spec ? "Follow up..." : "Describe the HTML Block..."}
+          placeholder={spec ? "Follow up..." : "Describe the app..."}
         />
         <div className="mt-2 flex items-center justify-between gap-2">
           <span className="min-w-0 truncate text-[10px] text-chrome-text/45">
@@ -3648,11 +3696,11 @@ function Toolbar({
             type="button"
             onClick={() => onSetQueryMode("app")}
             aria-pressed={app}
-            title="HTML Block — chat-authored HTML backed by named SQL queries"
+            title="App — chat-authored HTML app backed by named SQL queries"
             className={cn("inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] transition-colors", app ? "bg-main/20 text-main" : "text-chrome-text/55 hover:bg-foreground/[0.06]")}
           >
             <FileCode2 className="h-2.5 w-2.5" />
-            HTML
+            App
           </button>
         </div>
       ) : null}

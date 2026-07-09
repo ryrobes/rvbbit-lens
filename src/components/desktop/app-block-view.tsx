@@ -1,12 +1,13 @@
 "use client"
 
-import { useEffect, useMemo, useRef } from "react"
+import { useEffect, useMemo, useRef, useState } from "react"
 
 import { Button } from "@/components/ui/button"
-import { FileCode2, Play, RefreshCw, Table2 } from "@/lib/icons"
+import { FileCode2, Play, RefreshCw, Rocket, Table2 } from "@/lib/icons"
 import type { DesktopColumnDragPayload, DesktopColumnRef } from "@/lib/desktop/types"
 import {
   htmlBlockQueryResults,
+  slugifyAppTitle,
   type HtmlBlockQuery,
   type HtmlBlockQueryResult,
   type HtmlBlockSpec,
@@ -42,6 +43,9 @@ interface AppBlockViewProps {
   onRun: () => void
   onRunSql: (sql: string) => Promise<QueryResult>
   onEmitFilter: (input: AppBlockFilterInput) => void
+  /** Promote the block app into the dashboards registry (open → closed form).
+   *  Re-publishing the same slug bumps the version. Omit to hide the action. */
+  onPublish?: (meta: { slug: string; name: string; description?: string }) => Promise<{ ok: boolean; version?: number; error?: string }>
 }
 
 function scriptJson(value: unknown): string {
@@ -133,8 +137,33 @@ export function AppBlockView({
   onRun,
   onRunSql,
   onEmitFilter,
+  onPublish,
 }: AppBlockViewProps) {
   const iframeRef = useRef<HTMLIFrameElement>(null)
+  const [publishOpen, setPublishOpen] = useState(false)
+  const [pubName, setPubName] = useState("")
+  const [pubSlug, setPubSlug] = useState("")
+  const [pubDesc, setPubDesc] = useState("")
+  const [pubBusy, setPubBusy] = useState(false)
+  const [pubStatus, setPubStatus] = useState<{ kind: "ok"; slug: string; version: number } | { kind: "err"; error: string } | null>(null)
+
+  const openPublish = () => {
+    const name = spec?.title ?? "App"
+    setPubName(name)
+    setPubSlug(slugifyAppTitle(name))
+    setPubStatus(null)
+    setPublishOpen((o) => !o)
+  }
+
+  const doPublish = async () => {
+    if (!onPublish || pubBusy) return
+    const slug = slugifyAppTitle(pubSlug || pubName)
+    setPubBusy(true)
+    setPubStatus(null)
+    const r = await onPublish({ slug, name: pubName.trim() || slug, description: pubDesc.trim() || undefined })
+    setPubBusy(false)
+    setPubStatus(r.ok ? { kind: "ok", slug, version: r.version ?? 1 } : { kind: "err", error: r.error ?? "publish failed" })
+  }
   const entries = useMemo(() => htmlBlockQueryResults(spec, result), [spec, result])
   const srcDoc = useMemo(() => (spec ? buildSrcdoc(spec, entries) : ""), [spec, entries])
 
@@ -168,14 +197,25 @@ export function AppBlockView({
         return
       }
       const ref = data.ref
-      const sql =
+      const refStr =
         typeof ref === "string"
+          ? ref
+          : ref && typeof ref === "object"
+            ? String((ref as { queryId?: unknown; id?: unknown }).queryId ?? (ref as { id?: unknown }).id ?? "")
+            : ""
+      // A known query id resolves to that query's SQL — the app may ask before
+      // this window's run has baked results into the srcdoc (or re-ask after a
+      // filter). Without this, the id string itself was executed as SQL.
+      const byId = refStr ? spec?.queries?.find((q) => q.id === refStr) : undefined
+      const sql = byId
+        ? byId.sql
+        : typeof ref === "string"
           ? ref
           : ref && typeof ref === "object" && typeof (ref as { sql?: unknown }).sql === "string"
             ? String((ref as { sql: string }).sql)
             : ""
       if (!sql.trim()) {
-        frame.contentWindow?.postMessage({ __rvbbitAppQ: data.__rvbbitAppQ, error: "unknown query" }, "*")
+        frame.contentWindow?.postMessage({ __rvbbitAppQ: data.__rvbbitAppQ, error: refStr ? `unknown query id: ${refStr}` : "unknown query" }, "*")
         return
       }
       onRunSql(sql)
@@ -184,7 +224,7 @@ export function AppBlockView({
     }
     window.addEventListener("message", onMessage)
     return () => window.removeEventListener("message", onMessage)
-  }, [activeConnectionId, onEmitFilter, onRunSql])
+  }, [activeConnectionId, onEmitFilter, onRunSql, spec])
 
   if (!spec) {
     return (
@@ -208,15 +248,68 @@ export function AppBlockView({
         />
       </div>
       <aside className="flex w-64 shrink-0 flex-col border-l border-chrome-border bg-chrome-bg/45">
-        <div className="flex h-9 shrink-0 items-center justify-between gap-2 border-b border-chrome-border px-2">
-          <span className="truncate text-[11px] font-medium text-foreground">{spec.title}</span>
-          <Button size="sm" variant="ghost" onClick={onRun} disabled={running} title="Run HTML Block queries">
+        <div className="flex h-9 shrink-0 items-center justify-between gap-1 border-b border-chrome-border px-2">
+          <span className="min-w-0 flex-1 truncate text-[11px] font-medium text-foreground">{spec.title}</span>
+          {onPublish ? (
+            <Button size="sm" variant="ghost" onClick={openPublish} title="Publish as a live app (dashboards registry)">
+              <Rocket className={cn("h-3.5 w-3.5", publishOpen && "text-main")} />
+            </Button>
+          ) : null}
+          <Button size="sm" variant="ghost" onClick={onRun} disabled={running} title="Run app queries">
             {running ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : <Play className="h-3.5 w-3.5" />}
           </Button>
         </div>
         {error ? (
           <div className="border-b border-danger/30 bg-danger/10 px-2 py-1.5 text-[11px] text-danger">
             {error}
+          </div>
+        ) : null}
+        {publishOpen ? (
+          <div className="shrink-0 space-y-1.5 border-b border-chrome-border bg-chrome-bg/60 p-2">
+            <label className="block text-[10px] uppercase tracking-wider text-chrome-text/50">
+              Name
+              <input
+                value={pubName}
+                onChange={(e) => { setPubName(e.target.value); setPubSlug(slugifyAppTitle(e.target.value)) }}
+                className="mt-0.5 w-full rounded border border-chrome-border bg-background px-1.5 py-1 text-[11px] text-foreground outline-none focus:border-main/50"
+              />
+            </label>
+            <label className="block text-[10px] uppercase tracking-wider text-chrome-text/50">
+              Slug
+              <input
+                value={pubSlug}
+                onChange={(e) => setPubSlug(e.target.value)}
+                className="mt-0.5 w-full rounded border border-chrome-border bg-background px-1.5 py-1 font-mono text-[11px] text-foreground outline-none focus:border-main/50"
+              />
+            </label>
+            <label className="block text-[10px] uppercase tracking-wider text-chrome-text/50">
+              Description
+              <input
+                value={pubDesc}
+                onChange={(e) => setPubDesc(e.target.value)}
+                placeholder="optional"
+                className="mt-0.5 w-full rounded border border-chrome-border bg-background px-1.5 py-1 text-[11px] text-foreground outline-none focus:border-main/50"
+              />
+            </label>
+            <div className="flex items-center gap-2 pt-0.5">
+              <button
+                type="button"
+                onClick={() => void doPublish()}
+                disabled={pubBusy || !pubSlug.trim()}
+                className="inline-flex items-center gap-1 rounded border border-main/50 px-2 py-1 text-[10px] text-main transition-colors hover:bg-main/10 disabled:opacity-50"
+              >
+                {pubBusy ? <RefreshCw className="h-3 w-3 animate-spin" /> : <Rocket className="h-3 w-3" />}
+                Publish
+              </button>
+              {pubStatus?.kind === "ok" ? (
+                <span className="min-w-0 truncate font-mono text-[10px] text-success">
+                  /d/{pubStatus.slug} · v{pubStatus.version}
+                </span>
+              ) : null}
+            </div>
+            {pubStatus?.kind === "err" ? (
+              <div className="whitespace-pre-wrap text-[10px] text-danger">{pubStatus.error}</div>
+            ) : null}
           </div>
         ) : null}
         <div className="min-h-0 flex-1 overflow-auto p-2">
@@ -237,7 +330,10 @@ export function AppBlockView({
                     const payload: DesktopColumnDragPayload = {
                       kind: "rvbbit-lens.desktop.column",
                       parentWindowId: columnDragSource?.parentWindowId ?? "",
-                      parentBlockName: columnDragSource?.parentBlockName ?? "",
+                      // Each named query is its own referenceable relation in the
+                      // runtime graph ({<block>_<query_id>}) — the bare block name
+                      // is the multi-statement bundle, which a FROM item can't hold.
+                      parentBlockName: columnDragSource ? `${columnDragSource.parentBlockName}_${entry.query.id}` : "",
                       parentTitle: `${columnDragSource?.parentTitle ?? spec.title} · ${queryLabel(entry.query)}`,
                       parentSql: entry.query.sql,
                       relationKey: `${columnDragSource?.relationKey ?? "html-block"}:${entry.query.id}`,

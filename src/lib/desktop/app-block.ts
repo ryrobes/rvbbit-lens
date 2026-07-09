@@ -339,6 +339,80 @@ export function fallbackHtmlBlockTurn(args: {
   }
 }
 
+function scriptJsonSafe(value: unknown): string {
+  return JSON.stringify(value).replace(/</g, "\\u003c")
+}
+
+/** URL-safe slug from an app title. */
+export function slugifyAppTitle(title: string): string {
+  return title
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 60) || "app"
+}
+
+/**
+ * Prepare a block app's HTML for publication to the dashboards registry.
+ * Hosted runtimes (the /d/ pages and the lens Dashboards broker) inject
+ * `rvbbitQuery(sql)` that takes INLINE SQL — but block HTML calls it with
+ * named query IDS. This preamble carries the id→sql map inside the artifact
+ * itself, so the published app resolves its named queries against ANY host's
+ * inline-SQL bridge — the artifact stays self-contained (closed form), no
+ * host-version dependency.
+ */
+export function buildPublishedAppHtml(spec: HtmlBlockSpec): string {
+  const named: Record<string, string> = {}
+  for (const q of spec.queries) named[q.id] = q.sql
+  const preamble = `<script>
+(function(){
+  var NAMED = ${scriptJsonSafe(named)};
+  var host = window.rvbbitQuery || null;
+  function resolve(ref){
+    var id = typeof ref === "string" ? ref : ref && (ref.queryId || ref.id);
+    if (id && Object.prototype.hasOwnProperty.call(NAMED, id)) return NAMED[id];
+    if (typeof ref === "string") return ref;
+    return (ref && ref.sql) || "";
+  }
+  var mine = function(ref, opts){
+    var fn = host && host !== mine ? host : (window.rvbbitQuery !== mine ? window.rvbbitQuery : null);
+    if (!fn) return Promise.reject(new Error("no host rvbbitQuery bridge"));
+    return fn(resolve(ref), opts || {});
+  };
+  window.__rvbbitNamedQueries = NAMED;
+  window.rvbbitQuery = mine;
+  window.rvbbit = window.rvbbit || {};
+  window.rvbbit.query = mine;
+})();</script>`
+  const html = spec.html.trim()
+  if (/<!doctype\b|<html[\s>]/i.test(html)) {
+    if (/<body[^>]*>/i.test(html)) return html.replace(/<body([^>]*)>/i, `<body$1>${preamble}`)
+    if (/<\/head>/i.test(html)) return html.replace(/<\/head>/i, `${preamble}</head>`)
+    return html.replace(/<html([^>]*)>/i, `<html$1>${preamble}`)
+  }
+  return `${preamble}\n${html}`
+}
+
+/** The published manifest: the named queries ride along as DATA (the source
+ *  map), so the closed artifact keeps the structure the open block had. */
+export function buildAppBlockManifest(spec: HtmlBlockSpec, blockName: string): Record<string, unknown> {
+  return {
+    origin: "sql-block",
+    block: blockName,
+    published_from: "lens",
+    schema_version: spec.schemaVersion,
+    queries: spec.queries.map((q) => ({
+      id: q.id,
+      title: q.title ?? null,
+      role: q.role ?? null,
+      sql: q.sql,
+      filterable: q.filterable ?? [],
+    })),
+    bindings: spec.bindings ?? [],
+  }
+}
+
 export function appendHtmlBlockTurn(args: {
   current: HtmlBlockSpec | null
   turn: HtmlBlockTurnResult

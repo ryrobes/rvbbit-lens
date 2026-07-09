@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect, useMemo, useRef } from "react"
+import { useCallback, useEffect, useMemo, useRef } from "react"
 import CodeMirror, { type Extension, type ReactCodeMirrorRef } from "@uiw/react-codemirror"
 import { sql, PostgreSQL, type SQLNamespace } from "@codemirror/lang-sql"
 import { json as jsonLang } from "@codemirror/lang-json"
@@ -8,6 +8,7 @@ import type { CompletionSource } from "@codemirror/autocomplete"
 import { EditorView, keymap, tooltips } from "@codemirror/view"
 import { rvbbitLensCodeMirrorTheme } from "@/lib/desktop/codemirror-theme"
 import { blockReferenceExtensions, type BlockReferenceMap } from "@/lib/desktop/sql-block-refs"
+import { sqlScrubberExtensions } from "@/lib/desktop/sql-scrubbers"
 import { postgresDollarPlpgsqlExtension } from "@/lib/desktop/sql-dollar-plpgsql"
 import { semanticOperatorExtensions } from "@/lib/desktop/sql-semantic-operators"
 import type { SemanticOpMeta } from "@/lib/desktop/types"
@@ -26,6 +27,10 @@ interface SqlEditorProps {
   value: string
   onChange: (next: string) => void
   onRun?: () => void
+  /** Debounced re-run for literal-scrub drags. When provided it's used instead
+   *  of onRun so hosts can run "quietly" (e.g. without flipping to the results
+   *  tab, which would unmount this editor mid-drag). */
+  onScrubRun?: () => void
   height?: string | number
   readOnly?: boolean
   /** Focus the editor on mount. Default true; pass false for inline read-only
@@ -61,6 +66,7 @@ export function SqlEditor({
   value,
   onChange,
   onRun,
+  onScrubRun,
   height = "100%",
   readOnly,
   autoFocus = true,
@@ -77,6 +83,21 @@ export function SqlEditor({
   const ref = useRef<ReactCodeMirrorRef | null>(null)
   const plain = language === "plain"
   const isJson = language === "json"
+
+  // Scrub-drags fire a change per step; only the settled value should hit the
+  // database (same 350ms contract as the time-travel scrubber). Refs keep the
+  // callback stable so the extensions memo doesn't rebuild mid-drag.
+  const scrubRunTargetRef = useRef(onScrubRun ?? onRun)
+  useEffect(() => {
+    scrubRunTargetRef.current = onScrubRun ?? onRun
+  }, [onScrubRun, onRun])
+  const scrubRunDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const onScrub = useCallback(() => {
+    if (scrubRunDebounceRef.current) clearTimeout(scrubRunDebounceRef.current)
+    scrubRunDebounceRef.current = setTimeout(() => {
+      scrubRunTargetRef.current?.()
+    }, 350)
+  }, [])
 
   const extensions: Extension[] = useMemo(() => {
     const exts: Extension[] = []
@@ -113,6 +134,9 @@ export function SqlEditor({
       if (blockReferences) exts.push(blockReferenceExtensions(blockReferences))
       // highlight semantic operator calls + hover-to-see their workflow.
       if (semanticOperators?.length) exts.push(...semanticOperatorExtensions(semanticOperators))
+      // drag-to-scrub numeric/date literals; each step re-runs (debounced) so
+      // the results chase the drag. Editable SQL editors only.
+      if (!readOnly) exts.push(...sqlScrubberExtensions({ onScrub: onRun ? onScrub : undefined }))
       // Render tooltips (hover cards + the completion popup) into <body> so the
       // editor's overflow-hidden chrome (rail, window body) can't clip them. CM
       // copies the editor's theme classes onto the external container, so the
@@ -133,7 +157,7 @@ export function SqlEditor({
       )
     }
     return exts
-  }, [onRun, plain, isJson, wrap, schema, defaultSchema, completionSources, blockReferences, semanticOperators])
+  }, [onRun, onScrub, readOnly, plain, isJson, wrap, schema, defaultSchema, completionSources, blockReferences, semanticOperators])
 
   // Auto-focus on first mount (skipped for read-only previews).
   useEffect(() => {

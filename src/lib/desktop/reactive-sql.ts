@@ -268,9 +268,15 @@ export function buildDesktopRuntimeGraph(
       const upAsOf = parseAsOfComment(upstreamCompiled.compiledSql).asOf
       if (upAsOf) inheritedAsOfs.push(upAsOf)
       const upstreamSql = upstreamCompiled.projectionSql ?? upstreamCompiled.compiledSql
-      const inner = stripTrailingLimitOffset(
+      let inner = stripTrailingLimitOffset(
         stripTrailingSqlTerminator(parseAsOfComment(upstreamSql).body),
       )
+      // A multi-statement upstream (an app block's compiled bundle, a scratch
+      // transcript) can't live inside `( … ) AS x` — truncate to the first
+      // statement (an app's primary query, by construction). Mask first so a
+      // `;` inside strings/comments doesn't split early.
+      const semi = maskSql(inner).indexOf(";")
+      if (semi >= 0) inner = stripTrailingLimitOffset(inner.slice(0, semi).trimEnd())
       const stampedInner = `${blockVersionStamp(upstreamCompiled)}\n${inner}`
       return `(\n${indentSql(stampedInner)}\n) AS ${quoteSqlIdent(slugifyBlockName(upstream.blockName))}`
     })
@@ -383,15 +389,36 @@ function dataWindowsToRuntimeInputs(windows: DesktopWindowState[]): RuntimeBlock
     const payload = w.payload as DataPayload | undefined
     if (!payload) return []
     const fallback = slugifyBlockName(payload.title || w.title || w.id)
-    return [{
+    const blockName = payload.reactive?.blockName || fallback
+    const inputs: RuntimeBlockInput[] = [{
       windowId: w.id,
       title: payload.title || w.title,
-      blockName: payload.reactive?.blockName || fallback,
+      blockName,
       sourceSql: sourceSqlForPayload(payload),
       version: payload.reactive?.version ?? 1,
       subscriptions: payload.reactive?.paramSubscriptions ?? [],
       jsonbProjection: payload.jsonbProjection,
     }]
+    // An app block's canonical SQL is a multi-statement bundle, which can't be
+    // parenthesized into a FROM item — so each named query ALSO registers as
+    // its own referenceable relation: {<block>_<query_id>}. Bare {<block>}
+    // still resolves (the inliner truncates a bundle to its primary statement).
+    const hb = payload.htmlBlock as { queries?: { id?: unknown; sql?: unknown; title?: unknown }[] } | null | undefined
+    for (const q of hb?.queries ?? []) {
+      const id = typeof q.id === "string" ? q.id : ""
+      const sql = typeof q.sql === "string" ? q.sql : ""
+      if (!id || !sql.trim()) continue
+      inputs.push({
+        windowId: `${w.id}::q:${id}`,
+        title: `${payload.title || w.title} · ${typeof q.title === "string" && q.title ? q.title : id}`,
+        blockName: `${blockName}_${id}`,
+        sourceSql: sql,
+        version: payload.reactive?.version ?? 1,
+        subscriptions: [],
+        jsonbProjection: undefined,
+      })
+    }
+    return inputs
   })
 }
 
