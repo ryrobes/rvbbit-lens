@@ -25,6 +25,7 @@ export type DesktopWindowKind =
   | "palette"
   | "appearance"
   | "pg-monitor"
+  | "fleet"
   | "postgres-admin"
   | "notifications"
   | "operators"
@@ -118,6 +119,7 @@ export type WindowPayload =
   | PalettePayload
   | AppearancePayload
   | PgMonitorPayload
+  | FleetPayload
   | PostgresAdminPayload
   | NotificationsPayload
   | OperatorsPayload
@@ -934,6 +936,10 @@ export interface AppearancePayload {
 
 export interface PgMonitorPayload {
   kind?: "pg-monitor"
+}
+
+export interface FleetPayload {
+  kind?: "fleet"
 }
 
 export interface PostgresAdminPayload {

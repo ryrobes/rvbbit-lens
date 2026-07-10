@@ -28,6 +28,8 @@ import {
   fetchColumnarTables,
   fetchDecisionSummary,
   fetchEngineRuntime,
+  fetchRoutingNodes,
+  type RoutingNodeOption,
   fetchLogStatus,
   fetchObservationGroups,
   fetchProfileEntries,
@@ -87,17 +89,21 @@ export function RoutingWindow({ activeConnectionId, hasRvbbit }: RoutingWindowPr
   const [intervalMs, setIntervalMs] = useState(5000)
   const workspaceActive = useWorkspaceActive()
   const [windowHours, setWindowHours] = useState<number>(ROUTE_WINDOW_OPTIONS[0].hours)
+  const [nodeFilter, setNodeFilter] = useState<string>("all")
+  const [fleetNodes, setFleetNodes] = useState<RoutingNodeOption[]>([])
   const [updatedAt, setUpdatedAt] = useState(0)
   const loading = updatedAt === 0
 
   const pollFlow = useCallback(async () => {
     if (!activeConnectionId) return
-    const [executions, decisionSummary, engineRuntime, logStatus] = await Promise.all([
-      fetchRouteExecutions(activeConnectionId, windowHours),
-      fetchDecisionSummary(activeConnectionId, windowHours),
-      fetchEngineRuntime(activeConnectionId, windowHours),
+    const [executions, decisionSummary, engineRuntime, logStatus, nodeOptions] = await Promise.all([
+      fetchRouteExecutions(activeConnectionId, windowHours, nodeFilter),
+      fetchDecisionSummary(activeConnectionId, windowHours, nodeFilter),
+      fetchEngineRuntime(activeConnectionId, windowHours, nodeFilter),
       fetchLogStatus(activeConnectionId),
+      fetchRoutingNodes(activeConnectionId, windowHours),
     ])
+    setFleetNodes(nodeOptions)
     setError(executions.error ?? null)
     setFlow({
       executions: executions.rows,
@@ -106,7 +112,7 @@ export function RoutingWindow({ activeConnectionId, hasRvbbit }: RoutingWindowPr
       logStatus,
     })
     setUpdatedAt(Date.now())
-  }, [activeConnectionId, windowHours])
+  }, [activeConnectionId, windowHours, nodeFilter])
 
   const loadProfile = useCallback(async () => {
     if (!activeConnectionId) return
@@ -181,6 +187,31 @@ export function RoutingWindow({ activeConnectionId, hasRvbbit }: RoutingWindowPr
           <GitBranch className="h-3.5 w-3.5 text-rvbbit-accent" />
           Adaptive Routing
         </span>
+        {fleetNodes.length > 0 ? (
+          <span className="inline-flex items-center gap-1" title="Filter every panel to one execution node — where the query physically ran">
+            {[{ node: "all", name: "all", healthy: null }, { node: "local", name: "brain", healthy: null }, ...fleetNodes].map((n) => (
+              <button
+                key={n.node}
+                type="button"
+                onClick={() => setNodeFilter(n.node)}
+                className={cn(
+                  "inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] transition-colors",
+                  nodeFilter === n.node
+                    ? "border-rvbbit-accent/60 bg-rvbbit-accent/15 text-rvbbit-accent"
+                    : "border-chrome-border/60 text-chrome-text/60 hover:bg-foreground/[0.05]",
+                )}
+              >
+                {n.healthy != null ? (
+                  <span
+                    className="h-1.5 w-1.5 rounded-full"
+                    style={{ background: n.healthy ? "var(--success, #3fb950)" : "var(--danger, #f85149)" }}
+                  />
+                ) : null}
+                {n.name ?? n.node}
+              </button>
+            ))}
+          </span>
+        ) : null}
         {profileName ? (
           <>
             <span className="text-chrome-text/40">·</span>

@@ -443,18 +443,64 @@ function windowClause(col: string, hours: number): string {
   return `${col} >= now() - interval '${h} hours'`
 }
 
+/** Fleet-node filter fragment. "all" = every node; "local" = the brain's own
+ *  engines (node IS NULL); anything else = a specific engine endpoint. Applied
+ *  to route_decisions/route_executions, whose `node` column records which
+ *  endpoint the dispatcher resolved (0134/0137). */
+export type RoutingNodeFilter = string // "all" | "local" | endpoint
+function nodeClause(filter: RoutingNodeFilter): string {
+  if (!filter || filter === "all") return ""
+  if (filter === "local") return " AND node IS NULL"
+  return ` AND node = '${filter.replace(/'/g, "''")}'`
+}
+
+export interface RoutingNodeOption {
+  node: string
+  name: string | null
+  healthy: boolean | null
+}
+
+/** Endpoints that can appear in the breadcrumbs: everything observed in the
+ *  window plus everything registered in the fleet (tolerates pre-0136
+ *  warehouses by falling back to observed-only). */
+export async function fetchRoutingNodes(
+  connectionId: string,
+  windowHours: number,
+): Promise<RoutingNodeOption[]> {
+  const observed =
+    "SELECT DISTINCT node FROM rvbbit.route_decisions WHERE node IS NOT NULL AND " +
+    windowClause("decided_at", windowHours)
+  const withFleet = await runQuery(
+    connectionId,
+    "SELECT n.node, f.name, (f.enabled AND f.last_probe_ok) AS healthy FROM (" +
+      observed + " UNION SELECT endpoint FROM rvbbit.fleet_endpoints" +
+      ") n LEFT JOIN rvbbit.fleet_endpoints f ON f.endpoint = n.node ORDER BY f.name NULLS LAST, n.node",
+  )
+  if (withFleet.ok) {
+    return withFleet.rows.map((r) => ({
+      node: String(r.node ?? ""),
+      name: r.name == null ? null : String(r.name),
+      healthy: r.healthy == null ? null : Boolean(r.healthy),
+    }))
+  }
+  const bare = await runQuery(connectionId, observed + " ORDER BY node")
+  if (!bare.ok) return []
+  return bare.rows.map((r) => ({ node: String(r.node ?? ""), name: null, healthy: null }))
+}
+
 // ── Live telemetry ──────────────────────────────────────────────────
 
 export async function fetchRouteExecutions(
   connectionId: string,
   windowHours: number,
+  nodeFilter: RoutingNodeFilter = "all",
 ): Promise<{ rows: RouteExecution[]; error?: string }> {
   const res = await runQuery(
     connectionId,
     "SELECT executed_at, candidate, route_doc->>'physical_path' AS physical_path, " +
       "route_source, elapsed_ms, rows_returned, " +
       "cache_hit, status, shape_family, reason FROM rvbbit.route_executions " +
-      "WHERE " + windowClause("executed_at", windowHours) +
+      "WHERE " + windowClause("executed_at", windowHours) + nodeClause(nodeFilter) +
       " ORDER BY executed_at DESC LIMIT 500",
   )
   if (!res.ok) return { rows: [], error: res.error }
@@ -479,6 +525,7 @@ export async function fetchRouteExecutions(
 export async function fetchDecisionSummary(
   connectionId: string,
   windowHours: number,
+  nodeFilter: RoutingNodeFilter = "all",
 ): Promise<DecisionSummaryRow[]> {
   const res = await runQuery(
     connectionId,
@@ -486,7 +533,7 @@ export async function fetchDecisionSummary(
       "count(*) AS decisions, " +
       "count(*) FILTER (WHERE cache_hit) AS cache_hits, " +
       "count(*) FILTER (WHERE rewritten) AS rewritten " +
-      "FROM rvbbit.route_decisions WHERE " + windowClause("decided_at", windowHours) +
+      "FROM rvbbit.route_decisions WHERE " + windowClause("decided_at", windowHours) + nodeClause(nodeFilter) +
       " GROUP BY candidate, route_doc->>'physical_path', route_source",
   )
   if (!res.ok) return []
@@ -505,13 +552,14 @@ export async function fetchDecisionSummary(
 export async function fetchEngineRuntime(
   connectionId: string,
   windowHours: number,
+  nodeFilter: RoutingNodeFilter = "all",
 ): Promise<EngineRuntimeRow[]> {
   const res = await runQuery(
     connectionId,
     "SELECT candidate, count(*) AS runs, " +
       "percentile_cont(0.5) WITHIN GROUP (ORDER BY elapsed_ms) AS median_ms, " +
       "percentile_cont(0.95) WITHIN GROUP (ORDER BY elapsed_ms) AS p95_ms " +
-      "FROM rvbbit.route_executions WHERE " + windowClause("executed_at", windowHours) +
+      "FROM rvbbit.route_executions WHERE " + windowClause("executed_at", windowHours) + nodeClause(nodeFilter) +
       " GROUP BY candidate",
   )
   if (!res.ok) return []
