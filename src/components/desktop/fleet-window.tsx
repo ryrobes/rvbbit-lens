@@ -78,6 +78,15 @@ export function FleetWindow({ activeConnectionId, workspaceActive }: Props) {
   const [selected, setSelected] = useState<string | null>(null)
   const [console_, setConsole] = useState<ConsoleLine[]>([])
   const [adding, setAdding] = useState(false)
+  // Two-step remove: first click arms, second confirms. Auto-disarms — a
+  // fleet node is one accidental click from vanishing otherwise (it fails
+  // open, but still).
+  const [confirmRemove, setConfirmRemove] = useState<string | null>(null)
+  useEffect(() => {
+    if (!confirmRemove) return
+    const t = setTimeout(() => setConfirmRemove(null), 3500)
+    return () => clearTimeout(t)
+  }, [confirmRemove])
   const [addName, setAddName] = useState("")
   const [addEndpoint, setAddEndpoint] = useState("")
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
@@ -310,17 +319,28 @@ export function FleetWindow({ activeConnectionId, workspaceActive }: Props) {
                   <span className="min-w-0 flex-1 truncate font-medium text-foreground">{selectedNode.name}</span>
                   <button
                     type="button"
-                    title="Remove from fleet"
+                    title={confirmRemove === selectedNode.name ? "Click again to remove from fleet" : "Remove from fleet"}
                     onClick={() => {
+                      if (confirmRemove !== selectedNode.name) {
+                        setConfirmRemove(selectedNode.name)
+                        return
+                      }
+                      setConfirmRemove(null)
                       void removeNode(activeConnectionId, selectedNode.name).then((r) => {
                         log(`rvbbit.fleet_remove('${selectedNode.name}') → ${r.ok ? "ok" : r.error}`, r.ok)
                         setSelected(null)
                         void refresh()
                       })
                     }}
-                    className="text-chrome-text/50 hover:text-danger"
+                    className={cn(
+                      "inline-flex items-center gap-1",
+                      confirmRemove === selectedNode.name
+                        ? "rounded border border-danger/60 bg-danger/10 px-1.5 py-0.5 text-[9px] text-danger"
+                        : "text-chrome-text/50 hover:text-danger",
+                    )}
                   >
                     <Trash2 className="h-3 w-3" />
+                    {confirmRemove === selectedNode.name ? "remove?" : null}
                   </button>
                 </div>
                 <div className="space-y-0.5 font-mono text-[10px] text-chrome-text/70">
