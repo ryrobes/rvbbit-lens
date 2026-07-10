@@ -527,13 +527,18 @@ export async function fetchDecisionSummary(
   windowHours: number,
   nodeFilter: RoutingNodeFilter = "all",
 ): Promise<DecisionSummaryRow[]> {
+  // Decisions are made BEFORE dispatch, so they can't honestly claim a node
+  // (since 0141 they no longer try — placement truth lives on executions,
+  // stamped at dispatch time). Per-node filtering therefore applies to
+  // executions only; the decision flow always shows the whole brain's intent.
+  void nodeFilter
   const res = await runQuery(
     connectionId,
     "SELECT candidate, route_doc->>'physical_path' AS physical_path, route_source, " +
       "count(*) AS decisions, " +
       "count(*) FILTER (WHERE cache_hit) AS cache_hits, " +
       "count(*) FILTER (WHERE rewritten) AS rewritten " +
-      "FROM rvbbit.route_decisions WHERE " + windowClause("decided_at", windowHours) + nodeClause(nodeFilter) +
+      "FROM rvbbit.route_decisions WHERE " + windowClause("decided_at", windowHours) +
       " GROUP BY candidate, route_doc->>'physical_path', route_source",
   )
   if (!res.ok) return []

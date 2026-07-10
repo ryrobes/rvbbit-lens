@@ -55,6 +55,29 @@ export interface ProbeReport {
   error: string | null
 }
 
+export interface HareInvocation {
+  invoked_at: string
+  ok: boolean
+  row_count: number | null
+  engine_ms: number | null
+  server_ms: number | null
+  wire_ms: number | null
+  total_ms: number | null
+  sql: string | null
+  error: string | null
+}
+
+/** The serverless side of the fleet: a hare has no registry row to probe —
+ * it exists only while answering. What we CAN show is the configured
+ * endpoint (rvbbit.hare_endpoint) and the invocation ledger, whose timing
+ * decomposition (engine vs artifact-fetch vs wire) is the whole targeting
+ * story. `available:false` = pre-0140 warehouse. */
+export interface HareInfo {
+  available: boolean
+  endpoint: string | null
+  recent: HareInvocation[]
+}
+
 const esc = (s: string) => s.replace(/'/g, "''")
 
 async function runQuery(
@@ -119,6 +142,38 @@ export async function fetchStoreConfig(connectionId: string): Promise<StoreConfi
   if (!r.ok || !r.rows.length) return null
   const row = r.rows[0]
   return { url_prefix: String(row.url_prefix ?? ""), enabled: Boolean(row.enabled) }
+}
+
+export async function fetchHare(connectionId: string): Promise<HareInfo> {
+  // Endpoint resolution is layered because ALTER DATABASE ... SET only
+  // reaches NEW sessions — a pooled connection may predate it. Session GUC →
+  // the database-level setting straight from the catalog → the most recent
+  // invocation's endpoint (something demonstrably answered from there).
+  const probe = await runQuery(
+    connectionId,
+    "SELECT coalesce( nullif(current_setting('rvbbit.hare_endpoint', true), ''), " +
+      "  (SELECT split_part(s, '=', 2) FROM pg_db_role_setting d " +
+      "     JOIN pg_database db ON db.oid = d.setdatabase, unnest(d.setconfig) AS s " +
+      "   WHERE db.datname = current_database() AND s LIKE 'rvbbit.hare_endpoint=%' LIMIT 1) " +
+      ") AS endpoint, to_regclass('rvbbit.hare_invocations') IS NOT NULL AS has_ledger",
+  )
+  if (!probe.ok || !probe.rows.length) return { available: false, endpoint: null, recent: [] }
+  const row = probe.rows[0]
+  const available = Boolean(row.has_ledger)
+  let endpoint = row.endpoint ? String(row.endpoint) : null
+  if (!available) return { available, endpoint, recent: [] }
+  const r = await runQuery(
+    connectionId,
+    "SELECT invoked_at, endpoint, ok, row_count, round(engine_ms::numeric,1)::float8 AS engine_ms, " +
+      "round(server_ms::numeric,1)::float8 AS server_ms, round(wire_ms::numeric,1)::float8 AS wire_ms, " +
+      "round(total_ms::numeric,1)::float8 AS total_ms, left(sql, 90) AS sql, left(coalesce(error,''), 140) AS error " +
+      "FROM rvbbit.hare_invocations ORDER BY invoked_at DESC LIMIT 8",
+  )
+  const recent = r.ok ? (r.rows as unknown as (HareInvocation & { endpoint?: string })[]) : []
+  if (!endpoint && recent.length > 0 && recent[0].endpoint) {
+    endpoint = String(recent[0].endpoint)
+  }
+  return { available, endpoint, recent }
 }
 
 export async function probeNode(connectionId: string, name: string): Promise<ProbeReport | { error: string }> {

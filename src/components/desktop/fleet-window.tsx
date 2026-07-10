@@ -6,6 +6,7 @@ import { Anchor, Loader2, Plus, Trash2, Zap } from "@/lib/icons"
 import {
   addNode,
   fetchFleet,
+  fetchHare,
   fetchPublishState,
   fetchStoreConfig,
   probeNode,
@@ -13,6 +14,7 @@ import {
   setNodeEnabled,
   storeDoctor,
   type FleetNode,
+  type HareInfo,
   type ProbeReport,
   type PublishTableState,
   type StoreConfig,
@@ -71,6 +73,7 @@ export function FleetWindow({ activeConnectionId, workspaceActive }: Props) {
   const [nodes, setNodes] = useState<FleetNode[]>([])
   const [pond, setPond] = useState<PublishTableState[]>([])
   const [store, setStore] = useState<StoreConfig | null>(null)
+  const [hare, setHare] = useState<HareInfo | null>(null)
   const [doctor, setDoctor] = useState<StoreDoctorReport | null>(null)
   const [doctorBusy, setDoctorBusy] = useState(false)
   const [probing, setProbing] = useState<string | null>(null)
@@ -97,16 +100,18 @@ export function FleetWindow({ activeConnectionId, workspaceActive }: Props) {
 
   const refresh = useCallback(async () => {
     if (!activeConnectionId) return
-    const [fleet, publish, cfg] = await Promise.all([
+    const [fleet, publish, cfg, hareInfo] = await Promise.all([
       fetchFleet(activeConnectionId),
       fetchPublishState(activeConnectionId),
       fetchStoreConfig(activeConnectionId),
+      fetchHare(activeConnectionId),
     ])
     setBrain(fleet.brain)
     setRegistry(fleet.registry)
     setNodes(fleet.nodes)
     setPond(publish)
     setStore(cfg)
+    setHare(hareInfo)
   }, [activeConnectionId])
 
   useEffect(() => {
@@ -309,6 +314,45 @@ export function FleetWindow({ activeConnectionId, workspaceActive }: Props) {
                 <circle r={18} fill="none" stroke="var(--chrome-text)" strokeOpacity={0.35} strokeDasharray="3 3" />
                 <text y={4} textAnchor="middle" style={{ fill: "var(--chrome-text)", opacity: 0.5, fontSize: 16 }}>+</text>
               </g>
+
+              {/* the hare: serverless — no burrow, no registry row, nothing to
+                  probe. Drawn as a ghost that only half-exists (scale-to-zero
+                  is the whole point); the edge carries the last invocation's
+                  wall-clock. Summoned via rvbbit.hare_run(sql). */}
+              {hare?.endpoint ? (
+                <>
+                  <path
+                    d={edgePath(bx + 40, by + 34, bx + 190 - 24, H - 60)}
+                    fill="none"
+                    stroke="var(--main)"
+                    strokeOpacity={0.3}
+                    strokeWidth={1.2}
+                    strokeDasharray="2 5"
+                  />
+                  {hare.recent[0]?.total_ms != null ? (
+                    <text
+                      x={(bx + 40 + bx + 166) / 2}
+                      y={(by + 34 + H - 60) / 2 + 14}
+                      textAnchor="middle"
+                      style={{ fill: "var(--chrome-text)", opacity: 0.55, fontSize: 10, fontFamily: "var(--font-mono, monospace)" }}
+                    >
+                      {Math.round(hare.recent[0].total_ms)}ms
+                    </text>
+                  ) : null}
+                  <g transform={`translate(${bx + 190}, ${H - 52})`}>
+                    <circle r={20} fill="none" stroke="var(--main)" strokeWidth={1.4} strokeDasharray="4 4" strokeOpacity={0.7}>
+                      <animate attributeName="stroke-opacity" values="0.7;0.25;0.7" dur="3.2s" repeatCount="indefinite" />
+                    </circle>
+                    <text y={4} textAnchor="middle" style={{ fill: "var(--main)", fontSize: 12, opacity: 0.85 }}>⌁</text>
+                    <text x={30} y={4} textAnchor="start" style={{ fill: "var(--foreground)", fontSize: 11, fontWeight: 500 }}>
+                      hare
+                    </text>
+                    <text x={30} y={17} textAnchor="start" style={{ fill: "var(--chrome-text)", opacity: 0.5, fontSize: 9, fontFamily: "var(--font-mono, monospace)" }}>
+                      serverless · scale-to-zero
+                    </text>
+                  </g>
+                </>
+              ) : null}
             </svg>
 
             {/* selected node card */}
@@ -416,8 +460,8 @@ export function FleetWindow({ activeConnectionId, workspaceActive }: Props) {
             ) : null}
           </div>
 
-          {/* ── pond + storage ── */}
-          <div className="grid shrink-0 grid-cols-2 gap-2 border-t border-chrome-border p-2" style={{ minHeight: 132 }}>
+          {/* ── pond + storage + hares ── */}
+          <div className="grid shrink-0 grid-cols-3 gap-2 border-t border-chrome-border p-2" style={{ minHeight: 132 }}>
             <div className="min-w-0 rounded-md border border-chrome-border/60 bg-chrome-bg/30 p-2">
               <div className="mb-1.5 flex items-baseline gap-2">
                 <span className="text-[11px] font-medium text-foreground">Pond</span>
@@ -494,6 +538,70 @@ export function FleetWindow({ activeConnectionId, workspaceActive }: Props) {
               ) : doctor && !doctor.ok ? (
                 <div className="mt-1.5 whitespace-pre-wrap text-[10px] text-danger/80">{doctor.error ?? doctor.hint}</div>
               ) : null}
+            </div>
+
+            {/* Hares: the invocation ledger. Each bar decomposes a capsule
+                round trip into engine (the query itself), fetch (the hare's
+                handling: views + artifact GETs), and wire (network/platform/
+                cold start) — the "does the query eat the tax?" picture. */}
+            <div className="min-w-0 rounded-md border border-chrome-border/60 bg-chrome-bg/30 p-2">
+              <div className="mb-1.5 flex items-center gap-2">
+                <span className="text-[11px] font-medium text-foreground">Hares</span>
+                {hare?.endpoint ? (
+                  <span className="min-w-0 flex-1 truncate font-mono text-[9px] text-chrome-text/50" title={hare.endpoint}>
+                    {hare.endpoint.replace(/^https?:\/\//, "")}
+                  </span>
+                ) : (
+                  <span className="rounded-full bg-foreground/[0.08] px-1.5 py-px text-[9px] text-chrome-text/60">
+                    not configured
+                  </span>
+                )}
+              </div>
+              {!hare?.available ? (
+                <div className="font-mono text-[10px] text-chrome-text/50">
+                  Needs migration 0140 (rvbbit.hare_run + hare_invocations).
+                </div>
+              ) : hare.recent.length === 0 ? (
+                <div className="font-mono text-[10px] text-chrome-text/50">
+                  SELECT rvbbit.hare_run(&apos;SELECT …&apos;) — capsules out, answers back, nothing left running.
+                </div>
+              ) : (
+                <div className="max-h-24 space-y-1 overflow-auto pr-1">
+                  {(() => {
+                    const maxTotal = Math.max(...hare.recent.map((h) => h.total_ms ?? 0), 1)
+                    return hare.recent.map((h, i) => {
+                      const total = h.total_ms ?? 0
+                      const engine = Math.max(h.engine_ms ?? 0, 0)
+                      const fetch_ = Math.max((h.server_ms ?? 0) - engine, 0)
+                      const wire = Math.max(h.wire_ms ?? 0, 0)
+                      const pct = (v: number) => `${(v / maxTotal) * 100}%`
+                      return (
+                        <div key={`${h.invoked_at}-${i}`} className="flex items-center gap-2" title={h.ok ? h.sql ?? "" : h.error ?? ""}>
+                          <div className="relative h-2.5 min-w-0 flex-1 overflow-hidden rounded-full bg-foreground/[0.07]">
+                            {h.ok ? (
+                              <div className="absolute inset-y-0 left-0 flex" style={{ width: pct(total) }}>
+                                <div style={{ width: `${total ? (engine / total) * 100 : 0}%`, background: "var(--main)" }} />
+                                <div style={{ width: `${total ? (fetch_ / total) * 100 : 0}%`, background: "color-mix(in oklab, var(--main) 45%, transparent)" }} />
+                                <div style={{ width: `${total ? (wire / total) * 100 : 0}%`, background: "color-mix(in oklab, var(--main) 20%, transparent)" }} />
+                              </div>
+                            ) : (
+                              <div className="absolute inset-y-0 left-0 rounded-full bg-danger/60" style={{ width: pct(Math.max(total, maxTotal * 0.08)) }} />
+                            )}
+                          </div>
+                          <span className={cn("w-24 shrink-0 text-right font-mono text-[9px]", h.ok ? "text-chrome-text/55" : "text-danger/80")}>
+                            {h.ok ? `${Math.round(total)}ms · ${h.row_count ?? 0} rows` : "error"}
+                          </span>
+                        </div>
+                      )
+                    })
+                  })()}
+                  <div className="flex items-center gap-2 pt-0.5 font-mono text-[8px] text-chrome-text/40">
+                    <span className="inline-block h-1.5 w-3 rounded-sm" style={{ background: "var(--main)" }} /> engine
+                    <span className="inline-block h-1.5 w-3 rounded-sm" style={{ background: "color-mix(in oklab, var(--main) 45%, transparent)" }} /> fetch
+                    <span className="inline-block h-1.5 w-3 rounded-sm" style={{ background: "color-mix(in oklab, var(--main) 20%, transparent)" }} /> wire
+                  </div>
+                </div>
+              )}
             </div>
           </div>
 
