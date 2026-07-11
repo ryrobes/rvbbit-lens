@@ -144,6 +144,60 @@ export async function fetchStoreConfig(connectionId: string): Promise<StoreConfi
   return { url_prefix: String(row.url_prefix ?? ""), enabled: Boolean(row.enabled) }
 }
 
+/** Per-placement workload over the last N hours: total executions, median
+ * latency, and hourly buckets (oldest→newest) for spark-bars. 'brain' is a
+ * placement like any other; hares appear as 'hare:<endpoint>'. This is what
+ * lets the topology show WORK, not just wiring. */
+export interface NodeActivity {
+  placement: string
+  executions: number
+  medianMs: number
+  buckets: number[]
+}
+
+export async function fetchFleetActivity(connectionId: string, hours = 6): Promise<NodeActivity[]> {
+  const h = Math.max(1, Math.min(hours, 48))
+  const bucketed = (src: string, placement: string, at: string, ms: string, extra: string) =>
+    `SELECT ${placement} AS placement, floor(extract(epoch FROM (now() - ${at})) / 3600)::int AS hours_ago, ` +
+    `count(*) AS n, percentile_cont(0.5) WITHIN GROUP (ORDER BY ${ms}) AS median_ms ` +
+    `FROM ${src} WHERE ${at} > now() - interval '${h} hours' ${extra} GROUP BY 1, 2`
+  const res = await runQuery(
+    connectionId,
+    bucketed("rvbbit.route_executions", "coalesce(node, 'brain')", "executed_at", "elapsed_ms", "AND status = 'ok'") +
+      " UNION ALL " +
+      bucketed("rvbbit.hare_invocations", "'hare:' || endpoint", "invoked_at", "total_ms", "AND ok"),
+  )
+  let rows: Record<string, unknown>[] = []
+  if (res.ok) {
+    rows = res.rows
+  } else {
+    // pre-0140 warehouse: no hare ledger — fall back to executions only
+    const fallback = await runQuery(
+      connectionId,
+      bucketed("rvbbit.route_executions", "coalesce(node, 'brain')", "executed_at", "elapsed_ms", "AND status = 'ok'"),
+    )
+    if (fallback.ok) rows = fallback.rows
+  }
+  const byPlacement = new Map<string, { total: number; weighted: number; buckets: number[] }>()
+  for (const r of rows ?? []) {
+    const key = String(r.placement ?? "brain")
+    const hoursAgo = Math.max(0, Math.min(h - 1, Number(r.hours_ago ?? 0)))
+    const n = Number(r.n ?? 0)
+    const median = Number(r.median_ms ?? 0)
+    const entry = byPlacement.get(key) ?? { total: 0, weighted: 0, buckets: new Array(h).fill(0) }
+    entry.total += n
+    entry.weighted += median * n
+    entry.buckets[h - 1 - hoursAgo] += n
+    byPlacement.set(key, entry)
+  }
+  return Array.from(byPlacement.entries()).map(([placement, e]) => ({
+    placement,
+    executions: e.total,
+    medianMs: e.total > 0 ? e.weighted / e.total : 0,
+    buckets: e.buckets,
+  }))
+}
+
 export async function fetchHare(connectionId: string): Promise<HareInfo> {
   // Endpoint resolution is layered because ALTER DATABASE ... SET only
   // reaches NEW sessions — a pooled connection may predate it. Session GUC →

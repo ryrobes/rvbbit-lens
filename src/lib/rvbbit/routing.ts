@@ -467,9 +467,12 @@ export async function fetchRoutingNodes(
   connectionId: string,
   windowHours: number,
 ): Promise<RoutingNodeOption[]> {
+  // Observed placements come from EXECUTIONS (0141: decisions never carry a
+  // node — placement is stamped at dispatch time, on the execution row).
   const observed =
-    "SELECT DISTINCT node FROM rvbbit.route_decisions WHERE node IS NOT NULL AND " +
-    windowClause("decided_at", windowHours)
+    "SELECT DISTINCT node FROM rvbbit.route_executions WHERE node IS NOT NULL AND " +
+    windowClause("executed_at", windowHours)
+  const options: RoutingNodeOption[] = []
   const withFleet = await runQuery(
     connectionId,
     "SELECT n.node, f.name, (f.enabled AND f.last_probe_ok) AS healthy FROM (" +
@@ -477,15 +480,41 @@ export async function fetchRoutingNodes(
       ") n LEFT JOIN rvbbit.fleet_endpoints f ON f.endpoint = n.node ORDER BY f.name NULLS LAST, n.node",
   )
   if (withFleet.ok) {
-    return withFleet.rows.map((r) => ({
-      node: String(r.node ?? ""),
-      name: r.name == null ? null : String(r.name),
-      healthy: r.healthy == null ? null : Boolean(r.healthy),
-    }))
+    options.push(
+      ...withFleet.rows.map((r) => ({
+        node: String(r.node ?? ""),
+        name: r.name == null ? null : String(r.name),
+        healthy: r.healthy == null ? null : Boolean(r.healthy),
+      })),
+    )
+  } else {
+    const bare = await runQuery(connectionId, observed + " ORDER BY node")
+    if (bare.ok) {
+      options.push(...bare.rows.map((r) => ({ node: String(r.node ?? ""), name: null, healthy: null })))
+    }
   }
-  const bare = await runQuery(connectionId, observed + " ORDER BY node")
-  if (!bare.ok) return []
-  return bare.rows.map((r) => ({ node: String(r.node ?? ""), name: null, healthy: null }))
+  // Hares are placements too — sourced from the invocation ledger, not the
+  // registry (nothing persistent to register). Tolerate pre-0140 warehouses.
+  const hares = await runQuery(
+    connectionId,
+    "SELECT DISTINCT endpoint FROM rvbbit.hare_invocations WHERE " +
+      windowClause("invoked_at", windowHours) + " ORDER BY endpoint",
+  )
+  if (hares.ok) {
+    options.push(
+      ...hares.rows.map((r) => ({
+        node: `hare:${String(r.endpoint ?? "")}`,
+        name: hares.rows.length > 1 ? `hare ${String(r.endpoint ?? "").replace(/^https?:\/\//, "").slice(0, 18)}` : "hare",
+        healthy: null,
+      })),
+    )
+  }
+  return options
+}
+
+/** `hare:<endpoint>` pills route every panel to the invocation ledger. */
+function hareEndpoint(filter: RoutingNodeFilter): string | null {
+  return filter && filter.startsWith("hare:") ? filter.slice(5) : null
 }
 
 // ── Live telemetry ──────────────────────────────────────────────────
@@ -495,13 +524,25 @@ export async function fetchRouteExecutions(
   windowHours: number,
   nodeFilter: RoutingNodeFilter = "all",
 ): Promise<{ rows: RouteExecution[]; error?: string }> {
+  const hare = hareEndpoint(nodeFilter)
   const res = await runQuery(
     connectionId,
-    "SELECT executed_at, candidate, route_doc->>'physical_path' AS physical_path, " +
-      "route_source, elapsed_ms, rows_returned, " +
-      "cache_hit, status, shape_family, reason FROM rvbbit.route_executions " +
-      "WHERE " + windowClause("executed_at", windowHours) + nodeClause(nodeFilter) +
-      " ORDER BY executed_at DESC LIMIT 500",
+    hare
+      ? // Hare invocations, wearing the execution-row shape: candidate is the
+        // capsule engine, route_source names the path, errors ride in reason.
+        "SELECT invoked_at AS executed_at, 'duck_capsule' AS candidate, " +
+        "'parquet' AS physical_path, 'hare_run' AS route_source, " +
+        "total_ms AS elapsed_ms, row_count AS rows_returned, false AS cache_hit, " +
+        "CASE WHEN ok THEN 'ok' ELSE 'error' END AS status, '' AS shape_family, " +
+        "coalesce(error, '') AS reason FROM rvbbit.hare_invocations " +
+        "WHERE " + windowClause("invoked_at", windowHours) +
+        ` AND endpoint = '${hare.replace(/'/g, "''")}'` +
+        " ORDER BY invoked_at DESC LIMIT 500"
+      : "SELECT executed_at, candidate, route_doc->>'physical_path' AS physical_path, " +
+        "route_source, elapsed_ms, rows_returned, " +
+        "cache_hit, status, shape_family, reason FROM rvbbit.route_executions " +
+        "WHERE " + windowClause("executed_at", windowHours) + nodeClause(nodeFilter) +
+        " ORDER BY executed_at DESC LIMIT 500",
   )
   if (!res.ok) return { rows: [], error: res.error }
   return {
@@ -529,16 +570,37 @@ export async function fetchDecisionSummary(
 ): Promise<DecisionSummaryRow[]> {
   // Decisions are made BEFORE dispatch, so they can't honestly claim a node
   // (since 0141 they no longer try — placement truth lives on executions,
-  // stamped at dispatch time). Per-node filtering therefore applies to
-  // executions only; the decision flow always shows the whole brain's intent.
-  void nodeFilter
+  // stamped at dispatch time). "all" keeps the decision-weighted flow (the
+  // whole brain's intent, cache hits included); a node pill switches the
+  // SAME flow shape to execution-weighted rows from route_executions, i.e.
+  // "of the work that actually ran here, how did it arrive". Both sides of
+  // the source switch produce identical columns so the pathways viz is
+  // agnostic to which story it's telling.
+  const hare = hareEndpoint(nodeFilter)
+  if (hare) {
+    const r = await runQuery(
+      connectionId,
+      "SELECT count(*) AS decisions FROM rvbbit.hare_invocations WHERE ok AND " +
+        windowClause("invoked_at", windowHours) +
+        ` AND endpoint = '${hare.replace(/'/g, "''")}'`,
+    )
+    if (!r.ok || !r.rows.length) return []
+    const n = Number(r.rows[0].decisions ?? 0)
+    return n > 0
+      ? [{ candidate: "duck_capsule", physicalPath: "parquet", routeSource: "hare_run", decisions: n, cacheHits: 0, rewritten: 0 }]
+      : []
+  }
+  const filtered = nodeFilter !== "all"
+  const source = filtered
+    ? "FROM rvbbit.route_executions WHERE " + windowClause("executed_at", windowHours) + nodeClause(nodeFilter)
+    : "FROM rvbbit.route_decisions WHERE " + windowClause("decided_at", windowHours)
   const res = await runQuery(
     connectionId,
     "SELECT candidate, route_doc->>'physical_path' AS physical_path, route_source, " +
       "count(*) AS decisions, " +
       "count(*) FILTER (WHERE cache_hit) AS cache_hits, " +
       "count(*) FILTER (WHERE rewritten) AS rewritten " +
-      "FROM rvbbit.route_decisions WHERE " + windowClause("decided_at", windowHours) +
+      source +
       " GROUP BY candidate, route_doc->>'physical_path', route_source",
   )
   if (!res.ok) return []
@@ -559,13 +621,20 @@ export async function fetchEngineRuntime(
   windowHours: number,
   nodeFilter: RoutingNodeFilter = "all",
 ): Promise<EngineRuntimeRow[]> {
+  const hare = hareEndpoint(nodeFilter)
   const res = await runQuery(
     connectionId,
-    "SELECT candidate, count(*) AS runs, " +
-      "percentile_cont(0.5) WITHIN GROUP (ORDER BY elapsed_ms) AS median_ms, " +
-      "percentile_cont(0.95) WITHIN GROUP (ORDER BY elapsed_ms) AS p95_ms " +
-      "FROM rvbbit.route_executions WHERE " + windowClause("executed_at", windowHours) + nodeClause(nodeFilter) +
-      " GROUP BY candidate",
+    hare
+      ? "SELECT 'duck_capsule' AS candidate, count(*) AS runs, " +
+        "percentile_cont(0.5) WITHIN GROUP (ORDER BY total_ms) AS median_ms, " +
+        "percentile_cont(0.95) WITHIN GROUP (ORDER BY total_ms) AS p95_ms " +
+        "FROM rvbbit.hare_invocations WHERE ok AND " + windowClause("invoked_at", windowHours) +
+        ` AND endpoint = '${hare.replace(/'/g, "''")}'`
+      : "SELECT candidate, count(*) AS runs, " +
+        "percentile_cont(0.5) WITHIN GROUP (ORDER BY elapsed_ms) AS median_ms, " +
+        "percentile_cont(0.95) WITHIN GROUP (ORDER BY elapsed_ms) AS p95_ms " +
+        "FROM rvbbit.route_executions WHERE " + windowClause("executed_at", windowHours) + nodeClause(nodeFilter) +
+        " GROUP BY candidate",
   )
   if (!res.ok) return []
   return res.rows.map((r) => ({
