@@ -351,18 +351,21 @@ export function FlowDiagram({
   )
 }
 
-// ── FlowDiagram3 — decision source → placement → engine ─────────────
+// ── FlowDiagram3 — decision source → engine → placement ─────────────
 //
-// The "all" pathways view with the fleet made visible: the middle column is
-// WHERE each query physically ran (brain, warrens by name, hare), so offload
-// share is readable at a glance and each placement's engine mix fans out to
-// the right. Execution-weighted by necessity — only executions know where
-// dispatch landed (decisions can't claim a node under rotation). The
+// The "all" pathways view in CAUSAL order: the router picks the source rule
+// (why) and the engine (what) at decision time; dispatch draws the node
+// (where) last, so placement is the terminus. Both ribbon halves carry the
+// engine's color — a choice flows in from its source and out to the machines
+// that served it. Execution-weighted by necessity — only executions know
+// where dispatch landed (decisions can't claim a node under rotation). The
 // single-node pill views keep the classic two-column diagram.
 
 export interface FlowTriple {
   source: string
+  /** engine (flow-target id, physical-path split included) */
   mid: string
+  /** placement — brain, warren name, or hare */
   target: string
   value: number
 }
@@ -404,10 +407,7 @@ export function FlowDiagram3({
     const tgtTotals = totals((t) => t.target)
 
     const sources = [...srcTotals.entries()].sort((a, b) => b[1] - a[1])
-    const mids = [...midTotals.entries()].sort((a, b) =>
-      a[0] === "brain" ? -1 : b[0] === "brain" ? 1 : b[1] - a[1],
-    )
-    const engines = [...tgtTotals.entries()]
+    const engines = [...midTotals.entries()]
       .filter(([, total]) => total > 0)
       .sort((a, b) => {
         const ka = engineFlowOrder(a[0])
@@ -415,10 +415,13 @@ export function FlowDiagram3({
         return ka[0] - kb[0] || ka[1] - kb[1]
       })
       .map(([id]) => engineMeta(id))
+    const placements = [...tgtTotals.entries()].sort((a, b) =>
+      a[0] === "brain" ? -1 : b[0] === "brain" ? 1 : b[1] - a[1],
+    )
 
     const avail = (n: number) => height - Math.max(0, n - 1) * gap
     const unit =
-      Math.max(0, Math.min(avail(sources.length), avail(mids.length), avail(engines.length))) /
+      Math.max(0, Math.min(avail(sources.length), avail(engines.length), avail(placements.length))) /
       grand
     if (unit <= 0) return null
 
@@ -434,13 +437,13 @@ export function FlowDiagram3({
       }))
     }
     const srcNodes = column(sources)
-    const midNodes = column(mids)
-    const tgtSized = engines.map((e) => [e.id, tgtTotals.get(e.id) ?? 0] as [string, number])
-    const tgtNodes = column(tgtSized).map((n, i) => ({ ...n, engine: engines[i] }))
+    const midSized = engines.map((e) => [e.id, midTotals.get(e.id) ?? 0] as [string, number])
+    const midNodes = column(midSized).map((n, i) => ({ ...n, engine: engines[i] }))
+    const tgtNodes = column(placements)
 
     const srcById = new Map(srcNodes.map((n) => [n.name, n]))
-    const midById = new Map(midNodes.map((n) => [n.name, n]))
-    const tgtById = new Map<string, (typeof tgtNodes)[number]>(tgtNodes.map((n) => [n.engine.id, n]))
+    const midById = new Map<string, (typeof midNodes)[number]>(midNodes.map((n) => [n.engine.id, n]))
+    const tgtById = new Map(tgtNodes.map((n) => [n.name, n]))
 
     const xL = padX + nodeW
     const xM0 = w / 2 - nodeW / 2
@@ -495,8 +498,8 @@ export function FlowDiagram3({
         {
           id: `L${i}`,
           d: ribbonPath(xL, xM0, sy, ty, th),
-          color: placementColor(l.b),
-          label: `${l.a} → ${l.b} · ${l.value}`,
+          color: engineMeta(l.b).color,
+          label: `${l.a} → ${engineMeta(l.b).label} · ${l.value}`,
         },
       ]
     })
@@ -515,8 +518,8 @@ export function FlowDiagram3({
         {
           id: `R${i}`,
           d: ribbonPath(xM1, xR, sy, ty, th),
-          color: tn.engine.color,
-          label: `${l.a} → ${engineMeta(l.b).label} · ${l.value}`,
+          color: engineMeta(l.a).color,
+          label: `${engineMeta(l.a).label} → ${l.b} · ${l.value}`,
         },
       ]
     })
@@ -551,21 +554,21 @@ export function FlowDiagram3({
             </g>
           ))}
           {model.midNodes.map((n) => (
-            <g key={n.name}>
-              <rect x={model.xM0} y={n.y} width={nodeW} height={Math.max(2, n.h)} rx={1.5} fill={placementColor(n.name)} opacity={0.85} />
+            <g key={n.engine.id}>
+              <rect x={model.xM0} y={n.y} width={nodeW} height={Math.max(2, n.h)} rx={1.5} fill={n.engine.color} opacity={0.9} />
               <text x={model.xM0 + nodeW / 2} y={n.y - 4} textAnchor="middle" fontSize={9} className="font-mono" fill="var(--foreground)">
-                {n.name}
+                {engineMeta(n.engine.id).label}
               </text>
             </g>
           ))}
           {model.tgtNodes.map((n) => (
-            <g key={n.engine.id}>
-              <rect x={w - padX - nodeW} y={n.y} width={nodeW} height={Math.max(2, n.h)} rx={1.5} fill={n.engine.color} opacity={0.9} />
+            <g key={n.name}>
+              <rect x={w - padX - nodeW} y={n.y} width={nodeW} height={Math.max(2, n.h)} rx={1.5} fill={placementColor(n.name)} opacity={0.85} />
               <text x={w - padX + 6} y={n.y + n.h / 2 + 3} textAnchor="start" fontSize={9} className="font-mono" fill="var(--foreground)">
-                {engineMeta(n.engine.id).label}
+                {n.name}
               </text>
               <text x={w - padX + 6} y={n.y + n.h / 2 + 13} textAnchor="start" fontSize={8} className="font-mono" fill="var(--chrome-text)" opacity={0.6}>
-                {n.total} routed
+                {n.total} served
               </text>
             </g>
           ))}

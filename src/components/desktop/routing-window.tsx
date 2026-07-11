@@ -460,11 +460,11 @@ function FlowTab({
     const agg = new Map<string, FlowTriple>()
     for (const t of flowTriples) {
       if (t.executions <= 0) continue
-      const target = engineFlowTarget(t.candidate, t.physicalPath)
-      const key = `${t.routeSource}\u001f${t.placement}\u001f${target}`
+      const engine = engineFlowTarget(t.candidate, t.physicalPath)
+      const key = `${t.routeSource}\u001f${engine}\u001f${t.placement}`
       const ex = agg.get(key)
       if (ex) ex.value += t.executions
-      else agg.set(key, { source: t.routeSource, mid: t.placement, target, value: t.executions })
+      else agg.set(key, { source: t.routeSource, mid: engine, target: t.placement, value: t.executions })
     }
     return [...agg.values()]
   }, [flowTriples])
@@ -498,7 +498,7 @@ function FlowTab({
         right={
           <span>
             {nodeFilter === "all" && sankeyTriples.length > 0
-              ? "decision source → node → engine"
+              ? "decision source → engine → node"
               : "decision source → engine"}{" "}
             · last {windowLabel}
           </span>
@@ -511,7 +511,7 @@ function FlowTab({
         )}
         <p className="mt-1.5 text-[10px] leading-snug text-chrome-text/55">
           {nodeFilter === "all" && sankeyTriples.length > 0
-            ? "Every routed SELECT enters from a decision source on the left, lands on the node that physically served it — brain, warren, or hare — and fans out to the engine that ran it. Execution-weighted: placement is stamped at dispatch time."
+            ? "Every routed SELECT enters from a decision source on the left, is assigned an engine by the router, and lands on the node that physically served it — brain, warren, or hare. Causal order: the engine is chosen at decision time; placement is drawn last, at dispatch."
             : "Every routed SELECT enters from a decision source on the left — a hard rule, an eligibility check, or a hit in the trained profile — and is dispatched to an execution engine on the right. Only engines that saw traffic in this window appear here; idle ones are hidden, and their cards below are dimmed."}
         </p>
       </Panel>
