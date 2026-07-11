@@ -92,6 +92,17 @@ export const ENGINES: EngineMeta[] = [
 ]
 
 export function engineMeta(id: string): EngineMeta {
+  if (id === "duck_capsule") {
+    // Not a routed candidate (the router never races it) — a TRANSPORT class:
+    // the same DuckDB, reached through a capsule on a serverless hare. Gets
+    // first-class card/flow identity without polluting the trainable set.
+    return {
+      id: id as EngineId,
+      label: "hare capsule",
+      color: "var(--viz-engine-duck-capsule, var(--main))",
+      blurb: "DuckDB over presigned artifacts on a serverless hare — totals include fetch + wire",
+    }
+  }
   // Virtual "native·<path>" ids split the native family by the physical storage
   // actually read (heap/parquet/vortex/mixed) for the sankey + log chips. Same
   // native colour, tinted by path: heap dimmed (unaccelerated), vortex brighter.

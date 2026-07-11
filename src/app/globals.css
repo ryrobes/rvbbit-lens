@@ -76,6 +76,7 @@
   --viz-engine-duck-vector: color-mix(in oklch, var(--brand-duck) 62%, var(--chart-3));
   --viz-engine-duck-vortex: color-mix(in oklch, var(--brand-duck) 52%, var(--chart-6));
   --viz-engine-duck-hive: color-mix(in oklch, var(--brand-duck) 54%, var(--chart-2));
+  --viz-engine-duck-capsule: color-mix(in oklch, var(--brand-duck) 45%, var(--main));
   --viz-engine-datafusion-vector: color-mix(in oklch, var(--brand-routing) 52%, var(--chart-1));
   --viz-engine-datafusion-vortex: color-mix(in oklch, var(--brand-routing) 48%, var(--chart-6));
   --viz-engine-datafusion-hive: color-mix(in oklch, var(--brand-routing) 52%, var(--info));

@@ -25,6 +25,7 @@ import { EngineDot, EnginePill, FlowDiagram, FlowDiagram3, type FlowLink, type F
 import {
   ENGINES,
   engineFlowTarget,
+  engineMeta,
   fetchColumnarTables,
   fetchDecisionSummary,
   fetchEngineRuntime,
@@ -412,6 +413,31 @@ function FlowTab({
     })
   }, [flow, profileData])
 
+  // Runtime candidates outside the canonical ENGINES list (today: the hare
+  // pill's duck_capsule transport class) still deserve a card — appended
+  // dynamically so the trainable set stays closed while the visible one stays
+  // honest.
+  const extraStats = useMemo<EngineStat[]>(() => {
+    const known = new Set<string>(ENGINES.map((e) => e.id))
+    return (flow?.engineRuntime ?? [])
+      .filter((r) => !known.has(r.candidate) && r.runs > 0)
+      .map((r) => {
+        const decRows = (flow?.decisionSummary ?? []).filter((d) => d.candidate === r.candidate)
+        return {
+          id: r.candidate,
+          decisions: decRows.reduce((sum, d) => sum + d.decisions, 0),
+          cacheHits: decRows.reduce((sum, d) => sum + d.cacheHits, 0),
+          runs: r.runs,
+          median: r.medianMs,
+          p95: r.p95Ms,
+          trainedShapes: 0,
+          trainedConf: 0,
+        }
+      })
+  }, [flow])
+
+  const allStats = useMemo(() => [...engineStats, ...extraStats], [engineStats, extraStats])
+
   const flowLinks = useMemo<FlowLink[]>(() => {
     // Split the native family by physical_path (native·heap/parquet/vortex) and
     // aggregate by (source, target) in case two candidates collapse to the same
@@ -454,7 +480,7 @@ function FlowTab({
     return m
   }, [engineTrends])
 
-  const slowestMedian = Math.max(1, ...engineStats.map((e) => e.median))
+  const slowestMedian = Math.max(1, ...allStats.map((e) => e.median))
 
   if (loading) {
     return (
@@ -511,7 +537,7 @@ function FlowTab({
       ) : null}
 
       <div className="grid grid-cols-3 gap-2.5">
-        {engineStats.map((s) => (
+        {allStats.map((s) => (
           <EngineCard key={s.id} stat={s} slowestMedian={slowestMedian} trend={trendByEngine.get(s.id)} />
         ))}
       </div>
@@ -566,7 +592,7 @@ function EngineCard({
   slowestMedian: number
   trend?: { runs: number; p50: number; inflight: number }[]
 }) {
-  const engine = ENGINES.find((e) => e.id === stat.id)!
+  const engine = engineMeta(stat.id)
   const cacheRate = stat.decisions > 0 ? stat.cacheHits / stat.decisions : 0
   // No routing this window → dim it. It returns to full strength the moment
   // a decision or run lands on this engine again.
