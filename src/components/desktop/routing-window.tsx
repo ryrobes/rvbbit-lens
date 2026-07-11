@@ -21,13 +21,14 @@ import {
   Metric,
   Panel,
 } from "./instruments"
-import { EngineDot, EnginePill, FlowDiagram, type FlowLink } from "./routing-charts"
+import { EngineDot, EnginePill, FlowDiagram, FlowDiagram3, type FlowLink, type FlowTriple } from "./routing-charts"
 import {
   ENGINES,
   engineFlowTarget,
   fetchColumnarTables,
   fetchDecisionSummary,
   fetchEngineRuntime,
+  fetchFlowTriples,
   fetchRoutingNodes,
   type RoutingNodeOption,
   fetchLogStatus,
@@ -91,18 +92,21 @@ export function RoutingWindow({ activeConnectionId, hasRvbbit }: RoutingWindowPr
   const [windowHours, setWindowHours] = useState<number>(ROUTE_WINDOW_OPTIONS[0].hours)
   const [nodeFilter, setNodeFilter] = useState<string>("all")
   const [fleetNodes, setFleetNodes] = useState<RoutingNodeOption[]>([])
+  const [flowTriples, setFlowTriples] = useState<Awaited<ReturnType<typeof fetchFlowTriples>>>([])
   const [updatedAt, setUpdatedAt] = useState(0)
   const loading = updatedAt === 0
 
   const pollFlow = useCallback(async () => {
     if (!activeConnectionId) return
-    const [executions, decisionSummary, engineRuntime, logStatus, nodeOptions] = await Promise.all([
+    const [executions, decisionSummary, engineRuntime, logStatus, nodeOptions, triples] = await Promise.all([
       fetchRouteExecutions(activeConnectionId, windowHours, nodeFilter),
       fetchDecisionSummary(activeConnectionId, windowHours, nodeFilter),
       fetchEngineRuntime(activeConnectionId, windowHours, nodeFilter),
       fetchLogStatus(activeConnectionId),
       fetchRoutingNodes(activeConnectionId, windowHours),
+      nodeFilter === "all" ? fetchFlowTriples(activeConnectionId, windowHours) : Promise.resolve([]),
     ])
+    setFlowTriples(triples)
     setFleetNodes(nodeOptions)
     setError(executions.error ?? null)
     setFlow({
@@ -313,6 +317,8 @@ export function RoutingWindow({ activeConnectionId, hasRvbbit }: RoutingWindowPr
             profileData={profileData}
             loading={loading}
             windowLabel={windowLabel}
+            nodeFilter={nodeFilter}
+            flowTriples={flowTriples}
           />
         ) : tab === "freshness" ? (
           <RoutingFreshnessTab activeConnectionId={activeConnectionId} />
@@ -353,11 +359,15 @@ function FlowTab({
   profileData,
   loading,
   windowLabel,
+  nodeFilter,
+  flowTriples,
 }: {
   flow: FlowData | null
   profileData: ProfileData | null
   loading: boolean
   windowLabel: string
+  nodeFilter: string
+  flowTriples: Awaited<ReturnType<typeof fetchFlowTriples>>
 }) {
   const engineStats = useMemo<EngineStat[]>(() => {
     const entries = profileData?.entries ?? []
@@ -399,6 +409,21 @@ function FlowTab({
     return [...agg.values()]
   }, [flow])
 
+  // 3-layer sankey rows (source → placement → engine) for the "all" view —
+  // same physical-path splitting on the engine column as the 2-layer flow.
+  const sankeyTriples = useMemo<FlowTriple[]>(() => {
+    const agg = new Map<string, FlowTriple>()
+    for (const t of flowTriples) {
+      if (t.executions <= 0) continue
+      const target = engineFlowTarget(t.candidate, t.physicalPath)
+      const key = `${t.routeSource}\u001f${t.placement}\u001f${target}`
+      const ex = agg.get(key)
+      if (ex) ex.value += t.executions
+      else agg.set(key, { source: t.routeSource, mid: t.placement, target, value: t.executions })
+    }
+    return [...agg.values()]
+  }, [flowTriples])
+
   const slowestMedian = Math.max(1, ...engineStats.map((e) => e.median))
 
   if (loading) {
@@ -414,14 +439,24 @@ function FlowTab({
       <Panel
         icon={FlowArrow}
         title="Routing pathways"
-        right={<span>decision source → engine · last {windowLabel}</span>}
+        right={
+          <span>
+            {nodeFilter === "all" && sankeyTriples.length > 0
+              ? "decision source → node → engine"
+              : "decision source → engine"}{" "}
+            · last {windowLabel}
+          </span>
+        }
       >
-        <FlowDiagram links={flowLinks} height={232} />
+        {nodeFilter === "all" && sankeyTriples.length > 0 ? (
+          <FlowDiagram3 triples={sankeyTriples} height={232} />
+        ) : (
+          <FlowDiagram links={flowLinks} height={232} />
+        )}
         <p className="mt-1.5 text-[10px] leading-snug text-chrome-text/55">
-          Every routed SELECT enters from a decision source on the left — a hard rule, an
-          eligibility check, or a hit in the trained profile — and is dispatched to an
-          execution engine on the right. Only engines that saw traffic in this window appear
-          here; idle ones are hidden, and their cards below are dimmed.
+          {nodeFilter === "all" && sankeyTriples.length > 0
+            ? "Every routed SELECT enters from a decision source on the left, lands on the node that physically served it — brain, warren, or hare — and fans out to the engine that ran it. Execution-weighted: placement is stamped at dispatch time."
+            : "Every routed SELECT enters from a decision source on the left — a hard rule, an eligibility check, or a hit in the trained profile — and is dispatched to an execution engine on the right. Only engines that saw traffic in this window appear here; idle ones are hidden, and their cards below are dimmed."}
         </p>
       </Panel>
 

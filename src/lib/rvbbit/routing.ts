@@ -517,6 +517,56 @@ function hareEndpoint(filter: RoutingNodeFilter): string | null {
   return filter && filter.startsWith("hare:") ? filter.slice(5) : null
 }
 
+/** One row per (decision source → placement → engine) path with traffic in
+ * the window — the 3-layer sankey behind the "all" pathways view. Execution-
+ * weighted by necessity: only executions know where dispatch landed.
+ * Placements resolve to fleet names where registered; hares fold in from the
+ * invocation ledger (tolerated absent pre-0140). */
+export interface FlowTripleRow {
+  routeSource: string
+  placement: string
+  candidate: string
+  physicalPath: string
+  executions: number
+}
+
+export async function fetchFlowTriples(
+  connectionId: string,
+  windowHours: number,
+): Promise<FlowTripleRow[]> {
+  const res = await runQuery(
+    connectionId,
+    "SELECT e.route_source, " +
+      "CASE WHEN e.node IS NULL THEN 'brain' ELSE coalesce(f.name, e.node) END AS placement, " +
+      "e.candidate, e.route_doc->>'physical_path' AS physical_path, count(*) AS n " +
+      "FROM rvbbit.route_executions e LEFT JOIN rvbbit.fleet_endpoints f ON f.endpoint = e.node " +
+      "WHERE " + windowClause("e.executed_at", windowHours) +
+      " AND e.status = 'ok' AND e.candidate IS NOT NULL " +
+      "GROUP BY 1, 2, 3, 4",
+  )
+  const rows: FlowTripleRow[] = res.ok
+    ? res.rows.map((r) => ({
+        routeSource: String(r.route_source ?? "unknown"),
+        placement: String(r.placement ?? "brain"),
+        candidate: normalizeCandidate(String(r.candidate ?? "")),
+        physicalPath: String(r.physical_path ?? ""),
+        executions: num(r.n),
+      }))
+    : []
+  const hares = await runQuery(
+    connectionId,
+    "SELECT count(*) AS n FROM rvbbit.hare_invocations WHERE ok AND " +
+      windowClause("invoked_at", windowHours),
+  )
+  if (hares.ok && hares.rows.length > 0) {
+    const n = num(hares.rows[0].n)
+    if (n > 0) {
+      rows.push({ routeSource: "hare_run", placement: "hare", candidate: "duck_capsule", physicalPath: "parquet", executions: n })
+    }
+  }
+  return rows
+}
+
 // ── Live telemetry ──────────────────────────────────────────────────
 
 export async function fetchRouteExecutions(
