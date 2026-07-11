@@ -237,6 +237,11 @@ export interface RouteExecution {
   status: string
   shapeFamily: string
   reason: string
+  /** Stable hash of the exact SQL — the apples-to-apples benchmark filter key. */
+  queryHash: string
+  /** Representative SQL: the shape's captured sample for routed executions,
+   *  the literal statement for hare invocations. */
+  sql: string
 }
 
 export interface DecisionSummaryRow {
@@ -517,6 +522,14 @@ function hareEndpoint(filter: RoutingNodeFilter): string | null {
   return filter && filter.startsWith("hare:") ? filter.slice(5) : null
 }
 
+/** Optional exact-query pin (apples-to-apples benchmarking): appended to any
+ *  WHERE over route_executions/route_decisions (query_hash) or the hare
+ *  ledger (sql_hash). */
+function hashClause(column: string, queryHash?: string | null): string {
+  if (!queryHash) return ""
+  return ` AND ${column} = '${queryHash.replace(/'/g, "''")}'`
+}
+
 /** One row per (decision source → placement → engine) path with traffic in
  * the window — the 3-layer sankey behind the "all" pathways view. Execution-
  * weighted by necessity: only executions know where dispatch landed.
@@ -533,6 +546,7 @@ export interface FlowTripleRow {
 export async function fetchFlowTriples(
   connectionId: string,
   windowHours: number,
+  queryHash?: string | null,
 ): Promise<FlowTripleRow[]> {
   const res = await runQuery(
     connectionId,
@@ -542,6 +556,7 @@ export async function fetchFlowTriples(
       "FROM rvbbit.route_executions e LEFT JOIN rvbbit.fleet_endpoints f ON f.endpoint = e.node " +
       "WHERE " + windowClause("e.executed_at", windowHours) +
       " AND e.status = 'ok' AND e.candidate IS NOT NULL " +
+      hashClause("e.query_hash", queryHash) +
       "GROUP BY 1, 2, 3, 4",
   )
   const rows: FlowTripleRow[] = res.ok
@@ -556,7 +571,7 @@ export async function fetchFlowTriples(
   const hares = await runQuery(
     connectionId,
     "SELECT count(*) AS n FROM rvbbit.hare_invocations WHERE ok AND " +
-      windowClause("invoked_at", windowHours),
+      windowClause("invoked_at", windowHours) + hashClause("sql_hash", queryHash),
   )
   if (hares.ok && hares.rows.length > 0) {
     const n = num(hares.rows[0].n)
@@ -573,6 +588,7 @@ export async function fetchRouteExecutions(
   connectionId: string,
   windowHours: number,
   nodeFilter: RoutingNodeFilter = "all",
+  queryHash?: string | null,
 ): Promise<{ rows: RouteExecution[]; error?: string }> {
   const hare = hareEndpoint(nodeFilter)
   const res = await runQuery(
@@ -584,15 +600,21 @@ export async function fetchRouteExecutions(
         "'parquet' AS physical_path, 'hare_run' AS route_source, " +
         "total_ms AS elapsed_ms, row_count AS rows_returned, false AS cache_hit, " +
         "CASE WHEN ok THEN 'ok' ELSE 'error' END AS status, '' AS shape_family, " +
-        "coalesce(error, '') AS reason FROM rvbbit.hare_invocations " +
+        "coalesce(error, '') AS reason, sql_hash AS query_hash, coalesce(sql, '') AS sql " +
+        "FROM rvbbit.hare_invocations " +
         "WHERE " + windowClause("invoked_at", windowHours) +
         ` AND endpoint = '${hare.replace(/'/g, "''")}'` +
+        hashClause("sql_hash", queryHash) +
         " ORDER BY invoked_at DESC LIMIT 500"
-      : "SELECT executed_at, candidate, route_doc->>'physical_path' AS physical_path, " +
-        "route_source, elapsed_ms, rows_returned, " +
-        "cache_hit, status, shape_family, reason FROM rvbbit.route_executions " +
-        "WHERE " + windowClause("executed_at", windowHours) + nodeClause(nodeFilter) +
-        " ORDER BY executed_at DESC LIMIT 500",
+      : "SELECT e.executed_at, e.candidate, e.route_doc->>'physical_path' AS physical_path, " +
+        "e.route_source, e.elapsed_ms, e.rows_returned, " +
+        "e.cache_hit, e.status, e.shape_family, e.reason, e.query_hash, " +
+        "coalesce(s.sql, '') AS sql " +
+        "FROM rvbbit.route_executions e " +
+        "LEFT JOIN rvbbit.route_shape_samples s ON s.shape_key = e.shape_key " +
+        "WHERE " + windowClause("e.executed_at", windowHours) + nodeClause(nodeFilter) +
+        hashClause("e.query_hash", queryHash) +
+        " ORDER BY e.executed_at DESC LIMIT 500",
   )
   if (!res.ok) return { rows: [], error: res.error }
   return {
@@ -607,6 +629,8 @@ export async function fetchRouteExecutions(
       status: String(r.status ?? ""),
       shapeFamily: String(r.shape_family ?? ""),
       reason: String(r.reason ?? ""),
+      queryHash: String(r.query_hash ?? ""),
+      sql: String(r.sql ?? ""),
     })),
   }
 }
@@ -617,6 +641,7 @@ export async function fetchDecisionSummary(
   connectionId: string,
   windowHours: number,
   nodeFilter: RoutingNodeFilter = "all",
+  queryHash?: string | null,
 ): Promise<DecisionSummaryRow[]> {
   // Decisions are made BEFORE dispatch, so they can't honestly claim a node
   // (since 0141 they no longer try — placement truth lives on executions,
@@ -642,8 +667,8 @@ export async function fetchDecisionSummary(
   }
   const filtered = nodeFilter !== "all"
   const source = filtered
-    ? "FROM rvbbit.route_executions WHERE " + windowClause("executed_at", windowHours) + nodeClause(nodeFilter)
-    : "FROM rvbbit.route_decisions WHERE " + windowClause("decided_at", windowHours)
+    ? "FROM rvbbit.route_executions WHERE " + windowClause("executed_at", windowHours) + nodeClause(nodeFilter) + hashClause("query_hash", queryHash)
+    : "FROM rvbbit.route_decisions WHERE " + windowClause("decided_at", windowHours) + hashClause("query_hash", queryHash)
   const res = await runQuery(
     connectionId,
     "SELECT candidate, route_doc->>'physical_path' AS physical_path, route_source, " +
@@ -670,6 +695,7 @@ export async function fetchEngineRuntime(
   connectionId: string,
   windowHours: number,
   nodeFilter: RoutingNodeFilter = "all",
+  queryHash?: string | null,
 ): Promise<EngineRuntimeRow[]> {
   const hare = hareEndpoint(nodeFilter)
   const res = await runQuery(
@@ -679,11 +705,13 @@ export async function fetchEngineRuntime(
         "percentile_cont(0.5) WITHIN GROUP (ORDER BY total_ms) AS median_ms, " +
         "percentile_cont(0.95) WITHIN GROUP (ORDER BY total_ms) AS p95_ms " +
         "FROM rvbbit.hare_invocations WHERE ok AND " + windowClause("invoked_at", windowHours) +
-        ` AND endpoint = '${hare.replace(/'/g, "''")}'`
+        ` AND endpoint = '${hare.replace(/'/g, "''")}'` +
+        hashClause("sql_hash", queryHash)
       : "SELECT candidate, count(*) AS runs, " +
         "percentile_cont(0.5) WITHIN GROUP (ORDER BY elapsed_ms) AS median_ms, " +
         "percentile_cont(0.95) WITHIN GROUP (ORDER BY elapsed_ms) AS p95_ms " +
         "FROM rvbbit.route_executions WHERE " + windowClause("executed_at", windowHours) + nodeClause(nodeFilter) +
+        hashClause("query_hash", queryHash) +
         " GROUP BY candidate",
   )
   if (!res.ok) return []
@@ -692,6 +720,67 @@ export async function fetchEngineRuntime(
     runs: num(r.runs),
     medianMs: num(r.median_ms),
     p95Ms: num(r.p95_ms),
+  }))
+}
+
+/** Per-engine timeseries over the window: N buckets of (runs, p50, in-flight).
+ * "In-flight" counts executions whose [start, end] interval OVERLAPS the
+ * bucket — the honest parallelism read (an execution spanning three buckets
+ * was concurrent work in all three). Runs/p50 count only completions. Honors
+ * the node pill (hare pill reads the ledger) and the exact-query pin. */
+export interface EngineTrendPoint {
+  candidate: string
+  bucket: number
+  runs: number
+  p50: number
+  inflight: number
+}
+
+export const TREND_BUCKETS = 24
+
+export async function fetchEngineTrends(
+  connectionId: string,
+  windowHours: number,
+  nodeFilter: RoutingNodeFilter = "all",
+  queryHash?: string | null,
+): Promise<EngineTrendPoint[]> {
+  const hare = hareEndpoint(nodeFilter)
+  const n = TREND_BUCKETS
+  const bucketSecs = (windowHours * 3600) / n
+  const buckets =
+    `(SELECT i, now() - make_interval(secs => ${windowHours * 3600}) + make_interval(secs => i * ${bucketSecs}) AS t0, ` +
+    `now() - make_interval(secs => ${windowHours * 3600}) + make_interval(secs => (i + 1) * ${bucketSecs}) AS t1 ` +
+    `FROM generate_series(0, ${n - 1}) AS i) b`
+  const sql = hare
+    ? "SELECT 'duck_capsule' AS candidate, b.i AS bucket, " +
+      "count(*) FILTER (WHERE h.invoked_at >= b.t0 AND h.invoked_at < b.t1) AS runs, " +
+      "percentile_cont(0.5) WITHIN GROUP (ORDER BY h.total_ms) " +
+      "FILTER (WHERE h.invoked_at >= b.t0 AND h.invoked_at < b.t1) AS p50, " +
+      "count(*) AS inflight " +
+      "FROM " + buckets + " JOIN rvbbit.hare_invocations h ON h.ok AND " +
+      windowClause("h.invoked_at", windowHours) +
+      ` AND h.endpoint = '${hare.replace(/'/g, "''")}'` +
+      hashClause("h.sql_hash", queryHash) +
+      " AND tstzrange(h.invoked_at - make_interval(secs => greatest(h.total_ms, 0) / 1000.0), h.invoked_at) && tstzrange(b.t0, b.t1) " +
+      "GROUP BY 1, 2"
+    : "SELECT e.candidate, b.i AS bucket, " +
+      "count(*) FILTER (WHERE e.executed_at >= b.t0 AND e.executed_at < b.t1) AS runs, " +
+      "percentile_cont(0.5) WITHIN GROUP (ORDER BY e.elapsed_ms) " +
+      "FILTER (WHERE e.executed_at >= b.t0 AND e.executed_at < b.t1) AS p50, " +
+      "count(*) AS inflight " +
+      "FROM " + buckets + " JOIN rvbbit.route_executions e ON e.status = 'ok' AND " +
+      windowClause("e.executed_at", windowHours) + nodeClause(nodeFilter).replace(/ AND node/g, " AND e.node") +
+      hashClause("e.query_hash", queryHash) +
+      " AND tstzrange(e.executed_at - make_interval(secs => greatest(e.elapsed_ms, 0) / 1000.0), e.executed_at) && tstzrange(b.t0, b.t1) " +
+      "GROUP BY 1, 2"
+  const res = await runQuery(connectionId, sql)
+  if (!res.ok) return []
+  return res.rows.map((r) => ({
+    candidate: normalizeCandidate(String(r.candidate ?? "")),
+    bucket: num(r.bucket),
+    runs: num(r.runs),
+    p50: num(r.p50),
+    inflight: num(r.inflight),
   }))
 }
 

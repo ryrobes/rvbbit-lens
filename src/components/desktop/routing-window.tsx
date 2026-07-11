@@ -28,7 +28,10 @@ import {
   fetchColumnarTables,
   fetchDecisionSummary,
   fetchEngineRuntime,
+  fetchEngineTrends,
   fetchFlowTriples,
+  TREND_BUCKETS,
+  type EngineTrendPoint,
   fetchRoutingNodes,
   type RoutingNodeOption,
   fetchLogStatus,
@@ -93,20 +96,27 @@ export function RoutingWindow({ activeConnectionId, hasRvbbit }: RoutingWindowPr
   const [nodeFilter, setNodeFilter] = useState<string>("all")
   const [fleetNodes, setFleetNodes] = useState<RoutingNodeOption[]>([])
   const [flowTriples, setFlowTriples] = useState<Awaited<ReturnType<typeof fetchFlowTriples>>>([])
+  // Exact-query pin (apples-to-apples benchmarking): set by clicking a row's
+  // SQL in Recent Executions; filters every panel to that query_hash.
+  const [queryFilter, setQueryFilter] = useState<{ hash: string; sql: string } | null>(null)
+  const [engineTrends, setEngineTrends] = useState<EngineTrendPoint[]>([])
   const [updatedAt, setUpdatedAt] = useState(0)
   const loading = updatedAt === 0
 
   const pollFlow = useCallback(async () => {
     if (!activeConnectionId) return
-    const [executions, decisionSummary, engineRuntime, logStatus, nodeOptions, triples] = await Promise.all([
-      fetchRouteExecutions(activeConnectionId, windowHours, nodeFilter),
-      fetchDecisionSummary(activeConnectionId, windowHours, nodeFilter),
-      fetchEngineRuntime(activeConnectionId, windowHours, nodeFilter),
+    const hash = queryFilter?.hash ?? null
+    const [executions, decisionSummary, engineRuntime, logStatus, nodeOptions, triples, trends] = await Promise.all([
+      fetchRouteExecutions(activeConnectionId, windowHours, nodeFilter, hash),
+      fetchDecisionSummary(activeConnectionId, windowHours, nodeFilter, hash),
+      fetchEngineRuntime(activeConnectionId, windowHours, nodeFilter, hash),
       fetchLogStatus(activeConnectionId),
       fetchRoutingNodes(activeConnectionId, windowHours),
-      nodeFilter === "all" ? fetchFlowTriples(activeConnectionId, windowHours) : Promise.resolve([]),
+      nodeFilter === "all" ? fetchFlowTriples(activeConnectionId, windowHours, hash) : Promise.resolve([]),
+      fetchEngineTrends(activeConnectionId, windowHours, nodeFilter, hash),
     ])
     setFlowTriples(triples)
+    setEngineTrends(trends)
     setFleetNodes(nodeOptions)
     setError(executions.error ?? null)
     setFlow({
@@ -116,7 +126,7 @@ export function RoutingWindow({ activeConnectionId, hasRvbbit }: RoutingWindowPr
       logStatus,
     })
     setUpdatedAt(Date.now())
-  }, [activeConnectionId, windowHours, nodeFilter])
+  }, [activeConnectionId, windowHours, nodeFilter, queryFilter])
 
   const loadProfile = useCallback(async () => {
     if (!activeConnectionId) return
@@ -319,6 +329,9 @@ export function RoutingWindow({ activeConnectionId, hasRvbbit }: RoutingWindowPr
             windowLabel={windowLabel}
             nodeFilter={nodeFilter}
             flowTriples={flowTriples}
+            engineTrends={engineTrends}
+            queryFilter={queryFilter}
+            onQueryFilter={setQueryFilter}
           />
         ) : tab === "freshness" ? (
           <RoutingFreshnessTab activeConnectionId={activeConnectionId} />
@@ -361,6 +374,9 @@ function FlowTab({
   windowLabel,
   nodeFilter,
   flowTriples,
+  engineTrends,
+  queryFilter,
+  onQueryFilter,
 }: {
   flow: FlowData | null
   profileData: ProfileData | null
@@ -368,6 +384,9 @@ function FlowTab({
   windowLabel: string
   nodeFilter: string
   flowTriples: Awaited<ReturnType<typeof fetchFlowTriples>>
+  engineTrends: EngineTrendPoint[]
+  queryFilter: { hash: string; sql: string } | null
+  onQueryFilter: (f: { hash: string; sql: string } | null) => void
 }) {
   const engineStats = useMemo<EngineStat[]>(() => {
     const entries = profileData?.entries ?? []
@@ -424,6 +443,17 @@ function FlowTab({
     return [...agg.values()]
   }, [flowTriples])
 
+  // trends grouped by engine id, densified to TREND_BUCKETS slots
+  const trendByEngine = useMemo(() => {
+    const m = new Map<string, { runs: number; p50: number; inflight: number }[]>()
+    for (const t of engineTrends) {
+      const arr = m.get(t.candidate) ?? Array.from({ length: TREND_BUCKETS }, () => ({ runs: 0, p50: 0, inflight: 0 }))
+      if (t.bucket >= 0 && t.bucket < TREND_BUCKETS) arr[t.bucket] = { runs: t.runs, p50: t.p50, inflight: t.inflight }
+      m.set(t.candidate, arr)
+    }
+    return m
+  }, [engineTrends])
+
   const slowestMedian = Math.max(1, ...engineStats.map((e) => e.median))
 
   if (loading) {
@@ -460,20 +490,82 @@ function FlowTab({
         </p>
       </Panel>
 
+      {queryFilter ? (
+        <div className="flex items-center gap-2 rounded-md border border-rvbbit-accent/40 bg-rvbbit-accent/[0.07] px-2.5 py-1.5 text-[11px]">
+          <span className="shrink-0 text-rvbbit-accent">pinned query</span>
+          <code
+            className="min-w-0 flex-1 truncate font-mono text-[10px] text-chrome-text/80"
+            title={queryFilter.sql || queryFilter.hash}
+          >
+            {queryFilter.sql || queryFilter.hash}
+          </code>
+          <span className="shrink-0 font-mono text-[9px] text-chrome-text/45">{queryFilter.hash.slice(0, 10)}</span>
+          <button
+            type="button"
+            onClick={() => onQueryFilter(null)}
+            className="shrink-0 rounded border border-chrome-border px-1.5 py-0.5 text-[10px] text-chrome-text hover:bg-foreground/[0.06]"
+          >
+            unpin
+          </button>
+        </div>
+      ) : null}
+
       <div className="grid grid-cols-3 gap-2.5">
         {engineStats.map((s) => (
-          <EngineCard key={s.id} stat={s} slowestMedian={slowestMedian} />
+          <EngineCard key={s.id} stat={s} slowestMedian={slowestMedian} trend={trendByEngine.get(s.id)} />
         ))}
       </div>
 
-      <RecentExecutions executions={flow?.executions ?? []} windowLabel={windowLabel} />
+      <RecentExecutions executions={flow?.executions ?? []} windowLabel={windowLabel} onQueryFilter={onQueryFilter} />
 
       <TelemetryPanel status={flow?.logStatus ?? null} />
     </div>
   )
 }
 
-function EngineCard({ stat, slowestMedian }: { stat: EngineStat; slowestMedian: number }) {
+/** Volume bars + p50 line over the active window — spikes read at a glance.
+ * Bars = completions per bucket (engine color); line = per-bucket p50
+ * normalized to the series max; hover a bar for runs / p50 / in-flight
+ * (in-flight counts executions overlapping that bucket = real parallelism). */
+function EngineTrend({ trend, color }: { trend: { runs: number; p50: number; inflight: number }[]; color: string }) {
+  const maxRuns = Math.max(...trend.map((t) => t.runs), 1)
+  const maxP50 = Math.max(...trend.map((t) => t.p50), 1)
+  const H = 26
+  const BW = 100 / trend.length
+  const pts = trend
+    .map((t, i) => (t.p50 > 0 ? `${i * BW + BW / 2},${H - 3 - (t.p50 / maxP50) * (H - 8)}` : null))
+    .filter((v): v is string => v != null)
+  return (
+    <svg viewBox={`0 0 100 ${H}`} preserveAspectRatio="none" className="mt-1.5 h-[26px] w-full">
+      {trend.map((t, i) => (
+        <rect
+          key={i}
+          x={i * BW + 0.5}
+          y={H - Math.max(t.runs > 0 ? 2 : 0.5, (t.runs / maxRuns) * (H - 4))}
+          width={BW - 1}
+          height={Math.max(t.runs > 0 ? 2 : 0.5, (t.runs / maxRuns) * (H - 4))}
+          fill={color}
+          opacity={t.runs > 0 ? 0.4 : 0.1}
+        >
+          <title>{`${t.runs} runs · p50 ${Math.round(t.p50)}ms · ${t.inflight} in-flight`}</title>
+        </rect>
+      ))}
+      {pts.length > 1 ? (
+        <polyline points={pts.join(" ")} fill="none" stroke="var(--foreground)" strokeWidth={0.8} strokeOpacity={0.65} vectorEffect="non-scaling-stroke" />
+      ) : null}
+    </svg>
+  )
+}
+
+function EngineCard({
+  stat,
+  slowestMedian,
+  trend,
+}: {
+  stat: EngineStat
+  slowestMedian: number
+  trend?: { runs: number; p50: number; inflight: number }[]
+}) {
   const engine = ENGINES.find((e) => e.id === stat.id)!
   const cacheRate = stat.decisions > 0 ? stat.cacheHits / stat.decisions : 0
   // No routing this window → dim it. It returns to full strength the moment
@@ -520,6 +612,9 @@ function EngineCard({ stat, slowestMedian }: { stat: EngineStat; slowestMedian: 
                 }}
               />
             </div>
+            {trend && trend.some((t) => t.runs > 0) ? (
+              <EngineTrend trend={trend} color={engine.color} />
+            ) : null}
           </>
         ) : (
           <div className="text-[10px] text-chrome-text/45">no online runs yet</div>
@@ -544,9 +639,11 @@ function EngineCard({ stat, slowestMedian }: { stat: EngineStat; slowestMedian: 
 function RecentExecutions({
   executions,
   windowLabel,
+  onQueryFilter,
 }: {
   executions: RouteExecution[]
   windowLabel: string
+  onQueryFilter: (f: { hash: string; sql: string } | null) => void
 }) {
   const rows = executions.slice(0, 14)
   return (
@@ -568,6 +665,7 @@ function RecentExecutions({
               <th className="py-0.5 pr-2 text-right font-medium">elapsed</th>
               <th className="py-0.5 pr-2 text-right font-medium">rows</th>
               <th className="py-0.5 pr-2 text-left font-medium">cache</th>
+              <th className="py-0.5 pr-2 text-left font-medium">query</th>
               <th className="py-0.5 text-left font-medium">reason</th>
             </tr>
           </thead>
@@ -589,8 +687,22 @@ function RecentExecutions({
                 <td className="py-0.5 pr-2 font-mono text-[10px] text-chrome-text/60">
                   {r.cacheHit ? "hit" : "miss"}
                 </td>
+                <td className="max-w-[220px] py-0.5 pr-2">
+                  {r.queryHash ? (
+                    <button
+                      type="button"
+                      onClick={() => onQueryFilter({ hash: r.queryHash, sql: r.sql })}
+                      title={`${r.sql || "(sample unavailable)"}\n\nclick to pin every panel to this exact query (${r.queryHash.slice(0, 12)})`}
+                      className="block w-full truncate text-left font-mono text-[10px] text-chrome-text/70 hover:text-rvbbit-accent"
+                    >
+                      {r.sql || r.queryHash.slice(0, 12)}
+                    </button>
+                  ) : (
+                    <span className="text-[10px] text-chrome-text/40">—</span>
+                  )}
+                </td>
                 <td
-                  className="max-w-[260px] truncate py-0.5 text-[10px] text-chrome-text/60"
+                  className="max-w-[200px] truncate py-0.5 text-[10px] text-chrome-text/60"
                   title={r.reason}
                 >
                   {r.reason || "—"}
