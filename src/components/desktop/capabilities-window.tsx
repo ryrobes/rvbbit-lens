@@ -993,6 +993,18 @@ function CapabilityCard({
               <span className="inline-flex items-center rounded-full border border-chrome-border/60 px-1.5 py-px text-[9px] text-chrome-text/60">
                 coming soon
               </span>
+            ) : (managed.pricing?.tiers?.length ?? 0) > 0 ? (
+              <span
+                className="inline-flex items-center rounded-full px-1.5 py-px text-[9px] font-medium"
+                style={{
+                  background: "color-mix(in oklch, var(--cap-type) 25%, transparent)",
+                  color: "var(--cap-type)",
+                  border: "1px solid color-mix(in oklch, var(--cap-type) 55%, transparent)",
+                }}
+                title="Tiered plans — open for details"
+              >
+                from ${managed.pricing!.monthly_usd}/mo
+              </span>
             ) : managed.pricing?.monthly_usd ? (
               <span
                 role="button"

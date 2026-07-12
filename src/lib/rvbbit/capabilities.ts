@@ -241,10 +241,18 @@ export interface ManagedCapabilityBlock {
   /** Env var NAME (on the Postgres host) that holds the subscriber key. */
   key_env: string
   pricing?: {
+    /** Lowest paid tier when `tiers` present; the single price otherwise. */
     monthly_usd?: number
+    /** True = render as "from $X/mo" (tiered product). */
+    from?: boolean
     checkout_url?: string
     note?: string
+    /** One product, many levels: tier is a property of the KEY (benefit →
+     * lanes at the gateway), so install SQL is identical across tiers. */
+    tiers?: { name: string; lanes: number; monthly_usd: number; checkout_url?: string }[]
   }
+  /** Privacy/trust claims — each one architecturally true, rendered as a list. */
+  privacy?: string[]
   endpoint?: { base_url?: string }
   /** Battery evidence from Semantic Tests — the "verified by us" receipt. */
   verified?: {

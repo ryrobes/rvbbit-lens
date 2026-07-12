@@ -675,6 +675,7 @@ function ManagedOverviewTab({
   const operators = manifest.operators ?? []
   const price = managed.pricing?.monthly_usd
   const comingSoon = managed.status === "coming_soon"
+  const hasTiers = (managed.pricing?.tiers?.length ?? 0) > 0
 
   return (
     <div className="h-full overflow-auto">
@@ -717,7 +718,11 @@ function ManagedOverviewTab({
             </span>
           ) : null}
           {price && !comingSoon ? (
-            managed.pricing?.checkout_url ? (
+            hasTiers ? (
+              <span className="text-[12px] font-semibold" style={{ color: gold }}>
+                from ${price}/mo
+              </span>
+            ) : managed.pricing?.checkout_url ? (
               <a
                 href={managed.pricing.checkout_url}
                 target="_blank"
@@ -740,6 +745,40 @@ function ManagedOverviewTab({
       </div>
 
       <div className="space-y-4 p-4">
+        {hasTiers ? (
+          <div>
+            <ManagedSectionTitle>Plans · pick a lane count</ManagedSectionTitle>
+            <div className="grid grid-cols-2 gap-1.5 sm:grid-cols-4">
+              {managed.pricing!.tiers!.map((tier) => (
+                <a
+                  key={tier.name}
+                  href={tier.checkout_url}
+                  target="_blank"
+                  rel="noreferrer"
+                  className={cn(
+                    "flex flex-col gap-0.5 rounded-md border p-2 transition",
+                    tier.checkout_url ? "hover:brightness-125" : "pointer-events-none opacity-70",
+                  )}
+                  style={{ borderColor: `color-mix(in oklch, ${gold} 30%, transparent)` }}
+                >
+                  <span className="text-[11px] font-medium text-foreground">{tier.name}</span>
+                  <span className="text-[13px] font-semibold" style={{ color: gold }}>
+                    {tier.monthly_usd === 0 ? "Free" : `$${tier.monthly_usd}`}
+                    {tier.monthly_usd === 0 ? "" : <span className="text-[9px] text-chrome-text/50">/mo</span>}
+                  </span>
+                  <span className="text-[10px] text-chrome-text/55">
+                    {tier.lanes} lane{tier.lanes === 1 ? "" : "s"}
+                  </span>
+                </a>
+              ))}
+            </div>
+            <p className="mt-1 text-[9px] leading-snug text-chrome-text/45">
+              Same install at every tier — your key carries the lane count, so nothing tier-specific to configure.
+              A lane = one operation in flight.
+            </p>
+          </div>
+        ) : null}
+
         {managed.free_tier ? (
           <div
             className="rounded-md border p-2.5"
@@ -830,6 +869,20 @@ function ManagedOverviewTab({
                 </div>
               ))}
             </div>
+          </div>
+        ) : null}
+
+        {(managed.privacy ?? []).length > 0 ? (
+          <div className="rounded-md border border-chrome-border/50 bg-foreground/[0.015] p-2.5">
+            <ManagedSectionTitle>Privacy</ManagedSectionTitle>
+            <ul className="space-y-1">
+              {managed.privacy!.map((claim, i) => (
+                <li key={i} className="flex items-start gap-1.5 text-[11px] leading-snug text-chrome-text/80">
+                  <CheckCircle2 className="mt-0.5 h-3 w-3 shrink-0" style={{ color: gold }} />
+                  {claim}
+                </li>
+              ))}
+            </ul>
           </div>
         ) : null}
 

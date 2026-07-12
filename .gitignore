@@ -8,6 +8,8 @@ node_modules
 out/
 build/
 
+# w*9,w*11
+
 # logs
 npm-debug.log*
 yarn-debug.log*
