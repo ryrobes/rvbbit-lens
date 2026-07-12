@@ -256,6 +256,11 @@ export interface ManagedCapabilityBlock {
   }
   models?: { slot: string; model: string; version?: string }[]
   install?: { sql?: string[] }
+  /** Marketing copy for the hosted detail page — all optional, data-driven. */
+  tagline?: string
+  value_props?: { title: string; detail?: string }[]
+  free_tier?: { note: string; cta_url?: string }
+  highlights?: string[]
 }
 
 export function isRuntimeManifest(m: Manifest): boolean {

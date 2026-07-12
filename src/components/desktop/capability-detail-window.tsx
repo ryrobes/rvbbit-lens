@@ -8,6 +8,7 @@ import {
   CheckCircle2,
   Clock,
   FileCode2,
+  Loader2,
   FlowArrow,
   Layers,
   Package,
@@ -97,6 +98,13 @@ const SQL_TEST_TABS: { key: TabKey; label: string }[] = [
   { key: "generated-sql", label: "Generated SQL" },
   { key: "tests", label: "Tests" },
 ]
+// Hosted (rvbbit.ai) capabilities are catalog-only: no local probe, no install
+// knobs, no generated-SQL scaffold. Overview is a value-prop page; Install
+// shows the metadata-only SQL.
+const MANAGED_TABS: { key: TabKey; label: string }[] = [
+  { key: "overview", label: "Overview" },
+  { key: "install", label: "Install" },
+]
 
 export function CapabilityDetailWindow({
   payload,
@@ -168,6 +176,7 @@ export function CapabilityDetailWindow({
   // Reuses the exact catalog query the MCP servers window uses, so the
   // declared-secret list and tool/resource counts match one-for-one.
   const isMcp = catalog?.kind === "mcp"
+  const isManaged = catalog?.kind === "managed"
   useEffect(() => {
     if (!activeConnectionId || !isMcp || !catalog) return
     let cancelled = false
@@ -365,7 +374,7 @@ export function CapabilityDetailWindow({
 
       {/* tab bar */}
       <div className="flex items-center gap-px border-b border-chrome-border bg-chrome-bg/20 px-2">
-        {(isMcp ? MCP_TABS : isSqlTest ? SQL_TEST_TABS : TABS).map((t) => (
+        {(isMcp ? MCP_TABS : isManaged ? MANAGED_TABS : isSqlTest ? SQL_TEST_TABS : TABS).map((t) => (
           <button
             key={t.key}
             type="button"
@@ -401,6 +410,17 @@ export function CapabilityDetailWindow({
             </div>
           ) : (
             <McpOverviewTab catalog={catalog!} manifest={manifest!} cap={mcpCap} />
+          )
+        ) : isManaged ? (
+          activeTab === "install" ? (
+            <ManagedInstallTab
+              manifest={manifest!}
+              rendered={rendered}
+              activeConnectionId={activeConnectionId}
+              onInstalled={() => void pollInstalled()}
+            />
+          ) : (
+            <ManagedOverviewTab catalog={catalog!} manifest={manifest!} />
           )
         ) : (
           <>
@@ -617,6 +637,414 @@ function McpOverviewTab({
 }
 
 // ── Overview tab ────────────────────────────────────────────────────
+
+// ── Managed (rvbbit.ai hosted) render mode ──────────────────────────────
+// Hosted capabilities are catalog-only: no local install knobs, no probe.
+// The overview is a value-prop page; copy is data-driven from manifest.managed.
+
+function ManagedSectionTitle({ children }: { children: React.ReactNode }) {
+  return (
+    <div className="mb-1.5 text-[10px] font-medium uppercase tracking-wider text-chrome-text/50">
+      {children}
+    </div>
+  )
+}
+
+function ManagedFact({ label, value, mono }: { label: string; value: string; mono?: boolean }) {
+  return (
+    <div className="min-w-0">
+      <div className="uppercase tracking-wider text-chrome-text/40">{label}</div>
+      <div className={cn("truncate text-chrome-text/80", mono && "font-mono")} title={value}>
+        {value}
+      </div>
+    </div>
+  )
+}
+
+function ManagedOverviewTab({
+  catalog,
+  manifest,
+}: {
+  catalog: CatalogEntry
+  manifest: Manifest
+}) {
+  const managed = manifest.managed
+  if (!managed) return null
+  const gold = "var(--cap-type-managed, #d4a017)"
+  const operators = manifest.operators ?? []
+  const price = managed.pricing?.monthly_usd
+  const comingSoon = managed.status === "coming_soon"
+
+  return (
+    <div className="h-full overflow-auto">
+      {/* hero */}
+      <div
+        className="border-b border-chrome-border/60 p-4"
+        style={{
+          background: `linear-gradient(180deg, color-mix(in oklch, ${gold} 8%, transparent), transparent)`,
+        }}
+      >
+        <div className="flex items-center gap-2">
+          <Sparkles className="h-4 w-4" style={{ color: gold }} />
+          <span className="text-[10px] font-medium uppercase tracking-wider" style={{ color: gold }}>
+            rvbbit Cloud · hosted
+          </span>
+          {comingSoon ? (
+            <span className="rounded-full border border-chrome-border/60 px-1.5 py-px text-[9px] text-chrome-text/60">
+              coming soon
+            </span>
+          ) : null}
+        </div>
+        <h2 className="mt-1 text-[16px] font-semibold text-foreground">{catalog.title}</h2>
+        {managed.tagline ? (
+          <p className="mt-0.5 text-[12px] leading-relaxed text-chrome-text/75">{managed.tagline}</p>
+        ) : catalog.description ? (
+          <p className="mt-0.5 text-[12px] leading-relaxed text-chrome-text/75">{catalog.description}</p>
+        ) : null}
+        <div className="mt-2.5 flex flex-wrap items-center gap-2">
+          {managed.verified?.tests ? (
+            <span
+              className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px]"
+              style={{
+                color: gold,
+                background: `color-mix(in oklch, ${gold} 12%, transparent)`,
+                border: `1px solid color-mix(in oklch, ${gold} 40%, transparent)`,
+              }}
+              title={`Semantic Tests battery · ${managed.verified.regime ?? ""} · ${managed.verified.battery_date ?? ""}${managed.verified.note ? ` · ${managed.verified.note}` : ""}`}
+            >
+              <CheckCircle2 className="h-3 w-3" /> verified {managed.verified.passed}/{managed.verified.tests}
+            </span>
+          ) : null}
+          {price && !comingSoon ? (
+            managed.pricing?.checkout_url ? (
+              <a
+                href={managed.pricing.checkout_url}
+                target="_blank"
+                rel="noreferrer"
+                className="inline-flex items-center gap-1 rounded px-3 py-1 text-[12px] font-semibold hover:brightness-110"
+                style={{ background: gold, color: "#1a1400" }}
+              >
+                Subscribe · ${price}/mo
+              </a>
+            ) : (
+              <span className="text-[12px] font-semibold" style={{ color: gold }}>
+                ${price}/mo
+              </span>
+            )
+          ) : null}
+          {managed.pricing?.note ? (
+            <span className="text-[10px] text-chrome-text/55">{managed.pricing.note}</span>
+          ) : null}
+        </div>
+      </div>
+
+      <div className="space-y-4 p-4">
+        {managed.free_tier ? (
+          <div
+            className="rounded-md border p-2.5"
+            style={{
+              borderColor: `color-mix(in oklch, ${gold} 35%, transparent)`,
+              background: `color-mix(in oklch, ${gold} 6%, transparent)`,
+            }}
+          >
+            <div className="flex items-center gap-1.5 text-[11px] font-medium" style={{ color: gold }}>
+              <Sparkles className="h-3 w-3" /> Free tier
+            </div>
+            <p className="mt-1 text-[11px] leading-snug text-chrome-text/80">{managed.free_tier.note}</p>
+            {managed.free_tier.cta_url ? (
+              <a
+                href={managed.free_tier.cta_url}
+                target="_blank"
+                rel="noreferrer"
+                className="mt-1.5 inline-flex items-center gap-1 rounded border px-2 py-0.5 text-[11px] hover:brightness-125"
+                style={{ borderColor: `color-mix(in oklch, ${gold} 50%, transparent)`, color: gold }}
+              >
+                Try it free
+              </a>
+            ) : null}
+          </div>
+        ) : null}
+
+        {(managed.value_props ?? []).length > 0 ? (
+          <div>
+            <ManagedSectionTitle>Why hosted</ManagedSectionTitle>
+            <div className="grid grid-cols-1 gap-1.5 sm:grid-cols-3">
+              {managed.value_props!.map((vp) => (
+                <div
+                  key={vp.title}
+                  className="rounded border border-chrome-border/50 bg-foreground/[0.02] p-2"
+                >
+                  <div className="flex items-center gap-1 text-[11px] font-medium text-foreground">
+                    <CheckCircle2 className="h-3 w-3 shrink-0" style={{ color: gold }} /> {vp.title}
+                  </div>
+                  {vp.detail ? (
+                    <p className="mt-0.5 text-[10px] leading-snug text-chrome-text/65">{vp.detail}</p>
+                  ) : null}
+                </div>
+              ))}
+            </div>
+          </div>
+        ) : null}
+
+        {(managed.highlights ?? []).length > 0 ? (
+          <ul className="space-y-1">
+            {managed.highlights!.map((h, i) => (
+              <li key={i} className="flex items-start gap-1.5 text-[11px] text-chrome-text/80">
+                <CheckCircle2 className="mt-0.5 h-3 w-3 shrink-0" style={{ color: gold }} /> {h}
+              </li>
+            ))}
+          </ul>
+        ) : null}
+
+        {operators.length > 0 ? (
+          <div>
+            <ManagedSectionTitle>Operators ({operators.length})</ManagedSectionTitle>
+            <div className="flex flex-wrap gap-1">
+              {operators.map((op) => (
+                <span
+                  key={op.name}
+                  className="rounded border border-brand-operators/30 bg-brand-operators/5 px-1.5 py-0.5 font-mono text-[10px] text-brand-operators"
+                  title={op.description ?? undefined}
+                >
+                  {op.name}
+                </span>
+              ))}
+            </div>
+          </div>
+        ) : null}
+
+        {(managed.models ?? []).length > 0 ? (
+          <div>
+            <ManagedSectionTitle>Models</ManagedSectionTitle>
+            <div className="space-y-1">
+              {managed.models!.map((mdl) => (
+                <div key={mdl.slot} className="flex items-baseline gap-2 text-[10px]">
+                  <span className="w-20 shrink-0 uppercase tracking-wider text-chrome-text/45">
+                    {mdl.slot}
+                  </span>
+                  <span className="min-w-0 truncate font-mono text-chrome-text/80">
+                    {mdl.model}
+                    {mdl.version ? ` · ${mdl.version}` : ""}
+                  </span>
+                </div>
+              ))}
+            </div>
+          </div>
+        ) : null}
+
+        <div className="grid grid-cols-2 gap-2 border-t border-chrome-border/40 pt-3 text-[10px] sm:grid-cols-4">
+          <ManagedFact label="vendor" value={managed.vendor} />
+          <ManagedFact label="entitlement" value={managed.entitlement} />
+          <ManagedFact label="key env" value={managed.key_env} mono />
+          <ManagedFact label="endpoint" value={managed.endpoint?.base_url ?? "—"} mono />
+        </div>
+        <p className="text-[10px] leading-snug text-chrome-text/50">
+          Hosted by rvbbit — we run the models, you run SQL. Install writes catalog metadata and registers a
+          backend at the rvbbit endpoint; set your subscriber key in the{" "}
+          <span className="font-mono">{managed.key_env}</span> environment variable on this Postgres host.
+          See the <span className="font-medium">Install</span> tab.
+        </p>
+      </div>
+    </div>
+  )
+}
+
+function ManagedInstallTab({
+  manifest,
+  rendered,
+  activeConnectionId,
+  onInstalled,
+}: {
+  manifest: Manifest
+  rendered: RenderedArtifacts | null
+  activeConnectionId: string | null
+  onInstalled: () => void
+}) {
+  const managed = manifest.managed
+  const gold = "var(--cap-type-managed, #d4a017)"
+  const sql = rendered?.registerSql ?? (managed?.install?.sql ?? []).join("\n")
+  const keyEnv = managed?.key_env ?? "RVBBIT_KEY"
+  const [running, setRunning] = useState(false)
+  const [result, setResult] = useState<{ ok: boolean; msg: string } | null>(null)
+  const [key, setKey] = useState("")
+  const [saving, setSaving] = useState(false)
+  const [saveResult, setSaveResult] = useState<{ ok: boolean; msg: string } | null>(null)
+  const [keySet, setKeySet] = useState<boolean | null>(null)
+
+  // Is the key already stored? (rvbbit.list_secrets is admin-gated; on older
+  // extensions without the secrets table this just stays unknown.)
+  useEffect(() => {
+    if (!activeConnectionId) return
+    let cancelled = false
+    const nameEsc = keyEnv.replace(/'/g, "''")
+    fetch("/api/db/query", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        connectionId: activeConnectionId,
+        sql: `SELECT count(*)::int AS n FROM rvbbit.list_secrets() WHERE name = '${nameEsc}'`,
+        rowLimit: 1,
+      }),
+    })
+      .then((r) => r.json())
+      .then((b: { ok: boolean; rows?: { n: number }[] }) => {
+        if (!cancelled && b.ok) setKeySet(Number(b.rows?.[0]?.n ?? 0) > 0)
+      })
+      .catch(() => {})
+    return () => {
+      cancelled = true
+    }
+  }, [activeConnectionId, keyEnv])
+
+  const saveKey = async () => {
+    if (!activeConnectionId || !key.trim() || saving) return
+    setSaving(true)
+    setSaveResult(null)
+    const nameEsc = keyEnv.replace(/'/g, "''")
+    const valEsc = key.trim().replace(/'/g, "''")
+    const sql = `SELECT rvbbit.set_secret('${nameEsc}', '${valEsc}'); SELECT rvbbit.reload_backends();`
+    try {
+      const res = await fetch("/api/db/query", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ connectionId: activeConnectionId, sql, rowLimit: 5, readOnly: false }),
+      })
+      const body = (await res.json()) as { ok: boolean; error?: string }
+      if (body.ok) {
+        setSaveResult({ ok: true, msg: "Key saved and backends reloaded." })
+        setKeySet(true)
+        setKey("")
+      } else {
+        setSaveResult({ ok: false, msg: body.error ?? "save failed" })
+      }
+    } catch (e) {
+      setSaveResult({ ok: false, msg: e instanceof Error ? e.message : String(e) })
+    }
+    setSaving(false)
+  }
+
+  const install = async () => {
+    if (!activeConnectionId || running) return
+    setRunning(true)
+    setResult(null)
+    try {
+      const res = await fetch("/api/db/query", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ connectionId: activeConnectionId, sql, rowLimit: 50, readOnly: false }),
+      })
+      const body = (await res.json()) as { ok: boolean; error?: string }
+      if (body.ok) {
+        setResult({ ok: true, msg: "Installed — backend registered and operators created." })
+        onInstalled()
+      } else {
+        setResult({ ok: false, msg: body.error ?? "install failed" })
+      }
+    } catch (e) {
+      setResult({ ok: false, msg: e instanceof Error ? e.message : String(e) })
+    }
+    setRunning(false)
+  }
+
+  return (
+    <div className="h-full space-y-3 overflow-auto p-3">
+      {/* step 1 — install */}
+      <div>
+        <div className="mb-1 text-[11px] font-medium text-foreground">1 · Install (metadata only)</div>
+        <p className="text-[11px] leading-snug text-chrome-text/70">
+          Registers a backend at the rvbbit endpoint and creates the operator wrappers. No models run locally;
+          nothing is downloaded.
+        </p>
+        <div className="mt-1.5 flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => void install()}
+            disabled={running || !activeConnectionId}
+            className={cn(
+              "inline-flex items-center gap-1.5 rounded px-3 py-1 text-[11px] font-semibold",
+              running || !activeConnectionId ? "opacity-50" : "hover:brightness-110",
+            )}
+            style={{ background: gold, color: "#1a1400" }}
+          >
+            {running ? <Loader2 className="h-3 w-3 animate-spin" /> : <Sparkles className="h-3 w-3" />}
+            {running ? "Installing…" : "Install"}
+          </button>
+          {result ? (
+            <span
+              className="text-[10px]"
+              style={{ color: result.ok ? "var(--viz-positive, #4ade80)" : undefined }}
+            >
+              <span className={cn(!result.ok && "text-danger/80")}>{result.msg}</span>
+            </span>
+          ) : null}
+        </div>
+      </div>
+
+      {/* step 2 — key */}
+      <div className="border-t border-chrome-border/40 pt-2.5">
+        <div className="mb-1 flex items-center gap-2 text-[11px] font-medium text-foreground">
+          2 · Set your subscriber key
+          {keySet ? (
+            <span
+              className="inline-flex items-center gap-0.5 rounded-full px-1.5 py-px text-[9px]"
+              style={{ color: gold, background: `color-mix(in oklch, ${gold} 12%, transparent)` }}
+            >
+              <CheckCircle2 className="h-2.5 w-2.5" /> key set
+            </span>
+          ) : null}
+        </div>
+        <p className="text-[11px] leading-snug text-chrome-text/70">
+          After subscribing, paste your key — it&apos;s stored in the database and used to authenticate this
+          backend. Reloads take effect immediately. A host{" "}
+          <span className="font-mono text-chrome-text/90">{keyEnv}</span> environment variable, if set, takes
+          precedence.
+        </p>
+        <div className="mt-1.5 flex items-center gap-2">
+          <input
+            value={key}
+            onChange={(e) => setKey(e.target.value)}
+            type="password"
+            placeholder="paste subscriber key (rvb_…)"
+            className="flex-1 rounded border border-chrome-border/60 bg-chrome-bg/30 px-2 py-1 font-mono text-[10px] text-foreground placeholder:text-chrome-text/35 focus:outline-none"
+          />
+          <button
+            type="button"
+            onClick={() => void saveKey()}
+            disabled={saving || !key.trim() || !activeConnectionId}
+            className={cn(
+              "inline-flex shrink-0 items-center gap-1 rounded px-2.5 py-1 text-[11px] font-semibold",
+              saving || !key.trim() || !activeConnectionId ? "opacity-50" : "hover:brightness-110",
+            )}
+            style={{ background: gold, color: "#1a1400" }}
+          >
+            {saving ? <Loader2 className="h-3 w-3 animate-spin" /> : null}
+            {saving ? "Saving…" : "Save key"}
+          </button>
+        </div>
+        {saveResult ? (
+          <div
+            className="mt-1 text-[10px]"
+            style={{ color: saveResult.ok ? "var(--viz-positive, #4ade80)" : undefined }}
+          >
+            <span className={cn(!saveResult.ok && "text-danger/80")}>{saveResult.msg}</span>
+          </div>
+        ) : null}
+        <p className="mt-1 text-[9px] leading-snug text-chrome-text/45">
+          Stored in rvbbit.secrets (superuser-gated, not browsable). Keys are plaintext at rest in this
+          release; use a host env var if you need it kept out of the database.
+        </p>
+      </div>
+
+      {/* the SQL */}
+      <div className="border-t border-chrome-border/40 pt-2.5">
+        <div className="mb-1 text-[10px] uppercase tracking-wider text-chrome-text/50">install SQL</div>
+        <pre className="overflow-auto whitespace-pre-wrap rounded border border-chrome-border/60 bg-chrome-bg/40 p-2 font-mono text-[10px] leading-relaxed text-chrome-text/85">
+          {sql}
+        </pre>
+      </div>
+    </div>
+  )
+}
 
 function OverviewTab({
   catalog,
