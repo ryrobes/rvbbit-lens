@@ -875,6 +875,10 @@ function CapabilityCard({
   // and an MCP-shaped facts row so they read as distinct at a glance, not just
   // via the type chip.
   const isMcp = catalog.kind === "mcp"
+  // rvbbit-hosted (managed) entries: the gold treatment. These are the
+  // in-app storefront — we run the models, install is metadata + a key.
+  const managed = catalog.kind === "managed" ? (catalog.manifest?.managed ?? null) : null
+  const comingSoon = managed?.status === "coming_soon"
   // Installed *and* live — a registered backend that's healthy, in use, or a
   // ready runtime. These get the prominent treatment.
   const active =
@@ -922,17 +926,25 @@ function CapabilityCard({
       style={capabilityTypeStyle(typeTone)}
     >
       <CapabilityTypeWash active={active} registered={flags.registered} />
-      {isMcp ? (
+      {isMcp || managed ? (
         <span
           aria-hidden
-          className="pointer-events-none absolute inset-y-0 left-0 w-[3px] bg-[var(--cap-type)]/70"
+          className={cn(
+            "pointer-events-none absolute inset-y-0 left-0 bg-[var(--cap-type)]/70",
+            managed ? "w-[4px]" : "w-[3px]",
+          )}
         />
       ) : null}
       <WeightBar bytes={vramRequired} max={maxVram} />
 
       {/* title row */}
       <div className="flex items-start gap-1.5">
-        {isMcp ? (
+        {managed ? (
+          <Sparkles
+            className="mt-0.5 h-3.5 w-3.5 shrink-0"
+            style={{ color: "var(--cap-type)" }}
+          />
+        ) : isMcp ? (
           <Plug
             className="mt-0.5 h-3.5 w-3.5 shrink-0"
             style={{ color: "var(--cap-type)" }}
@@ -958,6 +970,48 @@ function CapabilityCard({
           >
             <Sparkles className="h-2.5 w-2.5" />
             related
+          </span>
+        ) : null}
+        {managed ? (
+          <span className="flex shrink-0 items-center gap-1">
+            {managed.verified?.tests ? (
+              <span
+                className="inline-flex items-center gap-0.5 rounded-full border px-1.5 py-px text-[9px]"
+                style={{
+                  borderColor: "color-mix(in oklch, var(--cap-type) 45%, transparent)",
+                  color: "var(--cap-type)",
+                  background: "color-mix(in oklch, var(--cap-type) 12%, transparent)",
+                }}
+                title={`Semantic Tests battery: ${managed.verified.passed}/${managed.verified.tests} passed · ${managed.verified.regime ?? ""} · ${managed.verified.battery_date ?? ""}${managed.verified.note ? ` · ${managed.verified.note}` : ""}`}
+              >
+                <CheckCircle2 className="h-2.5 w-2.5" />
+                {managed.verified.passed}/{managed.verified.tests}
+              </span>
+            ) : null}
+            {comingSoon ? (
+              <span className="inline-flex items-center rounded-full border border-chrome-border/60 px-1.5 py-px text-[9px] text-chrome-text/60">
+                coming soon
+              </span>
+            ) : managed.pricing?.monthly_usd ? (
+              <span
+                role="button"
+                tabIndex={0}
+                className="inline-flex cursor-pointer items-center rounded-full px-1.5 py-px text-[9px] font-medium hover:brightness-125"
+                style={{
+                  background: "color-mix(in oklch, var(--cap-type) 25%, transparent)",
+                  color: "var(--cap-type)",
+                  border: "1px solid color-mix(in oklch, var(--cap-type) 55%, transparent)",
+                }}
+                title={managed.pricing.checkout_url ? "Subscribe — opens checkout" : "Subscription price"}
+                onClick={(ev) => {
+                  ev.stopPropagation()
+                  ev.preventDefault()
+                  if (managed.pricing?.checkout_url) window.open(managed.pricing.checkout_url, "_blank")
+                }}
+              >
+                ${managed.pricing.monthly_usd}/mo
+              </span>
+            ) : null}
           </span>
         ) : null}
         <DeviceChip device={catalog.device} />

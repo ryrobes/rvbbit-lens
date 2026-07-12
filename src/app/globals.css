@@ -215,6 +215,7 @@
   --cap-type-classify: color-mix(in oklch, var(--viz-kind-9) 68%, var(--brand-operators));
   --cap-type-forecast: color-mix(in oklch, var(--viz-kind-6) 68%, var(--brand-routing));
   --cap-type-tabular: color-mix(in oklch, var(--viz-kind-table) 68%, var(--brand-kg));
+  --cap-type-managed: color-mix(in oklch, oklch(0.82 0.14 85) 78%, var(--brand-capability));
   --cap-type-mcp: color-mix(in oklch, var(--viz-op-runtime) 60%, var(--brand-kg));
   --cap-type-specialist: color-mix(in oklch, var(--viz-op-specialist) 68%, var(--brand-specialists));
 
@@ -351,6 +352,7 @@
   --cap-type-classify: color-mix(in oklch, var(--viz-kind-9) 68%, var(--brand-operators));
   --cap-type-forecast: color-mix(in oklch, var(--viz-kind-6) 68%, var(--brand-routing));
   --cap-type-tabular: color-mix(in oklch, var(--viz-kind-table) 68%, var(--brand-kg));
+  --cap-type-managed: color-mix(in oklch, oklch(0.82 0.14 85) 78%, var(--brand-capability));
   --cap-type-mcp: color-mix(in oklch, var(--viz-op-runtime) 60%, var(--brand-kg));
   --cap-type-specialist: color-mix(in oklch, var(--viz-op-specialist) 68%, var(--brand-specialists));
 

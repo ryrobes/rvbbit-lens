@@ -225,7 +225,37 @@ export interface Manifest {
   resources?: ResourceProfile
   operators?: OperatorDef[]
   smoke?: ManifestSmokeBlock
+  /** Present on rvbbit-hosted (managed) capabilities — the gold entries.
+   * Install is metadata-only: run install.sql, put the key in key_env. */
+  managed?: ManagedCapabilityBlock
   [k: string]: unknown
+}
+
+/** An rvbbit-hosted capability: we run the models, the customer runs SQL.
+ * The benefit IS the SKU — subscribe → license key → operators light up. */
+export interface ManagedCapabilityBlock {
+  vendor: string
+  /** "available" | "coming_soon" */
+  status?: string
+  entitlement: string
+  /** Env var NAME (on the Postgres host) that holds the subscriber key. */
+  key_env: string
+  pricing?: {
+    monthly_usd?: number
+    checkout_url?: string
+    note?: string
+  }
+  endpoint?: { base_url?: string }
+  /** Battery evidence from Semantic Tests — the "verified by us" receipt. */
+  verified?: {
+    tests?: number
+    passed?: number
+    battery_date?: string
+    regime?: string
+    note?: string
+  }
+  models?: { slot: string; model: string; version?: string }[]
+  install?: { sql?: string[] }
 }
 
 export function isRuntimeManifest(m: Manifest): boolean {
@@ -1530,6 +1560,7 @@ export function isVllmManifest(m: Manifest): boolean {
 }
 
 export type CapabilityTypeKey =
+  | "managed"
   | "vllm"
   | "llm"
   | "runtime"
@@ -1550,6 +1581,12 @@ export interface CapabilityTypeTone {
 }
 
 export const CAPABILITY_TYPE_TONES: Record<CapabilityTypeKey, CapabilityTypeTone> = {
+  managed: {
+    key: "managed",
+    label: "rvbbit Cloud",
+    shortLabel: "Cloud",
+    cssVar: "--cap-type-managed",
+  },
   vllm: {
     key: "vllm",
     label: "vLLM LLM",
@@ -1679,6 +1716,9 @@ function classifyCapabilityTypeFields({
   const hasText = (...needles: string[]) => needles.some((t) => nameBits.includes(t))
   const hasAny = (...needles: string[]) => hasTag(...needles) || hasText(...needles)
 
+  // rvbbit-hosted (managed) entries render as their own species — the gold
+  // treatment. Strictly kind='managed'; a tag is not enough.
+  if (kind === "managed") return "managed"
   // Strictly the kind='mcp' rows — NOT anything merely tagged 'mcp' (e.g. the
   // MCP gateway *runtime* carries an 'mcp' tag but is a runtime_sidecar).
   if (kind === "mcp") return "mcp"
