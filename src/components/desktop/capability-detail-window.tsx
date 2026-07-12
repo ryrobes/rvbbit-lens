@@ -652,6 +652,71 @@ function OverviewTab({
           </p>
         ) : null}
 
+        {manifest.managed ? (
+          <Panel icon={Sparkles} title="rvbbit Cloud — hosted">
+            <div className="space-y-1.5">
+              <KV k="vendor" v={manifest.managed.vendor} mono />
+              <KV k="status" v={manifest.managed.status ?? "available"} mono />
+              <KV k="entitlement" v={manifest.managed.entitlement} mono />
+              <KV k="key env" v={manifest.managed.key_env} mono />
+              {manifest.managed.verified?.tests ? (
+                <div
+                  className="flex flex-wrap items-center gap-1.5 text-[11px]"
+                  style={{ color: "var(--cap-type-managed, #d4a017)" }}
+                >
+                  <CheckCircle2 className="h-3 w-3" />
+                  verified {manifest.managed.verified.passed}/{manifest.managed.verified.tests}
+                  {manifest.managed.verified.regime ? (
+                    <span className="text-chrome-text/50">· {manifest.managed.verified.regime}</span>
+                  ) : null}
+                  {manifest.managed.verified.battery_date ? (
+                    <span className="text-chrome-text/40">· {manifest.managed.verified.battery_date}</span>
+                  ) : null}
+                </div>
+              ) : null}
+              {(manifest.managed.models ?? []).map((mdl) => (
+                <KV
+                  key={mdl.slot}
+                  k={mdl.slot}
+                  v={`${mdl.model}${mdl.version ? ` · ${mdl.version}` : ""}`}
+                  mono
+                />
+              ))}
+              {manifest.managed.pricing?.monthly_usd ? (
+                manifest.managed.pricing.checkout_url ? (
+                  <a
+                    href={manifest.managed.pricing.checkout_url}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="mt-1 inline-flex items-center gap-1 rounded px-2 py-1 text-[11px] font-medium hover:brightness-125"
+                    style={{
+                      background: "color-mix(in oklch, var(--cap-type-managed, #d4a017) 25%, transparent)",
+                      color: "var(--cap-type-managed, #d4a017)",
+                      border: "1px solid color-mix(in oklch, var(--cap-type-managed, #d4a017) 55%, transparent)",
+                    }}
+                  >
+                    Subscribe · ${manifest.managed.pricing.monthly_usd}/mo
+                  </a>
+                ) : (
+                  <div className="text-[11px] text-chrome-text/75">
+                    ${manifest.managed.pricing.monthly_usd}/mo
+                  </div>
+                )
+              ) : manifest.managed.status === "coming_soon" ? (
+                <div className="text-[11px] text-chrome-text/60">
+                  coming soon
+                  {manifest.managed.pricing?.note ? ` · ${manifest.managed.pricing.note}` : ""}
+                </div>
+              ) : null}
+              <p className="pt-1 text-[10px] leading-snug text-chrome-text/55">
+                Hosted by rvbbit. Install writes metadata only — set your subscriber key in the{" "}
+                <span className="font-mono">{manifest.managed.key_env}</span> environment variable
+                on this Postgres host.
+              </p>
+            </div>
+          </Panel>
+        ) : null}
+
         <Panel icon={Sparkles} title="Source">
           <div className="space-y-1.5">
             <KV k="catalog" v={catalog.catalog_source} mono />
@@ -730,7 +795,7 @@ function OverviewTab({
                     </span>
                   </div>
                   <div className="mt-0.5 flex flex-wrap items-center gap-1">
-                    {op.arg_names.map((n, i) => (
+                    {(op.arg_names ?? []).map((n, i) => (
                       <span
                         key={n}
                         className="font-mono text-[10px] text-chrome-text/70"
@@ -1296,7 +1361,7 @@ function ProbeTab({
     for (const op of manifest.operators ?? []) {
       for (const k of Object.keys(op.inputs ?? {})) set.add(k)
       // also include arg_names with the templated placeholder form
-      for (const n of op.arg_names) set.add(n)
+      for (const n of op.arg_names ?? []) set.add(n)
     }
     if (sampleInputs) for (const k of Object.keys(sampleInputs)) set.add(k)
     return [...set]

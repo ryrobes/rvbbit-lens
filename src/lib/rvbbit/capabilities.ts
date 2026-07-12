@@ -1914,6 +1914,38 @@ export function renderManifest(
       composeGpuYaml: `# ${manifest.name} is SQL-only; no GPU overlay applies.\n`,
     }
   }
+  if (manifest.managed) {
+    // Hosted capability: the install is the pre-baked managed.install.sql
+    // (register a backend at the rvbbit endpoint + create wrapper operators);
+    // its operators are descriptive, not full OperatorDefs, so the operator-SQL
+    // generator must NOT run over them.
+    const steps = manifest.managed.install?.sql ?? []
+    const installSql =
+      steps.length > 0
+        ? [
+            `-- ${manifest.title ?? manifest.name} — hosted by rvbbit (${manifest.managed.vendor}).`,
+            `-- Metadata-only install. Set your subscriber key in the ${manifest.managed.key_env} env var.`,
+            "",
+            ...steps,
+            "",
+          ].join("\n")
+        : [
+            `-- ${manifest.title ?? manifest.name} — hosted by rvbbit.`,
+            manifest.managed.status === "coming_soon"
+              ? "-- Coming soon; no install steps yet."
+              : "-- No install steps declared.",
+            "",
+          ].join("\n")
+    return {
+      manifestYaml: renderManifestYaml(manifest),
+      registerSql: installSql,
+      operatorSql: `-- ${manifest.name} is hosted by rvbbit; operators are created by the install SQL (see the Install tab).\n`,
+      smokeSql: `-- ${manifest.name} is hosted by rvbbit; no local smoke check.\n`,
+      composeYaml: `# ${manifest.name} is a hosted capability; no Docker sidecar is generated.\n`,
+      composeHostPortsYaml: `# ${manifest.name} is hosted; no host port overlay applies.\n`,
+      composeGpuYaml: `# ${manifest.name} is hosted; no GPU overlay applies.\n`,
+    }
+  }
   const m = applyKnobs(manifest, knobs)
   const runtime = isRuntimeManifest(m)
   return {
@@ -2098,7 +2130,7 @@ function defaultStep(m: Manifest, op: OperatorDef): unknown {
     specialist: m.backend?.name ?? m.name,
     inputs:
       op.inputs ??
-      Object.fromEntries(op.arg_names.map((name) => [name, `{{ inputs.${name} }}`])),
+      Object.fromEntries((op.arg_names ?? []).map((name) => [name, `{{ inputs.${name} }}`])),
   }
 }
 
@@ -2108,13 +2140,14 @@ function renderOperatorSql(m: Manifest): string {
     `-- Operators for capability: ${m.name}`,
   ]
   for (const op of m.operators ?? []) {
+    const argNames = op.arg_names ?? []
     const steps = op.steps ?? [defaultStep(m, op)]
-    const argTypes = op.arg_types ?? op.arg_names.map(() => "text")
+    const argTypes = op.arg_types ?? argNames.map(() => "text")
     chunks.push(
       "",
       "SELECT rvbbit.create_operator(",
       `  op_name        => ${sqlLit(op.name)},`,
-      `  op_arg_names   => ${sqlTextArray(op.arg_names)},`,
+      `  op_arg_names   => ${sqlTextArray(argNames)},`,
       `  op_arg_types   => ${sqlTextArray(argTypes)},`,
       `  op_return_type => ${sqlLit(op.return_type)},`,
       `  op_parser      => ${sqlLitOrNull(op.parser)},`,
