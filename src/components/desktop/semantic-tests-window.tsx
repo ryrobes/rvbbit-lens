@@ -1,0 +1,262 @@
+"use client"
+
+import { useCallback, useEffect, useState } from "react"
+
+import { CheckCircle2, Loader2, Play, RefreshCw, Target } from "@/lib/icons"
+import {
+  fetchFailures,
+  fetchSemanticTests,
+  runBattery,
+  type SemanticTestsState,
+  type TestFailure,
+  type TestRun,
+} from "@/lib/rvbbit/semantic-tests"
+import { cn } from "@/lib/utils"
+
+/**
+ * Semantic Tests — the honesty machine for operators. Every operator can
+ * carry embedded test cases; this window runs the battery and renders the
+ * drift timeline (rvbbit.operator_test_runs). Each run is stamped with a
+ * backend_tag naming the model/version regime that answered, so a pass-rate
+ * drop attributes to exactly one change. Same battery, different bindings =
+ * apples-to-apples across local vs managed inference.
+ */
+
+interface Props {
+  activeConnectionId: string | null
+  workspaceActive: boolean
+}
+
+function passTone(ratio: number): string {
+  if (ratio >= 1) return "var(--viz-positive, #4ade80)"
+  if (ratio >= 0.9) return "var(--viz-warning, #fbbf24)"
+  return "var(--viz-negative, #f87171)"
+}
+
+function TrendBars({ trend }: { trend: { run: number; ok: number; total: number }[] }) {
+  if (!trend.length) return <span className="font-mono text-[10px] text-chrome-text/40">—</span>
+  return (
+    <div className="flex h-4 items-end gap-[2px]" title={trend.map((t) => `run ${t.run}: ${t.ok}/${t.total}`).join("\n")}>
+      {trend.map((t) => {
+        const ratio = t.total > 0 ? t.ok / t.total : 0
+        return (
+          <div
+            key={t.run}
+            className="w-[7px] rounded-sm"
+            style={{
+              height: `${Math.max(18, ratio * 100)}%`,
+              background: passTone(ratio),
+              opacity: 0.45 + 0.55 * ratio,
+            }}
+          />
+        )
+      })}
+    </div>
+  )
+}
+
+export function SemanticTestsWindow({ activeConnectionId, workspaceActive }: Props) {
+  const [state, setState] = useState<SemanticTestsState | null>(null)
+  const [loading, setLoading] = useState(false)
+  const [running, setRunning] = useState(false)
+  const [tag, setTag] = useState("")
+  const [selectedRun, setSelectedRun] = useState<number | null>(null)
+  const [failures, setFailures] = useState<TestFailure[]>([])
+  const [lastResult, setLastResult] = useState<string | null>(null)
+
+  const refresh = useCallback(async () => {
+    if (!activeConnectionId) return
+    setLoading(true)
+    const s = await fetchSemanticTests(activeConnectionId)
+    setState(s)
+    setLoading(false)
+    if (s.runs.length > 0) {
+      const rid = s.runs[0].run_id
+      setSelectedRun((prev) => prev ?? rid)
+    }
+  }, [activeConnectionId])
+
+  useEffect(() => {
+    if (workspaceActive) void refresh()
+  }, [workspaceActive, refresh])
+
+  useEffect(() => {
+    if (!activeConnectionId || selectedRun == null) return
+    void fetchFailures(activeConnectionId, selectedRun).then(setFailures)
+  }, [activeConnectionId, selectedRun])
+
+  const onRun = useCallback(async () => {
+    if (!activeConnectionId || running) return
+    setRunning(true)
+    setLastResult(null)
+    const r = await runBattery(activeConnectionId, tag.trim())
+    setRunning(false)
+    if (r.ok) {
+      setLastResult(`run #${r.run_id}: ${r.passed}/${r.tests} passed`)
+      setSelectedRun(r.run_id ?? null)
+      void refresh()
+    } else {
+      setLastResult(`battery failed: ${r.error}`)
+    }
+  }, [activeConnectionId, running, tag, refresh])
+
+  if (!state) {
+    return (
+      <div className="flex h-full items-center justify-center text-chrome-text/50">
+        <Loader2 className="h-4 w-4 animate-spin" />
+      </div>
+    )
+  }
+  if (!state.available) {
+    return (
+      <div className="flex h-full flex-col items-center justify-center gap-2 p-6 text-center">
+        <Target className="h-6 w-6 text-chrome-text/40" />
+        <div className="text-sm text-foreground">Semantic Tests not initialized</div>
+        <div className="max-w-md text-[11px] text-chrome-text/60">
+          This warehouse has no <span className="font-mono">rvbbit.operator_test_runs</span> table
+          yet. Operators with embedded tests can still run via{" "}
+          <span className="font-mono">rvbbit.run_all_tests()</span>; the logged battery + drift
+          timeline arrives with the Semantic Tests migration.
+        </div>
+      </div>
+    )
+  }
+
+  const selected = state.runs.find((r) => r.run_id === selectedRun) ?? null
+
+  return (
+    <div className="flex h-full min-h-0 flex-col gap-2 p-2">
+      {/* header */}
+      <div className="flex items-center gap-2">
+        <Target className="h-4 w-4 text-chrome-text/70" />
+        <div className="text-[12px] font-medium text-foreground">Semantic Tests</div>
+        <div className="font-mono text-[10px] text-chrome-text/50">
+          {state.operators.length} operators ·{" "}
+          {state.operators.reduce((a, o) => a + o.n_tests, 0)} tests
+        </div>
+        <div className="ml-auto flex items-center gap-2">
+          <input
+            value={tag}
+            onChange={(e) => setTag(e.target.value)}
+            placeholder="regime tag (e.g. sentiment=modernbert)"
+            className="w-64 rounded-md border border-chrome-border/60 bg-chrome-bg/30 px-2 py-1 font-mono text-[10px] text-foreground placeholder:text-chrome-text/35 focus:outline-none"
+          />
+          <button
+            onClick={() => void onRun()}
+            disabled={running}
+            className={cn(
+              "flex items-center gap-1.5 rounded-md border border-chrome-border/60 px-2.5 py-1 text-[11px]",
+              running ? "opacity-50" : "hover:bg-chrome-bg/50",
+            )}
+          >
+            {running ? <Loader2 className="h-3 w-3 animate-spin" /> : <Play className="h-3 w-3" />}
+            {running ? "Running battery…" : "Run battery"}
+          </button>
+          <button
+            onClick={() => void refresh()}
+            disabled={loading}
+            className="rounded-md border border-chrome-border/60 p-1.5 hover:bg-chrome-bg/50"
+            title="Refresh"
+          >
+            <RefreshCw className={cn("h-3 w-3", loading && "animate-spin")} />
+          </button>
+        </div>
+      </div>
+      {lastResult && (
+        <div className="flex items-center gap-1.5 font-mono text-[10px] text-chrome-text/60">
+          <CheckCircle2 className="h-3 w-3" /> {lastResult}
+        </div>
+      )}
+
+      <div className="grid min-h-0 flex-1 grid-cols-[1.4fr_1fr] gap-2">
+        {/* operators */}
+        <div className="min-w-0 overflow-auto rounded-md border border-chrome-border/60 bg-chrome-bg/30 p-2">
+          <div className="mb-1.5 text-[11px] font-medium text-foreground">
+            Operators · pass-rate across recent runs
+          </div>
+          <table className="w-full text-left">
+            <tbody>
+              {state.operators.map((o) => {
+                const last = o.trend[o.trend.length - 1]
+                const ratio = last && last.total > 0 ? last.ok / last.total : null
+                return (
+                  <tr key={o.operator} className="border-t border-chrome-border/30">
+                    <td className="py-1 pr-2 font-mono text-[11px] text-foreground">{o.operator}</td>
+                    <td className="py-1 pr-2 font-mono text-[10px] text-chrome-text/50">
+                      {o.n_tests} tests
+                    </td>
+                    <td className="py-1 pr-2">
+                      <TrendBars trend={o.trend} />
+                    </td>
+                    <td className="py-1 text-right font-mono text-[11px]" style={{ color: ratio == null ? undefined : passTone(ratio) }}>
+                      {last ? `${last.ok}/${last.total}` : "never run"}
+                    </td>
+                  </tr>
+                )
+              })}
+            </tbody>
+          </table>
+        </div>
+
+        {/* runs + failures */}
+        <div className="flex min-h-0 min-w-0 flex-col gap-2">
+          <div className="min-h-0 flex-1 overflow-auto rounded-md border border-chrome-border/60 bg-chrome-bg/30 p-2">
+            <div className="mb-1.5 text-[11px] font-medium text-foreground">Runs</div>
+            {state.runs.map((r: TestRun) => {
+              const ratio = r.total > 0 ? r.ok / r.total : 0
+              return (
+                <button
+                  key={r.run_id}
+                  onClick={() => setSelectedRun(r.run_id)}
+                  className={cn(
+                    "mb-1 flex w-full items-center gap-2 rounded px-1.5 py-1 text-left hover:bg-chrome-bg/50",
+                    selectedRun === r.run_id && "bg-chrome-bg/60",
+                  )}
+                >
+                  <span className="font-mono text-[10px] text-chrome-text/50">#{r.run_id}</span>
+                  <span className="font-mono text-[11px]" style={{ color: passTone(ratio) }}>
+                    {r.ok}/{r.total}
+                  </span>
+                  <span className="min-w-0 flex-1 truncate font-mono text-[10px] text-chrome-text/60">
+                    {r.tag || "(untagged)"}
+                  </span>
+                  <span className="font-mono text-[9px] text-chrome-text/40">
+                    {r.ts.slice(5, 16).replace("T", " ")}
+                  </span>
+                </button>
+              )
+            })}
+          </div>
+          <div className="min-h-0 flex-1 overflow-auto rounded-md border border-chrome-border/60 bg-chrome-bg/30 p-2">
+            <div className="mb-1.5 text-[11px] font-medium text-foreground">
+              Failures {selected ? `· run #${selected.run_id}` : ""}
+            </div>
+            {failures.length === 0 ? (
+              <div className="font-mono text-[10px] text-chrome-text/50">
+                {selected ? "all green" : "select a run"}
+              </div>
+            ) : (
+              failures.map((f, i) => (
+                <div key={i} className="mb-1.5 rounded border border-chrome-border/40 p-1.5">
+                  <div className="font-mono text-[11px] text-foreground">
+                    {f.operator}
+                    <span className="text-chrome-text/50"> / {f.test_name}</span>
+                  </div>
+                  <div className="font-mono text-[10px] text-chrome-text/70">
+                    got <span className="text-danger/80">{f.actual || "∅"}</span> · expected{" "}
+                    {f.expected || "?"}
+                  </div>
+                  {f.error && (
+                    <div className="whitespace-pre-wrap font-mono text-[9px] text-danger/70">
+                      {f.error}
+                    </div>
+                  )}
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}

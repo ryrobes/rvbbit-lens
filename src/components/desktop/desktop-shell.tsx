@@ -36,6 +36,7 @@ import {
   Sparkles,
   Settings2,
   Table2,
+  Target,
   Trash2,
   TreeStructure,
   Upload,
@@ -77,6 +78,7 @@ import { AppearanceWindow } from "./appearance-window"
 import { CommandPalette, type PaletteGroup, type PaletteItem } from "./command-palette"
 import { PgMonitorWindow } from "./pg-monitor-window"
 import { FleetWindow } from "./fleet-window"
+import { SemanticTestsWindow } from "./semantic-tests-window"
 import { PostgresAdminWindow } from "./postgres-admin-window"
 import { NotificationToasts } from "./notification-toasts"
 import { NotificationCenterWindow } from "./notification-center-window"
@@ -210,6 +212,7 @@ import type {
   PalettePayload,
   PgMonitorPayload,
   FleetPayload,
+  SemanticTestsPayload,
   PostgresAdminPayload,
   QueryDocumentPayload,
   ReactiveBlockState,
@@ -2203,6 +2206,18 @@ export function DesktopShell() {
       title: "Fleet",
       x: 140, y: 90, width: 980, height: 680,
       payload: { kind: "fleet" } satisfies FleetPayload,
+    })
+  }, [focus, openWindow, liveWindows])
+
+  const openSemanticTests = useCallback(() => {
+    const existing = liveWindows().find((w) => w.kind === "semantic-tests")
+    if (existing) return focus(existing.id)
+    openWindow({
+      id: randomUUID(),
+      kind: "semantic-tests",
+      title: "Semantic Tests",
+      x: 170, y: 110, width: 940, height: 620,
+      payload: { kind: "semantic-tests" } satisfies SemanticTestsPayload,
     })
   }, [focus, openWindow, liveWindows])
 
@@ -4215,6 +4230,7 @@ export function DesktopShell() {
     { id: "extensions", label: "Extensions", icon: Settings2, color: "var(--brand-extensions)", description: "Installed Postgres extensions", activate: openExtensions, folder: "system" },
     { id: "monitor", label: "Monitor", icon: Activity, color: "var(--brand-pg-monitor)", description: "Live server activity & stats", activate: openPgMonitor, folder: "system" },
     { id: "fleet", label: "Fleet", icon: Anchor, color: "var(--brand-pg-monitor)", description: "Read-fleet workers, publication & storage health", activate: openFleet, folder: "system", rvbbit: true },
+    { id: "semantic-tests", label: "Semantic Tests", icon: Target, color: "var(--brand-pg-monitor)", description: "Operator test batteries, pass rates & verdict drift", activate: openSemanticTests, folder: "system", rvbbit: true },
     { id: "postgres-admin", label: "Postgres Admin", icon: Shield, color: "var(--brand-pg-monitor)", description: "Locks, grants, indexes, objects & backup plans", activate: () => openPostgresAdmin(), folder: "system" },
     { id: "cache", label: "Cache", icon: Database, color: "var(--brand-cache)", description: "Compiler & operator result caches", activate: openCache, folder: "system", rvbbit: true },
     { id: "receipts", label: "Receipts", icon: FileText, color: "var(--brand-rvbbit-cache)", sublabel: rvbbitVersion ?? undefined, description: "Per-call LLM receipts & audit", activate: openRvbbitCache, folder: "system", rvbbit: true },
@@ -5366,6 +5382,13 @@ function renderWindowContent(
           workspaceActive={ctx.workspaceActive}
         />
       )
+    case "semantic-tests":
+      return (
+        <SemanticTestsWindow
+          activeConnectionId={ctx.activeConnectionId}
+          workspaceActive={ctx.workspaceActive}
+        />
+      )
     case "postgres-admin":
       return (
         <PostgresAdminWindow
@@ -5944,6 +5967,7 @@ function iconForKind(kind: DesktopWindowState["kind"]) {
       return PaletteIcon
     case "pg-monitor": return Activity
     case "fleet": return Anchor
+    case "semantic-tests": return Target
     case "postgres-admin": return Shield
     case "notifications": return Bell
     case "operators":
