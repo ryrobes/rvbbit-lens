@@ -45,6 +45,7 @@ import {
   type WarrenInventoryRow,
 } from "@/lib/rvbbit/warren"
 import { Sparkline } from "./sparkline"
+import { RvbbitLogo } from "./rvbbit-logo"
 import { OperatorChips, type OpChip } from "./capability-operators"
 import {
   fmtAgo,
@@ -940,8 +941,8 @@ function CapabilityCard({
       {/* title row */}
       <div className="flex items-start gap-1.5">
         {managed ? (
-          <Sparkles
-            className="mt-0.5 h-3.5 w-3.5 shrink-0"
+          <RvbbitLogo
+            className="mt-1 h-2.5 w-auto shrink-0"
             style={{ color: "var(--cap-type)" }}
           />
         ) : isMcp ? (

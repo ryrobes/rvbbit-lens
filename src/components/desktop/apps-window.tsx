@@ -3,7 +3,8 @@
 import { useCallback, useMemo, useState, type MouseEvent } from "react"
 
 import { usePolling } from "@/lib/desktop/use-polling"
-import { AppWindow, CaretRight, Folder, Plus } from "@/lib/icons"
+import { AppWindow, CaretRight, Folder, LayoutDashboard, Plus, Table2 } from "@/lib/icons"
+import { cn } from "@/lib/utils"
 import { fetchDashboards, type DashboardRow } from "@/lib/rvbbit/dashboards"
 import { ContextMenu, type ContextMenuState } from "./context-menu"
 import { useWorkspaceActive } from "./workspace-active-context"
@@ -40,6 +41,18 @@ export function AppsWindow({ activeConnectionId, hasRvbbit, onOpenApp, onCreateS
   const [error, setError] = useState<string | null>(null)
   const [folder, setFolder] = useState<string | null>(null)
   const [menu, setMenu] = useState<ContextMenuState | null>(null)
+  const [view, setView] = useState<"icons" | "list">(() => {
+    if (typeof window === "undefined") return "icons"
+    return window.localStorage.getItem("rvbbit.apps.view") === "list" ? "list" : "icons"
+  })
+  const changeView = (v: "icons" | "list") => {
+    setView(v)
+    try {
+      window.localStorage.setItem("rvbbit.apps.view", v)
+    } catch {
+      /* private mode etc. — view just won't persist */
+    }
+  }
 
   const reload = useCallback(async () => {
     if (!activeConnectionId) return
@@ -105,6 +118,34 @@ export function AppsWindow({ activeConnectionId, hasRvbbit, onOpenApp, onCreateS
     </button>
   )
 
+  // List view: flat rows (team as a column) — folders collapse into a filter.
+  const appRow = (d: DashboardRow) => (
+    <button
+      key={d.slug}
+      onClick={() => onOpenApp(d.slug, d.name || d.slug)}
+      onContextMenu={(event) => openAppMenu(event, d)}
+      title={d.description ?? d.name}
+      className="grid w-full grid-cols-[14px_minmax(0,2fr)_minmax(0,1fr)_minmax(0,2.2fr)_52px] items-center gap-2 rounded px-2 py-1 text-left hover:bg-foreground/6"
+    >
+      <span className="flex items-center">
+        <StatusDot status={d.status} />
+      </span>
+      <span className="truncate text-[11px] text-foreground/90">{d.name || d.slug}</span>
+      <span className="truncate text-[10px] text-chrome-text/55">{d.team?.trim() || "—"}</span>
+      <span className="truncate text-[10px] text-chrome-text/45">{d.description ?? ""}</span>
+      <span className="text-right font-mono text-[9px] text-chrome-text/40">v{d.latest_version}</span>
+    </button>
+  )
+
+  const listRows = useMemo(() => {
+    const src = folder ? (byTeam.get(folder) ?? []) : rows
+    return [...src].sort(
+      (a, b) =>
+        (a.team?.trim() || "￿").localeCompare(b.team?.trim() || "￿") ||
+        (a.name || a.slug).localeCompare(b.name || b.slug),
+    )
+  }, [rows, byTeam, folder])
+
   const folderTile = (team: string, count: number) => (
     <button
       key={team}
@@ -137,6 +178,28 @@ export function AppsWindow({ activeConnectionId, hasRvbbit, onOpenApp, onCreateS
         <span className="ml-auto text-[10px] text-chrome-text/45">
           {rows.length} published · open as windows
         </span>
+        <span className="ml-2 flex items-center gap-px rounded border border-chrome-border/60">
+          <button
+            onClick={() => changeView("icons")}
+            title="Icon view"
+            className={cn(
+              "rounded-l px-1.5 py-1",
+              view === "icons" ? "bg-foreground/10 text-foreground" : "text-chrome-text/50 hover:text-foreground",
+            )}
+          >
+            <LayoutDashboard className="h-3 w-3" />
+          </button>
+          <button
+            onClick={() => changeView("list")}
+            title="List view"
+            className={cn(
+              "rounded-r px-1.5 py-1",
+              view === "list" ? "bg-foreground/10 text-foreground" : "text-chrome-text/50 hover:text-foreground",
+            )}
+          >
+            <Table2 className="h-3 w-3" />
+          </button>
+        </span>
       </header>
       <div className="min-h-0 flex-1 overflow-auto p-3">
         {error ? (
@@ -144,6 +207,17 @@ export function AppsWindow({ activeConnectionId, hasRvbbit, onOpenApp, onCreateS
         ) : rows.length === 0 ? (
           <div className="px-1 py-2 text-xs text-chrome-text/45">
             No live apps yet. Build one from any MCP chat (<code>live_app_template</code> → <code>create_live_app</code>) and it appears here.
+          </div>
+        ) : view === "list" ? (
+          <div className="flex flex-col gap-px">
+            <div className="grid grid-cols-[14px_minmax(0,2fr)_minmax(0,1fr)_minmax(0,2.2fr)_52px] gap-2 px-2 pb-1 text-[9px] uppercase tracking-wider text-chrome-text/40">
+              <span />
+              <span>name</span>
+              <span>team</span>
+              <span>description</span>
+              <span className="text-right">version</span>
+            </div>
+            {listRows.map(appRow)}
           </div>
         ) : (
           <div className="flex flex-wrap content-start items-start gap-1">

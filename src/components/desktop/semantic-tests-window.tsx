@@ -1,12 +1,14 @@
 "use client"
 
-import { useCallback, useEffect, useState } from "react"
+import { Fragment, useCallback, useEffect, useRef, useState } from "react"
 
-import { CheckCircle2, Loader2, Play, RefreshCw, Target } from "@/lib/icons"
+import { CaretRight, CheckCircle2, Loader2, Play, RefreshCw, Target } from "@/lib/icons"
 import {
   fetchFailures,
+  fetchOperatorTests,
   fetchSemanticTests,
   runBattery,
+  type OperatorTestDetail,
   type SemanticTestsState,
   type TestFailure,
   type TestRun,
@@ -63,6 +65,34 @@ export function SemanticTestsWindow({ activeConnectionId, workspaceActive }: Pro
   const [selectedRun, setSelectedRun] = useState<number | null>(null)
   const [failures, setFailures] = useState<TestFailure[]>([])
   const [lastResult, setLastResult] = useState<string | null>(null)
+  const [expanded, setExpanded] = useState<Set<string>>(new Set())
+  const [details, setDetails] = useState<Record<string, OperatorTestDetail[] | "loading">>({})
+  // Mirror of `expanded` readable from refresh() without making it a dep
+  // (a dep would change refresh's identity on every expand and re-fire the
+  // mount effect → full refetch per row toggle).
+  const expandedRef = useRef<Set<string>>(new Set())
+
+  const toggleOperator = useCallback(
+    (op: string) => {
+      setExpanded((prev) => {
+        const next = new Set(prev)
+        if (next.has(op)) {
+          next.delete(op)
+        } else {
+          next.add(op)
+        }
+        expandedRef.current = next
+        return next
+      })
+      if (activeConnectionId && details[op] === undefined) {
+        setDetails((d) => ({ ...d, [op]: "loading" }))
+        void fetchOperatorTests(activeConnectionId, op).then((tests) =>
+          setDetails((d) => ({ ...d, [op]: tests })),
+        )
+      }
+    },
+    [activeConnectionId, details],
+  )
 
   const refresh = useCallback(async () => {
     if (!activeConnectionId) return
@@ -70,6 +100,20 @@ export function SemanticTestsWindow({ activeConnectionId, workspaceActive }: Pro
     const s = await fetchSemanticTests(activeConnectionId)
     setState(s)
     setLoading(false)
+    // Latest-result columns in the expanded rows go stale after a run:
+    // refetch for rows that are OPEN (else they'd sit at "loading" forever),
+    // drop the rest so they reload lazily on next expand.
+    const open = [...expandedRef.current]
+    setDetails(() => {
+      const next: Record<string, OperatorTestDetail[] | "loading"> = {}
+      for (const op of open) next[op] = "loading"
+      return next
+    })
+    for (const op of open) {
+      void fetchOperatorTests(activeConnectionId, op).then((tests) =>
+        setDetails((d) => ({ ...d, [op]: tests })),
+      )
+    }
     if (s.runs.length > 0) {
       const rid = s.runs[0].run_id
       setSelectedRun((prev) => prev ?? rid)
@@ -179,19 +223,83 @@ export function SemanticTestsWindow({ activeConnectionId, workspaceActive }: Pro
               {state.operators.map((o) => {
                 const last = o.trend[o.trend.length - 1]
                 const ratio = last && last.total > 0 ? last.ok / last.total : null
+                const isOpen = expanded.has(o.operator)
+                const detail = details[o.operator]
                 return (
-                  <tr key={o.operator} className="border-t border-chrome-border/30">
-                    <td className="py-1 pr-2 font-mono text-[11px] text-foreground">{o.operator}</td>
-                    <td className="py-1 pr-2 font-mono text-[10px] text-chrome-text/50">
-                      {o.n_tests} tests
-                    </td>
-                    <td className="py-1 pr-2">
-                      <TrendBars trend={o.trend} />
-                    </td>
-                    <td className="py-1 text-right font-mono text-[11px]" style={{ color: ratio == null ? undefined : passTone(ratio) }}>
-                      {last ? `${last.ok}/${last.total}` : "never run"}
-                    </td>
-                  </tr>
+                  <Fragment key={o.operator}>
+                    <tr
+                      className="cursor-pointer border-t border-chrome-border/30 hover:bg-chrome-bg/40"
+                      onClick={() => toggleOperator(o.operator)}
+                    >
+                      <td className="py-1 pr-2 font-mono text-[11px] text-foreground">
+                        <span className="flex items-center gap-1">
+                          <CaretRight
+                            className={cn(
+                              "h-2.5 w-2.5 shrink-0 text-chrome-text/40 transition-transform",
+                              isOpen && "rotate-90",
+                            )}
+                          />
+                          {o.operator}
+                        </span>
+                      </td>
+                      <td className="py-1 pr-2 font-mono text-[10px] text-chrome-text/50">
+                        {o.n_tests} tests
+                      </td>
+                      <td className="py-1 pr-2">
+                        <TrendBars trend={o.trend} />
+                      </td>
+                      <td className="py-1 text-right font-mono text-[11px]" style={{ color: ratio == null ? undefined : passTone(ratio) }}>
+                        {last ? `${last.ok}/${last.total}` : "never run"}
+                      </td>
+                    </tr>
+                    {isOpen ? (
+                      <tr className="border-t border-chrome-border/20">
+                        <td colSpan={4} className="py-1 pl-4 pr-1">
+                          {detail === "loading" || detail === undefined ? (
+                            <div className="flex items-center gap-1.5 py-1 font-mono text-[10px] text-chrome-text/45">
+                              <Loader2 className="h-2.5 w-2.5 animate-spin" /> loading tests…
+                            </div>
+                          ) : detail.length === 0 ? (
+                            <div className="py-1 font-mono text-[10px] text-chrome-text/45">no embedded tests</div>
+                          ) : (
+                            <div className="space-y-px pb-1">
+                              {detail.map((t) => (
+                                <div
+                                  key={t.test_name}
+                                  title={`${t.sql}\n\nexpect: ${t.expect}${t.description ? `\n${t.description}` : ""}`}
+                                  className="grid cursor-help grid-cols-[8px_minmax(0,1.2fr)_minmax(0,1fr)_minmax(0,1.4fr)] items-center gap-2 rounded px-1 py-0.5 hover:bg-chrome-bg/50"
+                                >
+                                  <span
+                                    className="h-1.5 w-1.5 rounded-full"
+                                    style={{
+                                      background:
+                                        t.passed == null
+                                          ? "var(--chrome-border, #444)"
+                                          : passTone(t.passed ? 1 : 0),
+                                    }}
+                                  />
+                                  <span className="truncate font-mono text-[10px] text-chrome-text/80">
+                                    {t.test_name}
+                                  </span>
+                                  <span className="truncate font-mono text-[9px] text-chrome-text/50">
+                                    {t.expect}
+                                  </span>
+                                  <span
+                                    className={cn(
+                                      "truncate text-right font-mono text-[9px]",
+                                      t.passed === false ? "text-danger/80" : "text-chrome-text/45",
+                                    )}
+                                  >
+                                    {t.passed == null ? "never run" : (t.actual ?? "∅")}
+                                  </span>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </td>
+                      </tr>
+                    ) : null}
+                  </Fragment>
                 )
               })}
             </tbody>

@@ -128,6 +128,53 @@ export async function fetchSemanticTests(connectionId: string): Promise<Semantic
   return { available: true, operators, runs, error: opsR.ok ? undefined : opsR.error }
 }
 
+export interface OperatorTestDetail {
+  test_name: string
+  sql: string
+  expect: string
+  description: string | null
+  /** latest logged result (null = never run under a logged battery) */
+  passed: boolean | null
+  actual: string | null
+  last_run: number | null
+}
+
+/** The embedded test definitions for one operator, joined with each test's
+ * most recent LOGGED result. Powers the expandable rows in Semantic Tests. */
+export async function fetchOperatorTests(
+  connectionId: string,
+  operator: string,
+): Promise<OperatorTestDetail[]> {
+  const op = esc(operator)
+  const r = await runQuery(
+    connectionId,
+    `WITH defs AS (
+       SELECT t.ord,
+              coalesce(t.tc->>'name', '<unnamed>') AS test_name,
+              coalesce(t.tc->>'sql', '') AS sql,
+              coalesce(t.tc->'expect'->>'type', '?') || ' ' ||
+                coalesce(t.tc->'expect'->>'value', t.tc->'expect'->>'pattern', '') AS expect,
+              t.tc->>'description' AS description
+       FROM rvbbit.operators o,
+            LATERAL jsonb_array_elements(o.tests) WITH ORDINALITY AS t(tc, ord)
+       WHERE o.name = '${op}' AND o.tests IS NOT NULL
+     ),
+     latest AS (
+       SELECT DISTINCT ON (test_name) test_name, passed, actual, run_id
+       FROM rvbbit.operator_test_runs
+       WHERE operator = '${op}'
+       ORDER BY test_name, run_id DESC
+     )
+     SELECT d.test_name, d.sql, d.expect, d.description,
+            l.passed, left(coalesce(l.actual, ''), 160) AS actual,
+            l.run_id AS last_run
+     FROM defs d
+     LEFT JOIN latest l ON l.test_name = d.test_name
+     ORDER BY d.ord`,
+  )
+  return r.ok ? (r.rows as unknown as OperatorTestDetail[]) : []
+}
+
 export async function fetchFailures(
   connectionId: string,
   runId: number,

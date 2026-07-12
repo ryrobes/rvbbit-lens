@@ -21,6 +21,7 @@ import {
   X,
 } from "@/lib/icons"
 import { cn } from "@/lib/utils"
+import { RvbbitLogo } from "./rvbbit-logo"
 import { Button } from "@/components/ui/button"
 import {
   classifyManifestCapabilityType,
@@ -685,7 +686,7 @@ function ManagedOverviewTab({
         }}
       >
         <div className="flex items-center gap-2">
-          <Sparkles className="h-4 w-4" style={{ color: gold }} />
+          <RvbbitLogo className="h-3.5 w-auto" style={{ color: gold }} />
           <span className="text-[10px] font-medium uppercase tracking-wider" style={{ color: gold }}>
             rvbbit Cloud · hosted
           </span>
@@ -748,7 +749,7 @@ function ManagedOverviewTab({
             }}
           >
             <div className="flex items-center gap-1.5 text-[11px] font-medium" style={{ color: gold }}>
-              <Sparkles className="h-3 w-3" /> Free tier
+              <RvbbitLogo className="h-2.5 w-auto" /> Free tier
             </div>
             <p className="mt-1 text-[11px] leading-snug text-chrome-text/80">{managed.free_tier.note}</p>
             {managed.free_tier.cta_url ? (
@@ -966,7 +967,7 @@ function ManagedInstallTab({
             )}
             style={{ background: gold, color: "#1a1400" }}
           >
-            {running ? <Loader2 className="h-3 w-3 animate-spin" /> : <Sparkles className="h-3 w-3" />}
+            {running ? <Loader2 className="h-3 w-3 animate-spin" /> : <RvbbitLogo className="h-2.5 w-auto" />}
             {running ? "Installing…" : "Install"}
           </button>
           {result ? (
@@ -1081,7 +1082,7 @@ function OverviewTab({
         ) : null}
 
         {manifest.managed ? (
-          <Panel icon={Sparkles} title="rvbbit Cloud — hosted">
+          <Panel icon={RvbbitLogo} title="rvbbit Cloud — hosted">
             <div className="space-y-1.5">
               <KV k="vendor" v={manifest.managed.vendor} mono />
               <KV k="status" v={manifest.managed.status ?? "available"} mono />
