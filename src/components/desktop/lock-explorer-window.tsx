@@ -77,6 +77,17 @@ interface ResourceGroup {
   locks: LockExplorerLock[]
 }
 
+interface MatrixModePair {
+  requested: string
+  held: string
+}
+
+interface MatrixAffectedResource {
+  key: string
+  label: string
+  edges: DerivedEdge[]
+}
+
 interface RecentEvent {
   id: string
   at: number
@@ -159,6 +170,19 @@ export function LockExplorerWindow({
       && (!selection?.backendStart || session.backendStart === selection.backendStart)
     )) ?? null
   }, [sample, selection, selectedEdge, suggestedPid])
+  const matrixFocusEdge = useMemo(() => {
+    if (selectedEdge?.waiterLock?.lockType === "relation" && selectedEdge.blockerLock?.lockType === "relation") {
+      return selectedEdge
+    }
+    if (selectedSession) {
+      return derivedEdges.find((edge) => (
+        edge.waiterLock?.lockType === "relation"
+        && edge.blockerLock?.lockType === "relation"
+        && (edge.waiterPid === selectedSession.pid || edge.blockerPid === selectedSession.pid)
+      )) ?? null
+    }
+    return derivedEdges.find((edge) => edge.waiterLock?.lockType === "relation" && edge.blockerLock?.lockType === "relation") ?? null
+  }, [derivedEdges, selectedEdge, selectedSession])
 
   const waitingCount = sample?.locks.filter((item) => !item.granted).length ?? 0
   function selectSession(pid: number) {
@@ -305,7 +329,9 @@ export function LockExplorerWindow({
           {view === "matrix" ? (
             <CompatibilityView
               locks={sample.locks}
-              selectedEdge={selectedEdge}
+              edges={derivedEdges}
+              selectedEdge={matrixFocusEdge}
+              onSelectEdge={selectEdge}
             />
           ) : null}
         </main>
@@ -639,22 +665,61 @@ function ResourcesView({
 
 function CompatibilityView({
   locks,
+  edges,
   selectedEdge,
+  onSelectEdge,
 }: {
   locks: LockExplorerLock[]
+  edges: DerivedEdge[]
   selectedEdge: DerivedEdge | null
+  onSelectEdge: (edge: DerivedEdge) => void
 }) {
   const [kind, setKind] = useState<MatrixKind>("table")
-  const [hovered, setHovered] = useState<{ requested: string; held: string } | null>(null)
+  const [hovered, setHovered] = useState<MatrixModePair | null>(null)
+  const [pinned, setPinned] = useState<MatrixModePair | null>(null)
   const modes = kind === "table" ? TABLE_LOCK_MODES : ROW_LOCK_MODES
+  const visibleLocks = useMemo(
+    () => kind === "table" ? locks.filter((item) => item.lockType === "relation") : [],
+    [kind, locks],
+  )
   const counts = useMemo(() => {
     const result = new Map<string, number>()
-    for (const item of locks) result.set(item.mode, (result.get(item.mode) ?? 0) + 1)
+    for (const item of visibleLocks) result.set(item.mode, (result.get(item.mode) ?? 0) + 1)
     return result
-  }, [locks])
-  const selectedRequested = selectedEdge?.waiterLock?.lockType === "relation" ? selectedEdge.waiterLock.mode : null
-  const selectedHeld = selectedEdge?.blockerLock?.lockType === "relation" ? selectedEdge.blockerLock.mode : null
-  const activePair = hovered ?? (selectedRequested && selectedHeld ? { requested: selectedRequested, held: selectedHeld } : null)
+  }, [visibleLocks])
+  const focusedPair = kind === "table"
+    && selectedEdge?.waiterLock?.lockType === "relation"
+    && selectedEdge.blockerLock?.lockType === "relation"
+    ? { requested: selectedEdge.waiterLock.mode, held: selectedEdge.blockerLock.mode }
+    : null
+  const selectedPair = pinned ?? focusedPair
+  const activePair = hovered ?? selectedPair
+  const affectedResources = useMemo(() => {
+    if (kind !== "table" || !selectedPair) return []
+    const grouped = new Map<string, MatrixAffectedResource>()
+    for (const edge of edges) {
+      if (
+        edge.waiterLock?.lockType !== "relation"
+        || edge.blockerLock?.lockType !== "relation"
+        || edge.waiterLock.mode !== selectedPair.requested
+        || edge.blockerLock.mode !== selectedPair.held
+      ) continue
+      const current = grouped.get(edge.resourceKey) ?? {
+        key: edge.resourceKey,
+        label: edge.resourceLabel,
+        edges: [],
+      }
+      current.edges.push(edge)
+      grouped.set(edge.resourceKey, current)
+    }
+    return [...grouped.values()].sort((a, b) => a.label.localeCompare(b.label))
+  }, [edges, kind, selectedPair])
+
+  function changeKind(next: MatrixKind) {
+    setKind(next)
+    setHovered(null)
+    setPinned(null)
+  }
 
   return (
     <div className="flex h-full min-h-0 flex-col overflow-auto p-4">
@@ -664,7 +729,7 @@ function CompatibilityView({
             <button
               key={option}
               type="button"
-              onClick={() => setKind(option)}
+              onClick={() => changeKind(option)}
               className={cn(
                 "h-6 rounded-[2px] px-2 text-[10px] capitalize",
                 kind === option ? "bg-foreground/10 text-foreground" : "text-chrome-text/65",
@@ -679,16 +744,32 @@ function CompatibilityView({
             ? `${lockModeLabel(activePair.requested)} requested vs ${lockModeLabel(activePair.held)} held`
             : `${kind === "table" ? "Relation" : "Row"} lock compatibility`}
         </div>
+        {pinned ? (
+          <button
+            type="button"
+            title="Return to the focused blocker edge"
+            onClick={() => setPinned(null)}
+            className="ml-auto grid h-7 w-7 shrink-0 place-items-center rounded-sm border border-brand-lock-explorer/30 bg-brand-lock-explorer/7 text-brand-lock-explorer"
+          >
+            <RotateCcw className="h-3.5 w-3.5" />
+          </button>
+        ) : null}
       </div>
 
-      <div className="mt-4 min-w-[520px] flex-1 overflow-auto">
+      <div className="mt-4 min-w-[520px] shrink-0 overflow-x-auto">
         <div
           className="grid gap-1"
           style={{ gridTemplateColumns: `minmax(140px, 1fr) repeat(${modes.length}, minmax(38px, 54px))` }}
         >
           <div className="flex items-end pb-1 text-[9px] uppercase text-chrome-text/45">requested / held</div>
           {modes.map((mode) => (
-            <MatrixHeader key={mode.mode} mode={mode} count={counts.get(mode.mode) ?? 0} />
+            <MatrixHeader
+              key={mode.mode}
+              mode={mode}
+              count={counts.get(mode.mode) ?? 0}
+              active={activePair?.held === mode.mode}
+              selected={selectedPair?.held === mode.mode}
+            />
           ))}
           {modes.map((requested) => (
             <MatrixRow
@@ -696,18 +777,27 @@ function CompatibilityView({
               requested={requested}
               modes={modes}
               liveCount={counts.get(requested.mode) ?? 0}
-              selectedRequested={selectedRequested}
-              selectedHeld={selectedHeld}
+              activePair={activePair}
+              selectedPair={selectedPair}
               hovered={hovered}
               onHover={setHovered}
+              onSelect={setPinned}
             />
           ))}
         </div>
       </div>
 
-      <div className="mt-4 grid grid-cols-3 gap-3 border-t border-chrome-border/45 pt-3">
+      {kind === "table" ? (
+        <MatrixAffectedResources
+          pair={selectedPair}
+          resources={affectedResources}
+          onSelectEdge={onSelectEdge}
+        />
+      ) : null}
+
+      <div className="mt-3 grid shrink-0 grid-cols-3 gap-3 border-t border-chrome-border/45 pt-3">
         <Metric label="observed modes" value={String(counts.size)} />
-        <Metric label="observed locks" value={String(locks.length)} />
+        <Metric label={kind === "table" ? "relation locks" : "row locks visible"} value={String(visibleLocks.length)} />
         <Metric label="matrix" value={kind === "table" ? "8 x 8" : "4 x 4"} />
       </div>
       {kind === "row" ? (
@@ -719,9 +809,26 @@ function CompatibilityView({
   )
 }
 
-function MatrixHeader({ mode, count }: { mode: LockModeDefinition; count: number }) {
+function MatrixHeader({
+  mode,
+  count,
+  active,
+  selected,
+}: {
+  mode: LockModeDefinition
+  count: number
+  active: boolean
+  selected: boolean
+}) {
   return (
-    <div title={mode.label} className="flex h-11 flex-col items-center justify-end rounded-sm border border-chrome-border/35 bg-secondary-background/30 pb-1">
+    <div
+      title={mode.label}
+      className={cn(
+        "flex h-11 flex-col items-center justify-end rounded-sm border border-chrome-border/35 bg-secondary-background/30 pb-1 transition",
+        active && "border-brand-lock-explorer/45 bg-brand-lock-explorer/8",
+        selected && "ring-1 ring-brand-lock-explorer",
+      )}
+    >
       <span className="font-mono text-[9px] text-foreground">{mode.shortLabel}</span>
       <span className={cn("font-mono text-[8px]", count ? "text-brand-lock-explorer" : "text-chrome-text/35")}>{count}</span>
     </div>
@@ -732,42 +839,57 @@ function MatrixRow({
   requested,
   modes,
   liveCount,
-  selectedRequested,
-  selectedHeld,
+  activePair,
+  selectedPair,
   hovered,
   onHover,
+  onSelect,
 }: {
   requested: LockModeDefinition
   modes: readonly LockModeDefinition[]
   liveCount: number
-  selectedRequested: string | null
-  selectedHeld: string | null
-  hovered: { requested: string; held: string } | null
-  onHover: (pair: { requested: string; held: string } | null) => void
+  activePair: MatrixModePair | null
+  selectedPair: MatrixModePair | null
+  hovered: MatrixModePair | null
+  onHover: (pair: MatrixModePair | null) => void
+  onSelect: (pair: MatrixModePair) => void
 }) {
+  const activeRequested = activePair?.requested === requested.mode
+  const selectedRequested = selectedPair?.requested === requested.mode
   return (
     <>
-      <div className="flex h-10 min-w-0 items-center justify-between rounded-sm border border-chrome-border/35 bg-secondary-background/30 px-2">
+      <div className={cn(
+        "flex h-10 min-w-0 items-center justify-between rounded-sm border border-chrome-border/35 bg-secondary-background/30 px-2 transition",
+        activeRequested && "border-brand-lock-explorer/45 bg-brand-lock-explorer/8",
+        selectedRequested && "ring-1 ring-brand-lock-explorer",
+      )}>
         <span className="truncate text-[9px] font-medium text-foreground" title={requested.label}>{requested.label}</span>
         {liveCount ? <span className="font-mono text-[8px] text-brand-lock-explorer">{liveCount}</span> : null}
       </div>
       {modes.map((held) => {
         const conflict = requested.conflicts.includes(held.mode)
-        const selected = requested.mode === selectedRequested && held.mode === selectedHeld
+        const selected = requested.mode === selectedPair?.requested && held.mode === selectedPair.held
         const hot = hovered?.requested === requested.mode && hovered.held === held.mode
+        const crosshair = activePair != null && (
+          requested.mode === activePair.requested || held.mode === activePair.held
+        )
         return (
           <button
             key={held.mode}
             type="button"
             title={`${requested.label} ${conflict ? "conflicts with" : "is compatible with"} ${held.label}`}
+            aria-pressed={selected}
+            onClick={() => onSelect({ requested: requested.mode, held: held.mode })}
             onMouseEnter={() => onHover({ requested: requested.mode, held: held.mode })}
             onMouseLeave={() => onHover(null)}
             className={cn(
-              "grid h-10 place-items-center rounded-sm border font-mono text-[10px] transition",
+              "relative grid h-10 place-items-center rounded-sm border font-mono text-[10px] transition",
               conflict
                 ? "border-danger/25 bg-danger/8 text-danger"
                 : "border-success/15 bg-success/[0.025] text-success/35",
-              (selected || hot) && "ring-1 ring-brand-lock-explorer bg-brand-lock-explorer/12 text-foreground",
+              crosshair && "border-brand-lock-explorer/30 bg-brand-lock-explorer/[0.055]",
+              hot && "ring-1 ring-brand-lock-explorer/70 text-foreground",
+              selected && "z-10 ring-2 ring-brand-lock-explorer bg-brand-lock-explorer/15 text-foreground",
             )}
           >
             {conflict ? "X" : ""}
@@ -776,6 +898,101 @@ function MatrixRow({
       })}
     </>
   )
+}
+
+function MatrixAffectedResources({
+  pair,
+  resources,
+  onSelectEdge,
+}: {
+  pair: MatrixModePair | null
+  resources: MatrixAffectedResource[]
+  onSelectEdge: (edge: DerivedEdge) => void
+}) {
+  const requested = pair ? TABLE_LOCK_MODES.find((mode) => mode.mode === pair.requested) : null
+  const conflict = pair && requested ? requested.conflicts.includes(pair.held) : false
+
+  return (
+    <section className="mt-4 flex min-h-[112px] flex-1 flex-col overflow-hidden border-t border-chrome-border/45 pt-3">
+      <div className="mb-2 flex shrink-0 items-center gap-2">
+        <span className="text-[9px] font-medium uppercase text-chrome-text/55">Affected relations</span>
+        {pair ? (
+          <span className="truncate font-mono text-[9px] text-chrome-text/65">
+            {shortMode(pair.requested)} requested / {shortMode(pair.held)} held
+          </span>
+        ) : null}
+        <span className="ml-auto font-mono text-[9px] text-brand-lock-explorer">
+          {resources.length} live
+        </span>
+      </div>
+
+      {resources.length ? (
+        <div className="min-h-0 overflow-auto border-y border-chrome-border/30">
+          <div className="sticky top-0 z-10 grid min-w-[560px] grid-cols-[minmax(145px,1.2fr)_minmax(115px,1fr)_minmax(115px,1fr)_auto] gap-2 border-b border-chrome-border/35 bg-chrome-bg/95 px-2 py-1 text-[8px] uppercase text-chrome-text/40 backdrop-blur-md">
+            <span>blocked relation</span>
+            <span>waiting</span>
+            <span>blocking</span>
+            <span>kind</span>
+          </div>
+          {resources.map((resource) => {
+            const waiters = summarizeEdgeSessions(resource.edges, "waiter")
+            const blockers = summarizeEdgeSessions(resource.edges, "blocker")
+            const kinds = [...new Set(resource.edges.map((edge) => edge.blockKind))]
+            return (
+              <button
+                key={resource.key}
+                type="button"
+                title={`Inspect ${resource.label}`}
+                onClick={() => onSelectEdge(resource.edges[0])}
+                className="grid w-full min-w-[560px] grid-cols-[minmax(145px,1.2fr)_minmax(115px,1fr)_minmax(115px,1fr)_auto] items-center gap-2 border-b border-chrome-border/25 px-2 py-2 text-left transition last:border-b-0 hover:bg-brand-lock-explorer/[0.055]"
+              >
+                <span className="min-w-0">
+                  <span className="block truncate font-mono text-[10px] text-foreground">{resource.label}</span>
+                  <span className="block text-[8px] text-chrome-text/40">{resource.edges.length} wait edge{resource.edges.length === 1 ? "" : "s"}</span>
+                </span>
+                <span className="truncate font-mono text-[9px] text-warning" title={waiters}>{waiters}</span>
+                <span className="truncate font-mono text-[9px] text-danger" title={blockers}>{blockers}</span>
+                <span className="flex justify-end gap-1">
+                  {kinds.map((value) => (
+                    <span
+                      key={value}
+                      className={cn(
+                        "rounded-sm border px-1 py-0.5 font-mono text-[8px] uppercase",
+                        value === "hard"
+                          ? "border-danger/35 bg-danger/8 text-danger"
+                          : value === "soft"
+                            ? "border-warning/35 bg-warning/8 text-warning"
+                            : "border-chrome-border/40 text-chrome-text/50",
+                      )}
+                    >
+                      {value}
+                    </span>
+                  ))}
+                </span>
+              </button>
+            )
+          })}
+        </div>
+      ) : (
+        <div className="grid min-h-[72px] flex-1 place-items-center border-y border-chrome-border/25 text-[10px] text-chrome-text/45">
+          {!pair
+            ? "No active relation-lock intersection."
+            : conflict
+              ? "No live blocked relations at this intersection."
+              : "Compatible pair: no blocking relation edges."}
+        </div>
+      )}
+    </section>
+  )
+}
+
+function summarizeEdgeSessions(edges: DerivedEdge[], side: "waiter" | "blocker"): string {
+  const sessions = new Map<number, LockExplorerSession | null>()
+  for (const edge of edges) {
+    const pid = side === "waiter" ? edge.waiterPid : edge.blockerPid
+    sessions.set(pid, side === "waiter" ? edge.waiter : edge.blocker)
+  }
+  return [...sessions].map(([pid, session]) => `${sessionLabel(session)} · ${pid}`).join(", ")
 }
 
 function Inspector({
@@ -802,7 +1019,8 @@ function Inspector({
   const actionSession = edge ? edge.blocker : session
   const downstream = impactPid == null ? new Set<number>() : downstreamPids(impactPid, edges)
   const canPreview = impactPid != null && downstream.size > 1
-  const isRoot = impactPid != null && rootBlockerPids(edges).includes(impactPid)
+  const isBlocker = impactPid != null && edges.some((item) => item.blockerPid === impactPid)
+  const canCancel = actionSession?.state === "active"
   const query = focusSession?.query
   const explanation = edge ? explainEdge(edge, edges) : explainSession(session, edges)
 
@@ -812,7 +1030,7 @@ function Inspector({
         <div className="flex items-start gap-2">
           <div className={cn(
             "grid h-8 w-8 shrink-0 place-items-center rounded-md border",
-            edge || isRoot ? "border-danger/35 bg-danger/8 text-danger" : "border-brand-lock-explorer/35 bg-brand-lock-explorer/8 text-brand-lock-explorer",
+            edge || isBlocker ? "border-danger/35 bg-danger/8 text-danger" : "border-brand-lock-explorer/35 bg-brand-lock-explorer/8 text-brand-lock-explorer",
           )}>
             {edge ? <GitBranch className="h-4 w-4" /> : <Activity className="h-4 w-4" />}
           </div>
@@ -886,12 +1104,16 @@ function Inspector({
         </section>
       ) : null}
 
-      {isRoot && actionSession ? (
+      {isBlocker && actionSession ? (
         <section className="grid grid-cols-2 gap-2 border-b border-chrome-border/45 p-3">
           <button
             type="button"
-            disabled={!sample.permissions.signalBackend}
-            title={sample.permissions.signalBackend ? "Open reviewed pg_cancel_backend SQL" : "Current role cannot signal backends"}
+            disabled={!sample.permissions.signalBackend || !canCancel}
+            title={!sample.permissions.signalBackend
+              ? "Current role cannot signal backends"
+              : canCancel
+                ? "Open reviewed pg_cancel_backend SQL"
+                : "This blocker has no active statement to cancel; end its transaction or terminate the session"}
             onClick={() => openSignalSql("cancel", actionSession, onOpenSql)}
             className="inline-flex h-8 items-center justify-center gap-1 rounded-sm border border-warning/35 bg-warning/7 text-[9px] text-warning disabled:cursor-not-allowed disabled:opacity-40"
           >
@@ -1294,7 +1516,29 @@ function openSignalSql(kind: "cancel" | "terminate", session: LockExplorerSessio
   const fn = kind === "cancel" ? "pg_cancel_backend" : "pg_terminate_backend"
   const action = kind === "cancel" ? "Cancel" : "Terminate"
   const start = sqlLiteral(session.backendStart)
-  const sql = `-- Revalidates pid + backend_start so PID reuse cannot target a different session.\nSELECT ${fn}(pid) AS ${kind === "cancel" ? "cancelled" : "terminated"}\nFROM pg_stat_activity\nWHERE pid = ${session.pid}\n  AND backend_start = ${start}::timestamptz;`
+  const activeGuard = kind === "cancel" ? "\n    AND state = 'active'" : ""
+  const successNote = kind === "cancel"
+    ? "Cancel signal sent; the session remains connected."
+    : "Terminate signal sent; the session and its locks should disappear."
+  const missingNote = kind === "cancel"
+    ? "No matching active session; it may be idle, ended, or have a reused PID."
+    : "No matching session identity; it ended or its PID was reused."
+  const sql = `-- Revalidates pid + full-precision backend_start so PID reuse cannot target another session.
+WITH target AS MATERIALIZED (
+  SELECT pid
+  FROM pg_stat_activity
+  WHERE pid = ${session.pid}
+    AND backend_start = ${start}::timestamptz${activeGuard}
+), signal AS MATERIALIZED (
+  SELECT pid, ${fn}(pid) AS signaled
+  FROM target
+)
+SELECT pid, signaled,
+       CASE WHEN signaled THEN ${sqlLiteral(successNote)} ELSE 'Postgres rejected the signal.' END AS outcome
+FROM signal
+UNION ALL
+SELECT NULL::integer, false, ${sqlLiteral(missingNote)}
+WHERE NOT EXISTS (SELECT 1 FROM signal);`
   onOpenSql(`${action} blocker pid ${session.pid}`, sql, false)
 }
 

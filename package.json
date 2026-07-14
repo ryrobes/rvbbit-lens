@@ -11,6 +11,9 @@
     "start:standalone": "node .next/standalone/server.js",
     "lint": "eslint",
     "check:sql-viz": "node scripts/check-sql-viz-primitives.cjs",
+    "demo:locks": "node scripts/lock-explorer-demo.mjs start",
+    "demo:locks:status": "node scripts/lock-explorer-demo.mjs status",
+    "demo:locks:stop": "node scripts/lock-explorer-demo.mjs stop",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

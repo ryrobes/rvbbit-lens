@@ -96,6 +96,7 @@ export interface ColorTokens {
   winPaletteH: string
   winPgMonitorH: string
   winLockExplorerH: string
+  winMvccExplorerH: string
   winDuckH: string
   winFolderH: string
 
@@ -110,6 +111,7 @@ export interface ColorTokens {
   brandCache: string
   brandPgMonitor: string
   brandLockExplorer: string
+  brandMvccExplorer: string
   brandOperators: string
   brandSpecialists: string
   brandRouting: string

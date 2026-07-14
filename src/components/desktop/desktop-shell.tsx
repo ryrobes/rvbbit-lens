@@ -80,6 +80,7 @@ import { AppearanceWindow } from "./appearance-window"
 import { CommandPalette, type PaletteGroup, type PaletteItem } from "./command-palette"
 import { PgMonitorWindow } from "./pg-monitor-window"
 import { LockExplorerWindow } from "./lock-explorer-window"
+import { MvccExplorerWindow } from "./mvcc-explorer-window"
 import { FleetWindow } from "./fleet-window"
 import { SemanticTestsWindow } from "./semantic-tests-window"
 import { PostgresAdminWindow } from "./postgres-admin-window"
@@ -228,6 +229,7 @@ import type {
   PalettePayload,
   PgMonitorPayload,
   LockExplorerPayload,
+  MvccExplorerPayload,
   FleetPayload,
   SemanticTestsPayload,
   PostgresAdminPayload,
@@ -2227,6 +2229,18 @@ export function DesktopShell() {
       title: "Lock Explorer",
       x: 105, y: 65, width: 1120, height: 760,
       payload: { kind: "lock-explorer" } satisfies LockExplorerPayload,
+    })
+  }, [focus, openWindow, liveWindows])
+
+  const openMvccExplorer = useCallback(() => {
+    const existing = liveWindows().find((w) => w.kind === "mvcc-explorer")
+    if (existing) return focus(existing.id)
+    openWindow({
+      id: randomUUID(),
+      kind: "mvcc-explorer",
+      title: "MVCC Explorer",
+      x: 115, y: 72, width: 1160, height: 780,
+      payload: { kind: "mvcc-explorer" } satisfies MvccExplorerPayload,
     })
   }, [focus, openWindow, liveWindows])
 
@@ -4592,6 +4606,7 @@ export function DesktopShell() {
     { id: "extensions", label: "Extensions", icon: Settings2, color: "var(--brand-extensions)", description: "Installed Postgres extensions", activate: openExtensions, folder: "system" },
     { id: "monitor", label: "Monitor", icon: Activity, color: "var(--brand-pg-monitor)", description: "Live server activity & stats", activate: openPgMonitor, folder: "system" },
     { id: "lock-explorer", label: "Lock Explorer", icon: Lock, color: "var(--brand-lock-explorer)", description: "Live blocker chains, resources & replay", activate: openLockExplorer, folder: "system" },
+    { id: "mvcc-explorer", label: "MVCC Explorer", icon: Layers, color: "var(--brand-mvcc-explorer)", description: "Vacuum horizons, pressure & workers", activate: openMvccExplorer, folder: "system" },
     { id: "fleet", label: "Fleet", icon: Anchor, color: "var(--brand-pg-monitor)", description: "Read-fleet workers, publication & storage health", activate: openFleet, folder: "system", rvbbit: true },
     { id: "semantic-tests", label: "Semantic Tests", icon: Target, color: "var(--brand-pg-monitor)", description: "Operator test batteries, pass rates & verdict drift", activate: openSemanticTests, folder: "system", rvbbit: true },
     { id: "postgres-admin", label: "Postgres Admin", icon: Shield, color: "var(--brand-pg-monitor)", description: "Locks, grants, indexes, objects & backup plans", activate: () => openPostgresAdmin(), folder: "system" },
@@ -4637,7 +4652,7 @@ export function DesktopShell() {
   ], [
     viewAppCount, schema, rvbbitVersion,
     openFinder, openSqlScratch, openViewApps, openConnections, openDataSearch, openSystemLearning, openMcpIncoming,
-    openSystemObjects, openExtensions, openPgMonitor, openLockExplorer, openFleet, openPostgresAdmin, openCache, openRvbbitCache,
+    openSystemObjects, openExtensions, openPgMonitor, openLockExplorer, openMvccExplorer, openFleet, openPostgresAdmin, openCache, openRvbbitCache,
     openCosts, openAgentMessages, openAssistantSettings, openDataMover, dataMoverDetected, openSyncMirror, openOperators, openModelSettings, openSpecialists, openRouting,
     openMcpServers, openCapabilities, openHfDeploy, openWarren, openModelStudio,
     openDuck, openDagster, dagsterDetected, openMetricCatalog, openMetricCreator, openMetricInspector, openVizBlocks, openMetricBoard, openDashboards, openApps, openDashboardApp, openAlerts, openBrain,
@@ -5036,6 +5051,7 @@ export function DesktopShell() {
         onOpenSystemObjects={() => openSystemObjects("tables")}
         onOpenPgMonitor={openPgMonitor}
         onOpenLockExplorer={openLockExplorer}
+        onOpenMvccExplorer={openMvccExplorer}
         onOpenPostgresAdmin={() => openPostgresAdmin()}
         onOpenNotifications={openNotifications}
         onOpenExtensions={openExtensions}
@@ -5768,6 +5784,15 @@ function renderWindowContent(
           onOpenSql={ctx.openSqlInWindow}
         />
       )
+    case "mvcc-explorer":
+      return (
+        <MvccExplorerWindow
+          key={ctx.activeConnectionId ?? "no-connection"}
+          activeConnectionId={ctx.activeConnectionId}
+          workspaceActive={ctx.workspaceActive}
+          onOpenSql={ctx.openSqlInWindow}
+        />
+      )
     case "fleet":
       return (
         <FleetWindow
@@ -6365,6 +6390,7 @@ function iconForKind(kind: DesktopWindowState["kind"]) {
       return PaletteIcon
     case "pg-monitor": return Activity
     case "lock-explorer": return Lock
+    case "mvcc-explorer": return Layers
     case "fleet": return Anchor
     case "semantic-tests": return Target
     case "postgres-admin": return Shield

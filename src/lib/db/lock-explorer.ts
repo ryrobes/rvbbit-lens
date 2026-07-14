@@ -96,7 +96,7 @@ interface MetaRow {
 interface SessionRow {
   pid: number
   leader_pid: number | null
-  backend_start: Date | string
+  backend_start: string
   backend_type: string | null
   usename: string | null
   datname: string | null
@@ -171,7 +171,10 @@ SELECT pg_backend_pid() AS observer_pid,
 const SESSIONS_SQL = `
 SELECT pid,
        leader_pid,
-       backend_start,
+       to_char(
+         backend_start AT TIME ZONE 'UTC',
+         'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'
+       ) AS backend_start,
        backend_type,
        usename,
        datname,
@@ -245,7 +248,7 @@ ORDER BY prepared
 `
 
 export async function fetchLockExplorerSnapshot(connectionId: string): Promise<LockExplorerSnapshot> {
-  const { pool, record } = await getPool(connectionId, undefined, "meta")
+  const { pool, record } = await getPool(connectionId, undefined, "observer")
   const client = await pool.connect()
   try {
     const metaResult = await client.query<MetaRow>(META_SQL)
@@ -284,7 +287,7 @@ export async function fetchLockExplorerSnapshot(connectionId: string): Promise<L
       sessions: sessionsResult.rows.map((row) => ({
         pid: Number(row.pid),
         leaderPid: row.leader_pid == null ? null : Number(row.leader_pid),
-        backendStart: iso(row.backend_start) ?? new Date(0).toISOString(),
+        backendStart: row.backend_start,
         backendType: row.backend_type,
         user: row.usename,
         database: row.datname,

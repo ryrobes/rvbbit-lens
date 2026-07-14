@@ -26,6 +26,7 @@ export type DesktopWindowKind =
   | "appearance"
   | "pg-monitor"
   | "lock-explorer"
+  | "mvcc-explorer"
   | "fleet"
   | "semantic-tests"
   | "postgres-admin"
@@ -124,6 +125,7 @@ export type WindowPayload =
   | AppearancePayload
   | PgMonitorPayload
   | LockExplorerPayload
+  | MvccExplorerPayload
   | FleetPayload
   | SemanticTestsPayload
   | PostgresAdminPayload
@@ -960,6 +962,10 @@ export interface PgMonitorPayload {
 
 export interface LockExplorerPayload {
   kind?: "lock-explorer"
+}
+
+export interface MvccExplorerPayload {
+  kind?: "mvcc-explorer"
 }
 
 export interface FleetPayload {

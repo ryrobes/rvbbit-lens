@@ -5,7 +5,7 @@ import type { ConnectionRecord, SslMode } from "./types"
 import { getConnection } from "./registry"
 import { resolveEndpoint, disposeAllTunnels } from "./tunnel"
 
-export type PoolLane = "interactive" | "meta"
+export type PoolLane = "interactive" | "meta" | "observer"
 
 const POOL_CACHE = new Map<string, { pool: Pool; signature: string }>()
 
@@ -54,6 +54,12 @@ const META_POOL_MAX = (() => {
   return positiveEnvInt("RVBBIT_META_POOL_MAX", 4)
 })()
 
+/** Live observability stays available when schema/catalog discovery is queued
+ * behind relation locks. Keep it separate from both user SQL and metadata. */
+const OBSERVER_POOL_MAX = (() => {
+  return positiveEnvInt("RVBBIT_OBSERVER_POOL_MAX", 4)
+})()
+
 /** Connection-acquire timeout (ms). CRITICAL: without it, pool.connect() parks
  *  FOREVER when all slots are busy — so a slow spell (e.g. a running sync) silently
  *  queues every UI poll, then flushes them in a burst when pressure drops ("freeze
@@ -82,11 +88,14 @@ export function buildClientConfig(
 }
 
 function buildPoolConfig(c: ConnectionRecord, lane: PoolLane): PoolConfig {
+  const applicationName = lane === "observer"
+    ? "rvbbit-lens-observer"
+    : lane === "meta" ? "rvbbit-lens-meta" : "rvbbit-lens"
   return {
     ...buildClientConfig(c, {
-      applicationName: lane === "meta" ? "rvbbit-lens-meta" : "rvbbit-lens",
+      applicationName,
     }),
-    max: lane === "meta" ? META_POOL_MAX : POOL_MAX,
+    max: lane === "observer" ? OBSERVER_POOL_MAX : lane === "meta" ? META_POOL_MAX : POOL_MAX,
     idleTimeoutMillis: 30_000,
     connectionTimeoutMillis: POOL_ACQUIRE_TIMEOUT_MS,
   }

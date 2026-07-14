@@ -40,6 +40,7 @@ interface DesktopMenuBarProps {
   onOpenSystemObjects: () => void
   onOpenPgMonitor: () => void
   onOpenLockExplorer: () => void
+  onOpenMvccExplorer: () => void
   onOpenPostgresAdmin: () => void
   onOpenNotifications: () => void
   onOpenExtensions: () => void
@@ -151,6 +152,7 @@ export function DesktopMenuBar({
   onOpenSystemObjects,
   onOpenPgMonitor,
   onOpenLockExplorer,
+  onOpenMvccExplorer,
   onOpenPostgresAdmin,
   onOpenNotifications,
   onOpenExtensions,
@@ -261,6 +263,7 @@ export function DesktopMenuBar({
     { label: "Connections...", onClick: onOpenConnections },
     { label: "Postgres Monitor", onClick: onOpenPgMonitor },
     { label: "Lock Explorer", onClick: onOpenLockExplorer },
+    { label: "MVCC Explorer", onClick: onOpenMvccExplorer },
     { label: "Postgres Admin", onClick: onOpenPostgresAdmin },
     { label: "Notification Center", onClick: onOpenNotifications },
     { label: "System Objects", onClick: onOpenSystemObjects },

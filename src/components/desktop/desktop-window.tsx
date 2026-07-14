@@ -1036,6 +1036,7 @@ const KIND_HUE: Record<string, number> = {
   appearance: 320,
   "pg-monitor": 150,
   "lock-explorer": 205,
+  "mvcc-explorer": 115,
   "postgres-admin": 150,
   "data-mover": 175,
   duck: 210,
