@@ -72,6 +72,7 @@ export type DesktopWindowKind =
   | "dagster"
   | "brain"
   | "agent-messages"
+  | "assistant"
 
 export interface DesktopWindowPosition {
   x: number
@@ -166,6 +167,14 @@ export type WindowPayload =
   | AlertsPayload
   | DagsterPayload
   | AgentMessagesPayload
+  | AssistantPayload
+
+/** The desktop-level Assistant (archive + input). The conversation thread is
+ *  deliberately NOT stored here — it lives in localStorage + homebase keyed by
+ *  home, so scene restores and desktop resets never rewind the chat. */
+export interface AssistantPayload {
+  kind?: "assistant"
+}
 
 /** The Alerts cockpit — an observable view over rvbbit.alert_* (rules, state,
  *  queue, events, sweep heartbeats). `rule` is the selected rule name. */

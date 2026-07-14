@@ -96,7 +96,28 @@ function migrate(db: SqliteDb): void {
        ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
     ).run()
   }
-  // Future migrations: `if (version < 3) { ...; bump to '3' }`.
+  if (version < 3) {
+    // Desktop Assistant thread — append-only, one unbroken conversation per
+    // home ("system tray" continuity: no sessions, no threads to manage).
+    // Deliberately separate from lens_profile/lens_scene: scene restores and
+    // desktop resets must never rewind the chat.
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS lens_assistant_messages (
+        seq        INTEGER PRIMARY KEY AUTOINCREMENT,
+        home_id    TEXT NOT NULL,
+        msg_id     TEXT NOT NULL,
+        msg_json   TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS lens_assistant_home_idx ON lens_assistant_messages (home_id, seq);
+      CREATE UNIQUE INDEX IF NOT EXISTS lens_assistant_msg_idx ON lens_assistant_messages (home_id, msg_id);
+    `)
+    db.prepare(
+      `INSERT INTO lens_meta (key, value) VALUES ('schema_version', '3')
+       ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+    ).run()
+  }
+  // Future migrations: `if (version < 4) { ...; bump to '4' }`.
 }
 
 export function lensDb(): SqliteDb {
@@ -156,6 +177,71 @@ export function putViews(homeId: string, views: unknown[]): void {
        ON CONFLICT(home_id) DO UPDATE SET views_json = excluded.views_json, updated_at = excluded.updated_at`,
     )
     .run(homeId, JSON.stringify(Array.isArray(views) ? views : []), new Date().toISOString())
+}
+
+// ── assistant thread (append-only, per home) ────────────────────────────────
+
+/** The v3 DDL, runnable on demand: a long-lived dev-server process caches the
+ *  db handle on globalThis, so a handle opened before this table shipped never
+ *  re-runs migrate(). Everything here is IF NOT EXISTS — safe to re-apply. */
+function ensureAssistantTable(db: SqliteDb): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS lens_assistant_messages (
+      seq        INTEGER PRIMARY KEY AUTOINCREMENT,
+      home_id    TEXT NOT NULL,
+      msg_id     TEXT NOT NULL,
+      msg_json   TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS lens_assistant_home_idx ON lens_assistant_messages (home_id, seq);
+    CREATE UNIQUE INDEX IF NOT EXISTS lens_assistant_msg_idx ON lens_assistant_messages (home_id, msg_id);
+  `)
+}
+
+export function appendAssistantMessages(homeId: string, messages: unknown[]): number {
+  const db = lensDb()
+  ensureAssistantTable(db)
+  const stmt = db.prepare(
+    `INSERT INTO lens_assistant_messages (home_id, msg_id, msg_json, created_at)
+     VALUES (?, ?, ?, ?)
+     ON CONFLICT(home_id, msg_id) DO NOTHING`,
+  )
+  const now = new Date().toISOString()
+  let appended = 0
+  for (const msg of messages) {
+    const id =
+      msg && typeof msg === "object" && typeof (msg as { id?: unknown }).id === "string"
+        ? (msg as { id: string }).id
+        : null
+    if (!id) continue
+    const info = stmt.run(homeId, id, JSON.stringify(msg), now)
+    appended += Number(info.changes ?? 0)
+  }
+  return appended
+}
+
+/** The tail of the thread, oldest→newest (the client hydration shape). */
+export function listAssistantMessages(homeId: string, limit = 400): unknown[] {
+  const db = lensDb()
+  ensureAssistantTable(db)
+  const rows = db
+    .prepare(
+      `SELECT msg_json FROM (
+         SELECT seq, msg_json FROM lens_assistant_messages
+         WHERE home_id = ? ORDER BY seq DESC LIMIT ?
+       ) ORDER BY seq ASC`,
+    )
+    .all(homeId, limit) as Array<{ msg_json?: string }>
+  const out: unknown[] = []
+  for (const row of rows) {
+    if (!row.msg_json) continue
+    try {
+      out.push(JSON.parse(row.msg_json))
+    } catch {
+      // skip corrupt rows
+    }
+  }
+  return out
 }
 
 // ── home discovery ───────────────────────────────────────────────────────────

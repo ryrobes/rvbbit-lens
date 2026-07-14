@@ -30,6 +30,7 @@ import {
   Plug,
   Plus,
   Quote,
+  Rabbit,
   Rocket,
   Search,
   Shield,
@@ -86,6 +87,13 @@ import { OperatorsWindow } from "./operators-window"
 import { ModelSettingsWindow } from "./model-settings-window"
 import { CostsWindow } from "./costs-window"
 import { AgentMessagesWindow } from "./agent-messages-window"
+import { AssistantWindow } from "./assistant-window"
+import {
+  ASSISTANT_COMMAND_CAP,
+  assistantBlockName,
+  type AssistantApplyResult,
+  type AssistantCommand,
+} from "@/lib/desktop/assistant"
 import { SyncMirrorWindow } from "./sync-mirror-window"
 import { DASHBOARD_SELECT_EVENT, DashboardsWindow } from "./dashboards-window"
 import { AppsWindow } from "./apps-window"
@@ -182,6 +190,7 @@ import type {
   NotificationsPayload,
   CostsPayload,
   AgentMessagesPayload,
+  AssistantPayload,
   SyncMirrorPayload,
   DuckPayload,
   OperatorFlowPayload,
@@ -303,7 +312,7 @@ import type { DashboardRow } from "@/lib/rvbbit/dashboards"
 import { detectHindsight } from "@/lib/rvbbit/hindsight"
 import { detectDataMover } from "@/lib/rvbbit/data-mover"
 import { fetchKgEvidenceBySource, fetchPrimaryKeyColumn } from "@/lib/rvbbit/kg"
-import { broadcastTargetWindowIds, buildDesktopRuntimeGraph, paramKey, resolveParamTableTarget, sameParamValue, sourceSqlForPayload, uniqueBlockName } from "@/lib/desktop/reactive-sql"
+import { broadcastTargetWindowIds, buildDesktopRuntimeGraph, paramKey, resolveParamTableTarget, sameParamValue, slugifyBlockName, sourceSqlForPayload, uniqueBlockName } from "@/lib/desktop/reactive-sql"
 import {
   hasColumnDragPayload,
   readColumnDragPayload,
@@ -517,6 +526,10 @@ export function DesktopShell() {
   const [scenes, setScenes] = useState<Scene[]>([])
   const [runSignals, setRunSignals] = useState<Record<string, number>>({})
   const [viewport, setViewport] = useState<DesktopViewportState>(DEFAULT_VIEWPORT)
+  // Mutable mirror for callbacks that need the CURRENT viewport without
+  // re-creating on every pan frame (e.g. the assistant command applier).
+  const viewportRef = useRef(viewport)
+  viewportRef.current = viewport
   const [ctxMenu, setCtxMenu] = useState<ContextMenuState | null>(null)
   const [desktopShortcuts, setDesktopShortcuts] = useState<DesktopShortcut[]>(() => loadDesktopShortcuts())
   const [paletteOpen, setPaletteOpen] = useState(false)
@@ -2399,6 +2412,248 @@ export function DesktopShell() {
     [focus, openWindow, liveWindows, updatePayload],
   )
 
+  const openAssistant = useCallback(() => {
+    const existing = liveWindows().find((w) => w.kind === "assistant")
+    if (existing) {
+      if (existing.minimized) {
+        setWindows((ws) => ws.map((w) => (w.id === existing.id ? { ...w, minimized: false } : w)))
+      }
+      return focus(existing.id)
+    }
+    // Dock against the right edge of the CURRENT viewport — she hovers at the
+    // side of the desk, not wherever world (940, 90) happens to be.
+    const vp = viewportRef.current
+    const innerW = typeof window !== "undefined" ? window.innerWidth : 1600
+    const width = 440
+    const height = 640
+    openWindow({
+      id: randomUUID(),
+      kind: "assistant",
+      title: "Assistant",
+      x: clampWorld(Math.max((0 - vp.x) / vp.scale + 16, (innerW - vp.x) / vp.scale - width - 24)),
+      y: clampWorld((0 - vp.y) / vp.scale + 84),
+      width,
+      height,
+      payload: { kind: "assistant" } satisfies AssistantPayload,
+    })
+  }, [focus, openWindow, liveWindows])
+
+  /**
+   * Apply one assistant turn's rvbbit.desktop_commands.v1 batch through the
+   * shell mutation API, returning a per-command report that rides back to the
+   * agent in the NEXT turn's desktop_context (it never assumes an apply
+   * succeeded). Names are the foreign keys: later commands may reference
+   * blocks created earlier in the same batch, so created windows accumulate
+   * locally — liveWindows() reads a ref that is stale inside this batch.
+   * commitSnapshotNow() first makes the whole turn one undo step.
+   */
+  const applyAssistantCommands = useCallback(
+    (commands: AssistantCommand[]): AssistantApplyResult[] => {
+      commitSnapshotNow()
+      const report: AssistantApplyResult[] = []
+      const created: DesktopWindowState[] = []
+      const allKnown = () => [...liveWindows(), ...created]
+      const findTarget = (t: string | undefined): DesktopWindowState | undefined => {
+        if (!t) return undefined
+        const wanted = t.trim().toLowerCase()
+        const ws = allKnown()
+        return (
+          ws.find((w) => w.id === t) ??
+          ws.find((w) => w.kind === "data" && assistantBlockName(w).toLowerCase() === wanted) ??
+          ws.find((w) => assistantBlockName(w).toLowerCase() === wanted)
+        )
+      }
+      const overlaps = (x: number, y: number, width: number, height: number) =>
+        allKnown().some(
+          (w) =>
+            !w.minimized &&
+            x < w.x + w.width + 16 &&
+            x + width + 16 > w.x &&
+            y < w.y + w.height + 16 &&
+            y + height + 16 > w.y,
+        )
+      // Placement is confined to the VISIBLE world rect — a block the user
+      // can't see is a block that didn't happen. Prefer a free spot; when the
+      // visible area is full, cascade with overlap (it's a desktop, windows
+      // overlap) rather than walking off-screen.
+      const vp = viewportRef.current
+      const innerW = typeof window !== "undefined" ? window.innerWidth : 1600
+      const innerH = typeof window !== "undefined" ? window.innerHeight : 900
+      const vis = {
+        x: (0 - vp.x) / vp.scale + 16,
+        y: (0 - vp.y) / vp.scale + 72,
+        width: innerW / vp.scale - 32,
+        height: innerH / vp.scale - 96,
+      }
+      const clampVisible = (x: number, y: number, width: number, height: number) => ({
+        x: clampWorld(Math.min(Math.max(x, vis.x), Math.max(vis.x, vis.x + vis.width - width))),
+        y: clampWorld(Math.min(Math.max(y, vis.y), Math.max(vis.y, vis.y + vis.height - height))),
+      })
+      const placeAt = (
+        place: "auto" | { near: string } | undefined,
+        width: number,
+        height: number,
+      ): { x: number; y: number } => {
+        if (place && typeof place === "object" && place.near) {
+          const anchor = findTarget(place.near)
+          if (anchor) {
+            const right = { x: anchor.x + anchor.width + 28, y: anchor.y }
+            if (right.x + width <= vis.x + vis.width) return clampVisible(right.x, right.y, width, height)
+            return clampVisible(anchor.x, anchor.y + anchor.height + 28, width, height)
+          }
+        }
+        const stepX = 64
+        const stepY = 56
+        for (let y = vis.y; y + height <= vis.y + vis.height; y += stepY) {
+          for (let x = vis.x; x + width <= vis.x + vis.width; x += stepX) {
+            if (!overlaps(x, y, width, height)) return { x: clampWorld(x), y: clampWorld(y) }
+          }
+        }
+        const cascade = created.length
+        return clampVisible(vis.x + 96 + cascade * 44, vis.y + 48 + cascade * 40, width, height)
+      }
+
+      commands.forEach((cmd, index) => {
+        if (index >= ASSISTANT_COMMAND_CAP) {
+          report.push({ op: cmd.op, status: "skipped", detail: `over the ${ASSISTANT_COMMAND_CAP}-command per-turn cap` })
+          return
+        }
+        try {
+          switch (cmd.op) {
+            case "create_block": {
+              if (!cmd.sql?.trim()) {
+                report.push({ op: cmd.op, target: cmd.name, status: "skipped", detail: "create_block requires sql" })
+                return
+              }
+              const requested = cmd.name ?? cmd.title ?? "block"
+              const name = uniqueBlockName(requested, allKnown())
+              const id = randomUUID()
+              const size = { width: 720, height: 460 }
+              const { x, y } = placeAt(cmd.place, size.width, size.height)
+              const win: DesktopWindowState = {
+                id,
+                kind: "data",
+                title: cmd.title ?? name,
+                x, y, width: size.width, height: size.height,
+                zIndex: 0,
+                minimized: false,
+                payload: {
+                  kind: "data",
+                  title: cmd.title ?? name,
+                  sql: cmd.sql,
+                  origin: "derived",
+                  autoRun: true,
+                  reactive: { blockName: name, sourceSql: cmd.sql, version: 1 },
+                  view: { activeTab: "rows", sqlRailOpen: false },
+                } satisfies DataPayload,
+              }
+              openWindow(win)
+              created.push(win)
+              report.push({
+                op: cmd.op,
+                target: name,
+                status: "applied",
+                detail: name !== slugifyBlockName(requested) ? `created as ${name}` : undefined,
+              })
+              return
+            }
+            case "update_block": {
+              const target = findTarget(cmd.target)
+              if (!target || target.kind !== "data") {
+                report.push({ op: cmd.op, target: cmd.target, status: "skipped", detail: `no data block named "${cmd.target}"` })
+                return
+              }
+              const patch = cmd.patch ?? {}
+              updatePayload(target.id, (p) => {
+                const dp = p as DataPayload
+                return {
+                  ...dp,
+                  ...(patch.title ? { title: patch.title } : {}),
+                  ...(patch.sql ? { sql: patch.sql } : {}),
+                  reactive: dp.reactive
+                    ? {
+                        ...dp.reactive,
+                        ...(patch.sql ? { sourceSql: patch.sql } : {}),
+                        version: (dp.reactive.version ?? 1) + 1,
+                      }
+                    : dp.reactive,
+                } satisfies DataPayload
+              })
+              if (patch.title) {
+                const title = patch.title
+                setWindows((ws) => ws.map((w) => (w.id === target.id ? { ...w, title } : w)))
+              }
+              if (patch.sql) {
+                // Next tick, not same batch: the data window's draft syncs from
+                // payload.sql in an effect, and a same-render runSignal bump
+                // re-runs the STALE draft (effects fire with pre-sync closures).
+                window.setTimeout(() => {
+                  setRunSignals((prev) => ({ ...prev, [target.id]: (prev[target.id] ?? 0) + 1 }))
+                }, 80)
+              }
+              report.push({ op: cmd.op, target: assistantBlockName(target), status: "applied" })
+              return
+            }
+            case "emit_param": {
+              const source = findTarget(cmd.block)
+              if (!source) {
+                report.push({ op: cmd.op, target: cmd.block, status: "skipped", detail: `no block named "${cmd.block}"` })
+                return
+              }
+              emitParam({
+                sourceWindowId: source.id,
+                sourceBlockName: assistantBlockName(source),
+                sourceTitle: source.title,
+                field: cmd.field,
+                value: cmd.value,
+                operator: cmd.operator ?? "eq",
+              })
+              report.push({ op: cmd.op, target: `${assistantBlockName(source)}.${cmd.field}`, status: "applied" })
+              return
+            }
+            case "focus_block": {
+              const target = findTarget(cmd.target)
+              if (!target) {
+                report.push({ op: cmd.op, target: cmd.target, status: "skipped", detail: `no block named "${cmd.target}"` })
+                return
+              }
+              if (target.minimized) {
+                setWindows((ws) => ws.map((w) => (w.id === target.id ? { ...w, minimized: false } : w)))
+              }
+              focus(target.id)
+              report.push({ op: cmd.op, target: assistantBlockName(target), status: "applied" })
+              return
+            }
+            case "close_block": {
+              const target = findTarget(cmd.target)
+              if (!target) {
+                report.push({ op: cmd.op, target: cmd.target, status: "skipped", detail: `no block named "${cmd.target}"` })
+                return
+              }
+              close(target.id)
+              report.push({ op: cmd.op, target: assistantBlockName(target), status: "applied" })
+              return
+            }
+            default:
+              report.push({
+                op: (cmd as { op?: string }).op ?? "unknown",
+                status: "skipped",
+                detail: "unknown command op",
+              })
+          }
+        } catch (err) {
+          report.push({
+            op: (cmd as { op?: string }).op ?? "unknown",
+            status: "skipped",
+            detail: err instanceof Error ? err.message : "apply failed",
+          })
+        }
+      })
+      return report
+    },
+    [commitSnapshotNow, liveWindows, openWindow, updatePayload, emitParam, focus, close, setWindows, setRunSignals],
+  )
+
   const openSyncMirror = useCallback(() => {
     const existing = liveWindows().find((w) => w.kind === "sync-mirror")
     if (existing) return focus(existing.id)
@@ -4240,6 +4495,7 @@ export function DesktopShell() {
     // Semantic
     { id: "operators", label: "Operators", icon: FlowArrow, color: "var(--brand-operators)", description: "Semantic SQL operators", activate: openOperators, folder: "semantic", rvbbit: true },
     { id: "model-settings", label: "Model Settings", icon: Settings2, color: "var(--brand-routing)", description: "LLM defaults, operator models & spend", activate: openModelSettings, folder: "semantic", rvbbit: true },
+    { id: "assistant", label: "Assistant", icon: Rabbit, color: "var(--main)", description: "The desktop speaks — chat that builds and steers blocks", activate: openAssistant, folder: "semantic", rvbbit: true },
     { id: "agent-messages", label: "Messages", icon: Quote, color: "var(--viz-op-agent, var(--brand-warren))", description: "Agent transcripts — by run, with cost", activate: () => openAgentMessages(), folder: "semantic", rvbbit: true },
     { id: "specialists", label: "Specialists", icon: Brain, color: "var(--brand-specialists)", description: "Fine-tuned task models", activate: openSpecialists, folder: "semantic", rvbbit: true },
     { id: "routing", label: "Routing", icon: GitBranch, color: "var(--brand-routing)", description: "Model/backend routing rules", activate: openRouting, folder: "semantic", rvbbit: true },
@@ -4274,7 +4530,7 @@ export function DesktopShell() {
     viewAppCount, schema, rvbbitVersion,
     openFinder, openSqlScratch, openViewApps, openConnections, openDataSearch, openSystemLearning, openMcpIncoming,
     openSystemObjects, openExtensions, openPgMonitor, openFleet, openPostgresAdmin, openCache, openRvbbitCache,
-    openCosts, openAgentMessages, openDataMover, dataMoverDetected, openSyncMirror, openOperators, openModelSettings, openSpecialists, openRouting,
+    openCosts, openAgentMessages, openAssistant, openDataMover, dataMoverDetected, openSyncMirror, openOperators, openModelSettings, openSpecialists, openRouting,
     openMcpServers, openCapabilities, openHfDeploy, openWarren, openModelStudio,
     openDuck, openDagster, dagsterDetected, openMetricCatalog, openMetricCreator, openMetricInspector, openVizBlocks, openMetricBoard, openDashboards, openApps, openDashboardApp, openAlerts, openBrain,
     openCubeCatalog, openCubeCreator, openCubeInspector, openCubeProposals,
@@ -4502,6 +4758,7 @@ export function DesktopShell() {
       reloadSchema: () => activeConnectionId && void loadSchema(activeConnectionId),
       reloadConnections: loadConnections,
       updatePayload,
+      applyAssistantCommands,
       emitParam,
       subscribeParam,
       editRollupSpec,
@@ -4562,7 +4819,7 @@ export function DesktopShell() {
       openTableFromFinder, openSqlInWindow, viewObjectDdl, openField, openViewAppBuilder, openViewApp,
       addLauncherShortcut, addViewAppShortcut, addDashboardShortcut, openDashboardApp, openArtifact,
       openQueryDocument, openSqlData, openRowInspector, openCsvImport, openExtensions, openRvbbitCache, openCache, openConnections,
-      loadSchema, loadConnections, updatePayload, emitParam, subscribeParam,
+      loadSchema, loadConnections, updatePayload, applyAssistantCommands, emitParam, subscribeParam,
       editRollupSpec, repivotWindow, probeColumnValues, activePalette, paletteOverrides,
       wallpaperUrl, onPickWallpaper, onClearWallpaper, onApplyLibraryWallpaper, applyUploadedWallpaper,
       onReExtractPalette, onReExtractWithRvbbit, setPaletteOverrides,
@@ -5107,6 +5364,9 @@ interface WindowContext {
   reloadSchema: () => void
   reloadConnections: () => Promise<void>
   updatePayload: (id: string, mutator: (payload: unknown) => unknown) => void
+  /** Apply one assistant turn's command batch; returns the per-command report
+   *  that rides back to the agent in the next turn's desktop_context. */
+  applyAssistantCommands: (commands: AssistantCommand[]) => AssistantApplyResult[]
   windows: DesktopWindowState[]
   params: DesktopParamValue[]
   runSignal: number
@@ -5813,6 +6073,17 @@ function renderWindowContent(
           onOpenOperator={(name) => ctx.openOperatorFlow(name)}
         />
       )
+    case "assistant":
+      return (
+        <AssistantWindow
+          window={w}
+          activeConnectionId={ctx.activeConnectionId}
+          schema={ctx.schema}
+          allWindows={ctx.windows}
+          params={ctx.params}
+          applyCommands={ctx.applyAssistantCommands}
+        />
+      )
     case "sync-mirror":
       // Key on the connection so a switch remounts (clears stale jobs/overview +
       // discards any in-flight overview fetch for the previous connection).
@@ -6029,6 +6300,7 @@ function iconForKind(kind: DesktopWindowState["kind"]) {
       return Rocket
     case "costs": return DollarSign
     case "agent-messages": return Quote
+    case "assistant": return Rabbit
     case "data-mover": return Upload
     case "sync-mirror": return Database
     case "dashboards": return LayoutDashboard

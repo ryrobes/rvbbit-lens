@@ -108,6 +108,7 @@ export {
   Plus,
   Pulse as Activity,
   Quotes as Quote,
+  Rabbit,
   Rocket,
   Shield,
   ShoppingCart,
