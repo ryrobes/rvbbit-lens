@@ -95,6 +95,7 @@ export interface ColorTokens {
   winConnectionsH: string
   winPaletteH: string
   winPgMonitorH: string
+  winLockExplorerH: string
   winDuckH: string
   winFolderH: string
 
@@ -108,6 +109,7 @@ export interface ColorTokens {
   brandRvbbitCache: string
   brandCache: string
   brandPgMonitor: string
+  brandLockExplorer: string
   brandOperators: string
   brandSpecialists: string
   brandRouting: string

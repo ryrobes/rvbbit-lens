@@ -12,6 +12,7 @@ import {
   Calculator,
   Database,
   LayoutDashboard,
+  Lock,
   DollarSign,
   Eye,
   FileCode2,
@@ -78,6 +79,7 @@ import { PaletteWindow } from "./palette-window"
 import { AppearanceWindow } from "./appearance-window"
 import { CommandPalette, type PaletteGroup, type PaletteItem } from "./command-palette"
 import { PgMonitorWindow } from "./pg-monitor-window"
+import { LockExplorerWindow } from "./lock-explorer-window"
 import { FleetWindow } from "./fleet-window"
 import { SemanticTestsWindow } from "./semantic-tests-window"
 import { PostgresAdminWindow } from "./postgres-admin-window"
@@ -225,6 +227,7 @@ import type {
   AppearancePayload,
   PalettePayload,
   PgMonitorPayload,
+  LockExplorerPayload,
   FleetPayload,
   SemanticTestsPayload,
   PostgresAdminPayload,
@@ -2212,6 +2215,18 @@ export function DesktopShell() {
       title: "Postgres Monitor",
       x: 120, y: 80, width: 940, height: 720,
       payload: { kind: "pg-monitor" } satisfies PgMonitorPayload,
+    })
+  }, [focus, openWindow, liveWindows])
+
+  const openLockExplorer = useCallback(() => {
+    const existing = liveWindows().find((w) => w.kind === "lock-explorer")
+    if (existing) return focus(existing.id)
+    openWindow({
+      id: randomUUID(),
+      kind: "lock-explorer",
+      title: "Lock Explorer",
+      x: 105, y: 65, width: 1120, height: 760,
+      payload: { kind: "lock-explorer" } satisfies LockExplorerPayload,
     })
   }, [focus, openWindow, liveWindows])
 
@@ -4576,6 +4591,7 @@ export function DesktopShell() {
     { id: "system-objects", label: "System Objects", icon: Layers, color: "var(--brand-system-objects)", description: "Tables, indexes, roles, activity", activate: () => openSystemObjects("tables"), folder: "system" },
     { id: "extensions", label: "Extensions", icon: Settings2, color: "var(--brand-extensions)", description: "Installed Postgres extensions", activate: openExtensions, folder: "system" },
     { id: "monitor", label: "Monitor", icon: Activity, color: "var(--brand-pg-monitor)", description: "Live server activity & stats", activate: openPgMonitor, folder: "system" },
+    { id: "lock-explorer", label: "Lock Explorer", icon: Lock, color: "var(--brand-lock-explorer)", description: "Live blocker chains, resources & replay", activate: openLockExplorer, folder: "system" },
     { id: "fleet", label: "Fleet", icon: Anchor, color: "var(--brand-pg-monitor)", description: "Read-fleet workers, publication & storage health", activate: openFleet, folder: "system", rvbbit: true },
     { id: "semantic-tests", label: "Semantic Tests", icon: Target, color: "var(--brand-pg-monitor)", description: "Operator test batteries, pass rates & verdict drift", activate: openSemanticTests, folder: "system", rvbbit: true },
     { id: "postgres-admin", label: "Postgres Admin", icon: Shield, color: "var(--brand-pg-monitor)", description: "Locks, grants, indexes, objects & backup plans", activate: () => openPostgresAdmin(), folder: "system" },
@@ -4621,7 +4637,7 @@ export function DesktopShell() {
   ], [
     viewAppCount, schema, rvbbitVersion,
     openFinder, openSqlScratch, openViewApps, openConnections, openDataSearch, openSystemLearning, openMcpIncoming,
-    openSystemObjects, openExtensions, openPgMonitor, openFleet, openPostgresAdmin, openCache, openRvbbitCache,
+    openSystemObjects, openExtensions, openPgMonitor, openLockExplorer, openFleet, openPostgresAdmin, openCache, openRvbbitCache,
     openCosts, openAgentMessages, openAssistantSettings, openDataMover, dataMoverDetected, openSyncMirror, openOperators, openModelSettings, openSpecialists, openRouting,
     openMcpServers, openCapabilities, openHfDeploy, openWarren, openModelStudio,
     openDuck, openDagster, dagsterDetected, openMetricCatalog, openMetricCreator, openMetricInspector, openVizBlocks, openMetricBoard, openDashboards, openApps, openDashboardApp, openAlerts, openBrain,
@@ -5019,6 +5035,7 @@ export function DesktopShell() {
         canRunSqlBlocksOnScreen={canRunSqlBlocksOnScreen}
         onOpenSystemObjects={() => openSystemObjects("tables")}
         onOpenPgMonitor={openPgMonitor}
+        onOpenLockExplorer={openLockExplorer}
         onOpenPostgresAdmin={() => openPostgresAdmin()}
         onOpenNotifications={openNotifications}
         onOpenExtensions={openExtensions}
@@ -5742,6 +5759,15 @@ function renderWindowContent(
           workspaceActive={ctx.workspaceActive}
         />
       )
+    case "lock-explorer":
+      return (
+        <LockExplorerWindow
+          key={ctx.activeConnectionId ?? "no-connection"}
+          activeConnectionId={ctx.activeConnectionId}
+          workspaceActive={ctx.workspaceActive}
+          onOpenSql={ctx.openSqlInWindow}
+        />
+      )
     case "fleet":
       return (
         <FleetWindow
@@ -6338,6 +6364,7 @@ function iconForKind(kind: DesktopWindowState["kind"]) {
     case "appearance":
       return PaletteIcon
     case "pg-monitor": return Activity
+    case "lock-explorer": return Lock
     case "fleet": return Anchor
     case "semantic-tests": return Target
     case "postgres-admin": return Shield

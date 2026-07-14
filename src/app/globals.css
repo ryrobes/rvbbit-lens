@@ -176,6 +176,7 @@
   --win-connections-h: 290;
   --win-palette-h: 320;
   --win-pg-monitor-h: 150;
+  --win-lock-explorer-h: 205;
   --win-duck-h: 210;
   --win-dagster-h: 235;
   --win-folder-h: 85;
@@ -192,6 +193,7 @@
   --brand-rvbbit-cache: oklch(82% 0.02 175);
   --brand-cache: oklch(83% 0.04 95);
   --brand-pg-monitor: oklch(83% 0.02 150);
+  --brand-lock-explorer: oklch(82% 0.02 205);
   --brand-operators: oklch(82% 0.02 168);
   --brand-specialists: oklch(80% 0.02 300);
   --brand-routing: oklch(81% 0.02 255);
@@ -319,6 +321,7 @@
   --win-connections-h: 290;
   --win-palette-h: 320;
   --win-pg-monitor-h: 150;
+  --win-lock-explorer-h: 205;
   --win-duck-h: 210;
   --win-dagster-h: 235;
   --win-folder-h: 85;
@@ -332,6 +335,7 @@
   --brand-rvbbit-cache: oklch(54% 0.025 175);
   --brand-cache: oklch(58% 0.06 95);
   --brand-pg-monitor: oklch(50% 0.025 150);
+  --brand-lock-explorer: oklch(52% 0.025 205);
   --brand-operators: oklch(53% 0.025 168);
   --brand-specialists: oklch(52% 0.025 300);
   --brand-routing: oklch(52% 0.025 255);
@@ -412,6 +416,7 @@
   --color-brand-rvbbit-cache: var(--brand-rvbbit-cache);
   --color-brand-cache: var(--brand-cache);
   --color-brand-pg-monitor: var(--brand-pg-monitor);
+  --color-brand-lock-explorer: var(--brand-lock-explorer);
   --color-brand-operators: var(--brand-operators);
   --color-brand-specialists: var(--brand-specialists);
   --color-brand-routing: var(--brand-routing);
