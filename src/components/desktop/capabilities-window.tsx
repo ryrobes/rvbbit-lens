@@ -1001,9 +1001,11 @@ function CapabilityCard({
                   color: "var(--cap-type)",
                   border: "1px solid color-mix(in oklch, var(--cap-type) 55%, transparent)",
                 }}
-                title="Tiered plans — open for details"
+                title="Free tier available — open for plans"
               >
-                from ${managed.pricing!.monthly_usd}/mo
+                {managed.pricing?.tiers?.some((t) => t.monthly_usd === 0)
+                  ? `Free · from $${managed.pricing!.monthly_usd}/mo`
+                  : `from $${managed.pricing!.monthly_usd}/mo`}
               </span>
             ) : managed.pricing?.monthly_usd ? (
               <span

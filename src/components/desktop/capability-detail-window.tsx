@@ -720,7 +720,9 @@ function ManagedOverviewTab({
           {price && !comingSoon ? (
             hasTiers ? (
               <span className="text-[12px] font-semibold" style={{ color: gold }}>
-                from ${price}/mo
+                {managed.pricing?.tiers?.some((t) => t.monthly_usd === 0)
+                  ? `Free tier · paid from $${price}/mo`
+                  : `from $${price}/mo`}
               </span>
             ) : managed.pricing?.checkout_url ? (
               <a
@@ -749,28 +751,40 @@ function ManagedOverviewTab({
           <div>
             <ManagedSectionTitle>Plans · pick a lane count</ManagedSectionTitle>
             <div className="grid grid-cols-2 gap-1.5 sm:grid-cols-4">
-              {managed.pricing!.tiers!.map((tier) => (
-                <a
-                  key={tier.name}
-                  href={tier.checkout_url}
-                  target="_blank"
-                  rel="noreferrer"
-                  className={cn(
-                    "flex flex-col gap-0.5 rounded-md border p-2 transition",
-                    tier.checkout_url ? "hover:brightness-125" : "pointer-events-none opacity-70",
-                  )}
-                  style={{ borderColor: `color-mix(in oklch, ${gold} 30%, transparent)` }}
-                >
-                  <span className="text-[11px] font-medium text-foreground">{tier.name}</span>
-                  <span className="text-[13px] font-semibold" style={{ color: gold }}>
-                    {tier.monthly_usd === 0 ? "Free" : `$${tier.monthly_usd}`}
-                    {tier.monthly_usd === 0 ? "" : <span className="text-[9px] text-chrome-text/50">/mo</span>}
-                  </span>
-                  <span className="text-[10px] text-chrome-text/55">
-                    {tier.lanes} lane{tier.lanes === 1 ? "" : "s"}
-                  </span>
-                </a>
-              ))}
+              {managed.pricing!.tiers!.map((tier) => {
+                const isContact = tier.monthly_usd == null && !tier.checkout_url
+                const href = isContact
+                  ? tier.contact_email
+                    ? `mailto:${tier.contact_email}?subject=${encodeURIComponent(`${catalog.title} — custom plan`)}`
+                    : undefined
+                  : tier.checkout_url
+                return (
+                  <a
+                    key={tier.name}
+                    href={href}
+                    target={isContact ? undefined : "_blank"}
+                    rel="noreferrer"
+                    className={cn(
+                      "flex flex-col gap-0.5 rounded-md border p-2 transition",
+                      href ? "hover:brightness-125" : "pointer-events-none opacity-70",
+                    )}
+                    style={{ borderColor: `color-mix(in oklch, ${gold} 30%, transparent)` }}
+                  >
+                    <span className="text-[11px] font-medium text-foreground">{tier.name}</span>
+                    <span className="text-[13px] font-semibold" style={{ color: gold }}>
+                      {isContact ? "Email us" : tier.monthly_usd === 0 ? "Free" : `$${tier.monthly_usd}`}
+                      {isContact || tier.monthly_usd === 0 ? "" : <span className="text-[9px] text-chrome-text/50">/mo</span>}
+                    </span>
+                    <span className="text-[10px] text-chrome-text/55">
+                      {tier.lanes == null
+                        ? isContact
+                          ? "more lanes · custom"
+                          : ""
+                        : `${tier.lanes} lane${tier.lanes === 1 ? "" : "s"}`}
+                    </span>
+                  </a>
+                )
+              })}
             </div>
             <p className="mt-1 text-[9px] leading-snug text-chrome-text/45">
               Same install at every tier — your key carries the lane count, so nothing tier-specific to configure.

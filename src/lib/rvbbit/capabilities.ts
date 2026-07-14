@@ -248,8 +248,17 @@ export interface ManagedCapabilityBlock {
     checkout_url?: string
     note?: string
     /** One product, many levels: tier is a property of the KEY (benefit →
-     * lanes at the gateway), so install SQL is identical across tiers. */
-    tiers?: { name: string; lanes: number; monthly_usd: number; checkout_url?: string }[]
+     * lanes at the gateway), so install SQL is identical across tiers.
+     * A tier with null price/lanes + contact_email renders as "Email us"
+     * (the custom lane — becomes an unlisted Polar product when sold). */
+    tiers?: {
+      name: string
+      lanes: number | null
+      monthly_usd: number | null
+      checkout_url?: string
+      contact_email?: string
+      note?: string
+    }[]
   }
   /** Privacy/trust claims — each one architecturally true, rendered as a list. */
   privacy?: string[]

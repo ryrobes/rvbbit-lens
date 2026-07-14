@@ -4623,7 +4623,7 @@ export function DesktopShell() {
     { id: "specialists", label: "Specialists", icon: Brain, color: "var(--brand-specialists)", description: "Fine-tuned task models", activate: openSpecialists, folder: "semantic", rvbbit: true },
     { id: "routing", label: "Routing", icon: GitBranch, color: "var(--brand-routing)", description: "Model/backend routing rules", activate: openRouting, folder: "semantic", rvbbit: true },
     { id: "mcp", label: "MCP", icon: Globe, color: "var(--brand-mcp)", description: "MCP servers & tools", activate: openMcpServers, folder: "semantic", rvbbit: true },
-    { id: "capabilities", label: "Capabilities", icon: Package, color: "var(--brand-capability)", description: "Installable model capabilities", activate: () => openCapabilities(), folder: "semantic", rvbbit: true },
+    { id: "capabilities", label: "Capabilities", icon: Package, color: "var(--brand-capability)", description: "Packs, operators & hosted capabilities — install with one click", activate: () => openCapabilities(), rvbbit: true },
     { id: "hf-deploy", label: "Hugging Face", icon: Sparkles, color: "var(--brand-capability)", description: "Deploy any Hugging Face model by id", activate: () => openHfDeploy(), folder: "semantic", rvbbit: true },
     { id: "warren", label: "Warren", icon: Rocket, color: "var(--brand-warren)", description: "Sidecar model runtimes & jobs", activate: () => openWarren(), folder: "semantic", rvbbit: true },
     { id: "model-studio", label: "Model Studio", icon: Brain, color: "var(--brand-specialists)", description: "Inspect & try models", activate: () => openModelStudio(), folder: "semantic", rvbbit: true },
