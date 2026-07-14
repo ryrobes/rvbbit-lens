@@ -10,6 +10,98 @@ Repos involved: `rvbbit-lens` (UI, applier, persistence) + `rvbbit-sql` (operato
 - Lens: `assistant` window kind (`types.ts`), `assistant-window.tsx` (aether styling: translucent blur pane, ✦ floating utterances, command chips as receipts, theme tokens only), `lib/desktop/assistant.ts` (context builder w/ resolved SQL via buildDesktopRuntimeGraph, turn transport, thread persistence), applier + viewport-aware placement in `desktop-shell.tsx` (`applyAssistantCommands`), homebase `lens_assistant_messages` (lens-db v3) + `/api/lens/assistant`, Rabbit launcher in the Semantic folder.
 - Verified live (Playwright): create×2 with `place:near`, update_block (+ next-tick runSignal), emit_param → PARAMS shelf + cascade, focus, thread survives desktop reset, user-correction loop.
 
+## Tier 1 charts + live pills (shipped 2026-07-13, uncommitted)
+
+- `chart` field on create_block/update_block: Vega-Lite **mark+encoding only** —
+  chart-view.tsx force-injects `data:{values:rows}`, `width/height:"container"`,
+  autosize, and theme config, so specs must omit all of those (the CHARTS
+  section of the operator prompt enforces it; aggregation/ordering happens in
+  SQL). Lands as the sticky `chartSpec` + `viewKind:"chart"` +
+  `view.activeTab:"chart"` — the user keeps Shelf/YAML/Reset-to-auto chrome.
+  `patch.chart: null` clears back to auto.
+- Pills are live: click → `focus_block` via the applier (chips prefer the apply
+  report's actual target name — creates can be slug-renamed); chips whose
+  target left the canvas dim to 0.65 + disable ("no longer on the desktop"),
+  computed per render from ctx.windows. close_block chips stay bright — they
+  describe a completed act, not a live pointer.
+- Verified E2E incl. next-day thread continuity (14-message thread picked up
+  cold across a dev-server day boundary; she rebuilt a chart block from the
+  conversation `did` history on an empty desk).
+
+## Tier 2 HTML apps (shipped 2026-07-13, uncommitted)
+
+- `app` artifact on create_block/update_block (`AssistantAppArtifact` →
+  `normalizeHtmlBlockSpec` → `DataPayload.htmlBlock` + `buildHtmlBlockSql` +
+  app-mode view state). Assistant-created apps are full citizens of the
+  existing app-block runtime — same rvbbitQuery bridge, publish, revisions
+  (each assistant create/update appends an `HtmlBlockRevision`, in-block App
+  chat history preserved on update).
+- Context split done right: the CURRENT app artifact rides in the desktop
+  snapshot (truth, per turn, only while the block exists); the conversation
+  `did` record strips app html to a length note (an early bug dragged 15KB of
+  markup through every future turn).
+- Prompt contract hard-won specifics (all in 0146 APP BLOCKS):
+  `rvbbitQuery()` resolves a RESULT OBJECT (`.rows`/`.columns`) — not an array;
+  bigint/count(*) values arrive as JSON STRINGS (Number() before math — NaN
+  bars otherwise); render all panels immediately on load; emitFilter +
+  hardcoded WHERE stack (intersect-to-empty — her own final bug, self-diagnosed).
+- Verified E2E: "Bigfoot Field Research Console" — 3 named queries, terminal
+  aesthetic, roster + yearly histogram + report feed, fixed across three
+  conversational debug turns (the product's own repair loop doing the work).
+- Untested: in-app click → emitFilter → desktop param round trip (same code
+  path prod app blocks use; verify next session).
+
+## Split-brain UX + OS dock (shipped 2026-07-13, uncommitted)
+
+The two-authors problem (in-block App chat vs the desktop Assistant) is solved
+by ledger, not by merger: `HtmlBlockSpec.revisions[]` is the shared spine both
+authors append to, and the Assistant is state-anchored so out-of-band in-block
+revisions are picked up from the snapshot next turn automatically.
+
+- **Biography empty-state**: an app block with revisions but NO in-block
+  messages = assistant-authored. Its App-mode rail panel opens as the block's
+  biography (✦ Built by the Assistant + revision list + "Ask the Assistant"
+  door that summons the dock) instead of a blank chat. Renders from
+  revisions[] ONLY — the home thread never leaks into artifacts. Typing below
+  still starts a block-scoped chat (few-shot path unchanged; co-authorship
+  becomes visible in revisions).
+- **SQL is the default editor mode** for assistant-authored app blocks (the
+  multi-query body is the human canon); the App tab still renders the app.
+- **The Assistant is an OS dock, not a workspace window** (`AssistantDock` in
+  assistant-window.tsx): fixed overlay above the canvas (z-80), survives
+  workspace switches, drag + resize, position persisted to
+  `rvbbit-lens.assistant.dock.v1` — never in desktop state or scenes. Legacy
+  kind:"assistant" canvas windows are purged on sight by the shell.
+- **Source view (designed, deferred)**: a [chat|source] toggle inside the App
+  rail panel showing read-only syntax-lit html + per-query files — NOT a
+  global "files" window (implies a filesystem that doesn't exist). <10%-use
+  affordance, zero new chrome elsewhere.
+- Untested: biography "Ask the Assistant" click-path end-to-end (wiring is
+  one line, typechecked); in-app emitFilter→param round trip still open from
+  Tier 2 — user observed state clicks yielding "no data", likely param-injected
+  WHERE × client-side filter intersecting empty (the Tier-2 bug one layer up).
+
+## Capability KG + presence heartbeat (planned 2026-07-14)
+
+- **Capability KG** (`rvbbit-sql/docs/CAPABILITY_KG_PLAN.md`): the "teach her
+  the platform" problem inverted — one prompt line + `rvbbit.capability_search()`
+  over a `rvbbit_capabilities` named KG (reuses catalog_docs + data_search,
+  which is already graph-parameterized). Kills the planned prompt syllabus
+  (semantic ops / metrics / data_search / ask_brain sections) before it was
+  written: fixed prompt, growing capability space, JIT problem-shaped lookup,
+  receipts-derived observed costs. Scry gets a third layer for free.
+- **Presence heartbeat**: SHELL state, not window state — the OS-bar ✦ is the
+  heartbeat (dim idle / glow open / pulse + narration during a turn, polled
+  from agent_messages / live_call_counts for the running agent_run_id).
+  Global presence is the prerequisite for TTS/STT exchanges that work with
+  the transcript window closed entirely.
+
+Next on pills (designed, not built): version handles — capture
+`{before, after}` payload snapshots in update_block apply-report entries
+(thread already persists them append-only in homebase = durable per-block
+history through the conversation), revert/restore-latest actions, and a
+content-hash "user-modified since" guard before any revert clobbers hand edits.
+
 Hard-won P0 lessons (do not relearn):
 1. React updater staleness: a variable assigned inside a `setMessages` updater is still stale when the fetch fires — mirror state in a ref (`messagesRef`) for sync reads. This silently sent an EMPTY conversation for a while; found via `agent_messages` receipts (the task row shows exactly what she saw — always debug from receipts).
 2. Same-batch runSignal re-runs the STALE draft (payload.sql syncs into the editor draft in an effect); bump the run signal on a ~80ms next tick.

@@ -33,18 +33,46 @@ import { getHomeId } from "./server-sync"
 
 // ── Command contract (rvbbit.desktop_commands.v1) ──────────────────────
 
+/** An HTML app artifact (rvbbit.html_block.v1 shape, pre-normalization).
+ *  Same species the in-block App builder produces — assistant-created apps are
+ *  full citizens of the existing app-block runtime (rvbbitQuery bridge,
+ *  emitFilter, publish, Saved Views). */
+export interface AssistantAppArtifact {
+  title?: string
+  html: string
+  queries: Array<{
+    id: string
+    title?: string
+    role?: string
+    sql: string
+    filterable?: string[]
+  }>
+  bindings?: unknown[]
+}
+
 export type AssistantCommand =
   | {
       op: "create_block"
       name?: string
       title?: string
-      sql: string
+      sql?: string
+      /** Vega-Lite mark+encoding only — the chart tab injects data/size/theme. */
+      chart?: Record<string, unknown>
+      /** Full HTML app; when present, sql is derived from the app's queries. */
+      app?: AssistantAppArtifact
       place?: "auto" | { near: string }
     }
   | {
       op: "update_block"
       target: string
-      patch: { sql?: string; title?: string }
+      patch: {
+        sql?: string
+        title?: string
+        /** New spec, or null to clear back to the auto-inferred chart. */
+        chart?: Record<string, unknown> | null
+        /** Replace the block's HTML app artifact. */
+        app?: AssistantAppArtifact
+      }
     }
   | {
       op: "emit_param"
@@ -135,12 +163,29 @@ export function buildAssistantDesktopContext(
         base.resolved_sql = block.compiledSql
       }
       if (block?.missingParams?.length) base.missing_params = block.missingParams
+      // App blocks: the artifact IS the current truth she patches against —
+      // it rides in the snapshot (fresh every turn), never in conversation.
+      if (payload?.htmlBlock) {
+        base.app = {
+          title: payload.htmlBlock.title,
+          html: payload.htmlBlock.html,
+          queries: payload.htmlBlock.queries?.map((q) => ({
+            id: q.id,
+            title: q.title,
+            sql: q.sql,
+          })),
+          bindings: payload.htmlBlock.bindings,
+        }
+      }
     }
     return base
   })
 
+  const persona = loadPersona()
   return {
     schema_version: "rvbbit.desktop_context.v1",
+    ...(persona ? { persona } : {}),
+    spend_threshold_usd: loadSpendThreshold(),
     blocks,
     params: params.map((p) => ({
       key: p.key,
@@ -181,13 +226,36 @@ export async function runAssistantTurn(
       text: m.text,
       ...(m.commands?.length
         ? {
-            did: m.commands.map((c, i) => ({
-              ...c,
-              ...("sql" in c && typeof c.sql === "string"
-                ? { sql: c.sql.slice(0, 400) }
-                : {}),
-              ...(m.report?.[i]?.status === "skipped" ? { skipped: true } : {}),
-            })),
+            did: m.commands.map((c, i) => {
+              const compact: Record<string, unknown> = {
+                ...c,
+                ...("sql" in c && typeof c.sql === "string"
+                  ? { sql: c.sql.slice(0, 400) }
+                  : {}),
+                ...(m.report?.[i]?.status === "skipped" ? { skipped: true } : {}),
+              }
+              // App artifacts carry whole HTML documents — summarize instead of
+              // dragging kilobytes of markup through every future turn. The
+              // artifact itself lives on the block; she can ask for it.
+              const app = (c as { app?: { html?: string; queries?: Array<{ id: string; sql: string }> } }).app
+              if (app) {
+                compact.app = {
+                  html: `[${app.html?.length ?? 0} chars — live on the block]`,
+                  queries: app.queries?.map((q) => ({ id: q.id, sql: q.sql.slice(0, 200) })),
+                }
+              }
+              const patch = (c as { patch?: { app?: { html?: string; queries?: Array<{ id: string; sql: string }> } } }).patch
+              if (patch?.app) {
+                compact.patch = {
+                  ...patch,
+                  app: {
+                    html: `[${patch.app.html?.length ?? 0} chars — live on the block]`,
+                    queries: patch.app.queries?.map((q) => ({ id: q.id, sql: q.sql.slice(0, 200) })),
+                  },
+                }
+              }
+              return compact
+            }),
           }
         : {}),
     }))
@@ -285,6 +353,63 @@ export async function fetchThreadRemote(): Promise<AssistantMessage[]> {
     return Array.isArray(body.messages) ? body.messages : []
   } catch {
     return []
+  }
+}
+
+// ── Persona (assistant settings) ────────────────────────────────────────
+//
+// A user-authored standing note on voice/behavior, injected into every turn's
+// desktop_context.persona. Local to the browser like the rest of L1 state.
+
+const PERSONA_KEY = "rvbbit-lens.assistant.persona.v1"
+export const PERSONA_MAX_CHARS = 2000
+
+export function loadPersona(): string {
+  if (typeof window === "undefined") return ""
+  try {
+    return (window.localStorage.getItem(PERSONA_KEY) ?? "").slice(0, PERSONA_MAX_CHARS)
+  } catch {
+    return ""
+  }
+}
+
+export function savePersona(value: string): void {
+  if (typeof window === "undefined") return
+  try {
+    window.localStorage.setItem(PERSONA_KEY, value.slice(0, PERSONA_MAX_CHARS))
+  } catch {
+    // best-effort
+  }
+}
+
+// ── Spend threshold (the budget knob) ───────────────────────────────────
+//
+// Semantic SQL below this projected cost runs without asking; above it, she
+// quotes the explain_semantic estimate and waits (a zero-command turn). The
+// knob's existence is itself the incentive: you can't compare against a
+// threshold without pricing first, so everything gets pre-explained.
+
+const SPEND_KEY = "rvbbit-lens.assistant.spend.v1"
+export const DEFAULT_SPEND_THRESHOLD_USD = 0.25
+
+export function loadSpendThreshold(): number {
+  if (typeof window === "undefined") return DEFAULT_SPEND_THRESHOLD_USD
+  try {
+    const raw = window.localStorage.getItem(SPEND_KEY)
+    if (raw === null) return DEFAULT_SPEND_THRESHOLD_USD
+    const parsed = Number.parseFloat(raw)
+    return Number.isFinite(parsed) && parsed >= 0 ? parsed : DEFAULT_SPEND_THRESHOLD_USD
+  } catch {
+    return DEFAULT_SPEND_THRESHOLD_USD
+  }
+}
+
+export function saveSpendThreshold(value: number): void {
+  if (typeof window === "undefined") return
+  try {
+    window.localStorage.setItem(SPEND_KEY, String(Math.max(0, value)))
+  } catch {
+    // best-effort
   }
 }
 

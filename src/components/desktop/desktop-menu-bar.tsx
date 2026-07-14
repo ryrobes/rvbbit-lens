@@ -56,6 +56,9 @@ interface DesktopMenuBarProps {
   onOpenQueryLens: () => void
   onOpenDataSearch: () => void
   onOpenDrift: () => void
+  /** The Assistant lives in the OS bar — she's part of the system, not an app. */
+  assistantOpen: boolean
+  onToggleAssistant: () => void
   /** Open a SQL window with given content (deep-links from the scheduler tray).
    *  `database` targets a sibling db (cron links → the cron home db). */
   onOpenSql: (sql: string, title: string, database?: string) => void
@@ -163,6 +166,8 @@ export function DesktopMenuBar({
   onOpenQueryLens,
   onOpenDataSearch,
   onOpenDrift,
+  assistantOpen,
+  onToggleAssistant,
   onOpenSql,
   onOpenModelStudio,
   onOpenCatalogGraph,
@@ -399,6 +404,26 @@ export function DesktopMenuBar({
           sceneDirty={sceneDirty}
         />
         <HomeIndicator />
+        {/* No rvbbit, no rabbit — the assistant only exists where her operator does. */}
+        {hasRvbbit ? (
+        <button
+          type="button"
+          onClick={onToggleAssistant}
+          aria-pressed={assistantOpen}
+          title={assistantOpen ? "Dismiss the Assistant" : "Summon the Assistant"}
+          className="grid h-5 w-5 place-items-center rounded text-[13px] leading-none transition-all hover:bg-foreground/[0.08]"
+          style={
+            assistantOpen
+              ? {
+                  color: "var(--main)",
+                  textShadow: "0 0 10px color-mix(in oklch, var(--main) 65%, transparent)",
+                }
+              : { color: "color-mix(in oklch, var(--foreground) 40%, transparent)" }
+          }
+        >
+          ✦
+        </button>
+        ) : null}
         <PresentToggle />
         <GqeTray activeConnectionId={activeConnectionId} hasRvbbit={hasRvbbit} />
         <SchedulerTray

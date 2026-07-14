@@ -163,6 +163,8 @@ interface DataGridWindowProps {
     sourceColumn?: string
   }) => void
   onSubscribeParam: (key: string, targetField?: string, target?: ParamTarget) => void
+  /** Summon the OS-level Assistant dock (block biography panel's "Ask" door). */
+  onOpenAssistant?: () => void
   /**
    * Apply a pure transform to this window's rollup spec (shelf edits).
    * Rebuilds SQL/title at the host so the window chrome stays in sync.
@@ -937,6 +939,7 @@ export function DataGridWindow({
   onOpenRow,
   onEmitParam,
   onSubscribeParam,
+  onOpenAssistant,
   onEditRollup,
   onRepivot,
   onProbeValues,
@@ -2888,6 +2891,7 @@ export function DataGridWindow({
                 draft={appDraft}
                 onDraftChange={setAppDraft}
                 onRun={onRun}
+                onAskAssistant={onOpenAssistant}
               />
             ) : (
               <SqlEditor
@@ -3446,17 +3450,78 @@ function AppChatPanel({
   draft,
   onDraftChange,
   onRun,
+  onAskAssistant,
 }: {
   spec: HtmlBlockSpec | null
   draft: string
   onDraftChange: (next: string) => void
   onRun: () => void
+  onAskAssistant?: () => void
 }) {
   const messages = spec?.messages ?? []
+  // Revisions without in-block chat = the Desktop Assistant authored this
+  // artifact. The panel opens with the block's biography (rendered from the
+  // revision ledger, NEVER from the assistant's home thread) instead of a
+  // blank prompt lying about the block's history. Typing below still starts a
+  // block-scoped chat — co-authorship, visible in revisions.
+  const assistantAuthored = !!spec && messages.length === 0 && (spec.revisions?.length ?? 0) > 0
   return (
     <div className="flex h-full flex-col bg-doc-bg/70">
       <div className="min-h-0 flex-1 overflow-auto p-2">
-        {messages.length === 0 ? (
+        {assistantAuthored && spec ? (
+          <div
+            className="rounded-md px-2.5 py-2 text-[11px] leading-snug"
+            style={{
+              border: "1px solid color-mix(in oklch, var(--main) 25%, transparent)",
+              background: "color-mix(in oklch, var(--main) 6%, transparent)",
+            }}
+          >
+            <div
+              className="mb-1.5 flex items-center gap-1.5 text-[10px] uppercase tracking-wide"
+              style={{ color: "var(--main)" }}
+            >
+              <span
+                aria-hidden
+                style={{ textShadow: "0 0 10px color-mix(in oklch, var(--main) 55%, transparent)" }}
+              >
+                ✦
+              </span>
+              Built by the Assistant
+            </div>
+            <div className="space-y-1">
+              {(spec.revisions ?? []).slice(-6).map((r) => (
+                <div key={r.id} className="flex items-baseline gap-2">
+                  <span className="shrink-0 font-mono text-[9px] text-chrome-text/45">
+                    {new Date(r.createdAt).toLocaleString(undefined, {
+                      month: "short",
+                      day: "numeric",
+                      hour: "2-digit",
+                      minute: "2-digit",
+                    })}
+                  </span>
+                  <span className="min-w-0 text-chrome-text/80">{r.summary ?? r.source}</span>
+                </div>
+              ))}
+            </div>
+            {onAskAssistant ? (
+              <button
+                type="button"
+                onClick={onAskAssistant}
+                className="mt-2 rounded-full px-2.5 py-0.5 text-[11px]"
+                style={{
+                  border: "1px solid color-mix(in oklch, var(--main) 40%, transparent)",
+                  background: "color-mix(in oklch, var(--main) 10%, transparent)",
+                  color: "color-mix(in oklch, var(--main) 80%, var(--foreground))",
+                }}
+              >
+                ✦ Ask the Assistant
+              </button>
+            ) : null}
+            <div className="mt-1.5 text-[10px] text-chrome-text/45">
+              …or type below to iterate here — that starts a chat scoped to this block only.
+            </div>
+          </div>
+        ) : messages.length === 0 ? (
           <div className="rounded-md border border-chrome-border/60 bg-chrome-bg/35 px-2 py-2 text-[11px] text-chrome-text/55">
             No turns yet.
           </div>

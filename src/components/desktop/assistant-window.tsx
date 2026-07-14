@@ -12,7 +12,7 @@
  * (applyAssistantCommands), the brain in rvbbit.desktop_assistant_turn.
  */
 
-import { useCallback, useEffect, useRef, useState } from "react"
+import { useCallback, useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from "react"
 import type {
   DesktopParamValue,
   DesktopWindowState,
@@ -20,6 +20,7 @@ import type {
 import type { SchemaSnapshot } from "@/lib/db/types"
 import {
   appendThreadRemote,
+  assistantBlockName,
   buildAssistantDesktopContext,
   fetchThreadRemote,
   loadThreadLocal,
@@ -32,7 +33,6 @@ import {
 } from "@/lib/desktop/assistant"
 
 interface AssistantWindowProps {
-  window: DesktopWindowState
   activeConnectionId: string | null
   schema: SchemaSnapshot | null
   allWindows: DesktopWindowState[]
@@ -45,7 +45,7 @@ function commandChipLabel(cmd: AssistantCommand, report?: AssistantApplyResult):
   const mark = skipped ? "⃠" : "✦"
   switch (cmd.op) {
     case "create_block":
-      return `${mark} ${skipped ? "couldn't create" : "created"} ${cmd.name ?? cmd.title ?? "block"}`
+      return `${mark} ${skipped ? "couldn't create" : cmd.app ? "built" : cmd.chart ? "charted" : "created"} ${cmd.name ?? cmd.title ?? "block"}`
     case "update_block":
       return `${mark} ${skipped ? "couldn't update" : "updated"} ${cmd.target}`
     case "emit_param":
@@ -59,6 +59,187 @@ function commandChipLabel(cmd: AssistantCommand, report?: AssistantApplyResult):
   }
 }
 
+/** The canvas handle a chip points at — chips are the join points between
+ *  conversation-time and canvas-state. The applier may have renamed a create
+ *  (slug collisions), so prefer the report's actual target. */
+function chipTarget(cmd: AssistantCommand, report?: AssistantApplyResult): string | null {
+  switch (cmd.op) {
+    case "create_block":
+      return report?.target ?? cmd.name ?? cmd.title ?? null
+    case "update_block":
+    case "focus_block":
+      return report?.target ?? cmd.target
+    case "emit_param":
+      return cmd.block
+    case "close_block":
+      return null // closed by design — nothing to point at
+    default:
+      return null
+  }
+}
+
+// ── OS dock — the assistant is NOT a workspace window ───────────────────
+//
+// She sits between the user and the desktop: a fixed overlay above the canvas
+// that survives workspace switches, never appears in scenes or desktop state,
+// and is always exactly where you left her. Position persists per browser.
+
+interface DockRect {
+  x: number
+  y: number
+  width: number
+  height: number
+}
+
+const DOCK_KEY = "rvbbit-lens.assistant.dock.v1"
+
+function loadDockState(): { open: boolean; rect: DockRect | null } {
+  if (typeof window === "undefined") return { open: false, rect: null }
+  try {
+    const raw = window.localStorage.getItem(DOCK_KEY)
+    if (!raw) return { open: false, rect: null }
+    const parsed = JSON.parse(raw) as { open?: boolean; rect?: DockRect }
+    return { open: !!parsed.open, rect: parsed.rect ?? null }
+  } catch {
+    return { open: false, rect: null }
+  }
+}
+
+function saveDockState(open: boolean, rect: DockRect | null): void {
+  if (typeof window === "undefined") return
+  try {
+    window.localStorage.setItem(DOCK_KEY, JSON.stringify({ open, rect }))
+  } catch {
+    // best-effort
+  }
+}
+
+export function loadAssistantDockOpen(): boolean {
+  return loadDockState().open
+}
+
+function defaultDockRect(): DockRect {
+  const w = typeof window !== "undefined" ? window.innerWidth : 1600
+  return { x: Math.max(16, w - 464), y: 84, width: 440, height: 640 }
+}
+
+export function AssistantDock({
+  open,
+  onClose,
+  ...windowProps
+}: { open: boolean; onClose: () => void } & AssistantWindowProps) {
+  const [rect, setRect] = useState<DockRect | null>(null)
+  const dragRef = useRef<{ mode: "move" | "resize"; startX: number; startY: number; base: DockRect } | null>(null)
+
+  useEffect(() => {
+    setRect(loadDockState().rect ?? defaultDockRect())
+  }, [])
+
+  useEffect(() => {
+    if (rect) saveDockState(open, rect)
+  }, [open, rect])
+
+  const startDrag = useCallback(
+    (mode: "move" | "resize") => (e: ReactPointerEvent) => {
+      if (!rect) return
+      e.preventDefault()
+      dragRef.current = { mode, startX: e.clientX, startY: e.clientY, base: rect }
+      const onMove = (ev: globalThis.PointerEvent) => {
+        const d = dragRef.current
+        if (!d) return
+        const dx = ev.clientX - d.startX
+        const dy = ev.clientY - d.startY
+        if (d.mode === "move") {
+          setRect({
+            ...d.base,
+            x: Math.min(Math.max(d.base.x + dx, 8 - d.base.width + 120), window.innerWidth - 120),
+            y: Math.min(Math.max(d.base.y + dy, 36), window.innerHeight - 60),
+          })
+        } else {
+          setRect({
+            ...d.base,
+            width: Math.max(320, d.base.width + dx),
+            height: Math.max(280, d.base.height + dy),
+          })
+        }
+      }
+      const onUp = () => {
+        dragRef.current = null
+        window.removeEventListener("pointermove", onMove)
+        window.removeEventListener("pointerup", onUp)
+      }
+      window.addEventListener("pointermove", onMove)
+      window.addEventListener("pointerup", onUp)
+    },
+    [rect],
+  )
+
+  if (!open || !rect) return null
+  // No window chrome: the frame is invisible — just bubbles hovering over the
+  // desktop, with a slim drag pill up top and a resize corner. She's a layer,
+  // not a panel.
+  return (
+    <div
+      className="fixed flex flex-col"
+      style={{
+        left: rect.x,
+        top: rect.y,
+        width: rect.width,
+        height: rect.height,
+        zIndex: 80,
+      }}
+    >
+      <div
+        onPointerDown={startDrag("move")}
+        className="flex shrink-0 cursor-move select-none items-center justify-between px-1 pb-1.5"
+      >
+        <span
+          className="flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-[11px]"
+          style={{
+            background: "color-mix(in oklch, var(--background) 62%, transparent)",
+            border: "1px solid color-mix(in oklch, var(--main) 22%, transparent)",
+            color: "var(--foreground)",
+            backdropFilter: "blur(12px)",
+          }}
+        >
+          <span
+            aria-hidden
+            style={{
+              color: "var(--main)",
+              textShadow: "0 0 12px color-mix(in oklch, var(--main) 60%, transparent)",
+            }}
+          >
+            ✦
+          </span>
+          Assistant
+        </span>
+        <button
+          type="button"
+          onClick={onClose}
+          className="grid h-5 w-5 place-items-center rounded-full text-[11px] leading-none"
+          style={{
+            background: "color-mix(in oklch, var(--background) 62%, transparent)",
+            border: "1px solid color-mix(in oklch, var(--foreground) 14%, transparent)",
+            color: "color-mix(in oklch, var(--foreground) 60%, transparent)",
+            backdropFilter: "blur(12px)",
+          }}
+          title="Dismiss (she keeps the thread)"
+        >
+          ✕
+        </button>
+      </div>
+      <div className="min-h-0 flex-1">
+        <AssistantWindow {...windowProps} />
+      </div>
+      <div
+        onPointerDown={startDrag("resize")}
+        className="absolute -bottom-1 -right-1 h-5 w-5 cursor-nwse-resize"
+        title="Resize"
+      />
+    </div>
+  )
+}
+
 export function AssistantWindow({
   activeConnectionId,
   schema,
@@ -66,6 +247,11 @@ export function AssistantWindow({
   params,
   applyCommands,
 }: AssistantWindowProps) {
+  // Chips dim when their block leaves the canvas — the transcript visibly
+  // decays where the desktop has moved on.
+  const liveBlockNames = new Set(
+    allWindows.map((w) => assistantBlockName(w).toLowerCase()),
+  )
   const [messages, setMessages] = useState<AssistantMessage[]>([])
   const [draft, setDraft] = useState("")
   const [busy, setBusy] = useState(false)
@@ -166,20 +352,24 @@ export function AssistantWindow({
     }
   }, [draft, busy, activeConnectionId, applyCommands])
 
+  // Bubble plate: each utterance carries its own translucent blur backdrop so
+  // the transcript floats over any wallpaper — the container paints nothing.
+  const plate = (extra?: Record<string, string>) => ({
+    background: "color-mix(in oklch, var(--background) 68%, transparent)",
+    backdropFilter: "blur(12px)",
+    ...extra,
+  })
+
   return (
-    <div
-      className="flex h-full flex-col"
-      style={{
-        background:
-          "linear-gradient(180deg, color-mix(in oklch, var(--background) 55%, transparent) 0%, color-mix(in oklch, var(--background) 78%, transparent) 100%)",
-        backdropFilter: "blur(14px)",
-      }}
-    >
-      <div ref={scrollRef} className="flex-1 overflow-y-auto px-5 py-4">
+    <div className="flex h-full flex-col">
+      <div
+        ref={scrollRef}
+        className="flex-1 overflow-y-auto px-2 py-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+      >
         {hydrated && messages.length === 0 && !busy ? (
           <div
-            className="mt-10 select-none text-center text-[13px] leading-relaxed"
-            style={{ color: "color-mix(in oklch, var(--foreground) 45%, transparent)" }}
+            className="mx-auto mt-10 max-w-[85%] select-none rounded-2xl px-4 py-3 text-center text-[13px] leading-relaxed"
+            style={plate({ color: "color-mix(in oklch, var(--foreground) 55%, transparent)" })}
           >
             <div
               className="mb-2 text-lg"
@@ -201,17 +391,22 @@ export function AssistantWindow({
               <div key={m.id} className="flex justify-end">
                 <div
                   className="max-w-[82%] rounded-2xl rounded-br-sm px-3.5 py-2 text-[13px] leading-relaxed"
-                  style={{
-                    background: "color-mix(in oklch, var(--foreground) 9%, transparent)",
-                    color: "color-mix(in oklch, var(--foreground) 82%, transparent)",
-                  }}
+                  style={plate({
+                    border: "1px solid color-mix(in oklch, var(--foreground) 10%, transparent)",
+                    color: "color-mix(in oklch, var(--foreground) 85%, transparent)",
+                  })}
                 >
                   {m.text}
                 </div>
               </div>
             ) : (
-              <div key={m.id} className="flex flex-col gap-1.5 pr-6">
-                <div className="flex items-start gap-2.5">
+              <div key={m.id} className="flex flex-col gap-1.5 pr-4">
+                <div
+                  className="flex max-w-[92%] items-start gap-2.5 rounded-2xl rounded-bl-sm px-3.5 py-2"
+                  style={plate({
+                    border: `1px solid color-mix(in oklch, var(--main) ${m.error ? 8 : 16}%, transparent)`,
+                  })}
+                >
                   <span
                     aria-hidden
                     className="mt-[3px] shrink-0 text-[11px]"
@@ -230,8 +425,6 @@ export function AssistantWindow({
                       color: m.error
                         ? "color-mix(in oklch, var(--destructive, #b5524a) 80%, var(--foreground))"
                         : "var(--foreground)",
-                      textShadow:
-                        "0 0 24px color-mix(in oklch, var(--main) 14%, transparent)",
                     }}
                   >
                     {m.text}
@@ -242,21 +435,47 @@ export function AssistantWindow({
                     {m.commands.map((cmd, i) => {
                       const rep = m.report?.[i]
                       const skipped = rep?.status === "skipped"
+                      const target = chipTarget(cmd, rep)
+                      const alive =
+                        !skipped &&
+                        !!target &&
+                        liveBlockNames.has(target.toLowerCase())
                       return (
-                        <span
+                        <button
                           key={i}
-                          title={rep?.detail}
-                          className="rounded-full px-2.5 py-0.5 text-[11px]"
+                          type="button"
+                          disabled={!alive}
+                          onClick={() => {
+                            if (alive && target) {
+                              applyCommands([{ op: "focus_block", target }])
+                            }
+                          }}
+                          title={
+                            rep?.detail ??
+                            (alive
+                              ? "focus this block"
+                              : skipped
+                                ? undefined
+                                : target
+                                  ? "no longer on the desktop"
+                                  : undefined)
+                          }
+                          className="rounded-full px-2.5 py-0.5 text-[11px] transition-opacity"
                           style={{
-                            border: `1px solid color-mix(in oklch, var(--main) ${skipped ? 18 : 40}%, transparent)`,
-                            background: `color-mix(in oklch, var(--main) ${skipped ? 4 : 10}%, transparent)`,
+                            border: `1px solid color-mix(in oklch, var(--main) ${skipped ? 18 : alive ? 40 : 22}%, transparent)`,
+                            background: `color-mix(in oklch, color-mix(in oklch, var(--main) ${skipped ? 8 : alive ? 18 : 9}%, var(--background)) 72%, transparent)`,
+                            backdropFilter: "blur(10px)",
                             color: skipped
                               ? "color-mix(in oklch, var(--foreground) 50%, transparent)"
-                              : "color-mix(in oklch, var(--main) 80%, var(--foreground))",
+                              : alive
+                                ? "color-mix(in oklch, var(--main) 80%, var(--foreground))"
+                                : "color-mix(in oklch, var(--foreground) 38%, transparent)",
+                            cursor: alive ? "pointer" : "default",
+                            opacity: !skipped && !alive && target ? 0.65 : 1,
                           }}
                         >
                           {commandChipLabel(cmd, rep)}
-                        </span>
+                        </button>
                       )
                     })}
                   </div>
@@ -265,7 +484,10 @@ export function AssistantWindow({
             ),
           )}
           {busy ? (
-            <div className="flex items-center gap-2.5 pl-0.5">
+            <div
+              className="flex w-fit items-center gap-2.5 rounded-full px-3 py-1.5"
+              style={plate()}
+            >
               <span
                 className="animate-pulse text-[11px]"
                 style={{
@@ -285,33 +507,35 @@ export function AssistantWindow({
           ) : null}
         </div>
       </div>
-      <div
-        className="px-5 pb-4 pt-2"
-        style={{
-          borderTop: "1px solid color-mix(in oklch, var(--main) 14%, transparent)",
-        }}
-      >
-        <textarea
-          ref={inputRef}
-          value={draft}
-          disabled={busy || !activeConnectionId}
-          onChange={(e) => setDraft(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter" && !e.shiftKey) {
-              e.preventDefault()
-              void send()
+      <div className="shrink-0 px-2 pb-2 pt-1.5">
+        <div
+          className="rounded-2xl px-3.5 py-2"
+          style={plate({
+            border: "1px solid color-mix(in oklch, var(--main) 24%, transparent)",
+          })}
+        >
+          <textarea
+            ref={inputRef}
+            value={draft}
+            disabled={busy || !activeConnectionId}
+            onChange={(e) => setDraft(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && !e.shiftKey) {
+                e.preventDefault()
+                void send()
+              }
+            }}
+            rows={2}
+            placeholder={
+              activeConnectionId ? "ask the desktop…" : "connect to a database first"
             }
-          }}
-          rows={2}
-          placeholder={
-            activeConnectionId ? "ask the desktop…" : "connect to a database first"
-          }
-          className="w-full resize-none bg-transparent text-[13px] leading-relaxed outline-none"
-          style={{
-            color: "var(--foreground)",
-            caretColor: "var(--main)",
-          }}
-        />
+            className="w-full resize-none bg-transparent text-[13px] leading-relaxed outline-none"
+            style={{
+              color: "var(--foreground)",
+              caretColor: "var(--main)",
+            }}
+          />
+        </div>
       </div>
     </div>
   )

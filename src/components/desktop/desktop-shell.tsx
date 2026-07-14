@@ -87,13 +87,19 @@ import { OperatorsWindow } from "./operators-window"
 import { ModelSettingsWindow } from "./model-settings-window"
 import { CostsWindow } from "./costs-window"
 import { AgentMessagesWindow } from "./agent-messages-window"
-import { AssistantWindow } from "./assistant-window"
+import { AssistantDock, loadAssistantDockOpen } from "./assistant-window"
+import { AssistantSettingsWindow } from "./assistant-settings-window"
 import {
   ASSISTANT_COMMAND_CAP,
   assistantBlockName,
   type AssistantApplyResult,
   type AssistantCommand,
 } from "@/lib/desktop/assistant"
+import {
+  buildHtmlBlockSql,
+  normalizeHtmlBlockSpec,
+  type HtmlBlockSpec,
+} from "@/lib/desktop/app-block"
 import { SyncMirrorWindow } from "./sync-mirror-window"
 import { DASHBOARD_SELECT_EVENT, DashboardsWindow } from "./dashboards-window"
 import { AppsWindow } from "./apps-window"
@@ -190,7 +196,6 @@ import type {
   NotificationsPayload,
   CostsPayload,
   AgentMessagesPayload,
-  AssistantPayload,
   SyncMirrorPayload,
   DuckPayload,
   OperatorFlowPayload,
@@ -2412,31 +2417,45 @@ export function DesktopShell() {
     [focus, openWindow, liveWindows, updatePayload],
   )
 
+  // The assistant is an OS-level dock, not a workspace window — she survives
+  // workspace switches and never lands in scenes or desktop state.
+  const [assistantOpen, setAssistantOpen] = useState(false)
+  useEffect(() => {
+    setAssistantOpen(loadAssistantDockOpen())
+  }, [])
+
   const openAssistant = useCallback(() => {
-    const existing = liveWindows().find((w) => w.kind === "assistant")
+    setAssistantOpen(true)
+  }, [])
+
+  const toggleAssistant = useCallback(() => {
+    setAssistantOpen((o) => !o)
+  }, [])
+
+  const openAssistantSettings = useCallback(() => {
+    const existing = liveWindows().find((w) => w.kind === "assistant-settings")
     if (existing) {
       if (existing.minimized) {
         setWindows((ws) => ws.map((w) => (w.id === existing.id ? { ...w, minimized: false } : w)))
       }
       return focus(existing.id)
     }
-    // Dock against the right edge of the CURRENT viewport — she hovers at the
-    // side of the desk, not wherever world (940, 90) happens to be.
-    const vp = viewportRef.current
-    const innerW = typeof window !== "undefined" ? window.innerWidth : 1600
-    const width = 440
-    const height = 640
     openWindow({
       id: randomUUID(),
-      kind: "assistant",
-      title: "Assistant",
-      x: clampWorld(Math.max((0 - vp.x) / vp.scale + 16, (innerW - vp.x) / vp.scale - width - 24)),
-      y: clampWorld((0 - vp.y) / vp.scale + 84),
-      width,
-      height,
-      payload: { kind: "assistant" } satisfies AssistantPayload,
+      kind: "assistant-settings",
+      title: "Assistant Settings",
+      x: 260, y: 140, width: 480, height: 560,
+      payload: { kind: "assistant-settings" },
     })
   }, [focus, openWindow, liveWindows])
+
+  // Migration: earlier builds materialized the assistant as a canvas window
+  // (kind "assistant"). Purge any that hydrate out of saved desktop state.
+  useEffect(() => {
+    if (windows.some((w) => w.kind === "assistant")) {
+      setWindows((ws) => ws.filter((w) => w.kind !== "assistant"))
+    }
+  }, [windows])
 
   /**
    * Apply one assistant turn's rvbbit.desktop_commands.v1 batch through the
@@ -2521,30 +2540,61 @@ export function DesktopShell() {
         try {
           switch (cmd.op) {
             case "create_block": {
-              if (!cmd.sql?.trim()) {
-                report.push({ op: cmd.op, target: cmd.name, status: "skipped", detail: "create_block requires sql" })
+              // An app artifact derives its SQL body from its named queries;
+              // a plain/chart block requires sql directly.
+              const appSpec: HtmlBlockSpec | null = cmd.app
+                ? normalizeHtmlBlockSpec({ title: cmd.title, ...cmd.app })
+                : null
+              if (cmd.app && !appSpec) {
+                report.push({ op: cmd.op, target: cmd.name, status: "skipped", detail: "app requires html + at least one query" })
+                return
+              }
+              const sql = appSpec ? buildHtmlBlockSql(appSpec) : cmd.sql?.trim()
+              if (!sql) {
+                report.push({ op: cmd.op, target: cmd.name, status: "skipped", detail: "create_block requires sql (or an app artifact)" })
                 return
               }
               const requested = cmd.name ?? cmd.title ?? "block"
               const name = uniqueBlockName(requested, allKnown())
               const id = randomUUID()
-              const size = { width: 720, height: 460 }
+              const size = appSpec ? { width: 880, height: 580 } : { width: 720, height: 460 }
               const { x, y } = placeAt(cmd.place, size.width, size.height)
               const win: DesktopWindowState = {
                 id,
                 kind: "data",
-                title: cmd.title ?? name,
+                title: cmd.title ?? appSpec?.title ?? name,
                 x, y, width: size.width, height: size.height,
                 zIndex: 0,
                 minimized: false,
                 payload: {
                   kind: "data",
-                  title: cmd.title ?? name,
-                  sql: cmd.sql,
+                  title: cmd.title ?? appSpec?.title ?? name,
+                  sql,
                   origin: "derived",
                   autoRun: true,
-                  reactive: { blockName: name, sourceSql: cmd.sql, version: 1 },
-                  view: { activeTab: "rows", sqlRailOpen: false },
+                  reactive: { blockName: name, sourceSql: sql, version: 1 },
+                  ...(appSpec
+                    ? {
+                        htmlBlock: {
+                          ...appSpec,
+                          revisions: [
+                            {
+                              id: randomUUID(),
+                              createdAt: new Date().toISOString(),
+                              source: "agent" as const,
+                              summary: "Created by the Desktop Assistant.",
+                            },
+                          ],
+                        },
+                      }
+                    : {}),
+                  ...(!appSpec && cmd.chart ? { chartSpec: cmd.chart, viewKind: "chart" as const } : {}),
+                  // Assistant-authored app blocks open their editor rail in SQL
+                  // mode — the multi-query body is the human-facing canon; the
+                  // app-chat rail shows the block's biography instead.
+                  view: appSpec
+                    ? { activeTab: "app", queryMode: "sql", sqlRailOpen: false, sqlDraft: sql }
+                    : { activeTab: cmd.chart ? "chart" : "rows", sqlRailOpen: false },
                 } satisfies DataPayload,
               }
               openWindow(win)
@@ -2564,16 +2614,58 @@ export function DesktopShell() {
                 return
               }
               const patch = cmd.patch ?? {}
+              const patchApp: HtmlBlockSpec | null = patch.app
+                ? normalizeHtmlBlockSpec({ title: patch.title, ...patch.app })
+                : null
+              if (patch.app && !patchApp) {
+                report.push({ op: cmd.op, target: cmd.target, status: "skipped", detail: "app requires html + at least one query" })
+                return
+              }
+              const patchAppSql = patchApp ? buildHtmlBlockSql(patchApp) : undefined
               updatePayload(target.id, (p) => {
                 const dp = p as DataPayload
                 return {
                   ...dp,
                   ...(patch.title ? { title: patch.title } : {}),
                   ...(patch.sql ? { sql: patch.sql } : {}),
+                  ...(patchApp
+                    ? {
+                        sql: patchAppSql,
+                        htmlBlock: {
+                          ...patchApp,
+                          messages: dp.htmlBlock?.messages,
+                          revisions: [
+                            ...(dp.htmlBlock?.revisions ?? []),
+                            {
+                              id: randomUUID(),
+                              createdAt: new Date().toISOString(),
+                              source: "agent" as const,
+                              summary: "Revised by the Desktop Assistant.",
+                            },
+                          ],
+                        },
+                        view: {
+                          ...dp.view,
+                          activeTab: "app" as const,
+                          queryMode: "sql" as const,
+                          sqlDraft: patchAppSql,
+                        },
+                      }
+                    : {}),
+                  ...(!patchApp && patch.chart !== undefined
+                    ? {
+                        chartSpec: patch.chart,
+                        ...(patch.chart ? { viewKind: "chart" as const } : {}),
+                      }
+                    : {}),
+                  ...(!patchApp && patch.chart
+                    ? { view: { ...dp.view, activeTab: "chart" as const } }
+                    : {}),
                   reactive: dp.reactive
                     ? {
                         ...dp.reactive,
                         ...(patch.sql ? { sourceSql: patch.sql } : {}),
+                        ...(patchAppSql ? { sourceSql: patchAppSql } : {}),
                         version: (dp.reactive.version ?? 1) + 1,
                       }
                     : dp.reactive,
@@ -2583,7 +2675,7 @@ export function DesktopShell() {
                 const title = patch.title
                 setWindows((ws) => ws.map((w) => (w.id === target.id ? { ...w, title } : w)))
               }
-              if (patch.sql) {
+              if (patch.sql || patchAppSql) {
                 // Next tick, not same batch: the data window's draft syncs from
                 // payload.sql in an effect, and a same-render runSignal bump
                 // re-runs the STALE draft (effects fire with pre-sync closures).
@@ -4495,7 +4587,7 @@ export function DesktopShell() {
     // Semantic
     { id: "operators", label: "Operators", icon: FlowArrow, color: "var(--brand-operators)", description: "Semantic SQL operators", activate: openOperators, folder: "semantic", rvbbit: true },
     { id: "model-settings", label: "Model Settings", icon: Settings2, color: "var(--brand-routing)", description: "LLM defaults, operator models & spend", activate: openModelSettings, folder: "semantic", rvbbit: true },
-    { id: "assistant", label: "Assistant", icon: Rabbit, color: "var(--main)", description: "The desktop speaks — chat that builds and steers blocks", activate: openAssistant, folder: "semantic", rvbbit: true },
+    { id: "assistant", label: "Assistant", icon: Rabbit, color: "var(--main)", description: "Model, personality & voice for the desktop Assistant (summon her from the ✦ in the bar)", activate: openAssistantSettings, folder: "semantic", rvbbit: true },
     { id: "agent-messages", label: "Messages", icon: Quote, color: "var(--viz-op-agent, var(--brand-warren))", description: "Agent transcripts — by run, with cost", activate: () => openAgentMessages(), folder: "semantic", rvbbit: true },
     { id: "specialists", label: "Specialists", icon: Brain, color: "var(--brand-specialists)", description: "Fine-tuned task models", activate: openSpecialists, folder: "semantic", rvbbit: true },
     { id: "routing", label: "Routing", icon: GitBranch, color: "var(--brand-routing)", description: "Model/backend routing rules", activate: openRouting, folder: "semantic", rvbbit: true },
@@ -4530,7 +4622,7 @@ export function DesktopShell() {
     viewAppCount, schema, rvbbitVersion,
     openFinder, openSqlScratch, openViewApps, openConnections, openDataSearch, openSystemLearning, openMcpIncoming,
     openSystemObjects, openExtensions, openPgMonitor, openFleet, openPostgresAdmin, openCache, openRvbbitCache,
-    openCosts, openAgentMessages, openAssistant, openDataMover, dataMoverDetected, openSyncMirror, openOperators, openModelSettings, openSpecialists, openRouting,
+    openCosts, openAgentMessages, openAssistantSettings, openDataMover, dataMoverDetected, openSyncMirror, openOperators, openModelSettings, openSpecialists, openRouting,
     openMcpServers, openCapabilities, openHfDeploy, openWarren, openModelStudio,
     openDuck, openDagster, dagsterDetected, openMetricCatalog, openMetricCreator, openMetricInspector, openVizBlocks, openMetricBoard, openDashboards, openApps, openDashboardApp, openAlerts, openBrain,
     openCubeCatalog, openCubeCreator, openCubeInspector, openCubeProposals,
@@ -4759,6 +4851,7 @@ export function DesktopShell() {
       reloadConnections: loadConnections,
       updatePayload,
       applyAssistantCommands,
+      openAssistant,
       emitParam,
       subscribeParam,
       editRollupSpec,
@@ -4819,7 +4912,7 @@ export function DesktopShell() {
       openTableFromFinder, openSqlInWindow, viewObjectDdl, openField, openViewAppBuilder, openViewApp,
       addLauncherShortcut, addViewAppShortcut, addDashboardShortcut, openDashboardApp, openArtifact,
       openQueryDocument, openSqlData, openRowInspector, openCsvImport, openExtensions, openRvbbitCache, openCache, openConnections,
-      loadSchema, loadConnections, updatePayload, applyAssistantCommands, emitParam, subscribeParam,
+      loadSchema, loadConnections, updatePayload, applyAssistantCommands, openAssistant, emitParam, subscribeParam,
       editRollupSpec, repivotWindow, probeColumnValues, activePalette, paletteOverrides,
       wallpaperUrl, onPickWallpaper, onClearWallpaper, onApplyLibraryWallpaper, applyUploadedWallpaper,
       onReExtractPalette, onReExtractWithRvbbit, setPaletteOverrides,
@@ -4851,6 +4944,15 @@ export function DesktopShell() {
       onMouseDown={handleDesktopMouseDown}
       onContextMenu={handleDesktopContextMenu}
     >
+      <AssistantDock
+        open={assistantOpen && hasRvbbit}
+        onClose={() => setAssistantOpen(false)}
+        activeConnectionId={activeConnectionId}
+        schema={schema}
+        allWindows={windows}
+        params={desktopParams}
+        applyCommands={applyAssistantCommands}
+      />
       {wallpaperUrl ? (
         <div
           className="pointer-events-none fixed inset-0 bg-cover bg-center"
@@ -4900,6 +5002,8 @@ export function DesktopShell() {
       />
 
       <DesktopMenuBar
+        assistantOpen={assistantOpen}
+        onToggleAssistant={toggleAssistant}
         connections={connections.map((c) => ({
           id: c.id,
           label: c.label,
@@ -5367,6 +5471,8 @@ interface WindowContext {
   /** Apply one assistant turn's command batch; returns the per-command report
    *  that rides back to the agent in the next turn's desktop_context. */
   applyAssistantCommands: (commands: AssistantCommand[]) => AssistantApplyResult[]
+  /** Summon the OS-level Assistant dock (e.g. from a block's biography panel). */
+  openAssistant: () => void
   windows: DesktopWindowState[]
   params: DesktopParamValue[]
   runSignal: number
@@ -5556,6 +5662,7 @@ function renderWindowContent(
           onOpenRow={ctx.openRowInspector}
           onEmitParam={ctx.emitParam}
           onSubscribeParam={(key, field, target) => ctx.subscribeParam(w.id, key, field, target)}
+          onOpenAssistant={ctx.openAssistant}
           onEditRollup={(transform) => ctx.editRollupSpec(w.id, transform)}
           onRepivot={(grain) => ctx.repivotWindow(w.id, grain)}
           onProbeValues={(column, search) => ctx.probeColumnValues(w.id, column, search)}
@@ -6074,16 +6181,10 @@ function renderWindowContent(
         />
       )
     case "assistant":
-      return (
-        <AssistantWindow
-          window={w}
-          activeConnectionId={ctx.activeConnectionId}
-          schema={ctx.schema}
-          allWindows={ctx.windows}
-          params={ctx.params}
-          applyCommands={ctx.applyAssistantCommands}
-        />
-      )
+      // Legacy canvas windows from pre-dock builds — purged by the shell.
+      return null
+    case "assistant-settings":
+      return <AssistantSettingsWindow activeConnectionId={ctx.activeConnectionId} />
     case "sync-mirror":
       // Key on the connection so a switch remounts (clears stale jobs/overview +
       // discards any in-flight overview fetch for the previous connection).
@@ -6301,6 +6402,7 @@ function iconForKind(kind: DesktopWindowState["kind"]) {
     case "costs": return DollarSign
     case "agent-messages": return Quote
     case "assistant": return Rabbit
+    case "assistant-settings": return Rabbit
     case "data-mover": return Upload
     case "sync-mirror": return Database
     case "dashboards": return LayoutDashboard
