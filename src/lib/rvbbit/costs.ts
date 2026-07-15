@@ -399,6 +399,10 @@ export async function fetchRecentReceipts(
 
 export interface CostTotal {
   total_cost_usd: number
+  /** Would-be a-la-carte value of managed Clover calls (policy-estimated).
+   *  Included in the subscription — value, not spend. Subtract from
+   *  total_cost_usd to get real out-of-pocket spend. */
+  included_value_usd: number
   receipts: number
   receipts_costed: number
   receipts_uncosted: number
@@ -420,12 +424,27 @@ export async function fetchCostTotal(
       LEFT JOIN rvbbit.receipt_costs c USING (receipt_id)
      WHERE ${timeClause(filter, "r.invocation_at")}${filterClauses(filter)}
   `
-  const res = await runQuery<Record<string, unknown>>(connectionId, sql)
+  // Managed Clover calls carry a policy-estimated "would-be" cost —
+  // subscription value, not billable spend. Split so the header never
+  // conflates the two.
+  const includedSql = `
+    SELECT coalesce(sum(e.cost_usd), 0)::float8 AS included_value_usd
+      FROM rvbbit.cost_events e
+      JOIN rvbbit.receipts r2 ON r2.receipt_id = e.receipt_id
+     WHERE e.backend LIKE 'clover%' AND e.cost_usd IS NOT NULL
+       AND ${timeClause(filter, "r2.invocation_at")}${filterClauses(filter, { receiptAlias: "r2" })}
+  `
+  const [res, incRes] = await Promise.all([
+    runQuery<Record<string, unknown>>(connectionId, sql),
+    runQuery<Record<string, unknown>>(connectionId, includedSql),
+  ])
   if (!res.ok)
-    return { total_cost_usd: 0, receipts: 0, receipts_costed: 0, receipts_uncosted: 0, receipts_errored: 0 }
+    return { total_cost_usd: 0, included_value_usd: 0, receipts: 0, receipts_costed: 0, receipts_uncosted: 0, receipts_errored: 0 }
   const r = res.rows[0] ?? {}
+  const inc = incRes.ok ? (incRes.rows[0] ?? {}) : {}
   return {
     total_cost_usd: num(r.total_cost_usd),
+    included_value_usd: num((inc as Record<string, unknown>).included_value_usd),
     receipts: num(r.receipts),
     receipts_costed: num(r.receipts_costed),
     receipts_uncosted: num(r.receipts_uncosted),

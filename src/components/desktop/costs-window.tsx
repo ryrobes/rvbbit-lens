@@ -117,6 +117,7 @@ export function CostsWindow({
       <CostsHeader
         filter={filter}
         total={bundle?.total.total_cost_usd ?? 0}
+        includedValue={bundle?.total.included_value_usd ?? 0}
         receipts={bundle?.total.receipts ?? 0}
         loading={loading}
         onSetWindowDays={setWindowDays}
@@ -175,6 +176,7 @@ export function CostsWindow({
 function CostsHeader({
   filter,
   total,
+  includedValue,
   receipts,
   loading,
   hasFilters,
@@ -189,6 +191,7 @@ function CostsHeader({
 }: {
   filter: CostsFilter
   total: number
+  includedValue: number
   receipts: number
   loading: boolean
   hasFilters: boolean
@@ -239,8 +242,19 @@ function CostsHeader({
 
       <div className="flex-1" />
 
-      <span className="tabular-nums text-chrome-text">
-        {fmtCost(total)} · {receipts.toLocaleString()} receipts
+      {includedValue > 0 ? (
+        <span
+          className="rounded-sm border border-amber-500/30 bg-amber-500/10 px-1.5 py-0.5 tabular-nums text-[10px] text-amber-400"
+          title="Would-be à la carte value of managed Clover inference this period. Included in your subscription — not billed, not part of spend."
+        >
+          ≈{fmtCost(includedValue)} Clover value incl.
+        </span>
+      ) : null}
+      <span
+        className="tabular-nums text-chrome-text"
+        title={includedValue > 0 ? "Real out-of-pocket spend (Clover included value excluded)" : undefined}
+      >
+        {fmtCost(Math.max(total - includedValue, 0))} · {receipts.toLocaleString()} receipts
       </span>
       <Button size="sm" variant="ghost" onClick={onRefresh} disabled={loading} title="Refresh">
         <RefreshCw className={cn("h-3 w-3", loading && "animate-spin")} />
