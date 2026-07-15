@@ -167,7 +167,7 @@ import {
 } from "@/lib/desktop/state-store"
 import { shadowDesktopState, shadowScenes } from "@/lib/desktop/server-sync"
 import { usePresentMode } from "@/lib/desktop/present-mode"
-import type { ConnectionTestResult, RvbbitStatus, SchemaSnapshot } from "@/lib/db/types"
+import type { ConnectionTestResult, RvbbitStatus, SchemaSnapshot, SchemaTable } from "@/lib/db/types"
 import type { SanitizedConnection } from "@/lib/db/registry"
 import type {
   RvbbitCachePayload,
@@ -487,6 +487,11 @@ export function DesktopShell() {
   })
   const [bootOverlayVisible, setBootOverlayVisible] = useState(true)
   const [schema, setSchema] = useState<SchemaSnapshot | null>(null)
+  // Mirror for reads outside render (fingerprint guard, stale-keep on failure).
+  const schemaRef = useRef<SchemaSnapshot | null>(null)
+  useEffect(() => {
+    schemaRef.current = schema
+  }, [schema])
   const [rvbbitStatus, setRvbbitStatus] = useState<RvbbitStatus | null>(null)
   const [schemaLoading, setSchemaLoading] = useState(false)
   // Scalar semantic-operator catalog (rvbbit.operators) for the drag-drop
@@ -878,12 +883,58 @@ export function DesktopShell() {
     }
   }, [])
 
+  // Merge a finder-vitals batch into the current snapshot in place. Rows whose
+  // numbers didn't move keep their object identity, so an all-quiet refresh is
+  // a no-op render-wise.
+  const mergeFinderVitals = useCallback(
+    (connectionId: string, vitals: Array<{ oid: number } & Partial<SchemaTable>>) => {
+      if (!vitals.length) return
+      const byOid = new Map(vitals.map((v) => [v.oid, v]))
+      setSchema((prev) => {
+        if (!prev || prev.connectionId !== connectionId) return prev
+        let changed = false
+        const tables = prev.tables.map((t) => {
+          const v = t.oid != null ? byOid.get(t.oid) : undefined
+          if (!v) return t
+          let dirty = false
+          for (const k of Object.keys(v)) {
+            if (k === "oid") continue
+            const a = (t as unknown as Record<string, unknown>)[k]
+            const b = (v as unknown as Record<string, unknown>)[k]
+            const same =
+              Array.isArray(a) || Array.isArray(b)
+                ? JSON.stringify(a ?? null) === JSON.stringify(b ?? null)
+                : (a ?? null) === (b ?? null)
+            if (!same) {
+              dirty = true
+              break
+            }
+          }
+          if (!dirty) return t
+          changed = true
+          return { ...t, ...v }
+        })
+        return changed ? { ...prev, tables } : prev
+      })
+    },
+    [],
+  )
+
   const loadSchema = useCallback(async (connectionId: string) => {
     setSchemaLoading(true)
     try {
-      const res = await fetch(`/api/db/schema?connectionId=${encodeURIComponent(connectionId)}`, { cache: "no-store" })
+      // Only offer the fingerprint when the on-screen snapshot belongs to this
+      // connection — otherwise "unchanged" would keep another database's tree.
+      const prev = schemaRef.current
+      const staleForSame = prev != null && prev.connectionId === connectionId
+      const fp = staleForSame ? prev.fingerprint : null
+      const qs =
+        `connectionId=${encodeURIComponent(connectionId)}` +
+        (fp ? `&fp=${encodeURIComponent(fp)}` : "")
+      const res = await fetch(`/api/db/schema?${qs}`, { cache: "no-store" })
       if (!res.ok) {
-        setSchema(null)
+        // Keep the stale tree on a blip — seconds-old structure beats a blank.
+        if (!staleForSame) setSchema(null)
         const message = (await res.text().catch(() => "")).trim()
         setConnectionHealth({
           connectionId,
@@ -892,11 +943,31 @@ export function DesktopShell() {
         })
         return
       }
-      const snap = (await res.json()) as SchemaSnapshot
-      setSchema(snap)
+      const body = (await res.json()) as SchemaSnapshot & { unchanged?: boolean }
+      if (body.error) {
+        if (!staleForSame) setSchema(body)
+        setConnectionHealth({ connectionId, state: "offline", error: body.error })
+        return
+      }
+      if (!body.unchanged) setSchema(body)
       setConnectionHealth({ connectionId, state: "online" })
+      // Vitals ride behind structure: a small keyed-by-oid patch, merged in
+      // place. Failure here degrades to neutral rows, never an error state.
+      try {
+        const vres = await fetch(
+          `/api/db/finder-vitals?connectionId=${encodeURIComponent(connectionId)}`,
+          { cache: "no-store" },
+        )
+        if (vres.ok) {
+          const vbody = (await vres.json()) as { vitals?: Array<{ oid: number } & Partial<SchemaTable>> }
+          if (vbody.vitals?.length) mergeFinderVitals(connectionId, vbody.vitals)
+        }
+      } catch {
+        // vitals are decoration — structure already landed
+      }
     } catch (err) {
-      setSchema(null)
+      const prev = schemaRef.current
+      if (!(prev != null && prev.connectionId === connectionId)) setSchema(null)
       setConnectionHealth({
         connectionId,
         state: "offline",
@@ -905,7 +976,7 @@ export function DesktopShell() {
     } finally {
       setSchemaLoading(false)
     }
-  }, [])
+  }, [mergeFinderVitals])
 
   useEffect(() => { void loadConnections() }, [loadConnections])
 

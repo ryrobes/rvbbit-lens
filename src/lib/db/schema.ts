@@ -2,11 +2,13 @@ import "server-only"
 
 import { getPool } from "./pool"
 import type { ExtensionInfo, SchemaColumn, SchemaFunction, SchemaSnapshot, SchemaTable } from "./types"
-import { loadFinderStats } from "./finder-stats"
 
 type OperatorRow = { name: string; description: string | null; shape: string | null }
 type RvbbitRegistryRow = { oid: string | number; acceleration_enabled: boolean | string | null }
 
+// STRUCTURE ONLY — no pg_*_relation_size() calls here. Sizes stat every file
+// segment per relation (seconds on multi-thousand-relation DBs) and belong to
+// the finder-vitals endpoint, which refreshes independently of the tree.
 const TABLE_QUERY = `
 SELECT
   c.oid::int8                                       AS oid,
@@ -21,13 +23,6 @@ SELECT
     ELSE 'other'
   END                                               AS kind,
   c.reltuples::bigint                               AS row_estimate,
-  pg_total_relation_size(c.oid)::bigint             AS size_bytes,
-  -- COALESCE: pg_*_relation_size returns NULL for a relation whose file is gone
-  -- (e.g. concurrent DROP); without it the tier silently vanishes from the total.
-  COALESCE(pg_relation_size(c.oid), 0)::bigint      AS heap_bytes,
-  COALESCE(pg_indexes_size(c.oid), 0)::bigint       AS index_bytes,
-  CASE WHEN c.reltoastrelid <> 0
-       THEN COALESCE(pg_relation_size(c.reltoastrelid), 0) ELSE 0 END::bigint AS toast_bytes,
   obj_description(c.oid, 'pg_class')                AS comment,
   (am.amname = 'rvbbit')                            AS relam_is_rvbbit
 FROM pg_class c
@@ -39,6 +34,69 @@ WHERE c.relkind IN ('r','v','m','f','p')
   AND n.nspname NOT LIKE 'pg_temp_%'
 ORDER BY n.nspname, c.relname
 `
+
+// Cheap structure fingerprint: changes iff a relation, column, or routine is
+// added / dropped / renamed / retyped. A few ms even on large catalogs — lets
+// the schema route answer "unchanged" without building or shipping the 1MB
+// snapshot. Vitals (sizes, rows, generations, heat) are deliberately OUTSIDE
+// the fingerprint; they refresh via /api/db/finder-vitals.
+const STRUCTURE_FP_QUERY = `
+SELECT md5(
+  coalesce((
+    SELECT md5(string_agg(c.oid::text || ':' || c.relname || ':' || c.relnamespace::text || ':' || c.relkind::text, ',' ORDER BY c.oid))
+    FROM pg_class c
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE c.relkind IN ('r','v','m','f','p')
+      AND n.nspname NOT IN ('pg_catalog','information_schema')
+      AND n.nspname NOT LIKE 'pg_toast%'
+      AND n.nspname NOT LIKE 'pg_temp_%'
+  ), '') ||
+  coalesce((
+    SELECT md5(string_agg(a.attrelid::text || ':' || a.attnum || ':' || a.attname || ':' || a.atttypid::text, ',' ORDER BY a.attrelid, a.attnum))
+    FROM pg_attribute a
+    JOIN pg_class c ON c.oid = a.attrelid
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE a.attnum > 0 AND NOT a.attisdropped
+      AND c.relkind IN ('r','v','m','f','p')
+      AND n.nspname NOT IN ('pg_catalog','information_schema')
+      AND n.nspname NOT LIKE 'pg_toast%'
+      AND n.nspname NOT LIKE 'pg_temp_%'
+  ), '') ||
+  coalesce((
+    SELECT md5(string_agg(p.oid::text || ':' || p.proname, ',' ORDER BY p.oid))
+    FROM pg_proc p
+    JOIN pg_namespace n ON n.oid = p.pronamespace
+    WHERE n.nspname NOT IN ('pg_catalog','information_schema')
+      AND n.nspname NOT LIKE 'pg_toast%'
+      AND n.nspname NOT LIKE 'pg_temp_%'
+  ), '')
+) AS fp
+`
+
+// Operator metadata (descriptions / shapes) rides the snapshot's functions —
+// fold its freshness into the fingerprint so a new operator (e.g. one built by
+// make_operator) invalidates the cached structure. Degrades to '' off-rvbbit.
+const OPERATOR_FP_QUERY = `SELECT count(*)::text || ':' || coalesce(max(updated_at)::text, '') AS fp FROM rvbbit.operators`
+
+export async function loadStructureFingerprint(connectionId: string): Promise<string | null> {
+  try {
+    const { pool } = await getPool(connectionId, undefined, "meta")
+    const client = await pool.connect()
+    try {
+      const [cat, op] = await Promise.allSettled([
+        client.query<{ fp: string }>(STRUCTURE_FP_QUERY),
+        client.query<{ fp: string }>(OPERATOR_FP_QUERY),
+      ])
+      if (cat.status !== "fulfilled") return null
+      const opFp = op.status === "fulfilled" ? (op.value.rows[0]?.fp ?? "") : ""
+      return `${cat.value.rows[0]?.fp ?? ""}|${opFp}`
+    } finally {
+      client.release()
+    }
+  } catch {
+    return null
+  }
+}
 
 const COLUMN_QUERY = `
 SELECT
@@ -145,7 +203,6 @@ export async function loadSchema(connectionId: string): Promise<SchemaSnapshot> 
       functionsResult,
       opsResult,
       rvbbitRegistryResult,
-      finderStats,
     ] = await Promise.all([
       client.query(TABLE_QUERY),
       client.query(COLUMN_QUERY),
@@ -161,7 +218,6 @@ export async function loadSchema(connectionId: string): Promise<SchemaSnapshot> 
       client.query(FUNCTION_QUERY),
       client.query<OperatorRow>(OPERATOR_QUERY).catch(() => ({ rows: [] as OperatorRow[] })),
       client.query<RvbbitRegistryRow>(RVBBIT_TABLE_REGISTRY_QUERY).catch(() => ({ rows: [] as RvbbitRegistryRow[] })),
-      loadFinderStats(client),
     ])
 
     // Group columns by oid for O(n) join.
@@ -196,71 +252,33 @@ export async function loadSchema(connectionId: string): Promise<SchemaSnapshot> 
       name: string
       kind: SchemaTable["kind"]
       row_estimate: string | number | null
-      size_bytes: string | number | null
-      heap_bytes: string | number | null
-      index_bytes: string | number | null
-      toast_bytes: string | number | null
       comment: string | null
       relam_is_rvbbit: boolean | null
     }>).map((t) => {
-      const numOrNull = (v: string | number | null) => (v == null ? null : Number(v))
       const cols = colsByTable.get(String(t.oid)) ?? []
       const registryEnabled = rvbbitRegistryByOid.get(String(t.oid))
       const isRvbbit = registryEnabled ?? (t.relam_is_rvbbit === true)
-      const st = finderStats.byOid.get(String(t.oid))
       const reltuples = t.row_estimate == null ? null : Number(t.row_estimate)
       // PG14+ uses -1 as the "never analyzed" sentinel — clamp to null so we
       // never render a literal -1.
       const heapEst = reltuples != null && reltuples >= 0 ? reltuples : null
-      // Real count(*) from the crawl wins; then live rvbbit parquet rows; then
-      // the heap estimate.
-      let rows: number | null = null
-      let rowsSource: SchemaTable["rowsSource"] = null
-      if (st?.crawlRows != null) {
-        rows = st.crawlRows
-        rowsSource = "crawl"
-      } else if (isRvbbit && st?.parquetRows != null) {
-        rows = st.parquetRows
-        rowsSource = "live"
-      } else if (heapEst != null) {
-        rows = heapEst
-        rowsSource = "estimate"
-      }
+      // Structure pass: heap estimate only. The vitals merge (finder-vitals
+      // endpoint) upgrades rows to crawl count(*) / live parquet rows and
+      // fills every instrument-panel field.
       return {
         schema: t.schema,
         name: t.name,
         oid: Number(t.oid),
         kind: t.kind,
         rowEstimate: reltuples,
-        sizeBytes: t.size_bytes == null ? null : Number(t.size_bytes),
+        sizeBytes: null,
         comment: t.comment,
         columns: cols,
         colCount: cols.length,
         isRvbbit,
-        rows,
-        rowsSource,
-        profiledAt: st?.profiledAt ?? null,
-        parquetRows: st?.parquetRows ?? null,
-        parquetBytes: st?.parquetBytes ?? null,
-        rgCount: st?.rgCount ?? null,
-        coldCount: st?.coldCount ?? null,
-        // pg-native footprint (universal — every table); cold copies handled below.
-        heapBytes: numOrNull(t.heap_bytes),
-        indexBytes: numOrNull(t.index_bytes),
-        toastBytes: numOrNull(t.toast_bytes),
-        // rvbbit row-group split + redundant accelerator copies.
-        hotParquetBytes: st?.hotParquetBytes ?? null,
-        coldBytes: st?.coldBytes ?? null,
-        vortexBytes: st?.vortexBytes ?? null,
-        variantBytes: st?.variantBytes ?? null,
-        freshness: !isRvbbit ? "na" : st ? (st.shadowDirty ? "stale" : "fresh") : "na",
-        generation: st?.generation ?? null,
-        lastCompactAt: st?.lastCompactAt ?? null,
-        lanceEnabled: !!st?.lanceUrl,
-        heat: st?.heat ?? null,
-        driftSeverity: st?.driftSeverity ?? null,
-        driftFlags: st?.driftFlags ?? null,
-        driftChangeType: st?.driftChangeType ?? null,
+        rows: heapEst,
+        rowsSource: heapEst != null ? ("estimate" as const) : null,
+        freshness: "na" as const,
       }
     })
 

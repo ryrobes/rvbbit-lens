@@ -236,6 +236,9 @@ export interface SchemaSnapshot {
   extensions: ExtensionInfo[]
   hasRvbbit: boolean
   rvbbitVersion: string | null
+  /** structure fingerprint — client echoes it back so an unchanged catalog
+   *  skips the snapshot build + 1MB payload + tree swap entirely. */
+  fingerprint?: string | null
   error?: string
 }
 
