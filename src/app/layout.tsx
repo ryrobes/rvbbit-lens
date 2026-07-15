@@ -1,4 +1,5 @@
 import type { Metadata } from "next"
+import Script from "next/script"
 import "./globals.css"
 import { GOOGLE_FONTS_HREF } from "@/lib/desktop/fonts"
 
@@ -16,10 +17,11 @@ export default function RootLayout({
         {/* Pre-hydration script — applies saved theme before first
             paint (avoids FOUC), and wraps console.error to swallow
             Next.js 16.2.6's spurious "Set objects are not supported"
-            warning that originates in framework serialization. Lives
-            in /public so React 19 doesn't warn about <script> being
-            rendered through the React tree. */}
-        <script src="/pre-hydration.js" />
+            warning that originates in framework serialization.
+            next/script beforeInteractive is the App-Router-correct way to
+            inject a head script; a bare <script> trips React 19's
+            "script tag while rendering" warning. */}
+        <Script src="/pre-hydration.js" strategy="beforeInteractive" />
         {/* Preload candidates for the Desktop > Font submenu. Each
             family is small; only the ones a user picks actually render.
             Browser-cache means the cost is paid once per origin. The

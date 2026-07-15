@@ -6466,8 +6466,12 @@ function iconForKind(kind: DesktopWindowState["kind"]) {
 }
 
 function useViewAppCount(): number {
-  const [count, setCount] = useState(() => listViewApps().length)
+  // Start at 0 on BOTH server and client first render — localStorage only
+  // exists client-side, and reading it in the initializer causes a
+  // hydration mismatch on the Saved Views icon's sublabel.
+  const [count, setCount] = useState(0)
   useEffect(() => {
+    setCount(listViewApps().length)
     const onStorage = () => setCount(listViewApps().length)
     window.addEventListener("storage", onStorage)
     window.addEventListener("rvbbit-lens:apps-changed", onStorage as EventListener)

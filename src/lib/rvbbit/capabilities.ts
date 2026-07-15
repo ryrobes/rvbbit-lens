@@ -898,6 +898,50 @@ export async function fetchInstalledBackends(
   return { backends: res.rows.map(parseInstalled) }
 }
 
+/** Real per-backend daily call counts for the card sparklines — last 14
+ *  days from receipts sub_calls (specialist AND llm kinds, same keying as
+ *  the backend_health usage rollup). Returns backend -> 14 buckets,
+ *  oldest first. Backends absent from the map had no calls in-window. */
+const CALL_SERIES_SQL = `WITH expanded AS (
+  SELECT
+    CASE WHEN sub.value ->> 'kind' = 'llm'
+         THEN sub.value ->> 'backend'
+         ELSE sub.value ->> 'model' END AS backend_name,
+    (r.invocation_at AT TIME ZONE 'UTC')::date AS d
+  FROM rvbbit.receipts r,
+       LATERAL jsonb_array_elements(r.sub_calls) sub(value)
+  WHERE sub.value ->> 'kind' IN ('specialist', 'llm')
+    AND r.invocation_at > now() - interval '14 days'
+)
+SELECT backend_name, d::text, count(*)::int AS n
+FROM expanded WHERE backend_name IS NOT NULL
+GROUP BY backend_name, d`
+
+export async function fetchBackendCallSeries(
+  connectionId: string,
+): Promise<Map<string, number[]>> {
+  const out = new Map<string, number[]>()
+  const res = await runQuery(connectionId, CALL_SERIES_SQL)
+  if (!res.ok) return out
+  const today = new Date()
+  const dayIndex = new Map<string, number>()
+  for (let i = 0; i < 14; i++) {
+    const d = new Date(today.getTime() - (13 - i) * 86400_000)
+    dayIndex.set(d.toISOString().slice(0, 10), i)
+  }
+  for (const r of res.rows as { backend_name: string; d: string; n: number }[]) {
+    const idx = dayIndex.get(String(r.d).slice(0, 10))
+    if (idx == null) continue
+    let series = out.get(r.backend_name)
+    if (!series) {
+      series = new Array(14).fill(0)
+      out.set(r.backend_name, series)
+    }
+    series[idx] += Number(r.n)
+  }
+  return out
+}
+
 // ── Installed-runtime query (CAPABILITIES.md § "Installed Runtime Query") ──
 
 const PYTHON_RUNTIMES_SQL = `SELECT

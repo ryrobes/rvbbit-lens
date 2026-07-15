@@ -24,6 +24,7 @@ import {
   capabilityTypeTone,
   classifyCatalogCapabilityType,
   fetchCatalog,
+  fetchBackendCallSeries,
   fetchInstalledBackends,
   fetchInstalledRuntimes,
   flagsToStates,
@@ -96,6 +97,7 @@ export function CapabilitiesWindow({
 }: CapabilitiesWindowProps) {
   const [catalog, setCatalog] = useState<CatalogDoc | null>(null)
   const [installed, setInstalled] = useState<InstalledBackend[]>([])
+  const [callSeries, setCallSeries] = useState<Map<string, number[]>>(new Map())
   const [runtimes, setRuntimes] = useState<InstalledRuntime[]>([])
   const [catalogError, setCatalogError] = useState<string | null>(null)
   const [installedError, setInstalledError] = useState<string | null>(null)
@@ -135,12 +137,14 @@ export function CapabilitiesWindow({
 
   const pollInstalled = useCallback(async () => {
     if (!activeConnectionId || !hasRvbbit) return
-    const [b, rt] = await Promise.all([
+    const [b, rt, series] = await Promise.all([
       fetchInstalledBackends(activeConnectionId),
       fetchInstalledRuntimes(activeConnectionId),
+      fetchBackendCallSeries(activeConnectionId),
     ])
     setInstalled(b.backends)
     setRuntimes(rt.runtimes)
+    setCallSeries(series)
     setInstalledError(b.error ?? null)
     setUpdatedAt(Date.now())
   }, [activeConnectionId, hasRvbbit])
@@ -292,7 +296,21 @@ export function CapabilitiesWindow({
       return r !== 0 ? r : a.catalog.title.localeCompare(b.catalog.title)
     }
     if (search.trim().length === 0) {
-      return { entries: [...pool].sort(byInstall), semanticOnlyIds: new Set<string>() }
+      // Default browse: hosted (managed) entries lead within each install
+      // tier — the storefront's front shelf. Search results below stay
+      // strictly relevance-ordered; curation never outranks intent.
+      const byShelf = (a: JoinedCatalogEntry, b: JoinedCatalogEntry) => {
+        const tier = (e: JoinedCatalogEntry) =>
+          e.flags.used ? 0 : e.flags.registered ? 1 : 2
+        const t = tier(a) - tier(b)
+        if (t !== 0) return t
+        const managed = (e: JoinedCatalogEntry) => (e.catalog.kind === "managed" ? 0 : 1)
+        const m = managed(a) - managed(b)
+        if (m !== 0) return m
+        const calls = (b.installed?.n_calls ?? 0) - (a.installed?.n_calls ?? 0)
+        return calls !== 0 ? calls : a.catalog.title.localeCompare(b.catalog.title)
+      }
+      return { entries: [...pool].sort(byShelf), semanticOnlyIds: new Set<string>() }
     }
     // Exact substring matches stay on top (install-sorted); semantically-related
     // entries the substring filter missed are appended, ranked by similarity.
@@ -683,6 +701,7 @@ export function CapabilitiesWindow({
               <CapabilityCard
                 key={e.catalog.id}
                 entry={e}
+                callSeries={e.catalog.backend_name ? callSeries.get(e.catalog.backend_name) : undefined}
                 warrenNodes={uniqueNodesFromInventory(warrenInventory)}
                 maxVram={maxVram}
                 semanticMatch={semanticOnlyIds.has(e.catalog.id)}
@@ -856,12 +875,15 @@ function filterBySearchOnly<T extends { catalog: JoinedCatalogEntry["catalog"] }
 
 function CapabilityCard({
   entry,
+  callSeries,
   warrenNodes,
   maxVram,
   semanticMatch,
   onOpen,
 }: {
   entry: JoinedCatalogEntry
+  /** Real 14-day daily call counts for this entry's backend (oldest first). */
+  callSeries?: number[]
   warrenNodes: WarrenInventoryRow[]
   maxVram: number
   /** Surfaced by the semantic re-rank (no keyword match) — gets a subtle tag. */
@@ -1124,7 +1146,7 @@ function CapabilityCard({
       ) : null}
 
       {/* installed stats — only when registered */}
-      {installed ? <InstalledFooter installed={installed} /> : null}
+      {installed ? <InstalledFooter installed={installed} series={callSeries} /> : null}
       {!installed && installedRuntime ? (
         <div className="mt-2 border-t border-chrome-border/40 pt-1.5 text-[10px] text-chrome-text/55">
           runtime{" "}
@@ -1232,10 +1254,21 @@ function DeviceChip({ device }: { device: string }) {
   )
 }
 
-function InstalledFooter({ installed }: { installed: import("@/lib/rvbbit/capabilities").InstalledBackend }) {
-  const callPoints = installed.n_calls > 0 && installed.first_call_at && installed.last_call_at
-    ? buildSparkSeries(installed.first_call_at, installed.last_call_at, installed.n_calls)
-    : []
+function InstalledFooter({
+  installed,
+  series,
+}: {
+  installed: import("@/lib/rvbbit/capabilities").InstalledBackend
+  series?: number[]
+}) {
+  // Real 14-day receipts series when available; the flat placeholder only
+  // covers traffic older than the window (or extensions without receipts).
+  const hasReal = !!series && series.some((v) => v > 0)
+  const callPoints = hasReal
+    ? series!
+    : installed.n_calls > 0 && installed.first_call_at && installed.last_call_at
+      ? buildSparkSeries(installed.first_call_at, installed.last_call_at, installed.n_calls)
+      : []
   return (
     <div className="mt-2 border-t border-chrome-border/40 pt-1.5">
       <div className="flex items-center gap-2 text-[10px] text-chrome-text/55">

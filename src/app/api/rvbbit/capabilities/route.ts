@@ -42,9 +42,12 @@ async function readCatalog(): Promise<{ ok: true; doc: unknown } | { ok: false; 
   } catch (e) {
     const code = (e as NodeJS.ErrnoException).code
     if (code === "ENOENT") {
+      // Missing packaged catalog is an EXPECTED state (DB catalog serves
+      // instead) — 200 + ok:false, so every poll doesn't paint a red 404
+      // in the browser console.
       return {
         ok: false,
-        status: 404,
+        status: 200,
         error:
           `catalog.json not found at ${file}. Set RVBBIT_CAPABILITY_ROOT, ` +
           `set RVBBIT_REPO_PATH to your rvbbit-sql checkout, or rebuild/package the capability catalog.`,
