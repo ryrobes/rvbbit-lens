@@ -4593,10 +4593,10 @@ export function DesktopShell() {
   // folder windows. `folder` routes an item into a folder window (undefined =
   // lives on the desktop); `rvbbit` gates it to rvbbit connections.
   const launchers: LauncherItem[] = useMemo(() => [
-    { id: "finder", label: "Finder", icon: FolderOpen, color: "var(--brand-finder)", activate: openFinder },
-    { id: "sql-scratch", label: "SQL Scratch", icon: FileCode2, color: "var(--brand-sql-scratch)", activate: openSqlScratch },
-    { id: "view-apps", label: "Saved Views", icon: Boxes, color: "var(--brand-view-apps)", sublabel: viewAppCount ? `${viewAppCount} saved` : undefined, activate: openViewApps },
-    { id: "connections", label: "Connections", icon: Plug, color: "var(--brand-connections)", activate: openConnections },
+    { id: "finder", label: "Finder", icon: FolderOpen, color: "var(--brand-finder)", description: "Browse schemas, tables & columns with live rvbbit vitals", activate: openFinder },
+    { id: "sql-scratch", label: "SQL Scratch", icon: FileCode2, color: "var(--brand-sql-scratch)", description: "A scratch editor — write SQL, run it, chart the result", activate: openSqlScratch },
+    { id: "view-apps", label: "Saved Views", icon: Boxes, color: "var(--brand-view-apps)", sublabel: viewAppCount ? `${viewAppCount} saved` : undefined, description: "Your saved queries, charts & HTML app blocks", activate: openViewApps },
+    { id: "connections", label: "Connections", icon: Plug, color: "var(--brand-connections)", description: "Manage Postgres connections", activate: openConnections },
     { id: "data-search", label: "Data Search", icon: Search, color: "var(--brand-kg)", description: "Semantic search across data", activate: () => openDataSearch(), rvbbit: true },
     { id: "system-learning", label: "System Learning", icon: Brain, color: "var(--rvbbit-accent)", description: "Learned routing, acceleration & operator state", activate: openSystemLearning, rvbbit: true },
     { id: "mcp-incoming", label: "MCP Incoming", icon: Activity, color: "oklch(71% 0.17 205)", description: "Warehouse MCP usage", activate: openMcpIncoming, rvbbit: true },
@@ -4731,6 +4731,7 @@ export function DesktopShell() {
           shortcut,
           label: launcher.label,
           sublabel: shortcut.sublabel ?? launcher.sublabel,
+          description: launcher.description,
           icon: launcher.icon,
           color: launcher.color,
           activate: launcher.activate,
@@ -4743,6 +4744,7 @@ export function DesktopShell() {
           shortcut,
           label: app.name || shortcut.label,
           sublabel: app.kind === "scry" ? "Scry view" : "Saved view",
+          description: undefined as string | undefined,
           icon: iconFor(app.iconKey),
           color: app.iconColor || shortcut.iconColor || "var(--brand-view-apps)",
           activate: () => openViewApp(app.id),
@@ -4754,6 +4756,7 @@ export function DesktopShell() {
           shortcut,
           label: shortcut.label,
           sublabel: shortcut.sublabel ?? "Dashboard",
+          description: undefined as string | undefined,
           icon: LayoutDashboard,
           color: shortcut.iconColor ?? "oklch(78% 0.13 95)",
           activate: () => openDashboardApp(shortcut.targetId, shortcut.label),
@@ -5213,11 +5216,11 @@ export function DesktopShell() {
           {launchers
             .filter((l) => l.visible !== false && !l.folder && (!l.rvbbit || hasRvbbit))
             .map((l) => (
-              <DesktopIcon key={l.id} label={l.label} sublabel={l.sublabel} icon={l.icon} iconColor={l.color} onActivate={l.activate} />
+              <DesktopIcon key={l.id} label={l.label} sublabel={l.sublabel} description={l.description} icon={l.icon} iconColor={l.color} onActivate={l.activate} />
             ))}
           {/* eslint-disable-next-line react-hooks/refs */}
           {FOLDERS.filter((f) => launchers.some((l) => l.visible !== false && l.folder === f.id && (!l.rvbbit || hasRvbbit))).map((f) => (
-            <DesktopIcon key={`folder:${f.id}`} label={f.label} icon={Folder} iconColor={f.color} onActivate={() => openFolder(f.id)} />
+            <DesktopIcon key={`folder:${f.id}`} label={f.label} description={f.description ?? `${launchers.filter((l) => l.folder === f.id && (!l.rvbbit || hasRvbbit)).length} items`} icon={Folder} iconColor={f.color} onActivate={() => openFolder(f.id)} />
           ))}
         </div>
       </div>
@@ -5232,6 +5235,7 @@ export function DesktopShell() {
                 key={item.shortcut.id}
                 label={item.label}
                 sublabel={item.sublabel}
+                description={item.description}
                 icon={item.icon}
                 iconColor={item.color}
                 onActivate={item.activate}
@@ -6359,12 +6363,12 @@ function isCsvLikeFile(f: File): boolean {
 
 // Desktop launcher folders (file-explorer groups). Each is a folder icon on
 // the desktop that opens a folder window of its `launchers` items.
-const FOLDERS: { id: string; label: string; color: string }[] = [
-  { id: "system", label: "System", color: "var(--brand-system-objects)" },
-  { id: "semantic", label: "Semantic", color: "var(--brand-operators)" },
-  { id: "knowledge", label: "Knowledge", color: "var(--brand-kg)" },
-  { id: "metrics", label: "Metrics", color: "oklch(78% 0.13 95)" },
-  { id: "cubes", label: "Cubes", color: "oklch(76% 0.15 100)" },
+const FOLDERS: { id: string; label: string; color: string; description?: string }[] = [
+  { id: "system", label: "System", color: "var(--brand-system-objects)", description: "Learning, routing, backups & extension internals" },
+  { id: "semantic", label: "Semantic", color: "var(--brand-operators)", description: "LLM operators, models, MCP, warren & capabilities" },
+  { id: "knowledge", label: "Knowledge", color: "var(--brand-kg)", description: "Catalog knowledge graph, data search & brains" },
+  { id: "metrics", label: "Metrics", color: "oklch(78% 0.13 95)", description: "Governed metric definitions, checks & history" },
+  { id: "cubes", label: "Cubes", color: "oklch(76% 0.15 100)", description: "Curated semantic marts — wide joins, materialized" },
 ]
 
 function iconForKind(kind: DesktopWindowState["kind"]) {

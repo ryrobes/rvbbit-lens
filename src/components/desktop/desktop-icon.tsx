@@ -6,6 +6,9 @@ import { cn } from "@/lib/utils"
 interface DesktopIconProps {
   label: string
   sublabel?: string
+  /** Hover tooltip — what this thing does. Native title: no delay config,
+      but zero deps and works over the canvas. */
+  description?: string
   icon: LucideIcon
   iconColor?: string
   iconBackground?: string
@@ -18,6 +21,7 @@ interface DesktopIconProps {
 export function DesktopIcon({
   label,
   sublabel,
+  description,
   icon: Icon,
   iconColor,
   iconBackground,
@@ -29,6 +33,7 @@ export function DesktopIcon({
   return (
     <button
       type="button"
+      title={description ? `${label} — ${description}` : label}
       onDoubleClick={onActivate}
       onClick={onActivate}
       onContextMenu={onContextMenu}
