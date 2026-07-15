@@ -938,31 +938,86 @@ function ManagedInstallTab({
   const [saving, setSaving] = useState(false)
   const [saveResult, setSaveResult] = useState<{ ok: boolean; msg: string } | null>(null)
   const [keySet, setKeySet] = useState<boolean | null>(null)
+  const [keySetAt, setKeySetAt] = useState<string | null>(null)
+  const [removing, setRemoving] = useState(false)
 
-  // Is the key already stored? (rvbbit.list_secrets is admin-gated; on older
-  // extensions without the secrets table this just stays unknown.)
+  // Is the key already stored? Primary: rvbbit.list_secrets (admin-gated,
+  // has updated_at). Fallback for non-admin connections: get_secret(...) IS
+  // NOT NULL — boolean only, the value never leaves Postgres. Older
+  // extensions without the secrets table stay unknown.
   useEffect(() => {
     if (!activeConnectionId) return
     let cancelled = false
     const nameEsc = keyEnv.replace(/'/g, "''")
-    fetch("/api/db/query", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        connectionId: activeConnectionId,
-        sql: `SELECT count(*)::int AS n FROM rvbbit.list_secrets() WHERE name = '${nameEsc}'`,
-        rowLimit: 1,
-      }),
-    })
-      .then((r) => r.json())
-      .then((b: { ok: boolean; rows?: { n: number }[] }) => {
-        if (!cancelled && b.ok) setKeySet(Number(b.rows?.[0]?.n ?? 0) > 0)
-      })
-      .catch(() => {})
+    const probe = async () => {
+      try {
+        const r = await fetch("/api/db/query", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            connectionId: activeConnectionId,
+            sql: `SELECT to_char(updated_at, 'Mon DD') AS at FROM rvbbit.list_secrets() WHERE name = '${nameEsc}'`,
+            rowLimit: 1,
+          }),
+        })
+        const b = (await r.json()) as { ok: boolean; rows?: { at: string }[] }
+        if (b.ok) {
+          if (cancelled) return
+          setKeySet((b.rows?.length ?? 0) > 0)
+          setKeySetAt(b.rows?.[0]?.at ?? null)
+          return
+        }
+        // admin-gated or older extension — try the resolver-shaped fallback
+        const r2 = await fetch("/api/db/query", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            connectionId: activeConnectionId,
+            sql: `SELECT (rvbbit.get_secret('${nameEsc}') IS NOT NULL) AS set`,
+            rowLimit: 1,
+          }),
+        })
+        const b2 = (await r2.json()) as { ok: boolean; rows?: { set: boolean }[] }
+        if (!cancelled && b2.ok) setKeySet(Boolean(b2.rows?.[0]?.set))
+      } catch {
+        /* stay unknown */
+      }
+    }
+    void probe()
     return () => {
       cancelled = true
     }
   }, [activeConnectionId, keyEnv])
+
+  const removeKey = async () => {
+    if (!activeConnectionId || removing) return
+    setRemoving(true)
+    setSaveResult(null)
+    const nameEsc = keyEnv.replace(/'/g, "''")
+    try {
+      const res = await fetch("/api/db/query", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          connectionId: activeConnectionId,
+          sql: `SELECT rvbbit.delete_secret('${nameEsc}'); SELECT rvbbit.reload_backends();`,
+          rowLimit: 5,
+          readOnly: false,
+        }),
+      })
+      const body = (await res.json()) as { ok: boolean; error?: string }
+      if (body.ok) {
+        setKeySet(false)
+        setKeySetAt(null)
+        setSaveResult({ ok: true, msg: "Key removed." })
+      } else {
+        setSaveResult({ ok: false, msg: body.error ?? "remove failed" })
+      }
+    } catch (e) {
+      setSaveResult({ ok: false, msg: e instanceof Error ? e.message : String(e) })
+    }
+    setRemoving(false)
+  }
 
   const saveKey = async () => {
     if (!activeConnectionId || !key.trim() || saving) return
@@ -981,6 +1036,7 @@ function ManagedInstallTab({
       if (body.ok) {
         setSaveResult({ ok: true, msg: "Key saved and backends reloaded." })
         setKeySet(true)
+        setKeySetAt("just now")
         setKey("")
       } else {
         setSaveResult({ ok: false, msg: body.error ?? "save failed" })
@@ -1057,7 +1113,11 @@ function ManagedInstallTab({
               className="inline-flex items-center gap-0.5 rounded-full px-1.5 py-px text-[9px]"
               style={{ color: gold, background: `color-mix(in oklch, ${gold} 12%, transparent)` }}
             >
-              <CheckCircle2 className="h-2.5 w-2.5" /> key set
+              <CheckCircle2 className="h-2.5 w-2.5" /> key set{keySetAt ? ` · ${keySetAt}` : ""}
+            </span>
+          ) : keySet === false ? (
+            <span className="rounded-full border border-chrome-border/60 px-1.5 py-px text-[9px] text-chrome-text/55">
+              no key yet
             </span>
           ) : null}
         </div>
@@ -1072,8 +1132,21 @@ function ManagedInstallTab({
             value={key}
             onChange={(e) => setKey(e.target.value)}
             type="password"
-            placeholder="paste subscriber key (rvb_…)"
-            className="flex-1 rounded border border-chrome-border/60 bg-chrome-bg/30 px-2 py-1 font-mono text-[10px] text-foreground placeholder:text-chrome-text/35 focus:outline-none"
+            placeholder={keySet ? "●●●●●●●●●●●●●●●●  key saved — paste to replace" : "paste subscriber key (rvb_…)"}
+            className={cn(
+              "flex-1 rounded border px-2 py-1 font-mono text-[10px] text-foreground focus:outline-none",
+              keySet
+                ? "placeholder:text-chrome-text/60"
+                : "border-chrome-border/60 bg-chrome-bg/30 placeholder:text-chrome-text/35",
+            )}
+            style={
+              keySet
+                ? {
+                    borderColor: `color-mix(in oklch, ${gold} 40%, transparent)`,
+                    background: `color-mix(in oklch, ${gold} 5%, transparent)`,
+                  }
+                : undefined
+            }
           />
           <button
             type="button"
@@ -1086,8 +1159,19 @@ function ManagedInstallTab({
             style={{ background: gold, color: "#1a1400" }}
           >
             {saving ? <Loader2 className="h-3 w-3 animate-spin" /> : null}
-            {saving ? "Saving…" : "Save key"}
+            {saving ? "Saving…" : keySet ? "Replace key" : "Save key"}
           </button>
+          {keySet ? (
+            <button
+              type="button"
+              onClick={() => void removeKey()}
+              disabled={removing}
+              className="shrink-0 text-[10px] text-chrome-text/50 hover:text-danger/80"
+              title="Delete the stored key and reload backends"
+            >
+              {removing ? "removing…" : "remove"}
+            </button>
+          ) : null}
         </div>
         {saveResult ? (
           <div

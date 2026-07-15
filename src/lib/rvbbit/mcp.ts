@@ -815,6 +815,24 @@ export async function pushMcpSecret(
   }
 }
 
+/** Which secret NAMES the gateway already holds for a server (never values).
+ *  Empty on older gateway images without the status route — callers treat
+ *  that as "unknown" and simply skip the saved-state affordance. */
+export async function fetchMcpSecretNames(
+  connectionId: string,
+  server: string,
+): Promise<string[]> {
+  try {
+    const res = await fetch(
+      `/api/mcp/secret?server=${encodeURIComponent(server)}&connectionId=${encodeURIComponent(connectionId)}`,
+    )
+    const j = (await res.json()) as { ok: boolean; set?: string[] }
+    return j.ok ? (j.set ?? []) : []
+  } catch {
+    return []
+  }
+}
+
 export interface McpInstallResult {
   ok: boolean
   error?: string

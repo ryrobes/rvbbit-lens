@@ -73,6 +73,33 @@ export async function POST(req: Request) {
   }
 }
 
+// Which secret NAMES are set for a server — values are never returned by the
+// gateway, so this is safe to surface in install UIs ("saved — paste to
+// replace"). ?server=<name>&connectionId=<id>
+export async function GET(req: Request) {
+  const url = new URL(req.url)
+  const server = url.searchParams.get("server")
+  const connectionId = url.searchParams.get("connectionId")
+  if (!server) {
+    return NextResponse.json({ ok: false, error: "server is required" }, { status: 400 })
+  }
+  const gatewayUrl = await resolveGatewayUrl(connectionId)
+  try {
+    const res = await fetch(`${gatewayUrl}/secrets/${encodeURIComponent(server)}`, {
+      headers: authHeaders(),
+    })
+    if (!res.ok) {
+      // 404 = older gateway image without the status route; report unknown,
+      // the UI just skips the saved-state affordance.
+      return NextResponse.json({ ok: false, set: [] }, { status: 200 })
+    }
+    const body = (await res.json()) as { set?: string[] }
+    return NextResponse.json({ ok: true, set: body.set ?? [] })
+  } catch {
+    return NextResponse.json({ ok: false, set: [] }, { status: 200 })
+  }
+}
+
 export async function DELETE(req: Request) {
   const body = (await req.json().catch(() => null)) as { connectionId?: string; server?: string; name?: string } | null
   if (!body?.server || !body?.name) {
