@@ -28,6 +28,7 @@ import type {
   MvccExplorerVacuumWorker,
 } from "@/lib/db/mvcc-explorer"
 import { usePolling } from "@/lib/desktop/use-polling"
+import type { MvccExplorerPayload } from "@/lib/desktop/types"
 import { cn } from "@/lib/utils"
 
 type ExplorerView = "horizon" | "tables" | "workers"
@@ -35,9 +36,11 @@ type TableSort = "vacuum" | "freeze" | "size"
 type SqlOpener = (title: string, sql: string, run: boolean) => void
 
 interface MvccExplorerWindowProps {
+  payload: MvccExplorerPayload
   activeConnectionId: string | null
   workspaceActive?: boolean
   onOpenSql: SqlOpener
+  onChangePayload: (mutate: (payload: MvccExplorerPayload) => MvccExplorerPayload) => void
 }
 
 interface HistoryEntry {
@@ -72,21 +75,23 @@ const REFRESH_OPTIONS = [
 const HISTORY_LIMIT = 600
 
 export function MvccExplorerWindow({
+  payload,
   activeConnectionId,
   workspaceActive = true,
   onOpenSql,
+  onChangePayload,
 }: MvccExplorerWindowProps) {
   const [history, setHistory] = useState<HistoryEntry[]>([])
   const [intervalMs, setIntervalMs] = useState(2000)
   const [paused, setPaused] = useState(false)
   const [replayIndex, setReplayIndex] = useState<number | null>(null)
-  const [view, setView] = useState<ExplorerView>("horizon")
   const [selection, setSelection] = useState<Selection | null>(null)
   const [previewId, setPreviewId] = useState<string | null>(null)
   const [tableSort, setTableSort] = useState<TableSort>("vacuum")
-  const [tableSearch, setTableSearch] = useState("")
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
+  const view: ExplorerView = payload.view ?? "horizon"
+  const tableSearch = payload.tableSearch ?? ""
 
   const poll = useCallback(async () => {
     if (!activeConnectionId) return
@@ -126,9 +131,16 @@ export function MvccExplorerWindow({
   }, [candidates, selection])
   const selectedTable = useMemo(() => {
     if (!sample) return null
+    const needle = tableSearch.trim().toLowerCase()
+    const exact = needle
+      ? sample.tables.find((table) => `${table.schema}.${table.name}`.toLowerCase() === needle) ?? null
+      : null
     const oid = selection?.kind === "table" ? selection.oid : null
-    return oid ? sample.tables.find((table) => table.oid === oid) ?? null : null
-  }, [sample, selection])
+    const selected = oid ? sample.tables.find((table) => table.oid === oid) ?? null : null
+    if (exact) return exact
+    if (!selected || !needle) return selected
+    return `${selected.schema}.${selected.name}`.toLowerCase().includes(needle) ? selected : null
+  }, [sample, selection, tableSearch])
   const selectedWorker = useMemo(() => {
     if (!sample) return null
     const pid = selection?.kind === "worker" ? selection.pid : null
@@ -211,7 +223,7 @@ export function MvccExplorerWindow({
                 { value: "tables", label: "Tables", icon: Database },
                 { value: "workers", label: "Workers", icon: Activity },
               ]}
-              onChange={(next) => setView(next as ExplorerView)}
+              onChange={(next) => onChangePayload((current) => ({ ...current, view: next as ExplorerView }))}
             />
             <select
               aria-label="Refresh interval"
@@ -258,9 +270,9 @@ export function MvccExplorerWindow({
               tables={sample.tables}
               sort={tableSort}
               search={tableSearch}
-              selectedOid={selection?.kind === "table" ? selection.oid : null}
+              selectedOid={selectedTable?.oid ?? null}
               onSort={setTableSort}
-              onSearch={setTableSearch}
+              onSearch={(search) => onChangePayload((current) => ({ ...current, tableSearch: search }))}
               onSelect={(oid) => setSelection({ kind: "table", oid })}
             />
           ) : null}
@@ -458,8 +470,15 @@ function TablesView({
 }) {
   const visible = useMemo(() => {
     const needle = search.trim().toLowerCase()
+    const hasExactMatch = needle.length > 0 && tables.some(
+      (table) => `${table.schema}.${table.name}`.toLowerCase() === needle,
+    )
     return [...tables]
-      .filter((table) => !needle || `${table.schema}.${table.name}`.toLowerCase().includes(needle))
+      .filter((table) => {
+        if (!needle) return true
+        const relation = `${table.schema}.${table.name}`.toLowerCase()
+        return hasExactMatch ? relation === needle : relation.includes(needle)
+      })
       .sort((a, b) => tableScore(b, sort) - tableScore(a, sort))
   }, [search, sort, tables])
 

@@ -1,6 +1,7 @@
 import type { ExtensionInfo, QueryResultColumn, SchemaColumn, SchemaTable } from "@/lib/db/types"
 import type { DataSearchHit } from "@/lib/rvbbit/data-search"
 import type { OpStep, RetryPlan, TakesPlan, WardsPlan } from "@/lib/rvbbit/operators"
+import type { ActivityRow } from "@/lib/db/pg-stats"
 import type { HtmlBlockSpec } from "./app-block"
 
 export type DesktopWindowKind =
@@ -25,6 +26,7 @@ export type DesktopWindowKind =
   | "palette"
   | "appearance"
   | "pg-monitor"
+  | "pg-query-inspector"
   | "lock-explorer"
   | "mvcc-explorer"
   | "fleet"
@@ -124,6 +126,7 @@ export type WindowPayload =
   | PalettePayload
   | AppearancePayload
   | PgMonitorPayload
+  | PgQueryInspectorPayload
   | LockExplorerPayload
   | MvccExplorerPayload
   | FleetPayload
@@ -960,12 +963,22 @@ export interface PgMonitorPayload {
   kind?: "pg-monitor"
 }
 
+/** Persistent observer opened from one pg_stat_activity row. */
+export interface PgQueryInspectorPayload {
+  kind?: "pg-query-inspector"
+  connectionId: string
+  capturedAt: string
+  activity: ActivityRow
+}
+
 export interface LockExplorerPayload {
   kind?: "lock-explorer"
 }
 
 export interface MvccExplorerPayload {
   kind?: "mvcc-explorer"
+  view?: "horizon" | "tables" | "workers"
+  tableSearch?: string
 }
 
 export interface FleetPayload {

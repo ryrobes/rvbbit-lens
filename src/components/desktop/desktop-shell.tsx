@@ -79,6 +79,7 @@ import { PaletteWindow } from "./palette-window"
 import { AppearanceWindow } from "./appearance-window"
 import { CommandPalette, type PaletteGroup, type PaletteItem } from "./command-palette"
 import { PgMonitorWindow } from "./pg-monitor-window"
+import { PgQueryInspectorWindow } from "./pg-query-inspector-window"
 import { LockExplorerWindow } from "./lock-explorer-window"
 import { MvccExplorerWindow } from "./mvcc-explorer-window"
 import { FleetWindow } from "./fleet-window"
@@ -228,6 +229,7 @@ import type {
   AppearancePayload,
   PalettePayload,
   PgMonitorPayload,
+  PgQueryInspectorPayload,
   LockExplorerPayload,
   MvccExplorerPayload,
   FleetPayload,
@@ -2220,6 +2222,36 @@ export function DesktopShell() {
     })
   }, [focus, openWindow, liveWindows])
 
+  const openPgQueryInspector = useCallback((activity: PgQueryInspectorPayload["activity"]) => {
+    if (!activeConnectionId) return
+    const existing = liveWindows().find((window) => {
+      if (window.kind !== "pg-query-inspector") return false
+      const payload = window.payload as PgQueryInspectorPayload | undefined
+      return payload?.connectionId === activeConnectionId
+        && payload.activity.pid === activity.pid
+        && payload.activity.backend_start === activity.backend_start
+        && payload.activity.query_start === activity.query_start
+    })
+    if (existing) return focus(existing.id)
+
+    const source = activity.application_name || activity.usename || `pid ${activity.pid}`
+    openWindow({
+      id: randomUUID(),
+      kind: "pg-query-inspector",
+      title: `Query Inspector · ${source}`,
+      x: 170 + Math.random() * 50,
+      y: 95 + Math.random() * 45,
+      width: 980,
+      height: 720,
+      payload: {
+        kind: "pg-query-inspector",
+        connectionId: activeConnectionId,
+        capturedAt: new Date().toISOString(),
+        activity,
+      } satisfies PgQueryInspectorPayload,
+    })
+  }, [activeConnectionId, focus, liveWindows, openWindow])
+
   const openLockExplorer = useCallback(() => {
     const existing = liveWindows().find((w) => w.kind === "lock-explorer")
     if (existing) return focus(existing.id)
@@ -2232,17 +2264,31 @@ export function DesktopShell() {
     })
   }, [focus, openWindow, liveWindows])
 
-  const openMvccExplorer = useCallback(() => {
+  const openMvccExplorer = useCallback((target?: { schema: string; table: string }) => {
     const existing = liveWindows().find((w) => w.kind === "mvcc-explorer")
-    if (existing) return focus(existing.id)
+    if (existing) {
+      if (target) {
+        updatePayload(existing.id, (payload) => ({
+          ...(payload as MvccExplorerPayload),
+          kind: "mvcc-explorer",
+          view: "tables",
+          tableSearch: `${target.schema}.${target.table}`,
+        } satisfies MvccExplorerPayload))
+      }
+      focus(existing.id)
+      return
+    }
     openWindow({
       id: randomUUID(),
       kind: "mvcc-explorer",
       title: "MVCC Explorer",
       x: 115, y: 72, width: 1160, height: 780,
-      payload: { kind: "mvcc-explorer" } satisfies MvccExplorerPayload,
+      payload: {
+        kind: "mvcc-explorer",
+        ...(target ? { view: "tables" as const, tableSearch: `${target.schema}.${target.table}` } : {}),
+      } satisfies MvccExplorerPayload,
     })
-  }, [focus, openWindow, liveWindows])
+  }, [focus, openWindow, liveWindows, updatePayload])
 
   const openFleet = useCallback(() => {
     const existing = liveWindows().find((w) => w.kind === "fleet")
@@ -4865,6 +4911,8 @@ export function DesktopShell() {
       setBusy,
       openTableFromFinder,
       openSqlInWindow,
+      openPgQueryInspector,
+      openMvccExplorer,
       viewObjectDdl,
       openField,
       openViewAppBuilder,
@@ -4943,7 +4991,7 @@ export function DesktopShell() {
     }),
     [
       activeConnectionId, hasRvbbit, launchers, schema, semanticOps, schemaLoading, busy, setBusy,
-      openTableFromFinder, openSqlInWindow, viewObjectDdl, openField, openViewAppBuilder, openViewApp,
+      openTableFromFinder, openSqlInWindow, openPgQueryInspector, openMvccExplorer, viewObjectDdl, openField, openViewAppBuilder, openViewApp,
       addLauncherShortcut, addViewAppShortcut, addDashboardShortcut, openDashboardApp, openArtifact,
       openQueryDocument, openSqlData, openRowInspector, openCsvImport, openExtensions, openRvbbitCache, openCache, openConnections,
       loadSchema, loadConnections, updatePayload, applyAssistantCommands, openAssistant, emitParam, subscribeParam,
@@ -5439,6 +5487,8 @@ interface WindowContext {
   setBusy: (b: boolean) => void
   openTableFromFinder: (schema: string, name: string) => void
   openSqlInWindow: (title: string, sql: string, run: boolean) => void
+  openPgQueryInspector: (activity: PgQueryInspectorPayload["activity"]) => void
+  openMvccExplorer: (target?: { schema: string; table: string }) => void
   viewObjectDdl: (schema: string, name: string, kind: string) => void
   openField: (schema: string, rel: string, col: string) => void
   openViewAppBuilder: (seed?: ViewAppBuilderPayload) => void
@@ -5777,6 +5827,16 @@ function renderWindowContent(
         <PgMonitorWindow
           activeConnectionId={ctx.activeConnectionId}
           workspaceActive={ctx.workspaceActive}
+          onOpenQuery={ctx.openPgQueryInspector}
+          onOpenMvccTable={(schema, table) => ctx.openMvccExplorer({ schema, table })}
+        />
+      )
+    case "pg-query-inspector":
+      return (
+        <PgQueryInspectorWindow
+          payload={w.payload as PgQueryInspectorPayload}
+          workspaceActive={ctx.workspaceActive}
+          onOpenSql={ctx.openSqlInWindow}
         />
       )
     case "lock-explorer":
@@ -5791,10 +5851,12 @@ function renderWindowContent(
     case "mvcc-explorer":
       return (
         <MvccExplorerWindow
+          payload={w.payload as MvccExplorerPayload}
           key={ctx.activeConnectionId ?? "no-connection"}
           activeConnectionId={ctx.activeConnectionId}
           workspaceActive={ctx.workspaceActive}
           onOpenSql={ctx.openSqlInWindow}
+          onChangePayload={(mutate) => ctx.updatePayload(w.id, (payload) => mutate(payload as MvccExplorerPayload))}
         />
       )
     case "fleet":

@@ -58,15 +58,67 @@ export interface CumulativeCounters {
 
 export interface ActivityRow {
   pid: number
+  datname: string | null
+  usename: string | null
   state: string | null
   application_name: string | null
   client_addr: string | null
+  client_hostname: string | null
+  client_port: number | null
   backend_type: string | null
+  backend_start: string
+  xact_start: string | null
+  query_start: string | null
+  state_change: string | null
   wait_event_type: string | null
   wait_event: string | null
+  backend_xid: string | null
+  backend_xmin: string | null
+  leader_pid: number | null
+  query_id: string | null
   query_start_ms_ago: number | null
   xact_start_ms_ago: number | null
+  query: string | null
   query_preview: string | null
+}
+
+export interface PgQueryObservationTarget {
+  pid: number
+  backendStart: string
+  queryId: string | null
+  query: string | null
+}
+
+export interface PgStatementStats {
+  calls: number
+  plans: number
+  total_plan_time_ms: number
+  total_exec_time_ms: number
+  mean_exec_time_ms: number
+  min_exec_time_ms: number | null
+  max_exec_time_ms: number | null
+  rows: number
+  shared_blks_hit: number
+  shared_blks_read: number
+  shared_blks_dirtied: number
+  shared_blks_written: number
+  temp_blks_read: number
+  temp_blks_written: number
+  blk_read_time_ms: number
+  blk_write_time_ms: number
+  wal_records: number
+  wal_bytes: number
+}
+
+export interface PgQueryObservationSnapshot {
+  timestamp: string
+  match_mode: "query_id" | "normalized_sql" | "unavailable"
+  original_session: ActivityRow | null
+  matching_sessions: ActivityRow[]
+  pg_stat_statements_available: boolean
+  pg_stat_statements_reset: string | null
+  statement_stats: PgStatementStats | null
+  statement_stats_error: string | null
 }
 
 export interface ActivitySnapshot {
@@ -176,22 +228,45 @@ SELECT
    FROM (SELECT backend_type, count(*)::int4 AS cnt FROM a WHERE backend_type IS NOT NULL GROUP BY backend_type) z) AS by_backend_type
 `
 
-const ACTIVITY_ROWS_SQL = `
-SELECT
+const ACTIVITY_COLUMNS_SQL = `
   pid,
+  datname,
+  usename,
   state,
   application_name,
   client_addr::text AS client_addr,
+  client_hostname,
+  client_port,
   backend_type,
+  to_char(backend_start, 'YYYY-MM-DD"T"HH24:MI:SS.USOF') AS backend_start,
+  CASE WHEN xact_start IS NOT NULL
+       THEN to_char(xact_start, 'YYYY-MM-DD"T"HH24:MI:SS.USOF')
+       ELSE NULL END AS xact_start,
+  CASE WHEN query_start IS NOT NULL
+       THEN to_char(query_start, 'YYYY-MM-DD"T"HH24:MI:SS.USOF')
+       ELSE NULL END AS query_start,
+  CASE WHEN state_change IS NOT NULL
+       THEN to_char(state_change, 'YYYY-MM-DD"T"HH24:MI:SS.USOF')
+       ELSE NULL END AS state_change,
   wait_event_type,
   wait_event,
+  backend_xid::text AS backend_xid,
+  backend_xmin::text AS backend_xmin,
+  leader_pid,
+  query_id::text AS query_id,
   CASE WHEN query_start IS NOT NULL
        THEN (extract(epoch from now() - query_start) * 1000)::int8
        ELSE NULL END AS query_start_ms_ago,
   CASE WHEN xact_start IS NOT NULL
        THEN (extract(epoch from now() - xact_start) * 1000)::int8
        ELSE NULL END AS xact_start_ms_ago,
+  query,
   left(query, 200) AS query_preview
+`
+
+const ACTIVITY_ROWS_SQL = `
+SELECT
+  ${ACTIVITY_COLUMNS_SQL}
 FROM pg_stat_activity
 WHERE backend_type = 'client backend'
   AND pid <> pg_backend_pid()
@@ -199,6 +274,21 @@ ORDER BY
   CASE state WHEN 'active' THEN 0 WHEN 'idle in transaction' THEN 1 WHEN 'idle' THEN 2 ELSE 3 END,
   query_start ASC NULLS LAST
 LIMIT 25
+`
+
+const ORIGINAL_ACTIVITY_SQL = `
+SELECT
+  ${ACTIVITY_COLUMNS_SQL}
+FROM pg_stat_activity
+WHERE pid = $1
+  AND backend_start = $2::timestamptz
+LIMIT 1
+`
+
+const PGSS_CATALOG_SQL = `
+SELECT
+  to_regclass('pg_stat_statements') IS NOT NULL AS statements_available,
+  to_regclass('pg_stat_statements_info') IS NOT NULL AS info_available
 `
 
 const WAL_SQL = `
@@ -382,18 +472,7 @@ export async function fetchPgStats(connectionId: string): Promise<PgStatsSnapsho
       waiting: Number(sum.waiting ?? 0),
       longest_active_ms: Number(sum.longest_active_ms ?? 0),
       by_backend_type: (sum.by_backend_type ?? {}) as Record<string, number>,
-      rows: rows.rows.map((r) => ({
-        pid: Number(r.pid),
-        state: r.state ?? null,
-        application_name: r.application_name ?? null,
-        client_addr: r.client_addr ?? null,
-        backend_type: r.backend_type ?? null,
-        wait_event_type: r.wait_event_type ?? null,
-        wait_event: r.wait_event ?? null,
-        query_start_ms_ago: r.query_start_ms_ago == null ? null : Number(r.query_start_ms_ago),
-        xact_start_ms_ago: r.xact_start_ms_ago == null ? null : Number(r.xact_start_ms_ago),
-        query_preview: r.query_preview ?? null,
-      })),
+      rows: rows.rows.map(mapActivityRow),
     },
     wal: walRow
       ? {
@@ -423,4 +502,162 @@ export async function fetchPgStats(connectionId: string): Promise<PgStatsSnapsho
     },
     rvbbit,
   }
+}
+
+/**
+ * Focused observer for a query captured from pg_stat_activity. The original
+ * backend identity is queried independently from matching live executions, so
+ * an inspector can keep its immutable snapshot after that backend disappears.
+ * pg_stat_statements is opportunistic: the window still works on plain
+ * Postgres or when compute_query_id is disabled.
+ */
+export async function fetchPgQueryObservation(
+  connectionId: string,
+  target: PgQueryObservationTarget,
+): Promise<PgQueryObservationSnapshot> {
+  const { pool } = await getPool(connectionId, undefined, "observer")
+  const normalizedQuery = normalizeQueryText(target.query)
+  const hasQueryId = target.queryId != null && /^-?\d+$/.test(target.queryId)
+  const matchMode: PgQueryObservationSnapshot["match_mode"] = hasQueryId
+    ? "query_id"
+    : normalizedQuery ? "normalized_sql" : "unavailable"
+
+  const matchingSql = matchMode === "query_id"
+    ? `SELECT ${ACTIVITY_COLUMNS_SQL}
+       FROM pg_stat_activity
+       WHERE backend_type = 'client backend'
+         AND state = 'active'
+         AND pid <> pg_backend_pid()
+         AND query_id = $1::bigint
+       ORDER BY query_start ASC NULLS LAST
+       LIMIT 50`
+    : matchMode === "normalized_sql"
+      ? `SELECT ${ACTIVITY_COLUMNS_SQL}
+         FROM pg_stat_activity
+         WHERE backend_type = 'client backend'
+           AND state = 'active'
+           AND pid <> pg_backend_pid()
+           AND regexp_replace(btrim(query), '\\s+', ' ', 'g') = $1
+         ORDER BY query_start ASC NULLS LAST
+         LIMIT 50`
+      : null
+
+  const [original, matching, catalog] = await Promise.all([
+    pool.query(ORIGINAL_ACTIVITY_SQL, [target.pid, target.backendStart]),
+    matchingSql
+      ? pool.query(matchingSql, [matchMode === "query_id" ? target.queryId : normalizedQuery])
+      : Promise.resolve({ rows: [] }),
+    pool.query(PGSS_CATALOG_SQL),
+  ])
+
+  const catalogRow = catalog.rows[0] ?? {}
+  const statementsAvailable = !!catalogRow.statements_available
+  let statementsReset: string | null = null
+  let statementStats: PgStatementStats | null = null
+  let statementStatsError: string | null = null
+
+  if (statementsAvailable && hasQueryId) {
+    try {
+      const [statsResult, infoResult] = await Promise.all([
+        pool.query(
+          `SELECT to_jsonb(s) AS stats
+           FROM pg_stat_statements s
+           WHERE s.dbid = (SELECT oid FROM pg_database WHERE datname = current_database())
+             AND s.queryid = $1::bigint`,
+          [target.queryId],
+        ),
+        catalogRow.info_available
+          ? pool.query(`SELECT to_char(stats_reset, 'YYYY-MM-DD"T"HH24:MI:SS.USOF') AS stats_reset FROM pg_stat_statements_info`)
+          : Promise.resolve({ rows: [] }),
+      ])
+      statementStats = aggregateStatementStats(
+        statsResult.rows.map((row) => (row.stats ?? {}) as Record<string, unknown>),
+      )
+      statementsReset = infoResult.rows[0]?.stats_reset ?? null
+    } catch (error) {
+      statementStatsError = error instanceof Error ? error.message : String(error)
+    }
+  }
+
+  return {
+    timestamp: new Date().toISOString(),
+    match_mode: matchMode,
+    original_session: original.rows[0] ? mapActivityRow(original.rows[0]) : null,
+    matching_sessions: matching.rows.map(mapActivityRow),
+    pg_stat_statements_available: statementsAvailable,
+    pg_stat_statements_reset: statementsReset,
+    statement_stats: statementStats,
+    statement_stats_error: statementStatsError,
+  }
+}
+
+function mapActivityRow(row: Record<string, unknown>): ActivityRow {
+  return {
+    pid: Number(row.pid),
+    datname: row.datname == null ? null : String(row.datname),
+    usename: row.usename == null ? null : String(row.usename),
+    state: row.state == null ? null : String(row.state),
+    application_name: row.application_name == null ? null : String(row.application_name),
+    client_addr: row.client_addr == null ? null : String(row.client_addr),
+    client_hostname: row.client_hostname == null ? null : String(row.client_hostname),
+    client_port: row.client_port == null ? null : Number(row.client_port),
+    backend_type: row.backend_type == null ? null : String(row.backend_type),
+    backend_start: String(row.backend_start),
+    xact_start: row.xact_start == null ? null : String(row.xact_start),
+    query_start: row.query_start == null ? null : String(row.query_start),
+    state_change: row.state_change == null ? null : String(row.state_change),
+    wait_event_type: row.wait_event_type == null ? null : String(row.wait_event_type),
+    wait_event: row.wait_event == null ? null : String(row.wait_event),
+    backend_xid: row.backend_xid == null ? null : String(row.backend_xid),
+    backend_xmin: row.backend_xmin == null ? null : String(row.backend_xmin),
+    leader_pid: row.leader_pid == null ? null : Number(row.leader_pid),
+    query_id: row.query_id == null ? null : String(row.query_id),
+    query_start_ms_ago: row.query_start_ms_ago == null ? null : Number(row.query_start_ms_ago),
+    xact_start_ms_ago: row.xact_start_ms_ago == null ? null : Number(row.xact_start_ms_ago),
+    query: row.query == null ? null : String(row.query),
+    query_preview: row.query_preview == null ? null : String(row.query_preview),
+  }
+}
+
+function normalizeQueryText(query: string | null): string {
+  return query?.trim().replace(/\s+/g, " ") ?? ""
+}
+
+function aggregateStatementStats(rows: Record<string, unknown>[]): PgStatementStats | null {
+  if (rows.length === 0) return null
+  const sum = (key: string) => rows.reduce((total, row) => total + numeric(row[key]), 0)
+  const calls = sum("calls")
+  const totalExec = sum("total_exec_time")
+  const extrema = (key: string, mode: "min" | "max") => {
+    const values = rows
+      .map((row) => Number(row[key]))
+      .filter((value) => Number.isFinite(value))
+    if (values.length === 0) return null
+    return mode === "min" ? Math.min(...values) : Math.max(...values)
+  }
+  return {
+    calls,
+    plans: sum("plans"),
+    total_plan_time_ms: sum("total_plan_time"),
+    total_exec_time_ms: totalExec,
+    mean_exec_time_ms: calls > 0 ? totalExec / calls : 0,
+    min_exec_time_ms: extrema("min_exec_time", "min"),
+    max_exec_time_ms: extrema("max_exec_time", "max"),
+    rows: sum("rows"),
+    shared_blks_hit: sum("shared_blks_hit"),
+    shared_blks_read: sum("shared_blks_read"),
+    shared_blks_dirtied: sum("shared_blks_dirtied"),
+    shared_blks_written: sum("shared_blks_written"),
+    temp_blks_read: sum("temp_blks_read"),
+    temp_blks_written: sum("temp_blks_written"),
+    blk_read_time_ms: sum("blk_read_time"),
+    blk_write_time_ms: sum("blk_write_time"),
+    wal_records: sum("wal_records"),
+    wal_bytes: sum("wal_bytes"),
+  }
+}
+
+function numeric(value: unknown): number {
+  const parsed = Number(value)
+  return Number.isFinite(parsed) ? parsed : 0
 }

@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import {
   AlertTriangle,
+  Boxes,
   CheckCircle2,
   ChevronDown,
   Cpu,
@@ -16,8 +17,10 @@ import {
   Rocket,
   Sparkles,
   Search,
+  Table2,
   Tag,
   X,
+  type LucideIcon,
 } from "@/lib/icons"
 import { cn } from "@/lib/utils"
 import {
@@ -77,6 +80,29 @@ const REFRESH_OPTIONS_MS = [
   { ms: 30_000, label: "30s" },
 ]
 
+type CapabilitiesView = "card" | "list"
+
+const CAPABILITIES_VIEW_STORAGE_KEY = "rvbbit-lens:capabilities-view"
+
+function loadCapabilitiesView(): CapabilitiesView {
+  try {
+    return typeof window !== "undefined" &&
+      window.localStorage.getItem(CAPABILITIES_VIEW_STORAGE_KEY) === "list"
+      ? "list"
+      : "card"
+  } catch {
+    return "card"
+  }
+}
+
+function saveCapabilitiesView(view: CapabilitiesView): void {
+  try {
+    window.localStorage.setItem(CAPABILITIES_VIEW_STORAGE_KEY, view)
+  } catch {
+    /* ignore quota / disabled storage */
+  }
+}
+
 /**
  * The capability catalog browser — front door to the install/discovery
  * layer over `rvbbit.backends`. Reads catalog.json from disk (via the
@@ -84,8 +110,8 @@ const REFRESH_OPTIONS_MS = [
  * `rvbbit.backend_health` on the configured interval to keep
  * install-state badges fresh.
  *
- * Cards group by (matching tags + matching search query); clicking a
- * card opens its Capability Detail window.
+ * Entries group by (matching tags + matching search query); clicking a
+ * card or list row opens its Capability Detail window.
  */
 export function CapabilitiesWindow({
   activeConnectionId,
@@ -105,6 +131,7 @@ export function CapabilitiesWindow({
     () => new Set(initialTag ? [initialTag] : []),
   )
   const [search, setSearch] = useState("")
+  const [viewMode, setViewModeState] = useState<CapabilitiesView>(loadCapabilitiesView)
   // Semantic re-rank layer (Tier A): id -> similarity score for the current
   // query. Blended *under* the substring matches, so exact keyword hits stay on
   // top and semantically-related capabilities surface below. Empty when the
@@ -127,6 +154,11 @@ export function CapabilitiesWindow({
     message: string
   } | null>(null)
   const loadingCatalog = catalog == null && catalogError == null
+
+  const setViewMode = useCallback((view: CapabilitiesView) => {
+    setViewModeState(view)
+    saveCapabilitiesView(view)
+  }, [])
 
   const loadCatalog = useCallback(async () => {
     const r = await fetchCatalog(activeConnectionId)
@@ -608,7 +640,7 @@ export function CapabilitiesWindow({
 
       {/* filter bar */}
       <div className="flex flex-col gap-2 border-b border-chrome-border bg-chrome-bg/20 px-3 py-2">
-        <div className="flex items-center gap-2">
+        <div className="flex items-start gap-2">
           <div className="relative flex-1">
             <Search className="pointer-events-none absolute left-2 top-1/2 h-3 w-3 -translate-y-1/2 text-chrome-text/45" />
             <input
@@ -619,22 +651,42 @@ export function CapabilitiesWindow({
               className="h-7 w-full rounded border border-chrome-border bg-secondary-background pl-7 pr-2 text-[12px] text-foreground outline-none focus:ring-2 focus:ring-ring"
             />
           </div>
-          {allTags.length > 0 ? (
-            <TagFilterDropdown
-              tags={allTags}
-              liveCounts={liveTagCounts}
-              selected={selectedTags}
-              onToggle={(tag) =>
-                setSelectedTags((prev) => {
-                  const next = new Set(prev)
-                  if (next.has(tag)) next.delete(tag)
-                  else next.add(tag)
-                  return next
-                })
-              }
-              onClear={() => setSelectedTags(new Set())}
-            />
-          ) : null}
+          <div className="flex shrink-0 flex-col items-end gap-1">
+            {allTags.length > 0 ? (
+              <TagFilterDropdown
+                tags={allTags}
+                liveCounts={liveTagCounts}
+                selected={selectedTags}
+                onToggle={(tag) =>
+                  setSelectedTags((prev) => {
+                    const next = new Set(prev)
+                    if (next.has(tag)) next.delete(tag)
+                    else next.add(tag)
+                    return next
+                  })
+                }
+                onClear={() => setSelectedTags(new Set())}
+              />
+            ) : null}
+            <div
+              role="group"
+              className="flex items-center gap-0.5 rounded border border-chrome-border bg-secondary-background p-0.5"
+              aria-label="Capability view"
+            >
+              <CapabilityViewButton
+                active={viewMode === "card"}
+                onClick={() => setViewMode("card")}
+                icon={Boxes}
+                title="Card view"
+              />
+              <CapabilityViewButton
+                active={viewMode === "list"}
+                onClick={() => setViewMode("list")}
+                icon={Table2}
+                title="List view"
+              />
+            </div>
+          </div>
         </div>
         {allSources.length > 1 ? (
           <div className="flex flex-wrap items-center gap-1 border-t border-chrome-border/35 pt-1.5">
@@ -685,7 +737,7 @@ export function CapabilitiesWindow({
         ) : null}
       </div>
 
-      {/* card grid */}
+      {/* capability browser */}
       <div className="min-h-0 flex-1 overflow-auto p-3">
         {loadingCatalog ? (
           <div className="grid h-full place-items-center text-[11px] text-chrome-text/55">
@@ -696,11 +748,18 @@ export function CapabilitiesWindow({
             {totalCatalog === 0 ? "no capabilities in catalog" : "no matches"}
           </div>
         ) : (
-          <div className="grid grid-cols-[repeat(auto-fill,minmax(280px,1fr))] gap-2.5">
+          <div
+            className={cn(
+              viewMode === "card"
+                ? "grid grid-cols-[repeat(auto-fill,minmax(280px,1fr))] gap-2.5"
+                : "flex flex-col gap-1.5",
+            )}
+          >
             {visible.map((e) => (
               <CapabilityCard
                 key={e.catalog.id}
                 entry={e}
+                view={viewMode}
                 callSeries={e.catalog.backend_name ? callSeries.get(e.catalog.backend_name) : undefined}
                 warrenNodes={uniqueNodesFromInventory(warrenInventory)}
                 maxVram={maxVram}
@@ -716,6 +775,35 @@ export function CapabilitiesWindow({
 }
 
 // ── tag filter ──────────────────────────────────────────────────────
+
+function CapabilityViewButton({
+  active,
+  onClick,
+  icon: Icon,
+  title,
+}: {
+  active: boolean
+  onClick: () => void
+  icon: LucideIcon
+  title: string
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      title={title}
+      aria-pressed={active}
+      className={cn(
+        "grid h-6 w-7 place-items-center rounded transition-colors",
+        active
+          ? "bg-foreground/[0.12] text-foreground"
+          : "text-chrome-text hover:bg-foreground/[0.06]",
+      )}
+    >
+      <Icon className="h-3.5 w-3.5" />
+    </button>
+  )
+}
 
 /**
  * Multi-select tag filter, collapsed into a single control beside the
@@ -875,6 +963,7 @@ function filterBySearchOnly<T extends { catalog: JoinedCatalogEntry["catalog"] }
 
 function CapabilityCard({
   entry,
+  view,
   callSeries,
   warrenNodes,
   maxVram,
@@ -882,7 +971,8 @@ function CapabilityCard({
   onOpen,
 }: {
   entry: JoinedCatalogEntry
-  /** Real 14-day daily call counts for this entry's backend (oldest first). */
+  view: CapabilitiesView
+  /** Real call counts from at most the last 24h, oldest first. */
   callSeries?: number[]
   warrenNodes: WarrenInventoryRow[]
   maxVram: number
@@ -939,7 +1029,10 @@ function CapabilityCard({
       type="button"
       onClick={onOpen}
       className={cn(
-        "group relative flex flex-col overflow-hidden rounded-md border p-2.5 pl-3.5 text-left transition",
+        "group relative overflow-hidden rounded-md border text-left transition",
+        view === "card"
+          ? "flex flex-col p-2.5 pl-3.5"
+          : "grid grid-cols-[minmax(0,0.85fr)_minmax(0,1.35fr)_minmax(0,1fr)] items-start gap-x-3 gap-y-1 p-2 pl-3.5",
         active
           ? "border-brand-capability/60 bg-brand-capability/[0.07] shadow-[0_0_0_1px_var(--brand-capability)] ring-1 ring-brand-capability/30 hover:bg-brand-capability/[0.1]"
           : flags.registered
@@ -961,7 +1054,12 @@ function CapabilityCard({
       <WeightBar bytes={vramRequired} max={maxVram} />
 
       {/* title row */}
-      <div className="flex items-start gap-1.5">
+      <div
+        className={cn(
+          "flex min-w-0 items-start gap-1.5",
+          view === "list" ? "col-start-1 row-start-1 flex-wrap" : "",
+        )}
+      >
         {managed ? (
           <RvbbitLogo
             className="mt-1 h-2.5 w-auto shrink-0"
@@ -986,83 +1084,100 @@ function CapabilityCard({
             {catalog.name}
           </div>
         </div>
-        {semanticMatch ? (
-          <span
-            className="inline-flex shrink-0 items-center gap-0.5 rounded-full border border-brand-capability/30 bg-brand-capability/10 px-1.5 py-px text-[9px] text-brand-capability/90"
-            title="Surfaced by semantic search — related to your query (no keyword match)"
-          >
-            <Sparkles className="h-2.5 w-2.5" />
-            related
-          </span>
-        ) : null}
-        {managed ? (
-          <span className="flex shrink-0 items-center gap-1">
-            {managed.verified?.tests ? (
-              <span
-                className="inline-flex items-center gap-0.5 rounded-full border px-1.5 py-px text-[9px]"
-                style={{
-                  borderColor: "color-mix(in oklch, var(--cap-type) 45%, transparent)",
-                  color: "var(--cap-type)",
-                  background: "color-mix(in oklch, var(--cap-type) 12%, transparent)",
-                }}
-                title={`Semantic Tests battery: ${managed.verified.passed}/${managed.verified.tests} passed · ${managed.verified.regime ?? ""} · ${managed.verified.battery_date ?? ""}${managed.verified.note ? ` · ${managed.verified.note}` : ""}`}
-              >
-                <CheckCircle2 className="h-2.5 w-2.5" />
-                {managed.verified.passed}/{managed.verified.tests}
-              </span>
-            ) : null}
-            {comingSoon ? (
-              <span className="inline-flex items-center rounded-full border border-chrome-border/60 px-1.5 py-px text-[9px] text-chrome-text/60">
-                coming soon
-              </span>
-            ) : (managed.pricing?.tiers?.length ?? 0) > 0 ? (
-              <span
-                className="inline-flex items-center rounded-full px-1.5 py-px text-[9px] font-medium"
-                style={{
-                  background: "color-mix(in oklch, var(--cap-type) 25%, transparent)",
-                  color: "var(--cap-type)",
-                  border: "1px solid color-mix(in oklch, var(--cap-type) 55%, transparent)",
-                }}
-                title="Free tier available — open for plans"
-              >
-                {managed.pricing?.tiers?.some((t) => t.monthly_usd === 0)
-                  ? `Free · from $${managed.pricing!.monthly_usd}/mo`
-                  : `from $${managed.pricing!.monthly_usd}/mo`}
-              </span>
-            ) : managed.pricing?.monthly_usd ? (
-              <span
-                role="button"
-                tabIndex={0}
-                className="inline-flex cursor-pointer items-center rounded-full px-1.5 py-px text-[9px] font-medium hover:brightness-125"
-                style={{
-                  background: "color-mix(in oklch, var(--cap-type) 25%, transparent)",
-                  color: "var(--cap-type)",
-                  border: "1px solid color-mix(in oklch, var(--cap-type) 55%, transparent)",
-                }}
-                title={managed.pricing.checkout_url ? "Subscribe — opens checkout" : "Subscription price"}
-                onClick={(ev) => {
-                  ev.stopPropagation()
-                  ev.preventDefault()
-                  if (managed.pricing?.checkout_url) window.open(managed.pricing.checkout_url, "_blank")
-                }}
-              >
-                ${managed.pricing.monthly_usd}/mo
-              </span>
-            ) : null}
-          </span>
-        ) : null}
-        <DeviceChip device={catalog.device} />
+        <div
+          className={cn(
+            "flex items-center gap-1",
+            view === "list" ? "basis-full flex-wrap pl-5 pt-0.5" : "shrink-0",
+          )}
+        >
+          {semanticMatch ? (
+            <span
+              className="inline-flex shrink-0 items-center gap-0.5 rounded-full border border-brand-capability/30 bg-brand-capability/10 px-1.5 py-px text-[9px] text-brand-capability/90"
+              title="Surfaced by semantic search — related to your query (no keyword match)"
+            >
+              <Sparkles className="h-2.5 w-2.5" />
+              related
+            </span>
+          ) : null}
+          {managed ? (
+            <span className="flex shrink-0 items-center gap-1">
+              {managed.verified?.tests ? (
+                <span
+                  className="inline-flex items-center gap-0.5 rounded-full border px-1.5 py-px text-[9px]"
+                  style={{
+                    borderColor: "color-mix(in oklch, var(--cap-type) 45%, transparent)",
+                    color: "var(--cap-type)",
+                    background: "color-mix(in oklch, var(--cap-type) 12%, transparent)",
+                  }}
+                  title={`Semantic Tests battery: ${managed.verified.passed}/${managed.verified.tests} passed · ${managed.verified.regime ?? ""} · ${managed.verified.battery_date ?? ""}${managed.verified.note ? ` · ${managed.verified.note}` : ""}`}
+                >
+                  <CheckCircle2 className="h-2.5 w-2.5" />
+                  {managed.verified.passed}/{managed.verified.tests}
+                </span>
+              ) : null}
+              {comingSoon ? (
+                <span className="inline-flex items-center rounded-full border border-chrome-border/60 px-1.5 py-px text-[9px] text-chrome-text/60">
+                  coming soon
+                </span>
+              ) : (managed.pricing?.tiers?.length ?? 0) > 0 ? (
+                <span
+                  className="inline-flex items-center rounded-full px-1.5 py-px text-[9px] font-medium"
+                  style={{
+                    background: "color-mix(in oklch, var(--cap-type) 25%, transparent)",
+                    color: "var(--cap-type)",
+                    border: "1px solid color-mix(in oklch, var(--cap-type) 55%, transparent)",
+                  }}
+                  title="Free tier available — open for plans"
+                >
+                  {managed.pricing?.tiers?.some((t) => t.monthly_usd === 0)
+                    ? `Free · from $${managed.pricing!.monthly_usd}/mo`
+                    : `from $${managed.pricing!.monthly_usd}/mo`}
+                </span>
+              ) : managed.pricing?.monthly_usd ? (
+                <span
+                  role="button"
+                  tabIndex={0}
+                  className="inline-flex cursor-pointer items-center rounded-full px-1.5 py-px text-[9px] font-medium hover:brightness-125"
+                  style={{
+                    background: "color-mix(in oklch, var(--cap-type) 25%, transparent)",
+                    color: "var(--cap-type)",
+                    border: "1px solid color-mix(in oklch, var(--cap-type) 55%, transparent)",
+                  }}
+                  title={managed.pricing.checkout_url ? "Subscribe — opens checkout" : "Subscription price"}
+                  onClick={(ev) => {
+                    ev.stopPropagation()
+                    ev.preventDefault()
+                    if (managed.pricing?.checkout_url) window.open(managed.pricing.checkout_url, "_blank")
+                  }}
+                >
+                  ${managed.pricing.monthly_usd}/mo
+                </span>
+              ) : null}
+            </span>
+          ) : null}
+          <DeviceChip device={catalog.device} />
+        </div>
       </div>
 
       {/* description */}
       {catalog.description ? (
-        <p className="mt-1.5 line-clamp-2 text-[11px] leading-snug text-chrome-text/75">
+        <p
+          className={cn(
+            "line-clamp-2 text-[11px] leading-snug text-chrome-text/75",
+            view === "list" ? "col-start-2 row-start-1 mt-0" : "mt-1.5",
+          )}
+        >
           {catalog.description}
         </p>
       ) : null}
 
       {/* state badges */}
-      <div className="mt-2 flex flex-wrap items-center gap-1">
+      <div
+        className={cn(
+          "flex min-w-0 flex-wrap items-center gap-1",
+          view === "list" ? "col-start-1 row-start-2 mt-1" : "mt-2",
+        )}
+      >
         <InstallStateBadgeGroup states={states} size="xs" />
         <CapabilityTypeChip tone={typeTone} />
         <span
@@ -1099,7 +1214,12 @@ function CapabilityCard({
 
       {/* facts row — MCP cards describe a tool surface, not a model artifact */}
       {isMcp ? (
-        <div className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[10px] text-chrome-text/55">
+        <div
+          className={cn(
+            "flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5 text-[10px] text-chrome-text/55",
+            view === "list" ? "col-start-2 row-start-2 mt-1" : "mt-2",
+          )}
+        >
           <span className="font-mono text-[var(--cap-type)]">MCP server</span>
           <span>·</span>
           <span>
@@ -1113,7 +1233,12 @@ function CapabilityCard({
           ) : null}
         </div>
       ) : (
-        <div className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[10px] text-chrome-text/55">
+        <div
+          className={cn(
+            "flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5 text-[10px] text-chrome-text/55",
+            view === "list" ? "col-start-2 row-start-2 mt-1" : "mt-2",
+          )}
+        >
           <span
             className="truncate font-mono text-chrome-text/65"
             title={catalog.source_model ?? ""}
@@ -1133,7 +1258,12 @@ function CapabilityCard({
 
       {/* tags */}
       {catalog.tags && catalog.tags.length > 0 ? (
-        <div className="mt-1.5 flex flex-wrap gap-1">
+        <div
+          className={cn(
+            "flex min-w-0 flex-wrap gap-1",
+            view === "list" ? "col-start-2 row-start-3 mt-1" : "mt-1.5",
+          )}
+        >
           {catalog.tags.slice(0, 5).map((t) => (
             <span
               key={t}
@@ -1146,18 +1276,28 @@ function CapabilityCard({
       ) : null}
 
       {/* installed stats — only when registered */}
-      {installed ? <InstalledFooter installed={installed} series={callSeries} /> : null}
-      {!installed && installedRuntime ? (
-        <div className="mt-2 border-t border-chrome-border/40 pt-1.5 text-[10px] text-chrome-text/55">
-          runtime{" "}
-          <span className="font-mono text-foreground">{installedRuntime.name}</span>{" "}
-          <span className="text-chrome-text/45">·</span>{" "}
-          <span className="text-success">{installedRuntime.status}</span>
-        </div>
-      ) : null}
+      <div
+        className={cn(
+          "min-w-0",
+          view === "list" ? "col-start-3 row-span-3 row-start-1" : "",
+        )}
+      >
+        {installed ? <InstalledFooter installed={installed} series={callSeries} /> : null}
+        {!installed && installedRuntime ? (
+          <div className="mt-2 border-t border-chrome-border/40 pt-1.5 text-[10px] text-chrome-text/55">
+            runtime{" "}
+            <span className="font-mono text-foreground">{installedRuntime.name}</span>{" "}
+            <span className="text-chrome-text/45">·</span>{" "}
+            <span className="text-success">{installedRuntime.status}</span>
+          </div>
+        ) : null}
+      </div>
 
       {/* the SQL operators this pack unlocks — what people shop for */}
-      <OperatorChips operators={opChips} />
+      <OperatorChips
+        operators={opChips}
+        className={view === "list" ? "col-span-3 mt-1.5" : undefined}
+      />
     </button>
   )
 }
@@ -1261,14 +1401,6 @@ function InstalledFooter({
   installed: import("@/lib/rvbbit/capabilities").InstalledBackend
   series?: number[]
 }) {
-  // Real 14-day receipts series when available; the flat placeholder only
-  // covers traffic older than the window (or extensions without receipts).
-  const hasReal = !!series && series.some((v) => v > 0)
-  const callPoints = hasReal
-    ? series!
-    : installed.n_calls > 0 && installed.first_call_at && installed.last_call_at
-      ? buildSparkSeries(installed.first_call_at, installed.last_call_at, installed.n_calls)
-      : []
   return (
     <div className="mt-2 border-t border-chrome-border/40 pt-1.5">
       <div className="flex items-center gap-2 text-[10px] text-chrome-text/55">
@@ -1297,9 +1429,9 @@ function InstalledFooter({
           </span>
         ) : null}
       </div>
-      {callPoints.length > 0 ? (
+      {installed.n_calls > 0 ? (
         <Sparkline
-          values={callPoints}
+          values={series ?? []}
           height={18}
           color="var(--brand-capability)"
           fillOpacity={0.18}
@@ -1308,23 +1440,6 @@ function InstalledFooter({
       ) : null}
     </div>
   )
-}
-
-/**
- * `rvbbit.backend_health` rolls up at the per-backend level — we don't
- * get a per-call timeseries here. Synthesize a flat sparkline placeholder
- * that visually conveys "yes, this backend has had traffic", spanning
- * first_call_at..last_call_at. Real per-call shape lives in the
- * Specialist Detail window's ScatterStrip.
- */
-function buildSparkSeries(firstMs: number, lastMs: number, total: number): number[] {
-  const buckets = 14
-  const out: number[] = new Array(buckets).fill(0)
-  if (total <= 0 || lastMs <= firstMs) return out
-  // single bucket if span is tiny
-  const per = Math.max(1, Math.round(total / buckets))
-  for (let i = 0; i < buckets; i++) out[i] = per
-  return out
 }
 
 function fmtBytes(bytes: number): string {

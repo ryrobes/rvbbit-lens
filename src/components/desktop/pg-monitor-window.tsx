@@ -4,7 +4,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { usePolling } from "@/lib/desktop/use-polling"
 import {
   Activity,
-  Brain,
+  ChevronDown,
+  ChevronRight,
   Clock,
   Cpu,
   Database,
@@ -31,6 +32,8 @@ interface PgMonitorWindowProps {
   /** False when the monitor's workspace is parked — polling stands
    *  down so a backgrounded monitor doesn't keep hitting the DB. */
   workspaceActive?: boolean
+  onOpenQuery: (row: ActivityRow) => void
+  onOpenMvccTable: (schema: string, table: string) => void
 }
 
 const REFRESH_OPTIONS_MS: Array<{ ms: number; label: string }> = [
@@ -57,11 +60,15 @@ interface HistoryEntry {
 export function PgMonitorWindow({
   activeConnectionId,
   workspaceActive = true,
+  onOpenQuery,
+  onOpenMvccTable,
 }: PgMonitorWindowProps) {
   const [intervalMs, setIntervalMs] = useState<number>(2000)
   const [paused, setPaused] = useState(false)
   const [history, setHistory] = useState<HistoryEntry[]>([])
   const [error, setError] = useState<string | null>(null)
+  const [topTablesCollapsed, setTopTablesCollapsed] = useState(false)
+  const [activeQueriesCollapsed, setActiveQueriesCollapsed] = useState(false)
   const ageTickRef = useRef(0)
   const [, forceTick] = useState(0)
 
@@ -149,8 +156,18 @@ export function PgMonitorWindow({
           <WalPanel rates={rates} wal={current.wal} />
         </div>
 
-        <TopTablesPanel rows={current.topTables} />
-        <ActiveQueriesPanel rows={current.activity.rows} />
+        <TopTablesPanel
+          rows={current.topTables}
+          collapsed={topTablesCollapsed}
+          onToggleCollapsed={() => setTopTablesCollapsed((value) => !value)}
+          onOpenTable={onOpenMvccTable}
+        />
+        <ActiveQueriesPanel
+          rows={current.activity.rows}
+          collapsed={activeQueriesCollapsed}
+          onToggleCollapsed={() => setActiveQueriesCollapsed((value) => !value)}
+          onOpenQuery={onOpenQuery}
+        />
         {current.locks.total > 0 ? <LocksPanel locks={current.locks} /> : null}
         {current.rvbbit ? <RvbbitPanel rvbbit={current.rvbbit} rates={rates} /> : null}
       </div>
@@ -246,21 +263,41 @@ function Panel({
   children,
   right,
   className,
+  collapsed = false,
+  onToggleCollapsed,
 }: {
   icon: React.ComponentType<{ className?: string }>
   title: string
   children: React.ReactNode
   right?: React.ReactNode
   className?: string
+  collapsed?: boolean
+  onToggleCollapsed?: () => void
 }) {
   return (
     <section className={cn("rounded-md border border-chrome-border/60 bg-secondary-background/40 p-3", className)}>
-      <header className="mb-2 flex items-center gap-1.5 text-[10px] uppercase tracking-wider text-chrome-text">
+      <header
+        className={cn(
+          "flex items-center gap-1.5 text-[10px] uppercase tracking-wider text-chrome-text",
+          !collapsed && "mb-2",
+        )}
+      >
         <Icon className="h-3 w-3 text-rvbbit-accent" />
         <span>{title}</span>
         <span className="ml-auto flex items-center gap-1 text-chrome-text/60">{right}</span>
+        {onToggleCollapsed ? (
+          <button
+            type="button"
+            onClick={onToggleCollapsed}
+            aria-expanded={!collapsed}
+            title={collapsed ? `Expand ${title}` : `Collapse ${title}`}
+            className="grid h-5 w-5 place-items-center rounded text-chrome-text/70 hover:bg-foreground/[0.08] hover:text-foreground"
+          >
+            {collapsed ? <ChevronRight className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
+          </button>
+        ) : null}
       </header>
-      {children}
+      {collapsed ? null : children}
     </section>
   )
 }
@@ -396,9 +433,26 @@ function WalPanel({
   )
 }
 
-function TopTablesPanel({ rows }: { rows: UserTableRow[] }) {
+function TopTablesPanel({
+  rows,
+  collapsed,
+  onToggleCollapsed,
+  onOpenTable,
+}: {
+  rows: UserTableRow[]
+  collapsed: boolean
+  onToggleCollapsed: () => void
+  onOpenTable: (schema: string, table: string) => void
+}) {
   return (
-    <Panel icon={Database} title="Top tables" className="mt-3" right={<span>by total size</span>}>
+    <Panel
+      icon={Database}
+      title="Top tables"
+      className="mt-3"
+      right={<span>{rows.length} · by total size</span>}
+      collapsed={collapsed}
+      onToggleCollapsed={onToggleCollapsed}
+    >
       <div className="overflow-hidden">
         <table className="w-full text-[11px]">
           <thead className="text-[9px] uppercase tracking-wider text-chrome-text/80">
@@ -422,12 +476,21 @@ function TopTablesPanel({ rows }: { rows: UserTableRow[] }) {
                 : 0
               const rvbbit = t.schema === "rvbbit" || t.schema === "pg_rvbbit"
               return (
-                <tr
-                  key={`${t.schema}.${t.table}`}
-                  className={cn(
-                    "border-t border-chrome-border/30",
-                    i % 2 === 1 && "bg-foreground/[0.02]",
-                  )}
+              <tr
+                key={`${t.schema}.${t.table}`}
+                role="button"
+                tabIndex={0}
+                title={`Open ${t.schema}.${t.table} in MVCC Explorer`}
+                onClick={() => onOpenTable(t.schema, t.table)}
+                onKeyDown={(event) => {
+                  if (event.key !== "Enter" && event.key !== " ") return
+                  event.preventDefault()
+                  onOpenTable(t.schema, t.table)
+                }}
+                className={cn(
+                  "cursor-pointer border-t border-chrome-border/30 outline-none transition-colors hover:bg-brand-mvcc-explorer/[0.07] focus:bg-brand-mvcc-explorer/[0.1]",
+                  i % 2 === 1 && "bg-foreground/[0.02]",
+                )}
                 >
                   <td className={cn("px-2 py-1 font-mono", rvbbit ? "text-rvbbit-accent" : "text-foreground")}>
                     {t.schema}.<span className="opacity-90">{t.table}</span>
@@ -458,61 +521,84 @@ function TopTablesPanel({ rows }: { rows: UserTableRow[] }) {
   )
 }
 
-function ActiveQueriesPanel({ rows }: { rows: ActivityRow[] }) {
-  if (rows.length === 0) {
-    return (
-      <Panel icon={Activity} title="Active queries" className="mt-3">
-        <div className="text-[10px] text-chrome-text">No other client backends. The desktop&apos;s pool reuses one connection.</div>
-      </Panel>
-    )
-  }
+function ActiveQueriesPanel({
+  rows,
+  collapsed,
+  onToggleCollapsed,
+  onOpenQuery,
+}: {
+  rows: ActivityRow[]
+  collapsed: boolean
+  onToggleCollapsed: () => void
+  onOpenQuery: (row: ActivityRow) => void
+}) {
   return (
-    <Panel icon={Activity} title="Active queries" className="mt-3" right={<span>{rows.length} session{rows.length === 1 ? "" : "s"}</span>}>
-      <div className="overflow-hidden">
-        <table className="w-full text-[11px]">
-          <thead className="text-[9px] uppercase tracking-wider text-chrome-text/80">
-            <tr>
-              <th className="px-2 py-1 text-left">pid</th>
-              <th className="px-2 py-1 text-left">state</th>
-              <th className="px-2 py-1 text-left">app</th>
-              <th className="px-2 py-1 text-left">wait</th>
-              <th className="px-2 py-1 text-right">runtime</th>
-              <th className="px-2 py-1 text-left">query</th>
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((r, i) => (
-              <tr
-                key={r.pid}
-                className={cn(
-                  "border-t border-chrome-border/30 align-top",
-                  i % 2 === 1 && "bg-foreground/[0.02]",
-                )}
-              >
-                <td className="px-2 py-1 font-mono text-chrome-text">{r.pid}</td>
-                <td className={cn(
-                  "px-2 py-1 font-mono",
-                  r.state === "active" && "text-success",
-                  r.state === "idle in transaction" && "text-warning",
-                  r.state === "idle" && "text-chrome-text",
-                )}>
-                  {r.state ?? "—"}
-                </td>
-                <td className="px-2 py-1 text-foreground">{r.application_name ?? "—"}</td>
-                <td className="px-2 py-1 text-chrome-text">
-                  {r.wait_event_type ? `${r.wait_event_type}/${r.wait_event}` : "—"}
-                </td>
-                <td className="px-2 py-1 text-right font-mono text-foreground">
-                  {r.query_start_ms_ago != null ? fmtMs(r.query_start_ms_ago) : "—"}
-                </td>
-                <td className="px-2 py-1 max-w-[480px] truncate font-mono text-chrome-text/80" title={r.query_preview ?? ""}>
-                  {r.query_preview ?? "—"}
-                </td>
+    <Panel
+      icon={Activity}
+      title="Active queries"
+      className="mt-3"
+      right={<span>{rows.length} session{rows.length === 1 ? "" : "s"}</span>}
+      collapsed={collapsed}
+      onToggleCollapsed={onToggleCollapsed}
+    >
+      {rows.length === 0 ? (
+        <div className="text-[10px] text-chrome-text">No other client backends. The desktop&apos;s pool reuses one connection.</div>
+      ) : (
+        <div className="max-h-56 overflow-auto rounded-sm">
+          <table className="w-full text-[11px]">
+            <thead className="sticky top-0 z-10 bg-secondary-background text-[9px] uppercase tracking-wider text-chrome-text/80">
+              <tr>
+                <th className="px-2 py-1 text-left">pid</th>
+                <th className="px-2 py-1 text-left">state</th>
+                <th className="px-2 py-1 text-left">app</th>
+                <th className="px-2 py-1 text-left">wait</th>
+                <th className="px-2 py-1 text-right">runtime</th>
+                <th className="px-2 py-1 text-left">query</th>
               </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
+            </thead>
+            <tbody>
+              {rows.map((row, index) => (
+                <tr
+                  key={`${row.pid}:${row.backend_start}`}
+                  role="button"
+                  tabIndex={0}
+                  title="Open persistent query inspector"
+                  onClick={() => onOpenQuery(row)}
+                  onKeyDown={(event) => {
+                    if (event.key !== "Enter" && event.key !== " ") return
+                    event.preventDefault()
+                    onOpenQuery(row)
+                  }}
+                  className={cn(
+                    "cursor-pointer border-t border-chrome-border/30 align-top outline-none transition-colors hover:bg-foreground/[0.06] focus:bg-foreground/[0.08]",
+                    index % 2 === 1 && "bg-foreground/[0.02]",
+                  )}
+                >
+                  <td className="px-2 py-1 font-mono text-chrome-text">{row.pid}</td>
+                  <td className={cn(
+                    "px-2 py-1 font-mono",
+                    row.state === "active" && "text-success",
+                    row.state === "idle in transaction" && "text-warning",
+                    row.state === "idle" && "text-chrome-text",
+                  )}>
+                    {row.state ?? "—"}
+                  </td>
+                  <td className="px-2 py-1 text-foreground">{row.application_name ?? "—"}</td>
+                  <td className="px-2 py-1 text-chrome-text">
+                    {row.wait_event_type ? `${row.wait_event_type}/${row.wait_event}` : "—"}
+                  </td>
+                  <td className="px-2 py-1 text-right font-mono text-foreground">
+                    {row.query_start_ms_ago != null ? fmtMs(row.query_start_ms_ago) : "—"}
+                  </td>
+                  <td className="max-w-[480px] truncate px-2 py-1 font-mono text-chrome-text/80" title={row.query_preview ?? ""}>
+                    {row.query_preview ?? "—"}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
     </Panel>
   )
 }

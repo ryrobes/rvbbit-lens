@@ -898,24 +898,54 @@ export async function fetchInstalledBackends(
   return { backends: res.rows.map(parseInstalled) }
 }
 
-/** Real per-backend daily call counts for the card sparklines — last 14
- *  days from receipts sub_calls (specialist AND llm kinds, same keying as
- *  the backend_health usage rollup). Returns backend -> 14 buckets,
- *  oldest first. Backends absent from the map had no calls in-window. */
+/**
+ * Real per-backend call counts for the card sparklines. Keep at most the last
+ * 24 hours, then bucket each backend over its own observed span so a shorter
+ * history still uses the full card width. Specialist and LLM sub-calls use the
+ * same backend keys as the backend_health usage rollup.
+ */
+const CALL_SERIES_BUCKETS = 48
+
 const CALL_SERIES_SQL = `WITH expanded AS (
   SELECT
     CASE WHEN sub.value ->> 'kind' = 'llm'
          THEN sub.value ->> 'backend'
          ELSE sub.value ->> 'model' END AS backend_name,
-    (r.invocation_at AT TIME ZONE 'UTC')::date AS d
+    r.invocation_at AS called_at
   FROM rvbbit.receipts r,
        LATERAL jsonb_array_elements(r.sub_calls) sub(value)
   WHERE sub.value ->> 'kind' IN ('specialist', 'llm')
-    AND r.invocation_at > now() - interval '14 days'
+    AND r.invocation_at > now() - interval '24 hours'
+), bounds AS (
+  SELECT
+    backend_name,
+    min(called_at) AS first_call_at,
+    max(called_at) AS last_call_at
+  FROM expanded
+  WHERE backend_name IS NOT NULL
+  GROUP BY backend_name
+), bucketed AS (
+  SELECT
+    e.backend_name,
+    CASE
+      WHEN b.first_call_at = b.last_call_at THEN 0
+      ELSE floor(
+        extract(epoch FROM (e.called_at - b.first_call_at))
+        / extract(epoch FROM (b.last_call_at - b.first_call_at))
+        * ${CALL_SERIES_BUCKETS - 1}
+      )::int
+    END AS bucket_idx,
+    CASE
+      WHEN b.first_call_at = b.last_call_at THEN 1
+      ELSE ${CALL_SERIES_BUCKETS}
+    END AS bucket_count
+  FROM expanded e
+  JOIN bounds b USING (backend_name)
 )
-SELECT backend_name, d::text, count(*)::int AS n
-FROM expanded WHERE backend_name IS NOT NULL
-GROUP BY backend_name, d`
+SELECT backend_name, bucket_idx, bucket_count, count(*)::int AS n
+FROM bucketed
+GROUP BY backend_name, bucket_idx, bucket_count
+ORDER BY backend_name, bucket_idx`
 
 export async function fetchBackendCallSeries(
   connectionId: string,
@@ -923,19 +953,30 @@ export async function fetchBackendCallSeries(
   const out = new Map<string, number[]>()
   const res = await runQuery(connectionId, CALL_SERIES_SQL)
   if (!res.ok) return out
-  const today = new Date()
-  const dayIndex = new Map<string, number>()
-  for (let i = 0; i < 14; i++) {
-    const d = new Date(today.getTime() - (13 - i) * 86400_000)
-    dayIndex.set(d.toISOString().slice(0, 10), i)
-  }
-  for (const r of res.rows as { backend_name: string; d: string; n: number }[]) {
-    const idx = dayIndex.get(String(r.d).slice(0, 10))
-    if (idx == null) continue
-    let series = out.get(r.backend_name)
+  for (const r of res.rows as {
+    backend_name: string
+    bucket_idx: number
+    bucket_count: number
+    n: number
+  }[]) {
+    const backendName = String(r.backend_name)
+    const bucketCount = Number(r.bucket_count)
+    const idx = Number(r.bucket_idx)
+    if (
+      !backendName ||
+      !Number.isInteger(bucketCount) ||
+      bucketCount < 1 ||
+      bucketCount > CALL_SERIES_BUCKETS ||
+      !Number.isInteger(idx) ||
+      idx < 0 ||
+      idx >= bucketCount
+    ) {
+      continue
+    }
+    let series = out.get(backendName)
     if (!series) {
-      series = new Array(14).fill(0)
-      out.set(r.backend_name, series)
+      series = new Array(bucketCount).fill(0)
+      out.set(backendName, series)
     }
     series[idx] += Number(r.n)
   }
