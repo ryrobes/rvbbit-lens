@@ -196,6 +196,7 @@
   --brand-pg-monitor: oklch(83% 0.02 150);
   --brand-lock-explorer: oklch(82% 0.02 205);
   --brand-mvcc-explorer: oklch(82% 0.02 115);
+  --brand-semantic-tests: oklch(83% 0.035 75);
   --brand-operators: oklch(82% 0.02 168);
   --brand-specialists: oklch(80% 0.02 300);
   --brand-routing: oklch(81% 0.02 255);
@@ -340,6 +341,7 @@
   --brand-pg-monitor: oklch(50% 0.025 150);
   --brand-lock-explorer: oklch(52% 0.025 205);
   --brand-mvcc-explorer: oklch(54% 0.025 115);
+  --brand-semantic-tests: oklch(56% 0.04 75);
   --brand-operators: oklch(53% 0.025 168);
   --brand-specialists: oklch(52% 0.025 300);
   --brand-routing: oklch(52% 0.025 255);
@@ -422,6 +424,7 @@
   --color-brand-pg-monitor: var(--brand-pg-monitor);
   --color-brand-lock-explorer: var(--brand-lock-explorer);
   --color-brand-mvcc-explorer: var(--brand-mvcc-explorer);
+  --color-brand-semantic-tests: var(--brand-semantic-tests);
   --color-brand-operators: var(--brand-operators);
   --color-brand-specialists: var(--brand-specialists);
   --color-brand-routing: var(--brand-routing);

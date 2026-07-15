@@ -4725,7 +4725,7 @@ export function DesktopShell() {
     { id: "lock-explorer", label: "Lock Explorer", icon: Lock, color: "var(--brand-lock-explorer)", description: "Live blocker chains, resources & replay", activate: openLockExplorer, folder: "system" },
     { id: "mvcc-explorer", label: "MVCC Explorer", icon: Layers, color: "var(--brand-mvcc-explorer)", description: "Vacuum horizons, pressure & workers", activate: openMvccExplorer, folder: "system" },
     { id: "fleet", label: "Fleet", icon: Anchor, color: "var(--brand-pg-monitor)", description: "Read-fleet workers, publication & storage health", activate: openFleet, folder: "system", rvbbit: true },
-    { id: "semantic-tests", label: "Semantic Tests", icon: Target, color: "var(--brand-pg-monitor)", description: "Operator test batteries, pass rates & verdict drift", activate: openSemanticTests, folder: "system", rvbbit: true },
+    { id: "semantic-tests", label: "Semantic Tests", icon: Target, color: "var(--brand-semantic-tests)", description: "Operator test batteries, pass rates & verdict drift", activate: openSemanticTests, folder: "system", rvbbit: true },
     { id: "postgres-admin", label: "Postgres Admin", icon: Shield, color: "var(--brand-pg-monitor)", description: "Locks, grants, indexes, objects & backup plans", activate: () => openPostgresAdmin(), folder: "system" },
     { id: "cache", label: "Cache", icon: Database, color: "var(--brand-cache)", description: "Compiler & operator result caches", activate: openCache, folder: "system", rvbbit: true },
     { id: "receipts", label: "Receipts", icon: FileText, color: "var(--brand-rvbbit-cache)", sublabel: rvbbitVersion ?? undefined, description: "Per-call LLM receipts & audit", activate: openRvbbitCache, folder: "system", rvbbit: true },
