@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react"
 
 import { Button } from "@/components/ui/button"
-import { FileCode2, Play, RefreshCw, Rocket, Table2 } from "@/lib/icons"
+import { Camera, FileCode2, Play, RefreshCw, Rocket, Table2 } from "@/lib/icons"
 import type { DesktopColumnDragPayload, DesktopColumnRef } from "@/lib/desktop/types"
 import {
   htmlBlockQueryResults,
@@ -16,6 +16,7 @@ import { attachDragGhost } from "@/lib/desktop/drag-ghost"
 import { setActiveColumnDragSource, writeColumnDragPayload } from "@/lib/desktop/column-drag"
 import { cn } from "@/lib/utils"
 import type { QueryResult } from "@/lib/db/types"
+import { useAssistantIdentity } from "@/lib/desktop/assistant-identity"
 
 export interface AppBlockColumnDragSource {
   parentWindowId: string
@@ -33,6 +34,13 @@ export interface AppBlockFilterInput {
   targetQueryId?: string
 }
 
+export interface AppBlockCapture {
+  dataUrl: string
+  mimeType: "image/png" | "image/jpeg" | "image/webp" | "image/gif"
+  width: number
+  height: number
+}
+
 interface AppBlockViewProps {
   spec: HtmlBlockSpec | null | undefined
   result: QueryResult | null
@@ -43,6 +51,7 @@ interface AppBlockViewProps {
   onRun: () => void
   onRunSql: (sql: string) => Promise<QueryResult>
   onEmitFilter: (input: AppBlockFilterInput) => void
+  onCapture?: (capture: AppBlockCapture) => void
   /** Promote the block app into the dashboards registry (open → closed form).
    *  Re-publishing the same slug bumps the version. Omit to hide the action. */
   onPublish?: (meta: { slug: string; name: string; description?: string }) => Promise<{ ok: boolean; version?: number; error?: string }>
@@ -104,6 +113,120 @@ function buildSrcdoc(spec: HtmlBlockSpec, entries: HtmlBlockQueryResult[]): stri
   window.rvbbit.emitFilter = function(filter){
     parent.postMessage({ __rvbbitAppEvent: "filter", filter: filter || {} }, "*");
   };
+  function blobDataUrl(blob){
+    return new Promise(function(resolve, reject){
+      var reader = new FileReader();
+      reader.onload = function(){ resolve(String(reader.result || "")); };
+      reader.onerror = function(){ reject(reader.error || new Error("could not read screenshot")); };
+      reader.readAsDataURL(blob);
+    });
+  }
+  function loadCaptureImage(url){
+    return new Promise(function(resolve, reject){
+      var image = new Image();
+      image.onload = function(){ resolve(image); };
+      image.onerror = function(){ reject(new Error("could not render captured document")); };
+      image.src = url;
+    });
+  }
+  async function captureViewport(requestId){
+    if (document.fonts && document.fonts.ready) await document.fonts.ready;
+    var root = document.documentElement;
+    var width = Math.max(1, root.clientWidth || window.innerWidth || 1);
+    var height = Math.max(1, root.clientHeight || window.innerHeight || 1);
+    var clone = root.cloneNode(true);
+    clone.setAttribute("xmlns", "http://www.w3.org/1999/xhtml");
+    clone.style.width = width + "px";
+    clone.style.height = height + "px";
+    clone.style.overflow = "hidden";
+    Array.prototype.forEach.call(clone.querySelectorAll("script"), function(node){ node.remove(); });
+
+    var sourceCanvases = document.querySelectorAll("canvas");
+    var clonedCanvases = clone.querySelectorAll("canvas");
+    Array.prototype.forEach.call(sourceCanvases, function(source, index){
+      var target = clonedCanvases[index];
+      if (!target) return;
+      try {
+        var image = document.createElement("img");
+        image.src = source.toDataURL("image/png");
+        image.className = target.className;
+        image.setAttribute("style", target.getAttribute("style") || "");
+        image.style.width = (source.getBoundingClientRect().width || source.width) + "px";
+        image.style.height = (source.getBoundingClientRect().height || source.height) + "px";
+        target.replaceWith(image);
+      } catch (_) {}
+    });
+
+    var sourceFields = document.querySelectorAll("input, textarea, select");
+    var clonedFields = clone.querySelectorAll("input, textarea, select");
+    Array.prototype.forEach.call(sourceFields, function(source, index){
+      var target = clonedFields[index];
+      if (!target) return;
+      if (source.tagName === "TEXTAREA") target.textContent = source.value;
+      else if (source.tagName === "SELECT") target.value = source.value;
+      else {
+        target.setAttribute("value", source.value || "");
+        if (source.checked) target.setAttribute("checked", "checked");
+        else target.removeAttribute("checked");
+      }
+    });
+
+    var clonedBody = clone.querySelector("body");
+    if (clonedBody && (window.scrollX || window.scrollY)) {
+      var priorTransform = clonedBody.style.transform;
+      clonedBody.style.transformOrigin = "top left";
+      clonedBody.style.transform = "translate(" + (-window.scrollX) + "px," + (-window.scrollY) + "px) " + priorTransform;
+    }
+    var freeze = document.createElement("style");
+    freeze.textContent = "*,*::before,*::after{animation-play-state:paused!important;caret-color:transparent!important;}";
+    (clone.querySelector("head") || clone).appendChild(freeze);
+
+    var serialized = new XMLSerializer().serializeToString(clone);
+    var svg = '<svg xmlns="http://www.w3.org/2000/svg" width="' + width + '" height="' + height + '"><foreignObject width="100%" height="100%">' + serialized + '</foreignObject></svg>';
+    var svgUrl = URL.createObjectURL(new Blob([svg], { type: "image/svg+xml;charset=utf-8" }));
+    try {
+      var image = await loadCaptureImage(svgUrl);
+      var desiredScale = Math.min(2, Math.max(1, window.devicePixelRatio || 1));
+      var pixelCap = 6000000;
+      var scale = Math.min(desiredScale, Math.sqrt(pixelCap / Math.max(1, width * height)));
+      var canvas = document.createElement("canvas");
+      canvas.width = Math.max(1, Math.round(width * scale));
+      canvas.height = Math.max(1, Math.round(height * scale));
+      var ctx = canvas.getContext("2d");
+      if (!ctx) throw new Error("canvas capture is unavailable");
+      var background = getComputedStyle(document.body).backgroundColor;
+      if (!background || background === "rgba(0, 0, 0, 0)" || background === "transparent") {
+        background = getComputedStyle(root).backgroundColor;
+      }
+      if (background && background !== "rgba(0, 0, 0, 0)" && background !== "transparent") {
+        ctx.fillStyle = background;
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+      }
+      ctx.setTransform(scale, 0, 0, scale, 0, 0);
+      ctx.drawImage(image, 0, 0, width, height);
+      var blob = await new Promise(function(resolve){ canvas.toBlob(resolve, "image/webp", 0.9); });
+      if (!blob) throw new Error("could not encode screenshot");
+      parent.postMessage({
+        __rvbbitAppCaptureResponse: requestId,
+        dataUrl: await blobDataUrl(blob),
+        mimeType: "image/webp",
+        width: canvas.width,
+        height: canvas.height
+      }, "*");
+    } finally {
+      URL.revokeObjectURL(svgUrl);
+    }
+  }
+  window.addEventListener("message", function(event){
+    var data = event.data || {};
+    if (!data.__rvbbitAppCaptureRequest) return;
+    captureViewport(data.__rvbbitAppCaptureRequest).catch(function(error){
+      parent.postMessage({
+        __rvbbitAppCaptureResponse: data.__rvbbitAppCaptureRequest,
+        error: error && error.message ? error.message : String(error)
+      }, "*");
+    });
+  });
 })();</script>`
   const html = spec.html.trim()
   if (/<!doctype\b|<html[\s>]/i.test(html)) {
@@ -137,9 +260,14 @@ export function AppBlockView({
   onRun,
   onRunSql,
   onEmitFilter,
+  onCapture,
   onPublish,
 }: AppBlockViewProps) {
+  const assistantIdentity = useAssistantIdentity()
   const iframeRef = useRef<HTMLIFrameElement>(null)
+  const captureRequestRef = useRef<{ id: string; timeout: number } | null>(null)
+  const [captureBusy, setCaptureBusy] = useState(false)
+  const [captureError, setCaptureError] = useState<string | null>(null)
   const [publishOpen, setPublishOpen] = useState(false)
   const [pubName, setPubName] = useState("")
   const [pubSlug, setPubSlug] = useState("")
@@ -176,6 +304,39 @@ export function AppBlockView({
         __rvbbitAppEvent?: string
         ref?: unknown
         filter?: Record<string, unknown>
+        __rvbbitAppCaptureResponse?: string
+        dataUrl?: string
+        mimeType?: string
+        width?: number
+        height?: number
+        error?: string
+      }
+      if (data.__rvbbitAppCaptureResponse) {
+        const pending = captureRequestRef.current
+        if (!pending || pending.id !== data.__rvbbitAppCaptureResponse) return
+        window.clearTimeout(pending.timeout)
+        captureRequestRef.current = null
+        setCaptureBusy(false)
+        if (data.error) {
+          setCaptureError(data.error)
+          return
+        }
+        if (
+          onCapture &&
+          typeof data.dataUrl === "string" &&
+          /^data:image\/(?:png|jpeg|webp|gif);base64,/i.test(data.dataUrl)
+        ) {
+          setCaptureError(null)
+          onCapture({
+            dataUrl: data.dataUrl,
+            mimeType: (data.mimeType === "image/png" || data.mimeType === "image/jpeg" || data.mimeType === "image/gif")
+              ? data.mimeType
+              : "image/webp",
+            width: typeof data.width === "number" ? data.width : 0,
+            height: typeof data.height === "number" ? data.height : 0,
+          })
+        }
+        return
       }
       if (data.__rvbbitAppEvent === "filter") {
         const f = data.filter ?? {}
@@ -224,7 +385,27 @@ export function AppBlockView({
     }
     window.addEventListener("message", onMessage)
     return () => window.removeEventListener("message", onMessage)
-  }, [activeConnectionId, onEmitFilter, onRunSql, spec])
+  }, [activeConnectionId, onCapture, onEmitFilter, onRunSql, spec])
+
+  useEffect(() => () => {
+    if (captureRequestRef.current) window.clearTimeout(captureRequestRef.current.timeout)
+  }, [])
+
+  const captureForAssistant = () => {
+    const frame = iframeRef.current
+    if (!frame?.contentWindow || captureBusy || !onCapture) return
+    const id = crypto.randomUUID()
+    setCaptureBusy(true)
+    setCaptureError(null)
+    const timeout = window.setTimeout(() => {
+      if (captureRequestRef.current?.id !== id) return
+      captureRequestRef.current = null
+      setCaptureBusy(false)
+      setCaptureError("The app view took too long to capture.")
+    }, 12_000)
+    captureRequestRef.current = { id, timeout }
+    frame.contentWindow.postMessage({ __rvbbitAppCaptureRequest: id }, "*")
+  }
 
   if (!spec) {
     return (
@@ -250,6 +431,19 @@ export function AppBlockView({
       <aside className="flex w-64 shrink-0 flex-col border-l border-chrome-border bg-chrome-bg/45">
         <div className="flex h-9 shrink-0 items-center justify-between gap-1 border-b border-chrome-border px-2">
           <span className="min-w-0 flex-1 truncate text-[11px] font-medium text-foreground">{spec.title}</span>
+          {onCapture ? (
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={captureForAssistant}
+              disabled={captureBusy}
+              title={`Send current app view to ${assistantIdentity.name}`}
+            >
+              {captureBusy
+                ? <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+                : <Camera className="h-3.5 w-3.5" />}
+            </Button>
+          ) : null}
           {onPublish ? (
             <Button size="sm" variant="ghost" onClick={openPublish} title="Publish as a live app (dashboards registry)">
               <Rocket className={cn("h-3.5 w-3.5", publishOpen && "text-main")} />
@@ -262,6 +456,11 @@ export function AppBlockView({
         {error ? (
           <div className="border-b border-danger/30 bg-danger/10 px-2 py-1.5 text-[11px] text-danger">
             {error}
+          </div>
+        ) : null}
+        {captureError ? (
+          <div className="border-b border-danger/30 bg-danger/10 px-2 py-1.5 text-[10px] text-danger">
+            Screenshot failed: {captureError}
           </div>
         ) : null}
         {publishOpen ? (

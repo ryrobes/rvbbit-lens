@@ -40,7 +40,7 @@ import { ModelField } from "./operator-inspector"
 import { ResultGrid } from "./result-grid"
 import { ResultTranscript, defaultKind, statementKeys } from "./result-transcript"
 import { ArrangeGrid } from "./arrange-grid"
-import { AppBlockView, type AppBlockFilterInput } from "./app-block-view"
+import { AppBlockView, type AppBlockCapture, type AppBlockFilterInput } from "./app-block-view"
 import { extractUiArtifacts, UiArtifactView, type UiArtifactActionInput, type UiArtifactActionResult, type UiArtifactParamInput, type UiArtifactRow } from "./ui-artifact-view"
 import { ContextMenu, type ContextMenuState } from "./context-menu"
 import { listQueryHistory, pushQueryHistory } from "@/lib/desktop/query-history"
@@ -121,6 +121,7 @@ import {
 } from "@/lib/desktop/app-block"
 import { publishAppBlock } from "@/lib/rvbbit/dashboards"
 import { useAssistantIdentity } from "@/lib/desktop/assistant-identity"
+import type { AssistantImageAttachment } from "@/lib/desktop/assistant"
 import {
   buildAssistantExecutionObservation,
   type AssistantBlockExecutionObservation,
@@ -177,6 +178,8 @@ interface DataGridWindowProps {
   onSubscribeParam: (key: string, targetField?: string, target?: ParamTarget) => void
   /** Summon the OS-level Assistant dock (block biography panel's "Ask" door). */
   onOpenAssistant?: () => void
+  /** Put a clean rendered block view into the Assistant composer. */
+  onSendToAssistant?: (attachment: AssistantImageAttachment) => void
   /**
    * Apply a pure transform to this window's rollup spec (shelf edits).
    * Rebuilds SQL/title at the host so the window chrome stays in sync.
@@ -953,6 +956,7 @@ export function DataGridWindow({
   onEmitParam,
   onSubscribeParam,
   onOpenAssistant,
+  onSendToAssistant,
   onEditRollup,
   onRepivot,
   onProbeValues,
@@ -979,6 +983,25 @@ export function DataGridWindow({
   const isSemanticProjection = ((payload.lineage ? effectiveRollup(payload.lineage) : null)?.projections?.length ?? 0) > 0
   const [draftSql, setDraftSql] = useState<string>(view.sqlDraft ?? payload.sql ?? "")
   const htmlBlock = useMemo(() => normalizeHtmlBlockSpec(payload.htmlBlock) ?? null, [payload.htmlBlock])
+  const sendAppCaptureToAssistant = useCallback((capture: AppBlockCapture) => {
+    if (!onSendToAssistant) return
+    const title = htmlBlock?.title ?? payload.title ?? w.title ?? "App"
+    onSendToAssistant({
+      id: crypto.randomUUID(),
+      kind: "image",
+      dataUrl: capture.dataUrl,
+      mimeType: capture.mimeType,
+      width: capture.width,
+      height: capture.height,
+      name: `${title} · current view`,
+      source: {
+        windowId: w.id,
+        blockName: payload.reactive?.blockName ?? slugifyBlockName(title),
+        title,
+        capturedAt: Date.now(),
+      },
+    })
+  }, [htmlBlock?.title, onSendToAssistant, payload.reactive?.blockName, payload.title, w.id, w.title])
   // Editor input mode + the plain-English question (Ask mode). In "ask" mode the
   // editor edits `askDraft`; Run calls rvbbit.synth_sql to generate SQL, drops it
   // into `draftSql`, flips back to "sql", and runs it. `draftSql` therefore always
@@ -3177,6 +3200,7 @@ export function DataGridWindow({
               onRunSql={runAppReadOnlySql}
               onEmitFilter={emitAppFilter}
               onPublish={publishApp}
+              onCapture={onSendToAssistant ? sendAppCaptureToAssistant : undefined}
             />
           ) : null}
           {bodyTab === "rows" && result ? (

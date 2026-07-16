@@ -100,6 +100,7 @@ import {
   type AssistantApplyResult,
   type AssistantApplyOptions,
   type AssistantCommand,
+  type AssistantImageAttachment,
 } from "@/lib/desktop/assistant"
 import { useAssistantIdentity } from "@/lib/desktop/assistant-identity"
 import type { AssistantBlockExecutionObservation } from "@/lib/desktop/assistant-execution"
@@ -2629,6 +2630,7 @@ export function DesktopShell() {
   // The assistant is an OS-level dock, not a workspace window — she survives
   // workspace switches and never lands in scenes or desktop state.
   const [assistantOpen, setAssistantOpen] = useState(false)
+  const [assistantAttachments, setAssistantAttachments] = useState<AssistantImageAttachment[]>([])
   const assistantExecutionObservationsRef = useRef<Record<string, AssistantBlockExecutionObservation>>({})
   const [assistantAttention, setAssistantAttention] = useState<{ id: string; token: number } | null>(null)
   const assistantAttentionSequenceRef = useRef(0)
@@ -2668,6 +2670,19 @@ export function DesktopShell() {
 
   const openAssistant = useCallback(() => {
     setAssistantOpen(true)
+  }, [])
+
+  const queueAssistantAttachment = useCallback((attachment: AssistantImageAttachment) => {
+    setAssistantAttachments((current) => [
+      ...current.filter((item) => item.id !== attachment.id),
+      attachment,
+    ])
+    setAssistantOpen(true)
+  }, [])
+
+  const consumeAssistantAttachments = useCallback((ids: string[]) => {
+    const consumed = new Set(ids)
+    setAssistantAttachments((current) => current.filter((item) => !consumed.has(item.id)))
   }, [])
 
   const toggleAssistant = useCallback(() => {
@@ -5107,6 +5122,7 @@ export function DesktopShell() {
       updatePayload,
       applyAssistantCommands,
       openAssistant,
+      queueAssistantAttachment,
       reportAssistantExecution,
       emitParam,
       subscribeParam,
@@ -5168,7 +5184,7 @@ export function DesktopShell() {
       openTableFromFinder, openSqlInWindow, openPgQueryExplorer, openPgQueryInspector, openPgHistoricalQueryInspector, openMvccExplorer, viewObjectDdl, openField, openViewAppBuilder, openViewApp,
       addLauncherShortcut, addViewAppShortcut, addDashboardShortcut, openDashboardApp, openArtifact,
       openQueryDocument, openSqlData, openRowInspector, openCsvImport, openExtensions, openRvbbitCache, openCache, openConnections,
-      loadSchema, loadConnections, updatePayload, applyAssistantCommands, openAssistant, reportAssistantExecution, emitParam, subscribeParam,
+      loadSchema, loadConnections, updatePayload, applyAssistantCommands, openAssistant, queueAssistantAttachment, reportAssistantExecution, emitParam, subscribeParam,
       editRollupSpec, repivotWindow, probeColumnValues, activePalette, paletteOverrides,
       wallpaperUrl, onPickWallpaper, onClearWallpaper, onApplyLibraryWallpaper, applyUploadedWallpaper,
       onReExtractPalette, onReExtractWithRvbbit, setPaletteOverrides,
@@ -5208,6 +5224,8 @@ export function DesktopShell() {
         allWindows={windows}
         params={desktopParams}
         getExecutionObservations={getAssistantExecutionObservations}
+        queuedAttachments={assistantAttachments}
+        onConsumeQueuedAttachments={consumeAssistantAttachments}
         applyCommands={applyAssistantCommands}
       />
       {wallpaperUrl ? (
@@ -5746,6 +5764,8 @@ interface WindowContext {
   ) => void
   /** Summon the OS-level Assistant dock (e.g. from a block's biography panel). */
   openAssistant: () => void
+  /** Queue a rendered block view in the Assistant composer and summon it. */
+  queueAssistantAttachment: (attachment: AssistantImageAttachment) => void
   windows: DesktopWindowState[]
   params: DesktopParamValue[]
   runSignal: number
@@ -5943,6 +5963,7 @@ function renderWindowContent(
           onEmitParam={ctx.emitParam}
           onSubscribeParam={(key, field, target) => ctx.subscribeParam(w.id, key, field, target)}
           onOpenAssistant={ctx.openAssistant}
+          onSendToAssistant={ctx.queueAssistantAttachment}
           onEditRollup={(transform) => ctx.editRollupSpec(w.id, transform)}
           onRepivot={(grain) => ctx.repivotWindow(w.id, grain)}
           onProbeValues={(column, search) => ctx.probeColumnValues(w.id, column, search)}

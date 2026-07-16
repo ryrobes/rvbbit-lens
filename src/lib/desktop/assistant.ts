@@ -107,15 +107,33 @@ export interface AssistantMessage {
   role: "user" | "assistant"
   text: string
   at: number
+  attachments?: AssistantImageAttachment[]
   agentRunId?: string | null
   commands?: AssistantCommand[]
   report?: AssistantApplyResult[]
   error?: boolean
 }
 
+export interface AssistantImageAttachment {
+  id: string
+  kind: "image"
+  dataUrl: string
+  mimeType: "image/png" | "image/jpeg" | "image/webp" | "image/gif"
+  width: number
+  height: number
+  name: string
+  source?: {
+    windowId?: string
+    blockName?: string
+    title?: string
+    capturedAt?: number
+  }
+}
+
 export interface AssistantTurnResult {
   reply: string
   commands: AssistantCommand[]
+  attachments: AssistantImageAttachment[]
   agentRunId: string | null
   status: string
   error: string | null
@@ -243,6 +261,7 @@ export async function runAssistantTurn(
   message: string,
   thread: AssistantMessage[],
   desktopContext: Record<string, unknown>,
+  attachments: AssistantImageAttachment[] = [],
 ): Promise<AssistantTurnResult> {
   // The spine carries intent + a compact record of what each turn DID (so
   // "put those back" works across desktop resets) — never tool payloads.
@@ -252,6 +271,18 @@ export async function runAssistantTurn(
     .map((m) => ({
       role: m.role,
       text: m.role === "assistant" ? assistantReplyForDisplay(m.text) : m.text,
+      ...(m.attachments?.length
+        ? {
+            attachments: m.attachments.map((attachment) => ({
+              kind: attachment.kind,
+              mimeType: attachment.mimeType,
+              width: attachment.width,
+              height: attachment.height,
+              name: attachment.name,
+              source: attachment.source,
+            })),
+          }
+        : {}),
       ...(m.commands?.length
         ? {
             did: m.commands.map((c, i) => {
@@ -287,7 +318,13 @@ export async function runAssistantTurn(
           }
         : {}),
     }))
-  const sql = `SELECT rvbbit.desktop_assistant_turn(${sqlLiteral(message)}, ${sqlJsonLiteral(conversation)}, ${sqlJsonLiteral(desktopContext)}) AS result`
+  // Keep text-only turns compatible with pre-vision pg_rvbbit installs. The
+  // four-argument overload is introduced by migration 0153 and carries only
+  // the images attached to this user turn; historical screenshots remain
+  // lightweight transcript metadata instead of being re-billed every turn.
+  const sql = attachments.length > 0
+    ? `SELECT rvbbit.desktop_assistant_turn(${sqlLiteral(message)}, ${sqlJsonLiteral(conversation)}, ${sqlJsonLiteral(desktopContext)}, ${sqlJsonLiteral(attachments)}) AS result`
+    : `SELECT rvbbit.desktop_assistant_turn(${sqlLiteral(message)}, ${sqlJsonLiteral(conversation)}, ${sqlJsonLiteral(desktopContext)}) AS result`
   const res = await fetch("/api/db/query", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -333,6 +370,7 @@ export async function runAssistantTurn(
   const commands = !incompleteOutput && Array.isArray(inner.commands)
     ? (inner.commands as AssistantCommand[])
     : []
+  const responseAttachments = assistantImageAttachments(inner.attachments ?? inner.images)
   return {
     reply:
       incompleteOutput
@@ -345,10 +383,36 @@ export async function runAssistantTurn(
           ? `The assistant could not complete this turn: ${rawError}`
           : "The assistant turn ended without a reply.",
     commands,
+    attachments: responseAttachments,
     agentRunId: typeof inner.agent_run_id === "string" ? inner.agent_run_id : null,
     status: normalizedStatus,
     error: rawError,
   }
+}
+
+function assistantImageAttachments(value: unknown): AssistantImageAttachment[] {
+  if (!Array.isArray(value)) return []
+  return value.flatMap((entry, index) => {
+    if (!entry || typeof entry !== "object") return []
+    const image = entry as Record<string, unknown>
+    const dataUrl = typeof image.dataUrl === "string"
+      ? image.dataUrl
+      : typeof image.data_url === "string"
+        ? image.data_url
+        : ""
+    const match = /^data:(image\/(?:png|jpeg|webp|gif));base64,/i.exec(dataUrl)
+    if (!match) return []
+    const mimeType = match[1].toLowerCase() as AssistantImageAttachment["mimeType"]
+    return [{
+      id: typeof image.id === "string" ? image.id : `assistant-image-${Date.now()}-${index}`,
+      kind: "image" as const,
+      dataUrl,
+      mimeType,
+      width: typeof image.width === "number" && image.width > 0 ? image.width : 0,
+      height: typeof image.height === "number" && image.height > 0 ? image.height : 0,
+      name: typeof image.name === "string" ? image.name : `Assistant image ${index + 1}`,
+    }]
+  })
 }
 
 // ── Thread persistence: localStorage L1, homebase as the record ────────

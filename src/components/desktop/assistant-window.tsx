@@ -32,6 +32,7 @@ import {
   type AssistantApplyResult,
   type AssistantApplyOptions,
   type AssistantCommand,
+  type AssistantImageAttachment,
   type AssistantMessage,
 } from "@/lib/desktop/assistant"
 import { useAssistantIdentity } from "@/lib/desktop/assistant-identity"
@@ -44,6 +45,8 @@ interface AssistantWindowProps {
   allWindows: DesktopWindowState[]
   params: DesktopParamValue[]
   getExecutionObservations: () => Record<string, AssistantBlockExecutionObservation>
+  queuedAttachments: AssistantImageAttachment[]
+  onConsumeQueuedAttachments: (ids: string[]) => void
   applyCommands: (
     commands: AssistantCommand[],
     options?: AssistantApplyOptions,
@@ -311,6 +314,8 @@ export function AssistantWindow({
   allWindows,
   params,
   getExecutionObservations,
+  queuedAttachments,
+  onConsumeQueuedAttachments,
   applyCommands,
 }: AssistantWindowProps) {
   // Chips dim when their block leaves the canvas — the transcript visibly
@@ -320,6 +325,7 @@ export function AssistantWindow({
   )
   const [messages, setMessages] = useState<AssistantMessage[]>([])
   const [draft, setDraft] = useState("")
+  const [attachments, setAttachments] = useState<AssistantImageAttachment[]>([])
   const [busy, setBusy] = useState(false)
   const [hydrated, setHydrated] = useState(false)
   const lastReportRef = useRef<AssistantApplyResult[] | null>(null)
@@ -338,6 +344,18 @@ export function AssistantWindow({
   // stale when the turn request fires.
   const messagesRef = useRef<AssistantMessage[]>([])
   messagesRef.current = messages
+
+  useEffect(() => {
+    if (queuedAttachments.length === 0) return
+    setAttachments((current) => {
+      const byId = new Map(current.map((attachment) => [attachment.id, attachment]))
+      for (const attachment of queuedAttachments) byId.set(attachment.id, attachment)
+      return [...byId.values()]
+    })
+    setDraft((current) => current.trim() ? current : "Take a look at this current block view.")
+    onConsumeQueuedAttachments(queuedAttachments.map((attachment) => attachment.id))
+    requestAnimationFrame(() => inputRef.current?.focus())
+  }, [onConsumeQueuedAttachments, queuedAttachments])
 
   // One unbroken thread: show localStorage immediately, then reconcile the
   // durable tail even when local is nonempty. Large HTML commands can exceed
@@ -368,12 +386,16 @@ export function AssistantWindow({
   }, [messages, busy])
 
   const send = useCallback(async () => {
-    const text = draft.trim()
-    if (!text || busy) return
+    const pendingAttachments = attachments
+    const text = draft.trim() || (pendingAttachments.length > 0 ? "Take a look at this current block view." : "")
+    if ((!text && pendingAttachments.length === 0) || busy) return
     if (!activeConnectionId) return
     setDraft("")
+    setAttachments([])
     setBusy(true)
-    const userMsg = newAssistantMessage("user", text)
+    const userMsg = newAssistantMessage("user", text, {
+      attachments: pendingAttachments.length > 0 ? pendingAttachments : undefined,
+    })
     const thread = [...messagesRef.current, userMsg]
     setMessages(thread)
     saveThreadLocal(thread)
@@ -386,7 +408,13 @@ export function AssistantWindow({
         lastReportRef.current,
         getExecutionObservations(),
       )
-      const turn = await runAssistantTurn(activeConnectionId, text, thread, context)
+      const turn = await runAssistantTurn(
+        activeConnectionId,
+        text,
+        thread,
+        context,
+        pendingAttachments,
+      )
       let report: AssistantApplyResult[] = []
       if (turn.commands.length > 0) {
         report = applyCommands(turn.commands)
@@ -394,6 +422,7 @@ export function AssistantWindow({
       lastReportRef.current = report.length > 0 ? report : null
       const assistantMsg = newAssistantMessage("assistant", turn.reply, {
         agentRunId: turn.agentRunId,
+        attachments: turn.attachments.length > 0 ? turn.attachments : undefined,
         commands: turn.commands.length > 0 ? turn.commands : undefined,
         report: report.length > 0 ? report : undefined,
         error: !!turn.error || turn.status === "provider_error" || turn.status === "memory_error",
@@ -419,7 +448,7 @@ export function AssistantWindow({
       setBusy(false)
       inputRef.current?.focus()
     }
-  }, [draft, busy, activeConnectionId, applyCommands, getExecutionObservations])
+  }, [draft, attachments, busy, activeConnectionId, applyCommands, getExecutionObservations])
 
   // Bubble plate: each utterance carries its own translucent blur backdrop so
   // the transcript floats over any wallpaper — the container paints nothing.
@@ -465,6 +494,9 @@ export function AssistantWindow({
                     color: "color-mix(in oklch, var(--foreground) 85%, transparent)",
                   })}
                 >
+                  {m.attachments?.length ? (
+                    <AssistantAttachmentGallery attachments={m.attachments} />
+                  ) : null}
                   {m.text}
                 </div>
               </div>
@@ -493,6 +525,9 @@ export function AssistantWindow({
                         : "var(--foreground)",
                     }}
                   >
+                    {m.attachments?.length ? (
+                      <AssistantAttachmentGallery attachments={m.attachments} />
+                    ) : null}
                     {assistantReplyForDisplay(m.text)}
                   </div>
                 </div>
@@ -611,6 +646,33 @@ export function AssistantWindow({
             border: "1px solid color-mix(in oklch, var(--main) 24%, transparent)",
           })}
         >
+          {attachments.length > 0 ? (
+            <div className="mb-2 flex gap-2 overflow-x-auto pb-0.5 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+              {attachments.map((attachment) => (
+                <div
+                  key={attachment.id}
+                  className="group relative h-20 w-28 shrink-0 overflow-hidden rounded-lg border border-main/30 bg-background/50"
+                >
+                  <img
+                    src={attachment.dataUrl}
+                    alt={attachment.name}
+                    className="h-full w-full object-cover"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setAttachments((current) => current.filter((item) => item.id !== attachment.id))}
+                    className="absolute right-1 top-1 grid h-5 w-5 place-items-center rounded-full bg-background/80 text-[11px] text-foreground opacity-0 backdrop-blur transition-opacity group-hover:opacity-100"
+                    title="Remove screenshot"
+                  >
+                    ×
+                  </button>
+                  <div className="absolute inset-x-0 bottom-0 truncate bg-background/75 px-1.5 py-0.5 text-[9px] text-foreground backdrop-blur">
+                    {attachment.name}
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : null}
           <textarea
             ref={inputRef}
             value={draft}
@@ -634,6 +696,31 @@ export function AssistantWindow({
           />
         </div>
       </div>
+    </div>
+  )
+}
+
+function AssistantAttachmentGallery({ attachments }: { attachments: AssistantImageAttachment[] }) {
+  return (
+    <div className="mb-2 grid max-w-full grid-cols-1 gap-1.5">
+      {attachments.map((attachment) => (
+        <figure
+          key={attachment.id}
+          className="overflow-hidden rounded-xl border border-foreground/10 bg-background/35"
+        >
+          <img
+            src={attachment.dataUrl}
+            alt={attachment.name}
+            className="block max-h-72 w-full object-contain"
+          />
+          <figcaption className="truncate border-t border-foreground/10 px-2 py-1 text-[10px] text-foreground/55">
+            {attachment.name}
+            {attachment.width > 0 && attachment.height > 0
+              ? ` · ${attachment.width}×${attachment.height}`
+              : ""}
+          </figcaption>
+        </figure>
+      ))}
     </div>
   )
 }
