@@ -105,6 +105,8 @@ function rollupOpDescription(op: RollupOp): string {
 
 interface DesktopWindowProps {
   window: DesktopWindowState
+  /** Presentation-only title override; persisted window identity is unchanged. */
+  displayTitle?: string
   icon: LucideIcon
   children: React.ReactNode
   /** True when this window currently holds keyboard/visual focus. */
@@ -160,6 +162,7 @@ const MAX_WORLD = 20000
 
 export function DesktopWindow({
   window: w,
+  displayTitle,
   icon: Icon,
   children,
   focused,
@@ -735,7 +738,7 @@ export function DesktopWindow({
       >
         <div className="flex min-w-0 flex-1 items-center gap-2">
           <Icon className="h-4 w-4 shrink-0" style={{ color: chrome.icon }} />
-          <h2 className="truncate text-[12px] font-semibold text-foreground">{w.title}</h2>
+          <h2 className="truncate text-[12px] font-semibold text-foreground">{displayTitle ?? w.title}</h2>
         </div>
         <div
           className={cn("flex items-center gap-1", present && "hidden")}

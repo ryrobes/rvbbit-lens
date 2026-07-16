@@ -127,7 +127,7 @@ export function PgQueryExplorerWindow({
     const message = snapshot?.error ?? error
     const preload = !!message?.toLowerCase().includes("shared_preload_libraries")
     return (
-      <div className="flex h-full flex-col overflow-hidden bg-doc-bg text-foreground">
+      <div className="flex h-full flex-col overflow-hidden text-foreground">
         <ExplorerHeader paused={paused} onTogglePaused={() => setPaused((value) => !value)} onRefresh={() => void poll()} />
         <div className="grid min-h-0 flex-1 place-items-center overflow-auto p-8 text-center">
           <div className="max-w-xl">
@@ -165,11 +165,11 @@ export function PgQueryExplorerWindow({
   const rates = catalogRates(history)
 
   return (
-    <div className="flex h-full min-h-0 flex-col overflow-hidden bg-doc-bg text-[11px] text-foreground group-data-[focused=false]/window:bg-doc-bg/75">
+    <div className="flex h-full min-h-0 flex-col overflow-hidden text-[11px] text-foreground">
       <ExplorerHeader paused={paused} onTogglePaused={() => setPaused((value) => !value)} onRefresh={() => void poll()} error={error} />
 
       <main className="flex min-h-0 flex-1 flex-col gap-3 overflow-hidden p-3">
-        <section className="grid shrink-0 grid-cols-[repeat(auto-fit,minmax(135px,1fr))] overflow-hidden rounded border border-chrome-border/55 bg-chrome-border/30">
+        <section className="grid shrink-0 grid-cols-[repeat(auto-fit,minmax(135px,1fr))] overflow-hidden rounded-md border border-chrome-border/60 bg-secondary-background/40">
           <Metric label="normalized queries" value={fmtCount(ready.rows.length)} detail={`${fmtCount(ready.total_entries)} tracked entries`} accent />
           <Metric label="executions" value={fmtCount(totals.calls)} detail="since statistics reset" />
           <Metric label="total query time" value={fmtDuration(totals.runtimeMs)} detail={`${fmtDuration(rates.runtimeMsPerSecond)}/s now`} />
@@ -194,7 +194,7 @@ export function PgQueryExplorerWindow({
           />
         </section>
 
-        <section className="flex min-h-0 flex-1 flex-col overflow-hidden rounded border border-chrome-border/55 bg-secondary-background/30">
+        <section className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-md border border-chrome-border/60 bg-secondary-background/40">
           <div className="shrink-0 border-b border-chrome-border/45 p-2">
             <div className="flex flex-wrap items-center gap-2">
               <div className="min-w-0">
@@ -275,7 +275,7 @@ function ExplorerHeader({
   error?: string | null
 }) {
   return (
-    <header className="flex min-h-10 shrink-0 flex-wrap items-center gap-2 border-b border-chrome-border bg-chrome-bg/35 px-3 py-1.5">
+    <header className="flex min-h-10 shrink-0 flex-wrap items-center gap-2 border-b border-chrome-border bg-chrome-bg/40 px-3 py-1.5">
       <span className="inline-flex items-center gap-1.5 rounded-full bg-rvbbit-accent/10 px-2 py-0.5 text-[9px] uppercase tracking-wider text-rvbbit-accent">
         <span className={cn("h-1.5 w-1.5 rounded-full bg-rvbbit-accent", !paused && "animate-pulse")} />
         {paused ? "paused" : "statement history"}
@@ -351,7 +351,7 @@ function Trajectory({
   color: string
 }) {
   return (
-    <section className="rounded border border-chrome-border/55 bg-secondary-background/30 p-2.5">
+    <section className="rounded-md border border-chrome-border/60 bg-secondary-background/40 p-3">
       <div className="flex items-start gap-3">
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-1.5 text-[8px] uppercase tracking-wider text-chrome-text/45"><LineChart className="h-3 w-3" />{title}</div>
@@ -368,7 +368,7 @@ function Trajectory({
 
 function Metric({ label, value, detail, accent = false }: { label: string; value: string; detail: string; accent?: boolean }) {
   return (
-    <div className="min-w-0 bg-secondary-background/85 px-3 py-2">
+    <div className="min-w-0 border-r border-chrome-border/35 bg-secondary-background/40 px-3 py-2 last:border-r-0">
       <div className="text-[8px] uppercase tracking-[0.14em] text-chrome-text/42">{label}</div>
       <div className={cn("mt-0.5 truncate font-mono text-base", accent ? "text-rvbbit-accent" : "text-foreground")}>{value}</div>
       <div className="truncate text-[8px] text-chrome-text/40" title={detail}>{detail}</div>
@@ -388,7 +388,7 @@ function EvidenceBadge({ tone, children }: { tone: "warning" | "danger"; childre
 
 function CenteredMessage({ icon: Icon, title, detail, pulse = false }: { icon: React.ComponentType<{ className?: string }>; title: string; detail: string; pulse?: boolean }) {
   return (
-    <div className="grid h-full place-items-center bg-doc-bg p-6 text-center">
+    <div className="grid h-full place-items-center p-6 text-center">
       <div><Icon className={cn("mx-auto h-6 w-6 text-rvbbit-accent", pulse && "animate-pulse")} /><div className="mt-2 text-sm text-foreground">{title}</div><div className="mt-1 text-[10px] text-chrome-text/50">{detail}</div></div>
     </div>
   )

@@ -237,7 +237,7 @@ export function LockExplorerWindow({
 
   return (
     <WindowSurface>
-      <header className="shrink-0 border-b border-chrome-border/65 bg-secondary-background/50 px-3 py-2 group-data-[focused=false]/window:bg-secondary-background/30">
+      <header className="shrink-0 border-b border-chrome-border bg-chrome-bg/40 px-3 py-1.5">
         <div className="flex min-w-0 flex-wrap items-center gap-2">
           <div className="grid h-8 w-8 shrink-0 place-items-center rounded-md border border-brand-lock-explorer/35 bg-brand-lock-explorer/10">
             <Lock className="h-4 w-4 text-brand-lock-explorer" />
@@ -306,7 +306,7 @@ export function LockExplorerWindow({
       ) : null}
 
       <div className="grid min-h-0 flex-1 grid-cols-[minmax(0,1fr)_minmax(255px,31%)]">
-        <main className="relative min-h-0 min-w-0 overflow-hidden border-r border-chrome-border/55 bg-background/15">
+        <main className="relative min-h-0 min-w-0 overflow-hidden border-r border-chrome-border/60">
           {view === "causal" ? (
             <CausalView
               sample={sample}
@@ -362,7 +362,7 @@ export function LockExplorerWindow({
 
 function WindowSurface({ children }: { children: React.ReactNode }) {
   return (
-    <div className="flex h-full min-h-0 flex-col bg-block-bg/45 text-[12px] text-foreground backdrop-blur-md group-data-[focused=false]/window:bg-block-bg/25 group-data-[focused=false]/window:backdrop-blur-lg">
+    <div className="flex h-full min-h-0 flex-col text-[12px] text-foreground">
       {children}
     </div>
   )
@@ -611,7 +611,7 @@ function ResourcesView({
   }
   return (
     <div className="h-full overflow-auto">
-      <div className="sticky top-0 z-10 grid grid-cols-[minmax(170px,1fr)_100px_minmax(220px,1.35fr)] border-b border-chrome-border/60 bg-chrome-bg/88 px-3 py-1.5 text-[9px] uppercase text-chrome-text/55 backdrop-blur-md">
+      <div className="sticky top-0 z-10 grid grid-cols-[minmax(170px,1fr)_100px_minmax(220px,1.35fr)] border-b border-chrome-border/60 bg-secondary-background px-3 py-1.5 text-[9px] uppercase text-chrome-text/55">
         <span>Resource</span>
         <span>Type</span>
         <span>Holders and requests</span>
@@ -824,7 +824,7 @@ function MatrixHeader({
     <div
       title={mode.label}
       className={cn(
-        "flex h-11 flex-col items-center justify-end rounded-sm border border-chrome-border/35 bg-secondary-background/30 pb-1 transition",
+        "flex h-11 flex-col items-center justify-end rounded-md border border-chrome-border/60 bg-secondary-background/40 pb-1 transition",
         active && "border-brand-lock-explorer/45 bg-brand-lock-explorer/8",
         selected && "ring-1 ring-brand-lock-explorer",
       )}
@@ -859,7 +859,7 @@ function MatrixRow({
   return (
     <>
       <div className={cn(
-        "flex h-10 min-w-0 items-center justify-between rounded-sm border border-chrome-border/35 bg-secondary-background/30 px-2 transition",
+        "flex h-10 min-w-0 items-center justify-between rounded-md border border-chrome-border/60 bg-secondary-background/40 px-2 transition",
         activeRequested && "border-brand-lock-explorer/45 bg-brand-lock-explorer/8",
         selectedRequested && "ring-1 ring-brand-lock-explorer",
       )}>
@@ -928,7 +928,7 @@ function MatrixAffectedResources({
 
       {resources.length ? (
         <div className="min-h-0 overflow-auto border-y border-chrome-border/30">
-          <div className="sticky top-0 z-10 grid min-w-[560px] grid-cols-[minmax(145px,1.2fr)_minmax(115px,1fr)_minmax(115px,1fr)_auto] gap-2 border-b border-chrome-border/35 bg-chrome-bg/95 px-2 py-1 text-[8px] uppercase text-chrome-text/40 backdrop-blur-md">
+          <div className="sticky top-0 z-10 grid min-w-[560px] grid-cols-[minmax(145px,1.2fr)_minmax(115px,1fr)_minmax(115px,1fr)_auto] gap-2 border-b border-chrome-border/60 bg-secondary-background px-2 py-1 text-[8px] uppercase text-chrome-text/40">
             <span>blocked relation</span>
             <span>waiting</span>
             <span>blocking</span>
@@ -1025,7 +1025,7 @@ function Inspector({
   const explanation = edge ? explainEdge(edge, edges) : explainSession(session, edges)
 
   return (
-    <aside className="min-h-0 overflow-auto bg-secondary-background/25 group-data-[focused=false]/window:bg-secondary-background/15">
+    <aside className="min-h-0 overflow-auto bg-secondary-background/40">
       <section className="border-b border-chrome-border/45 p-3">
         <div className="flex items-start gap-2">
           <div className={cn(
@@ -1171,7 +1171,7 @@ function HistoryStrip({
   const changes = useMemo(() => transitionIndexes(history), [history])
   const sample = currentIndex >= 0 ? history[currentIndex] : null
   return (
-    <footer className="h-[68px] shrink-0 border-t border-chrome-border/65 bg-chrome-bg/45 px-3 py-2 group-data-[focused=false]/window:bg-chrome-bg/25">
+    <footer className="h-[68px] shrink-0 border-t border-chrome-border bg-chrome-bg/40 px-3 py-2">
       <div className="flex items-center gap-2">
         <Clock className="h-3.5 w-3.5 shrink-0 text-brand-lock-explorer" />
         <span className="font-mono text-[9px] text-chrome-text/55">

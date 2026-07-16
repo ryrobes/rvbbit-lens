@@ -224,8 +224,8 @@ export function PgQueryInspectorWindow({
   }, [capturedQuery])
 
   return (
-    <div className="flex h-full flex-col overflow-hidden bg-doc-bg text-[11px] text-foreground group-data-[focused=false]/window:bg-doc-bg/75">
-      <header className="flex min-h-10 shrink-0 flex-wrap items-center gap-2 border-b border-chrome-border bg-chrome-bg/35 px-3 py-1.5">
+    <div className="flex h-full flex-col overflow-hidden text-[11px] text-foreground">
+      <header className="flex min-h-10 shrink-0 flex-wrap items-center gap-2 border-b border-chrome-border bg-chrome-bg/40 px-3 py-1.5">
         <span
           className={cn(
             "inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-[9px] uppercase tracking-wider",
@@ -476,7 +476,7 @@ function AiSummaryPanel({
   onGenerate: () => void
 }) {
   return (
-    <section className="mb-3 overflow-hidden rounded border border-rvbbit-accent/25 bg-rvbbit-accent/[0.035]">
+    <section className="mb-3 overflow-hidden rounded-md border border-rvbbit-accent/30 bg-secondary-background/40">
       <header className="flex min-h-9 items-center gap-2 border-b border-rvbbit-accent/15 px-3 py-1.5">
         <div className="grid h-6 w-6 place-items-center rounded-sm border border-rvbbit-accent/30 bg-rvbbit-accent/8">
           <Brain className="h-3.5 w-3.5 text-rvbbit-accent" />
@@ -566,7 +566,7 @@ function EvidenceCard({
   detail: string
 }) {
   return (
-    <div className={cn("rounded border px-2.5 py-2", notable ? "border-warning/35 bg-warning/[0.045]" : "border-chrome-border/40 bg-background/25")}>
+    <div className={cn("rounded-md border px-2.5 py-2", notable ? "border-warning/35 bg-warning/[0.06]" : "border-chrome-border/60 bg-secondary-background/40")}>
       <div className={cn("text-[8px] uppercase tracking-wider", notable ? "text-warning" : "text-chrome-text/40")}>{label}</div>
       <div className={cn("mt-0.5 font-mono text-sm", notable ? "text-warning" : "text-foreground/75")}>{value}</div>
       <p className="mt-1 text-[8px] leading-relaxed text-chrome-text/45">{detail}</p>
@@ -588,7 +588,7 @@ function MetricCard({
   tone?: "success"
 }) {
   return (
-    <div className="rounded border border-chrome-border/55 bg-secondary-background/45 px-2.5 py-2">
+    <div className="rounded-md border border-chrome-border/60 bg-secondary-background/40 px-2.5 py-2">
       <div className="text-[8px] uppercase tracking-[0.16em] text-chrome-text/45">{label}</div>
       <div className={cn("mt-0.5 font-mono text-lg leading-tight", accent && "text-rvbbit-accent", tone === "success" && "text-success")}>
         {value}
@@ -612,7 +612,7 @@ function Panel({
   right?: React.ReactNode
 }) {
   return (
-    <section className={cn("rounded border border-chrome-border/55 bg-secondary-background/35 p-3", className)}>
+    <section className={cn("rounded-md border border-chrome-border/60 bg-secondary-background/40 p-3", className)}>
       <header className="mb-2 flex items-center gap-1.5 text-[9px] uppercase tracking-wider text-chrome-text/65">
         <Icon className="h-3 w-3 text-rvbbit-accent" />
         <span>{title}</span>

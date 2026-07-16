@@ -20,6 +20,8 @@ import {
 } from "@/lib/desktop/fonts"
 import type { Scene, SlotId, WorkspaceId } from "@/lib/desktop/types"
 import { SCENE_SLOT, WORKSPACE_IDS } from "@/lib/desktop/state-store"
+import { useAssistantIdentity } from "@/lib/desktop/assistant-identity"
+import { AssistantIdentityMark } from "./assistant-identity-mark"
 
 interface ConnectionSummary {
   id: string
@@ -219,6 +221,7 @@ export function DesktopMenuBar({
   onDeleteScene,
   onSceneNameExists,
 }: DesktopMenuBarProps) {
+  const assistantIdentity = useAssistantIdentity()
   const active = connections.find((c) => c.id === activeConnectionId) ?? null
   const [aboutOpen, setAboutOpen] = useState(false)
   const headerRef = useRef<HTMLElement>(null)
@@ -416,7 +419,7 @@ export function DesktopMenuBar({
           type="button"
           onClick={onToggleAssistant}
           aria-pressed={assistantOpen}
-          title={assistantOpen ? "Dismiss the Assistant" : "Summon the Assistant"}
+          title={assistantOpen ? `Dismiss ${assistantIdentity.name}` : `Summon ${assistantIdentity.name}`}
           className="grid h-5 w-5 place-items-center rounded text-[13px] leading-none transition-all hover:bg-foreground/[0.08]"
           style={
             assistantOpen
@@ -427,7 +430,10 @@ export function DesktopMenuBar({
               : { color: "color-mix(in oklch, var(--foreground) 40%, transparent)" }
           }
         >
-          ✦
+          <AssistantIdentityMark
+            className="grid h-4 w-4 place-items-center"
+            imageClassName={assistantOpen ? "ring-1 ring-main/60" : "opacity-75"}
+          />
         </button>
         ) : null}
         <PresentToggle />

@@ -100,6 +100,7 @@ import {
   type AssistantApplyResult,
   type AssistantCommand,
 } from "@/lib/desktop/assistant"
+import { useAssistantIdentity } from "@/lib/desktop/assistant-identity"
 import {
   buildHtmlBlockSql,
   normalizeHtmlBlockSpec,
@@ -482,6 +483,7 @@ function computePresentFit(windows: DesktopWindowState[]): PresentFit | null {
 }
 
 export function DesktopShell() {
+  const assistantIdentity = useAssistantIdentity()
   const [connections, setConnections] = useState<SanitizedConnection[]>([])
   const [activeConnectionId, setActiveConnectionId] = useState<string | null>(null)
   const [connectionHealth, setConnectionHealth] = useState<ConnectionHealth>({
@@ -2385,16 +2387,25 @@ export function DesktopShell() {
   }, [focus, openWindow, liveWindows])
 
   const openMvccExplorer = useCallback((target?: { schema: string; table: string }) => {
+    // Launcher click handlers receive a React event at runtime even though the
+    // registry exposes a zero-argument callback. Treat only a real schema/table
+    // pair as a deep-link so a standalone launch cannot become
+    // `undefined.undefined`.
+    const tableTarget = target
+      && typeof target.schema === "string"
+      && target.schema.length > 0
+      && typeof target.table === "string"
+      && target.table.length > 0
+      ? target
+      : null
     const existing = liveWindows().find((w) => w.kind === "mvcc-explorer")
     if (existing) {
-      if (target) {
-        updatePayload(existing.id, (payload) => ({
-          ...(payload as MvccExplorerPayload),
-          kind: "mvcc-explorer",
-          view: "tables",
-          tableSearch: `${target.schema}.${target.table}`,
-        } satisfies MvccExplorerPayload))
-      }
+      updatePayload(existing.id, (payload) => ({
+        ...(payload as MvccExplorerPayload),
+        kind: "mvcc-explorer",
+        view: tableTarget ? "tables" : "horizon",
+        tableSearch: tableTarget ? `${tableTarget.schema}.${tableTarget.table}` : undefined,
+      } satisfies MvccExplorerPayload))
       focus(existing.id)
       return
     }
@@ -2405,7 +2416,8 @@ export function DesktopShell() {
       x: 115, y: 72, width: 1160, height: 780,
       payload: {
         kind: "mvcc-explorer",
-        ...(target ? { view: "tables" as const, tableSearch: `${target.schema}.${target.table}` } : {}),
+        view: tableTarget ? "tables" : "horizon",
+        ...(tableTarget ? { tableSearch: `${tableTarget.schema}.${tableTarget.table}` } : {}),
       } satisfies MvccExplorerPayload,
     })
   }, [focus, openWindow, liveWindows, updatePayload])
@@ -2638,11 +2650,11 @@ export function DesktopShell() {
     openWindow({
       id: randomUUID(),
       kind: "assistant-settings",
-      title: "Assistant Settings",
+      title: `${assistantIdentity.name} Settings`,
       x: 260, y: 140, width: 480, height: 560,
       payload: { kind: "assistant-settings" },
     })
-  }, [focus, openWindow, liveWindows])
+  }, [assistantIdentity.name, focus, openWindow, liveWindows])
 
   // Migration: earlier builds materialized the assistant as a canvas window
   // (kind "assistant"). Purge any that hydrate out of saved desktop state.
@@ -4773,7 +4785,7 @@ export function DesktopShell() {
     { id: "monitor", label: "Monitor", icon: Activity, color: "var(--brand-pg-monitor)", description: "Live server activity & stats", activate: openPgMonitor, folder: "system" },
     { id: "query-explorer", label: "Query Explorer", icon: LineChart, color: "var(--brand-pg-monitor)", description: "Historical normalized queries, runtime & notable evidence", activate: openPgQueryExplorer, folder: "system" },
     { id: "lock-explorer", label: "Lock Explorer", icon: Lock, color: "var(--brand-lock-explorer)", description: "Live blocker chains, resources & replay", activate: openLockExplorer, folder: "system" },
-    { id: "mvcc-explorer", label: "MVCC Explorer", icon: Layers, color: "var(--brand-mvcc-explorer)", description: "Vacuum horizons, pressure & workers", activate: openMvccExplorer, folder: "system" },
+    { id: "mvcc-explorer", label: "MVCC Explorer", icon: Layers, color: "var(--brand-mvcc-explorer)", description: "Vacuum horizons, pressure & workers", activate: () => openMvccExplorer(), folder: "system" },
     { id: "fleet", label: "Fleet", icon: Anchor, color: "var(--brand-pg-monitor)", description: "Read-fleet workers, publication & storage health", activate: openFleet, folder: "system", rvbbit: true },
     { id: "semantic-tests", label: "Semantic Tests", icon: Target, color: "var(--brand-semantic-tests)", description: "Operator test batteries, pass rates & verdict drift", activate: openSemanticTests, folder: "system", rvbbit: true },
     { id: "postgres-admin", label: "Postgres Admin", icon: Shield, color: "var(--brand-pg-monitor)", description: "Locks, grants, indexes, objects & backup plans", activate: () => openPostgresAdmin(), folder: "system" },
@@ -4785,7 +4797,7 @@ export function DesktopShell() {
     // Semantic
     { id: "operators", label: "Operators", icon: FlowArrow, color: "var(--brand-operators)", description: "Semantic SQL operators", activate: openOperators, folder: "semantic", rvbbit: true },
     { id: "model-settings", label: "Model Settings", icon: Settings2, color: "var(--brand-routing)", description: "LLM defaults, operator models & spend", activate: openModelSettings, folder: "semantic", rvbbit: true },
-    { id: "assistant", label: "Assistant", icon: Rabbit, color: "var(--main)", description: "Model, personality & voice for the desktop Assistant (summon her from the ✦ in the bar)", activate: openAssistantSettings, folder: "semantic", rvbbit: true },
+    { id: "assistant", label: assistantIdentity.name, icon: Rabbit, color: "var(--main)", description: `Model, personality & voice for ${assistantIdentity.name} (summon from the identity control in the bar)`, activate: openAssistantSettings, folder: "semantic", rvbbit: true },
     { id: "agent-messages", label: "Messages", icon: Quote, color: "var(--viz-op-agent, var(--brand-warren))", description: "Agent transcripts — by run, with cost", activate: () => openAgentMessages(), folder: "semantic", rvbbit: true },
     { id: "specialists", label: "Specialists", icon: Brain, color: "var(--brand-specialists)", description: "Fine-tuned task models", activate: openSpecialists, folder: "semantic", rvbbit: true },
     { id: "routing", label: "Routing", icon: GitBranch, color: "var(--brand-routing)", description: "Model/backend routing rules", activate: openRouting, folder: "semantic", rvbbit: true },
@@ -4817,7 +4829,7 @@ export function DesktopShell() {
     { id: "query-lens", label: "Query Lens", icon: Eye, color: "var(--brand-query-lens)", description: "Trace a query's execution", activate: () => openQueryLens(), folder: "knowledge", rvbbit: true },
     { id: "drift", label: "Drift", icon: LineChart, color: "var(--brand-kg)", description: "Compare extraction runs", activate: () => openDrift(), folder: "knowledge", rvbbit: true },
   ], [
-    viewAppCount, schema, rvbbitVersion,
+    viewAppCount, schema, rvbbitVersion, assistantIdentity.name,
     openFinder, openSqlScratch, openViewApps, openConnections, openDataSearch, openSystemLearning, openMcpIncoming,
     openSystemObjects, openExtensions, openPgMonitor, openPgQueryExplorer, openLockExplorer, openMvccExplorer, openFleet, openPostgresAdmin, openCache, openRvbbitCache,
     openCosts, openAgentMessages, openAssistantSettings, openDataMover, dataMoverDetected, openSyncMirror, openOperators, openModelSettings, openSpecialists, openRouting,
@@ -5225,7 +5237,7 @@ export function DesktopShell() {
         onOpenSystemObjects={() => openSystemObjects("tables")}
         onOpenPgMonitor={openPgMonitor}
         onOpenLockExplorer={openLockExplorer}
-        onOpenMvccExplorer={openMvccExplorer}
+        onOpenMvccExplorer={() => openMvccExplorer()}
         onOpenPostgresAdmin={() => openPostgresAdmin()}
         onOpenNotifications={openNotifications}
         onOpenExtensions={openExtensions}
@@ -5477,6 +5489,7 @@ export function DesktopShell() {
                   requestRowsetStage={requestRowsetStage}
                   requestSemanticDrop={requestSemanticDrop}
                   semanticOps={semanticOps}
+                  assistantName={assistantIdentity.name}
                 />
               )
             })}
@@ -5530,10 +5543,10 @@ export function DesktopShell() {
                   type="button"
                   onClick={() => focus(w.id)}
                   className="flex items-center gap-1.5 rounded px-2 py-1 text-[11px] text-chrome-text hover:bg-foreground/[0.06] hover:text-foreground"
-                  title={w.title}
+                  title={w.kind === "assistant-settings" ? `${assistantIdentity.name} Settings` : w.title}
                 >
                   <Icon className="h-3.5 w-3.5" />
-                  <span className="max-w-[160px] truncate">{w.title}</span>
+                  <span className="max-w-[160px] truncate">{w.kind === "assistant-settings" ? `${assistantIdentity.name} Settings` : w.title}</span>
                 </button>
               )
             })}
@@ -5760,6 +5773,7 @@ const WindowFrame = memo(function WindowFrame({
   requestRowsetStage,
   requestSemanticDrop,
   semanticOps,
+  assistantName,
 }: {
   window: DesktopWindowState
   baseCtx: BaseWindowContext
@@ -5778,6 +5792,7 @@ const WindowFrame = memo(function WindowFrame({
   requestRowsetStage: (payload: DesktopBlockDragPayload, op: SemanticOpMeta, at: { x: number; y: number }, inPlace?: boolean) => void
   requestSemanticDrop: (payload: DesktopColumnDragPayload, op: SemanticOpMeta, at: { x: number; y: number }, targetWindowId?: string) => void
   semanticOps: SemanticOpMeta[]
+  assistantName: string
 }) {
   const ctx = useMemo<WindowContext>(
     () => ({ ...baseCtx, windows: slotWindows, params: slotParams, runSignal, workspaceActive }),
@@ -5806,6 +5821,7 @@ const WindowFrame = memo(function WindowFrame({
   return (
     <DesktopWindow
       window={w}
+      displayTitle={w.kind === "assistant-settings" ? `${assistantName} Settings` : undefined}
       icon={iconForKind(w.kind)}
       focused={focused}
       onFocus={onFocus}

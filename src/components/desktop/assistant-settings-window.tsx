@@ -10,8 +10,18 @@
  * desktop_context.persona.
  */
 
-import { useCallback, useEffect, useMemo, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent } from "react"
 import { fetchLlmModels, type LlmModel } from "@/lib/rvbbit/operators"
+import { WALLPAPER_FILE_ACCEPT, isLikelyImageFile } from "@/lib/desktop/wallpaper-store"
+import {
+  ASSISTANT_NAME_MAX_CHARS,
+  centerCropAssistantAvatar,
+  clearAssistantAvatar,
+  loadAssistantName,
+  saveAssistantAvatar,
+  saveAssistantName,
+  useAssistantIdentity,
+} from "@/lib/desktop/assistant-identity"
 import {
   loadPersona,
   savePersona,
@@ -19,6 +29,7 @@ import {
   saveSpendThreshold,
   PERSONA_MAX_CHARS,
 } from "@/lib/desktop/assistant"
+import { AssistantIdentityMark } from "./assistant-identity-mark"
 
 const OPERATOR = "desktop_assistant_turn"
 
@@ -44,16 +55,60 @@ export function AssistantSettingsWindow({
   activeConnectionId: string | null
 }) {
   const [models, setModels] = useState<LlmModel[]>([])
+  const identity = useAssistantIdentity()
+  const avatarInputRef = useRef<HTMLInputElement | null>(null)
+  const [name, setName] = useState(() => loadAssistantName())
+  const [nameSaved, setNameSaved] = useState(false)
+  const [avatarStatus, setAvatarStatus] = useState<string | null>(null)
+  const [avatarBusy, setAvatarBusy] = useState(false)
   const [currentModel, setCurrentModel] = useState<string | null>(null)
   const [modelStatus, setModelStatus] = useState<string | null>(null)
-  const [persona, setPersona] = useState("")
+  const [persona, setPersona] = useState(() => loadPersona())
   const [personaSaved, setPersonaSaved] = useState(false)
-  const [spend, setSpend] = useState("")
+  const [spend, setSpend] = useState(() => loadSpendThreshold().toFixed(2))
   const [spendSaved, setSpendSaved] = useState(false)
 
-  useEffect(() => {
-    setPersona(loadPersona())
-    setSpend(loadSpendThreshold().toFixed(2))
+  const onNameBlur = useCallback(() => {
+    const saved = saveAssistantName(name)
+    setName(saved)
+    setNameSaved(true)
+    window.setTimeout(() => setNameSaved(false), 1600)
+  }, [name])
+
+  const onAvatarChange = useCallback(async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0]
+    event.target.value = ""
+    if (!file) return
+    if (!isLikelyImageFile(file)) {
+      setAvatarStatus("choose an image file")
+      return
+    }
+    setAvatarBusy(true)
+    setAvatarStatus("center-cropping…")
+    try {
+      const cropped = await centerCropAssistantAvatar(file)
+      await saveAssistantAvatar(cropped)
+      setAvatarStatus("saved")
+      window.setTimeout(() => setAvatarStatus(null), 1800)
+    } catch (error) {
+      setAvatarStatus(error instanceof Error ? error.message : "image upload failed")
+    } finally {
+      setAvatarBusy(false)
+    }
+  }, [])
+
+  const removeAvatar = useCallback(async () => {
+    setAvatarBusy(true)
+    setAvatarStatus("removing…")
+    try {
+      await clearAssistantAvatar()
+      setAvatarStatus("removed")
+      window.setTimeout(() => setAvatarStatus(null), 1600)
+    } catch (error) {
+      setAvatarStatus(error instanceof Error ? error.message : "could not remove image")
+    } finally {
+      setAvatarBusy(false)
+    }
   }, [])
 
   const onSpendBlur = useCallback(() => {
@@ -145,18 +200,89 @@ export function AssistantSettingsWindow({
       className="mb-1.5 flex items-center gap-1.5 text-[10px] uppercase tracking-wide"
       style={{ color: "var(--main)" }}
     >
-      <span
-        aria-hidden
-        style={{ textShadow: "0 0 10px color-mix(in oklch, var(--main) 55%, transparent)" }}
-      >
-        ✦
-      </span>
+      <AssistantIdentityMark
+        className="grid h-3 w-3 place-items-center"
+        fallbackStyle={{ textShadow: "0 0 10px color-mix(in oklch, var(--main) 55%, transparent)" }}
+      />
       {label}
     </div>
   )
 
   return (
     <div className="flex h-full flex-col gap-4 overflow-y-auto bg-doc-bg p-4 text-[12px] text-foreground">
+      <section>
+        {sectionTitle("Identity")}
+        <div className="grid grid-cols-[minmax(0,1fr)_88px] items-start gap-4 rounded-md border border-chrome-border/60 bg-secondary-background/40 p-3">
+          <div className="min-w-0">
+            <label className="text-[10px] uppercase tracking-wide text-chrome-text/55" htmlFor="assistant-display-name">
+              Name
+            </label>
+            <input
+              id="assistant-display-name"
+              value={name}
+              maxLength={ASSISTANT_NAME_MAX_CHARS}
+              onChange={(event) => {
+                setName(event.target.value.slice(0, ASSISTANT_NAME_MAX_CHARS))
+                setNameSaved(false)
+              }}
+              onBlur={onNameBlur}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") event.currentTarget.blur()
+              }}
+              className="mt-1 w-full rounded-md border border-chrome-border bg-background px-2.5 py-2 text-[13px] text-foreground outline-none focus:border-main/60"
+              placeholder="Assistant"
+            />
+            <div className="mt-1 flex items-center justify-between text-[10px] text-chrome-text/45">
+              <span>{nameSaved ? "saved" : "saves on blur · labels only"}</span>
+              <span>{name.length}/{ASSISTANT_NAME_MAX_CHARS}</span>
+            </div>
+            <p className="mt-2 text-[10px] leading-relaxed text-chrome-text/50">
+              The internal assistant operator and protocol names stay unchanged.
+            </p>
+          </div>
+
+          <div className="flex flex-col items-center gap-1.5">
+            <button
+              type="button"
+              disabled={avatarBusy}
+              onClick={() => avatarInputRef.current?.click()}
+              title="Upload assistant picture"
+              className="group relative grid h-[72px] w-[72px] place-items-center overflow-hidden rounded-full border border-main/35 bg-background/70 text-lg text-main shadow-[0_8px_24px_oklch(0%_0_0_/_0.18)] outline-none transition hover:border-main/65 focus-visible:ring-2 focus-visible:ring-main/45 disabled:opacity-55"
+            >
+              <AssistantIdentityMark
+                className={identity.avatarUrl ? "h-full w-full" : "grid h-full w-full place-items-center"}
+                fallbackStyle={{ textShadow: "0 0 14px color-mix(in oklch, var(--main) 60%, transparent)" }}
+              />
+              <span className="absolute inset-x-0 bottom-0 bg-background/75 py-0.5 text-center text-[8px] uppercase tracking-wide text-foreground/70 opacity-0 backdrop-blur-sm transition group-hover:opacity-100">
+                upload
+              </span>
+            </button>
+            <input
+              ref={avatarInputRef}
+              type="file"
+              accept={WALLPAPER_FILE_ACCEPT}
+              className="hidden"
+              onChange={(event) => void onAvatarChange(event)}
+            />
+            {identity.avatarUrl ? (
+              <button
+                type="button"
+                disabled={avatarBusy}
+                onClick={() => void removeAvatar()}
+                className="text-[9px] text-chrome-text/45 hover:text-danger disabled:opacity-45"
+              >
+                remove
+              </button>
+            ) : (
+              <span className="text-[9px] text-chrome-text/40">picture</span>
+            )}
+          </div>
+        </div>
+        <div className="mt-1 text-[10px] text-chrome-text/45">
+          {avatarStatus ?? "Images are automatically center-cropped to a 1:1 circle and kept in this browser."}
+        </div>
+      </section>
+
       <section>
         {sectionTitle("Mind")}
         <div className="flex items-center gap-2">
@@ -227,7 +353,7 @@ export function AssistantSettingsWindow({
         </div>
         <p className="mt-1.5 text-[11px] leading-snug text-chrome-text/55">
           Semantic SQL she projects at or under this cost runs without asking
-          (she'll still mention the price). Anything over, she quotes the
+          (she&apos;ll still mention the price). Anything over, she quotes the
           estimate and waits for your go-ahead. $0.00 = always ask first.
         </p>
       </section>

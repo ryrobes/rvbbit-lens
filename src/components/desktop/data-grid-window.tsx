@@ -120,6 +120,8 @@ import {
   type HtmlBlockTurnResult,
 } from "@/lib/desktop/app-block"
 import { publishAppBlock } from "@/lib/rvbbit/dashboards"
+import { useAssistantIdentity } from "@/lib/desktop/assistant-identity"
+import { AssistantIdentityMark } from "./assistant-identity-mark"
 
 interface DataGridWindowProps {
   window: DesktopWindowState
@@ -2848,6 +2850,8 @@ export function DataGridWindow({
           onClose={() => setVizExportSeed(null)}
         />
       ) : null}
+      <ContextMenu state={exportMenu} onClose={() => setExportMenu(null)} />
+      <ContextMenu state={historyMenu} onClose={() => setHistoryMenu(null)} />
       {sqlRailOpen && !present ? (
         <>
         <aside
@@ -2913,8 +2917,6 @@ export function DataGridWindow({
             </div>
           ) : null}
           <RunStatus runState={runState} progress={progress} onCancel={cancelRun} />
-          <ContextMenu state={exportMenu} onClose={() => setExportMenu(null)} />
-          <ContextMenu state={historyMenu} onClose={() => setHistoryMenu(null)} />
         </aside>
         <div
           role="separator"
@@ -3458,6 +3460,7 @@ function AppChatPanel({
   onRun: () => void
   onAskAssistant?: () => void
 }) {
+  const assistantIdentity = useAssistantIdentity()
   const messages = spec?.messages ?? []
   // Revisions without in-block chat = the Desktop Assistant authored this
   // artifact. The panel opens with the block's biography (rendered from the
@@ -3480,13 +3483,11 @@ function AppChatPanel({
               className="mb-1.5 flex items-center gap-1.5 text-[10px] uppercase tracking-wide"
               style={{ color: "var(--main)" }}
             >
-              <span
-                aria-hidden
-                style={{ textShadow: "0 0 10px color-mix(in oklch, var(--main) 55%, transparent)" }}
-              >
-                ✦
-              </span>
-              Built by the Assistant
+              <AssistantIdentityMark
+                className="grid h-3 w-3 place-items-center"
+                fallbackStyle={{ textShadow: "0 0 10px color-mix(in oklch, var(--main) 55%, transparent)" }}
+              />
+              Built by {assistantIdentity.name}
             </div>
             <div className="space-y-1">
               {(spec.revisions ?? []).slice(-6).map((r) => (
@@ -3499,7 +3500,9 @@ function AppChatPanel({
                       minute: "2-digit",
                     })}
                   </span>
-                  <span className="min-w-0 text-chrome-text/80">{r.summary ?? r.source}</span>
+                  <span className="min-w-0 text-chrome-text/80">
+                    {(r.summary ?? r.source).replace(/(?:the )?Desktop Assistant/g, assistantIdentity.name)}
+                  </span>
                 </div>
               ))}
             </div>
@@ -3507,14 +3510,15 @@ function AppChatPanel({
               <button
                 type="button"
                 onClick={onAskAssistant}
-                className="mt-2 rounded-full px-2.5 py-0.5 text-[11px]"
+                className="mt-2 inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-[11px]"
                 style={{
                   border: "1px solid color-mix(in oklch, var(--main) 40%, transparent)",
                   background: "color-mix(in oklch, var(--main) 10%, transparent)",
                   color: "color-mix(in oklch, var(--main) 80%, var(--foreground))",
                 }}
               >
-                ✦ Ask the Assistant
+                <AssistantIdentityMark className="grid h-3 w-3 place-items-center" />
+                Ask {assistantIdentity.name}
               </button>
             ) : null}
             <div className="mt-1.5 text-[10px] text-chrome-text/45">

@@ -90,8 +90,14 @@ export function MvccExplorerWindow({
   const [tableSort, setTableSort] = useState<TableSort>("vacuum")
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
-  const view: ExplorerView = payload.view ?? "horizon"
-  const tableSearch = payload.tableSearch ?? ""
+  // Repair payloads persisted by the old launcher/event bug as well as guarding
+  // against malformed external deep-links.
+  const malformedTableSearch = payload.tableSearch === "undefined.undefined"
+    || payload.tableSearch === "null.null"
+  const view: ExplorerView = malformedTableSearch ? "horizon" : payload.view ?? "horizon"
+  const tableSearch = malformedTableSearch || typeof payload.tableSearch !== "string"
+    ? ""
+    : payload.tableSearch
 
   const poll = useCallback(async () => {
     if (!activeConnectionId) return
@@ -195,7 +201,7 @@ export function MvccExplorerWindow({
 
   return (
     <WindowSurface>
-      <header className="shrink-0 border-b border-chrome-border/65 bg-secondary-background/50 px-3 py-2 group-data-[focused=false]/window:bg-secondary-background/30">
+      <header className="shrink-0 border-b border-chrome-border bg-chrome-bg/40 px-3 py-1.5">
         <div className="flex min-w-0 flex-wrap items-center gap-2">
           <div className="grid h-8 w-8 shrink-0 place-items-center rounded-md border border-brand-mvcc-explorer/35 bg-brand-mvcc-explorer/10">
             <Layers className="h-4 w-4 text-brand-mvcc-explorer" />
@@ -243,7 +249,7 @@ export function MvccExplorerWindow({
         </div>
       </header>
 
-      <div className="grid shrink-0 grid-cols-2 border-b border-chrome-border/55 sm:grid-cols-4 lg:grid-cols-5">
+      <div className="grid shrink-0 grid-cols-2 border-b border-chrome-border/60 bg-secondary-background/40 sm:grid-cols-4 lg:grid-cols-5">
         <Metric label="Oldest observed candidate" value={oldestCandidate ? formatXids(oldestCandidate.age) : "none"} detail={oldestCandidate?.label ?? "no exposed xmin"} tone={oldestCandidate && oldestCandidate.age > sample.settings.freezeMaxAge * 0.25 ? "warning" : "neutral"} />
         <Metric label="Database frozen XID age" value={formatXids(sample.databaseAge.frozenXidAge)} detail={`${formatPercent(sample.databaseAge.frozenXidAge / sample.settings.freezeMaxAge)} of max age`} tone={sample.databaseAge.frozenXidAge / sample.settings.freezeMaxAge >= 0.75 ? "danger" : "neutral"} />
         <Metric label="Autovacuum pressure" value={String(vacuumDue)} detail={`of ${sample.tables.length} observed tables`} tone={vacuumDue ? "warning" : "neutral"} />
@@ -285,7 +291,7 @@ export function MvccExplorerWindow({
           ) : null}
         </main>
 
-        <aside className="hidden w-[310px] shrink-0 overflow-y-auto border-l border-chrome-border/55 bg-secondary-background/20 xl:block">
+        <aside className="hidden w-[310px] shrink-0 overflow-y-auto border-l border-chrome-border/60 bg-secondary-background/40 xl:block">
           <Inspector
             sample={sample}
             view={view}
@@ -507,7 +513,7 @@ function TablesView({
       </div>
 
       <div className="min-h-0 flex-1 overflow-auto">
-        <div className="sticky top-0 z-10 grid min-w-[760px] grid-cols-[minmax(190px,1.5fr)_minmax(150px,1fr)_minmax(130px,0.9fr)_100px_110px] gap-3 border-b border-chrome-border/50 bg-block-bg/95 px-3 py-1.5 text-[8px] uppercase text-chrome-text/45 backdrop-blur-md">
+        <div className="sticky top-0 z-10 grid min-w-[760px] grid-cols-[minmax(190px,1.5fr)_minmax(150px,1fr)_minmax(130px,0.9fr)_100px_110px] gap-3 border-b border-chrome-border/60 bg-secondary-background px-3 py-1.5 text-[8px] uppercase text-chrome-text/45">
           <span>Relation</span><span>Vacuum trigger</span><span>Freeze age</span><span>Visibility</span><span>Last auto</span>
         </div>
         {visible.map((table) => {
@@ -592,7 +598,7 @@ function WorkersView({ sample, selectedPid, onSelect }: {
             type="button"
             onClick={() => onSelect(worker.pid)}
             className={cn(
-              "rounded-md border border-chrome-border/45 bg-secondary-background/28 p-3 text-left transition hover:border-brand-mvcc-explorer/40",
+              "rounded-md border border-chrome-border/60 bg-secondary-background/40 p-3 text-left transition hover:border-brand-mvcc-explorer/40",
               selectedPid === worker.pid && "border-brand-mvcc-explorer/55 bg-brand-mvcc-explorer/8",
             )}
           >
@@ -934,7 +940,7 @@ function IconButton({ title, onClick, disabled, children }: { title: string; onC
 }
 
 function WindowSurface({ children }: { children: React.ReactNode }) {
-  return <div className="flex h-full min-h-0 flex-col overflow-hidden bg-block-bg/45 text-foreground backdrop-blur-md group-data-[focused=false]/window:bg-block-bg/25 group-data-[focused=false]/window:backdrop-blur-lg">{children}</div>
+  return <div className="flex h-full min-h-0 flex-col overflow-hidden text-foreground">{children}</div>
 }
 
 function CenteredState({ icon: Icon, title, detail, busy = false }: { icon: ComponentType<{ className?: string }>; title: string; detail: string; busy?: boolean }) {

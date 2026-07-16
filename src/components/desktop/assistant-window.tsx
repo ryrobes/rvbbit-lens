@@ -31,6 +31,8 @@ import {
   type AssistantCommand,
   type AssistantMessage,
 } from "@/lib/desktop/assistant"
+import { useAssistantIdentity } from "@/lib/desktop/assistant-identity"
+import { AssistantIdentityMark } from "./assistant-identity-mark"
 
 interface AssistantWindowProps {
   activeConnectionId: string | null
@@ -42,20 +44,19 @@ interface AssistantWindowProps {
 
 function commandChipLabel(cmd: AssistantCommand, report?: AssistantApplyResult): string {
   const skipped = report?.status === "skipped"
-  const mark = skipped ? "⃠" : "✦"
   switch (cmd.op) {
     case "create_block":
-      return `${mark} ${skipped ? "couldn't create" : cmd.app ? "built" : cmd.chart ? "charted" : "created"} ${cmd.name ?? cmd.title ?? "block"}`
+      return `${skipped ? "couldn't create" : cmd.app ? "built" : cmd.chart ? "charted" : "created"} ${cmd.name ?? cmd.title ?? "block"}`
     case "update_block":
-      return `${mark} ${skipped ? "couldn't update" : "updated"} ${cmd.target}`
+      return `${skipped ? "couldn't update" : "updated"} ${cmd.target}`
     case "emit_param":
-      return `${mark} filtered ${cmd.block}.${cmd.field}`
+      return `filtered ${cmd.block}.${cmd.field}`
     case "focus_block":
-      return `${mark} → ${cmd.target}`
+      return `→ ${cmd.target}`
     case "close_block":
-      return `${mark} closed ${cmd.target}`
+      return `closed ${cmd.target}`
     default:
-      return `${mark} ${(cmd as { op: string }).op}`
+      return (cmd as { op: string }).op
   }
 }
 
@@ -128,6 +129,7 @@ export function AssistantDock({
   onClose,
   ...windowProps
 }: { open: boolean; onClose: () => void } & AssistantWindowProps) {
+  const identity = useAssistantIdentity()
   const [rect, setRect] = useState<DockRect | null>(null)
   const dragRef = useRef<{ mode: "move" | "resize"; startX: number; startY: number; base: DockRect } | null>(null)
 
@@ -175,23 +177,29 @@ export function AssistantDock({
   )
 
   if (!open || !rect) return null
-  // No window chrome: the frame is invisible — just bubbles hovering over the
-  // desktop, with a slim drag pill up top and a resize corner. She's a layer,
-  // not a panel.
+  // No conventional window chrome: a faint tinted glass field gives the dock
+  // a readable boundary while preserving the assistant's floating OS-layer
+  // character. The drag pill and resize corner remain the only controls.
   return (
     <div
-      className="fixed flex flex-col"
+      className="fixed flex flex-col rounded-[18px]"
       style={{
         left: rect.x,
         top: rect.y,
         width: rect.width,
         height: rect.height,
         zIndex: 80,
+        background:
+          "linear-gradient(145deg, color-mix(in oklch, var(--main) 5%, color-mix(in oklch, var(--block-bg) 30%, transparent)), color-mix(in oklch, var(--background) 24%, transparent))",
+        backdropFilter: "blur(18px) saturate(1.08)",
+        WebkitBackdropFilter: "blur(18px) saturate(1.08)",
+        boxShadow:
+          "0 18px 54px oklch(0% 0 0 / 0.18), inset 0 1px 0 color-mix(in oklch, var(--foreground) 5%, transparent)",
       }}
     >
       <div
         onPointerDown={startDrag("move")}
-        className="flex shrink-0 cursor-move select-none items-center justify-between px-1 pb-1.5"
+        className="flex shrink-0 cursor-move select-none items-center justify-between px-2 pb-1.5 pt-2"
       >
         <span
           className="flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-[11px]"
@@ -202,16 +210,14 @@ export function AssistantDock({
             backdropFilter: "blur(12px)",
           }}
         >
-          <span
-            aria-hidden
-            style={{
+          <AssistantIdentityMark
+            className="grid h-4 w-4 place-items-center"
+            fallbackStyle={{
               color: "var(--main)",
               textShadow: "0 0 12px color-mix(in oklch, var(--main) 60%, transparent)",
             }}
-          >
-            ✦
-          </span>
-          Assistant
+          />
+          {identity.name}
         </span>
         <button
           type="button"
@@ -223,7 +229,7 @@ export function AssistantDock({
             color: "color-mix(in oklch, var(--foreground) 60%, transparent)",
             backdropFilter: "blur(12px)",
           }}
-          title="Dismiss (she keeps the thread)"
+          title={`Dismiss ${identity.name} (the thread is kept)`}
         >
           ✕
         </button>
@@ -371,14 +377,14 @@ export function AssistantWindow({
             className="mx-auto mt-10 max-w-[85%] select-none rounded-2xl px-4 py-3 text-center text-[13px] leading-relaxed"
             style={plate({ color: "color-mix(in oklch, var(--foreground) 55%, transparent)" })}
           >
-            <div
-              className="mb-2 text-lg"
-              style={{
-                color: "var(--main)",
-                textShadow: "0 0 18px color-mix(in oklch, var(--main) 55%, transparent)",
-              }}
-            >
-              ✦
+            <div className="mb-2 flex justify-center">
+              <AssistantIdentityMark
+                className="grid h-7 w-7 place-items-center text-lg"
+                fallbackStyle={{
+                  color: "var(--main)",
+                  textShadow: "0 0 18px color-mix(in oklch, var(--main) 55%, transparent)",
+                }}
+              />
             </div>
             I can see the desktop — every block, every filter.
             <br />
@@ -407,18 +413,15 @@ export function AssistantWindow({
                     border: `1px solid color-mix(in oklch, var(--main) ${m.error ? 8 : 16}%, transparent)`,
                   })}
                 >
-                  <span
-                    aria-hidden
-                    className="mt-[3px] shrink-0 text-[11px]"
-                    style={{
+                  <AssistantIdentityMark
+                    className="mt-[3px] grid h-4 w-4 shrink-0 place-items-center text-[11px]"
+                    fallbackStyle={{
                       color: m.error ? "var(--destructive, #b5524a)" : "var(--main)",
                       textShadow: m.error
                         ? "none"
                         : "0 0 12px color-mix(in oklch, var(--main) 60%, transparent)",
                     }}
-                  >
-                    ✦
-                  </span>
+                  />
                   <div
                     className="text-[13.5px] leading-relaxed"
                     style={{
@@ -460,7 +463,7 @@ export function AssistantWindow({
                                   ? "no longer on the desktop"
                                   : undefined)
                           }
-                          className="rounded-full px-2.5 py-0.5 text-[11px] transition-opacity"
+                          className="inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-[11px] transition-opacity"
                           style={{
                             border: `1px solid color-mix(in oklch, var(--main) ${skipped ? 18 : alive ? 40 : 22}%, transparent)`,
                             background: `color-mix(in oklch, color-mix(in oklch, var(--main) ${skipped ? 8 : alive ? 18 : 9}%, var(--background)) 72%, transparent)`,
@@ -474,6 +477,11 @@ export function AssistantWindow({
                             opacity: !skipped && !alive && target ? 0.65 : 1,
                           }}
                         >
+                          {skipped ? (
+                            <span aria-hidden>⃠</span>
+                          ) : (
+                            <AssistantIdentityMark className="grid h-3 w-3 place-items-center" />
+                          )}
                           {commandChipLabel(cmd, rep)}
                         </button>
                       )
@@ -488,15 +496,13 @@ export function AssistantWindow({
               className="flex w-fit items-center gap-2.5 rounded-full px-3 py-1.5"
               style={plate()}
             >
-              <span
-                className="animate-pulse text-[11px]"
-                style={{
+              <AssistantIdentityMark
+                className="grid h-4 w-4 animate-pulse place-items-center text-[11px]"
+                fallbackStyle={{
                   color: "var(--main)",
                   textShadow: "0 0 14px color-mix(in oklch, var(--main) 70%, transparent)",
                 }}
-              >
-                ✦
-              </span>
+              />
               <span
                 className="text-[12px] italic"
                 style={{ color: "color-mix(in oklch, var(--foreground) 40%, transparent)" }}
