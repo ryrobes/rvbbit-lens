@@ -325,7 +325,6 @@ export function AssistantWindow({
   )
   const [messages, setMessages] = useState<AssistantMessage[]>([])
   const [draft, setDraft] = useState("")
-  const [attachments, setAttachments] = useState<AssistantImageAttachment[]>([])
   const [busy, setBusy] = useState(false)
   const [hydrated, setHydrated] = useState(false)
   const lastReportRef = useRef<AssistantApplyResult[] | null>(null)
@@ -344,18 +343,6 @@ export function AssistantWindow({
   // stale when the turn request fires.
   const messagesRef = useRef<AssistantMessage[]>([])
   messagesRef.current = messages
-
-  useEffect(() => {
-    if (queuedAttachments.length === 0) return
-    setAttachments((current) => {
-      const byId = new Map(current.map((attachment) => [attachment.id, attachment]))
-      for (const attachment of queuedAttachments) byId.set(attachment.id, attachment)
-      return [...byId.values()]
-    })
-    setDraft((current) => current.trim() ? current : "Take a look at this current block view.")
-    onConsumeQueuedAttachments(queuedAttachments.map((attachment) => attachment.id))
-    requestAnimationFrame(() => inputRef.current?.focus())
-  }, [onConsumeQueuedAttachments, queuedAttachments])
 
   // One unbroken thread: show localStorage immediately, then reconcile the
   // durable tail even when local is nonempty. Large HTML commands can exceed
@@ -386,12 +373,12 @@ export function AssistantWindow({
   }, [messages, busy])
 
   const send = useCallback(async () => {
-    const pendingAttachments = attachments
+    const pendingAttachments = queuedAttachments
     const text = draft.trim() || (pendingAttachments.length > 0 ? "Take a look at this current block view." : "")
     if ((!text && pendingAttachments.length === 0) || busy) return
     if (!activeConnectionId) return
     setDraft("")
-    setAttachments([])
+    onConsumeQueuedAttachments(pendingAttachments.map((attachment) => attachment.id))
     setBusy(true)
     const userMsg = newAssistantMessage("user", text, {
       attachments: pendingAttachments.length > 0 ? pendingAttachments : undefined,
@@ -448,7 +435,7 @@ export function AssistantWindow({
       setBusy(false)
       inputRef.current?.focus()
     }
-  }, [draft, attachments, busy, activeConnectionId, applyCommands, getExecutionObservations])
+  }, [draft, queuedAttachments, busy, activeConnectionId, applyCommands, getExecutionObservations, onConsumeQueuedAttachments])
 
   // Bubble plate: each utterance carries its own translucent blur backdrop so
   // the transcript floats over any wallpaper — the container paints nothing.
@@ -646,9 +633,9 @@ export function AssistantWindow({
             border: "1px solid color-mix(in oklch, var(--main) 24%, transparent)",
           })}
         >
-          {attachments.length > 0 ? (
+          {queuedAttachments.length > 0 ? (
             <div className="mb-2 flex gap-2 overflow-x-auto pb-0.5 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
-              {attachments.map((attachment) => (
+              {queuedAttachments.map((attachment) => (
                 <div
                   key={attachment.id}
                   className="group relative h-20 w-28 shrink-0 overflow-hidden rounded-lg border border-main/30 bg-background/50"
@@ -660,7 +647,7 @@ export function AssistantWindow({
                   />
                   <button
                     type="button"
-                    onClick={() => setAttachments((current) => current.filter((item) => item.id !== attachment.id))}
+                    onClick={() => onConsumeQueuedAttachments([attachment.id])}
                     className="absolute right-1 top-1 grid h-5 w-5 place-items-center rounded-full bg-background/80 text-[11px] text-foreground opacity-0 backdrop-blur transition-opacity group-hover:opacity-100"
                     title="Remove screenshot"
                   >

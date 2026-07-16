@@ -183,39 +183,39 @@ function buildSrcdoc(spec: HtmlBlockSpec, entries: HtmlBlockQueryResult[]): stri
 
     var serialized = new XMLSerializer().serializeToString(clone);
     var svg = '<svg xmlns="http://www.w3.org/2000/svg" width="' + width + '" height="' + height + '"><foreignObject width="100%" height="100%">' + serialized + '</foreignObject></svg>';
-    var svgUrl = URL.createObjectURL(new Blob([svg], { type: "image/svg+xml;charset=utf-8" }));
-    try {
-      var image = await loadCaptureImage(svgUrl);
-      var desiredScale = Math.min(2, Math.max(1, window.devicePixelRatio || 1));
-      var pixelCap = 6000000;
-      var scale = Math.min(desiredScale, Math.sqrt(pixelCap / Math.max(1, width * height)));
-      var canvas = document.createElement("canvas");
-      canvas.width = Math.max(1, Math.round(width * scale));
-      canvas.height = Math.max(1, Math.round(height * scale));
-      var ctx = canvas.getContext("2d");
-      if (!ctx) throw new Error("canvas capture is unavailable");
-      var background = getComputedStyle(document.body).backgroundColor;
-      if (!background || background === "rgba(0, 0, 0, 0)" || background === "transparent") {
-        background = getComputedStyle(root).backgroundColor;
-      }
-      if (background && background !== "rgba(0, 0, 0, 0)" && background !== "transparent") {
-        ctx.fillStyle = background;
-        ctx.fillRect(0, 0, canvas.width, canvas.height);
-      }
-      ctx.setTransform(scale, 0, 0, scale, 0, 0);
-      ctx.drawImage(image, 0, 0, width, height);
-      var blob = await new Promise(function(resolve){ canvas.toBlob(resolve, "image/webp", 0.9); });
-      if (!blob) throw new Error("could not encode screenshot");
-      parent.postMessage({
-        __rvbbitAppCaptureResponse: requestId,
-        dataUrl: await blobDataUrl(blob),
-        mimeType: "image/webp",
-        width: canvas.width,
-        height: canvas.height
-      }, "*");
-    } finally {
-      URL.revokeObjectURL(svgUrl);
+    // A blob URL has a distinct opaque origin inside a sandboxed srcdoc and
+    // taints the destination canvas. A data URL keeps the serialized document
+    // self-contained, which is safe because app blocks already forbid network
+    // resources and every live canvas was replaced with an inline PNG above.
+    var svgUrl = "data:image/svg+xml;charset=utf-8," + encodeURIComponent(svg);
+    var image = await loadCaptureImage(svgUrl);
+    var desiredScale = Math.min(2, Math.max(1, window.devicePixelRatio || 1));
+    var pixelCap = 6000000;
+    var scale = Math.min(desiredScale, Math.sqrt(pixelCap / Math.max(1, width * height)));
+    var canvas = document.createElement("canvas");
+    canvas.width = Math.max(1, Math.round(width * scale));
+    canvas.height = Math.max(1, Math.round(height * scale));
+    var ctx = canvas.getContext("2d");
+    if (!ctx) throw new Error("canvas capture is unavailable");
+    var background = getComputedStyle(document.body).backgroundColor;
+    if (!background || background === "rgba(0, 0, 0, 0)" || background === "transparent") {
+      background = getComputedStyle(root).backgroundColor;
     }
+    if (background && background !== "rgba(0, 0, 0, 0)" && background !== "transparent") {
+      ctx.fillStyle = background;
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+    }
+    ctx.setTransform(scale, 0, 0, scale, 0, 0);
+    ctx.drawImage(image, 0, 0, width, height);
+    var blob = await new Promise(function(resolve){ canvas.toBlob(resolve, "image/webp", 0.9); });
+    if (!blob) throw new Error("could not encode screenshot");
+    parent.postMessage({
+      __rvbbitAppCaptureResponse: requestId,
+      dataUrl: await blobDataUrl(blob),
+      mimeType: "image/webp",
+      width: canvas.width,
+      height: canvas.height
+    }, "*");
   }
   window.addEventListener("message", function(event){
     var data = event.data || {};

@@ -319,11 +319,13 @@ export async function runAssistantTurn(
         : {}),
     }))
   // Keep text-only turns compatible with pre-vision pg_rvbbit installs. The
-  // four-argument overload is introduced by migration 0153 and carries only
+  // vision-capable overload is introduced by migration 0153 and carries only
   // the images attached to this user turn; historical screenshots remain
   // lightweight transcript metadata instead of being re-billed every turn.
+  // Pass opts explicitly as the fifth argument so PostgreSQL cannot bind the
+  // attachment jsonb to the legacy wrapper's fourth `opts` parameter.
   const sql = attachments.length > 0
-    ? `SELECT rvbbit.desktop_assistant_turn(${sqlLiteral(message)}, ${sqlJsonLiteral(conversation)}, ${sqlJsonLiteral(desktopContext)}, ${sqlJsonLiteral(attachments)}) AS result`
+    ? `SELECT rvbbit.desktop_assistant_turn(${sqlLiteral(message)}, ${sqlJsonLiteral(conversation)}, ${sqlJsonLiteral(desktopContext)}, ${sqlJsonLiteral(attachments)}, '{}'::jsonb) AS result`
     : `SELECT rvbbit.desktop_assistant_turn(${sqlLiteral(message)}, ${sqlJsonLiteral(conversation)}, ${sqlJsonLiteral(desktopContext)}) AS result`
   const res = await fetch("/api/db/query", {
     method: "POST",
@@ -335,6 +337,12 @@ export async function runAssistantTurn(
     rows?: Array<Record<string, unknown>>
   }
   if (!res.ok || body.error) {
+    if (
+      attachments.length > 0 &&
+      /desktop_assistant_turn|function .* does not exist|no function matches/i.test(body.error ?? "")
+    ) {
+      throw new Error("Assistant screenshots require the pg_rvbbit assistant-vision update (migration 0153).")
+    }
     throw new Error(body.error ?? `assistant turn failed (${res.status})`)
   }
   let value: unknown = body.rows?.[0]?.result ?? null
@@ -381,7 +389,9 @@ export async function runAssistantTurn(
         ? rawReply
         : rawError
           ? `The assistant could not complete this turn: ${rawError}`
-          : "The assistant turn ended without a reply.",
+          : responseAttachments.length > 0
+            ? ""
+            : "The assistant turn ended without a reply.",
     commands,
     attachments: responseAttachments,
     agentRunId: typeof inner.agent_run_id === "string" ? inner.agent_run_id : null,
