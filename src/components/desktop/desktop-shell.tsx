@@ -79,6 +79,7 @@ import { PaletteWindow } from "./palette-window"
 import { AppearanceWindow } from "./appearance-window"
 import { CommandPalette, type PaletteGroup, type PaletteItem } from "./command-palette"
 import { PgMonitorWindow } from "./pg-monitor-window"
+import { PgQueryExplorerWindow } from "./pg-query-explorer-window"
 import { PgQueryInspectorWindow } from "./pg-query-inspector-window"
 import { LockExplorerWindow } from "./lock-explorer-window"
 import { MvccExplorerWindow } from "./mvcc-explorer-window"
@@ -169,6 +170,7 @@ import { shadowDesktopState, shadowScenes } from "@/lib/desktop/server-sync"
 import { usePresentMode } from "@/lib/desktop/present-mode"
 import type { ConnectionTestResult, RvbbitStatus, SchemaSnapshot, SchemaTable } from "@/lib/db/types"
 import type { SanitizedConnection } from "@/lib/db/registry"
+import type { ActivityRow, PgStatementCatalogRow } from "@/lib/db/pg-stats"
 import type {
   RvbbitCachePayload,
   CachePayload,
@@ -229,6 +231,7 @@ import type {
   AppearancePayload,
   PalettePayload,
   PgMonitorPayload,
+  PgQueryExplorerPayload,
   PgQueryInspectorPayload,
   LockExplorerPayload,
   MvccExplorerPayload,
@@ -2293,13 +2296,29 @@ export function DesktopShell() {
     })
   }, [focus, openWindow, liveWindows])
 
-  const openPgQueryInspector = useCallback((activity: PgQueryInspectorPayload["activity"]) => {
+  const openPgQueryExplorer = useCallback(() => {
+    const existing = liveWindows().find((window) => window.kind === "pg-query-explorer")
+    if (existing) return focus(existing.id)
+    openWindow({
+      id: randomUUID(),
+      kind: "pg-query-explorer",
+      title: "Query Explorer",
+      x: 105,
+      y: 65,
+      width: 1080,
+      height: 760,
+      payload: { kind: "pg-query-explorer" } satisfies PgQueryExplorerPayload,
+    })
+  }, [focus, liveWindows, openWindow])
+
+  const openPgQueryInspector = useCallback((activity: ActivityRow) => {
     if (!activeConnectionId) return
     const existing = liveWindows().find((window) => {
       if (window.kind !== "pg-query-inspector") return false
       const payload = window.payload as PgQueryInspectorPayload | undefined
-      return payload?.connectionId === activeConnectionId
-        && payload.activity.pid === activity.pid
+      return payload?.source !== "historical"
+        && payload?.connectionId === activeConnectionId
+        && payload.activity?.pid === activity.pid
         && payload.activity.backend_start === activity.backend_start
         && payload.activity.query_start === activity.query_start
     })
@@ -2316,9 +2335,39 @@ export function DesktopShell() {
       height: 720,
       payload: {
         kind: "pg-query-inspector",
+        source: "live",
         connectionId: activeConnectionId,
         capturedAt: new Date().toISOString(),
         activity,
+      } satisfies PgQueryInspectorPayload,
+    })
+  }, [activeConnectionId, focus, liveWindows, openWindow])
+
+  const openPgHistoricalQueryInspector = useCallback((statement: PgStatementCatalogRow) => {
+    if (!activeConnectionId) return
+    const existing = liveWindows().find((window) => {
+      if (window.kind !== "pg-query-inspector") return false
+      const payload = window.payload as PgQueryInspectorPayload | undefined
+      return payload?.source === "historical"
+        && payload.connectionId === activeConnectionId
+        && payload.statement.query_id === statement.query_id
+    })
+    if (existing) return focus(existing.id)
+
+    openWindow({
+      id: randomUUID(),
+      kind: "pg-query-inspector",
+      title: `Query Detail · #${statement.query_id}`,
+      x: 155 + Math.random() * 50,
+      y: 85 + Math.random() * 45,
+      width: 1040,
+      height: 760,
+      payload: {
+        kind: "pg-query-inspector",
+        source: "historical",
+        connectionId: activeConnectionId,
+        capturedAt: new Date().toISOString(),
+        statement,
       } satisfies PgQueryInspectorPayload,
     })
   }, [activeConnectionId, focus, liveWindows, openWindow])
@@ -4722,6 +4771,7 @@ export function DesktopShell() {
     { id: "system-objects", label: "System Objects", icon: Layers, color: "var(--brand-system-objects)", description: "Tables, indexes, roles, activity", activate: () => openSystemObjects("tables"), folder: "system" },
     { id: "extensions", label: "Extensions", icon: Settings2, color: "var(--brand-extensions)", description: "Installed Postgres extensions", activate: openExtensions, folder: "system" },
     { id: "monitor", label: "Monitor", icon: Activity, color: "var(--brand-pg-monitor)", description: "Live server activity & stats", activate: openPgMonitor, folder: "system" },
+    { id: "query-explorer", label: "Query Explorer", icon: LineChart, color: "var(--brand-pg-monitor)", description: "Historical normalized queries, runtime & notable evidence", activate: openPgQueryExplorer, folder: "system" },
     { id: "lock-explorer", label: "Lock Explorer", icon: Lock, color: "var(--brand-lock-explorer)", description: "Live blocker chains, resources & replay", activate: openLockExplorer, folder: "system" },
     { id: "mvcc-explorer", label: "MVCC Explorer", icon: Layers, color: "var(--brand-mvcc-explorer)", description: "Vacuum horizons, pressure & workers", activate: openMvccExplorer, folder: "system" },
     { id: "fleet", label: "Fleet", icon: Anchor, color: "var(--brand-pg-monitor)", description: "Read-fleet workers, publication & storage health", activate: openFleet, folder: "system", rvbbit: true },
@@ -4769,7 +4819,7 @@ export function DesktopShell() {
   ], [
     viewAppCount, schema, rvbbitVersion,
     openFinder, openSqlScratch, openViewApps, openConnections, openDataSearch, openSystemLearning, openMcpIncoming,
-    openSystemObjects, openExtensions, openPgMonitor, openLockExplorer, openMvccExplorer, openFleet, openPostgresAdmin, openCache, openRvbbitCache,
+    openSystemObjects, openExtensions, openPgMonitor, openPgQueryExplorer, openLockExplorer, openMvccExplorer, openFleet, openPostgresAdmin, openCache, openRvbbitCache,
     openCosts, openAgentMessages, openAssistantSettings, openDataMover, dataMoverDetected, openSyncMirror, openOperators, openModelSettings, openSpecialists, openRouting,
     openMcpServers, openCapabilities, openHfDeploy, openWarren, openModelStudio,
     openDuck, openDagster, dagsterDetected, openMetricCatalog, openMetricCreator, openMetricInspector, openVizBlocks, openMetricBoard, openDashboards, openApps, openDashboardApp, openAlerts, openBrain,
@@ -4982,7 +5032,9 @@ export function DesktopShell() {
       setBusy,
       openTableFromFinder,
       openSqlInWindow,
+      openPgQueryExplorer,
       openPgQueryInspector,
+      openPgHistoricalQueryInspector,
       openMvccExplorer,
       viewObjectDdl,
       openField,
@@ -5062,7 +5114,7 @@ export function DesktopShell() {
     }),
     [
       activeConnectionId, hasRvbbit, launchers, schema, semanticOps, schemaLoading, busy, setBusy,
-      openTableFromFinder, openSqlInWindow, openPgQueryInspector, openMvccExplorer, viewObjectDdl, openField, openViewAppBuilder, openViewApp,
+      openTableFromFinder, openSqlInWindow, openPgQueryExplorer, openPgQueryInspector, openPgHistoricalQueryInspector, openMvccExplorer, viewObjectDdl, openField, openViewAppBuilder, openViewApp,
       addLauncherShortcut, addViewAppShortcut, addDashboardShortcut, openDashboardApp, openArtifact,
       openQueryDocument, openSqlData, openRowInspector, openCsvImport, openExtensions, openRvbbitCache, openCache, openConnections,
       loadSchema, loadConnections, updatePayload, applyAssistantCommands, openAssistant, emitParam, subscribeParam,
@@ -5558,7 +5610,9 @@ interface WindowContext {
   setBusy: (b: boolean) => void
   openTableFromFinder: (schema: string, name: string) => void
   openSqlInWindow: (title: string, sql: string, run: boolean) => void
-  openPgQueryInspector: (activity: PgQueryInspectorPayload["activity"]) => void
+  openPgQueryExplorer: () => void
+  openPgQueryInspector: (activity: ActivityRow) => void
+  openPgHistoricalQueryInspector: (statement: PgStatementCatalogRow) => void
   openMvccExplorer: (target?: { schema: string; table: string }) => void
   viewObjectDdl: (schema: string, name: string, kind: string) => void
   openField: (schema: string, rel: string, col: string) => void
@@ -5899,7 +5953,17 @@ function renderWindowContent(
           activeConnectionId={ctx.activeConnectionId}
           workspaceActive={ctx.workspaceActive}
           onOpenQuery={ctx.openPgQueryInspector}
+          onOpenQueryExplorer={ctx.openPgQueryExplorer}
           onOpenMvccTable={(schema, table) => ctx.openMvccExplorer({ schema, table })}
+        />
+      )
+    case "pg-query-explorer":
+      return (
+        <PgQueryExplorerWindow
+          activeConnectionId={ctx.activeConnectionId}
+          workspaceActive={ctx.workspaceActive}
+          onOpenQuery={ctx.openPgHistoricalQueryInspector}
+          onOpenSql={ctx.openSqlInWindow}
         />
       )
     case "pg-query-inspector":
@@ -6526,6 +6590,7 @@ function iconForKind(kind: DesktopWindowState["kind"]) {
     case "appearance":
       return PaletteIcon
     case "pg-monitor": return Activity
+    case "pg-query-explorer": return LineChart
     case "lock-explorer": return Lock
     case "mvcc-explorer": return Layers
     case "fleet": return Anchor

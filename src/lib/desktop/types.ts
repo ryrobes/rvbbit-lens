@@ -1,7 +1,7 @@
 import type { ExtensionInfo, QueryResultColumn, SchemaColumn, SchemaTable } from "@/lib/db/types"
 import type { DataSearchHit } from "@/lib/rvbbit/data-search"
 import type { OpStep, RetryPlan, TakesPlan, WardsPlan } from "@/lib/rvbbit/operators"
-import type { ActivityRow } from "@/lib/db/pg-stats"
+import type { ActivityRow, PgStatementCatalogRow } from "@/lib/db/pg-stats"
 import type { HtmlBlockSpec } from "./app-block"
 
 export type DesktopWindowKind =
@@ -26,6 +26,7 @@ export type DesktopWindowKind =
   | "palette"
   | "appearance"
   | "pg-monitor"
+  | "pg-query-explorer"
   | "pg-query-inspector"
   | "lock-explorer"
   | "mvcc-explorer"
@@ -126,6 +127,7 @@ export type WindowPayload =
   | PalettePayload
   | AppearancePayload
   | PgMonitorPayload
+  | PgQueryExplorerPayload
   | PgQueryInspectorPayload
   | LockExplorerPayload
   | MvccExplorerPayload
@@ -963,13 +965,22 @@ export interface PgMonitorPayload {
   kind?: "pg-monitor"
 }
 
-/** Persistent observer opened from one pg_stat_activity row. */
-export interface PgQueryInspectorPayload {
+export interface PgQueryExplorerPayload {
+  kind?: "pg-query-explorer"
+}
+
+/** Persistent detail opened from either pg_stat_activity or the historical
+ * pg_stat_statements catalog. Old saved live payloads omit `source`. */
+interface PgQueryInspectorPayloadBase {
   kind?: "pg-query-inspector"
   connectionId: string
   capturedAt: string
-  activity: ActivityRow
 }
+
+export type PgQueryInspectorPayload = PgQueryInspectorPayloadBase & (
+  | { source?: "live"; activity: ActivityRow; statement?: never }
+  | { source: "historical"; statement: PgStatementCatalogRow; activity?: never }
+)
 
 export interface LockExplorerPayload {
   kind?: "lock-explorer"

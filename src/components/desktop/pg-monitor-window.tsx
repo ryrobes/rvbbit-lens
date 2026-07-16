@@ -10,6 +10,7 @@ import {
   Cpu,
   Database,
   KeyRound,
+  LineChart,
   Lock,
   Pause,
   Play,
@@ -33,6 +34,7 @@ interface PgMonitorWindowProps {
    *  down so a backgrounded monitor doesn't keep hitting the DB. */
   workspaceActive?: boolean
   onOpenQuery: (row: ActivityRow) => void
+  onOpenQueryExplorer: () => void
   onOpenMvccTable: (schema: string, table: string) => void
 }
 
@@ -61,6 +63,7 @@ export function PgMonitorWindow({
   activeConnectionId,
   workspaceActive = true,
   onOpenQuery,
+  onOpenQueryExplorer,
   onOpenMvccTable,
 }: PgMonitorWindowProps) {
   const [intervalMs, setIntervalMs] = useState<number>(2000)
@@ -167,6 +170,7 @@ export function PgMonitorWindow({
           collapsed={activeQueriesCollapsed}
           onToggleCollapsed={() => setActiveQueriesCollapsed((value) => !value)}
           onOpenQuery={onOpenQuery}
+          onOpenQueryExplorer={onOpenQueryExplorer}
         />
         {current.locks.total > 0 ? <LocksPanel locks={current.locks} /> : null}
         {current.rvbbit ? <RvbbitPanel rvbbit={current.rvbbit} rates={rates} /> : null}
@@ -526,18 +530,32 @@ function ActiveQueriesPanel({
   collapsed,
   onToggleCollapsed,
   onOpenQuery,
+  onOpenQueryExplorer,
 }: {
   rows: ActivityRow[]
   collapsed: boolean
   onToggleCollapsed: () => void
   onOpenQuery: (row: ActivityRow) => void
+  onOpenQueryExplorer: () => void
 }) {
   return (
     <Panel
       icon={Activity}
       title="Active queries"
       className="mt-3"
-      right={<span>{rows.length} session{rows.length === 1 ? "" : "s"}</span>}
+      right={(
+        <>
+          <span>{rows.length} session{rows.length === 1 ? "" : "s"}</span>
+          <button
+            type="button"
+            onClick={onOpenQueryExplorer}
+            className="ml-1 inline-flex h-5 items-center gap-1 rounded border border-chrome-border/45 px-1.5 text-[8px] text-chrome-text/70 transition hover:bg-foreground/[0.06] hover:text-foreground"
+            title="Open historical Query Explorer"
+          >
+            <LineChart className="h-2.5 w-2.5" /> history
+          </button>
+        </>
+      )}
       collapsed={collapsed}
       onToggleCollapsed={onToggleCollapsed}
     >

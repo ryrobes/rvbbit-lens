@@ -4,14 +4,17 @@ import { useCallback, useEffect, useMemo, useState } from "react"
 import {
   Activity,
   AlertTriangle,
+  Brain,
   ClipboardCopy,
   Database,
   Eye,
   Hash,
   LineChart,
+  Loader2,
   Pause,
   Play,
   RefreshCw,
+  Sparkles,
   TerminalSquare,
   Wrench,
 } from "@/lib/icons"
@@ -20,6 +23,7 @@ import type { PgQueryInspectorPayload } from "@/lib/desktop/types"
 import type {
   ActivityRow,
   PgQueryObservationSnapshot,
+  PgQuerySummaryResult,
   PgStatementStats,
 } from "@/lib/db/pg-stats"
 import { cn } from "@/lib/utils"
@@ -62,17 +66,26 @@ export function PgQueryInspectorWindow({
   workspaceActive = true,
   onOpenSql,
 }: PgQueryInspectorWindowProps) {
+  const liveActivity = payload.source === "historical" ? null : payload.activity
+  const historicalStatement = payload.source === "historical" ? payload.statement : null
   const [intervalMs, setIntervalMs] = useState(2000)
   const [paused, setPaused] = useState(false)
   const [latest, setLatest] = useState<PgQueryObservationSnapshot | null>(null)
   const [history, setHistory] = useState<HistoryEntry[]>([])
   const [baseline, setBaseline] = useState<{ calls: number; at: number } | null>(null)
-  const [observed, setObserved] = useState<ObservedExecution[]>(() => [
-    observedFromRow(payload.activity, payload.capturedAt),
-  ])
+  const [observed, setObserved] = useState<ObservedExecution[]>(() => (
+    liveActivity ? [observedFromRow(liveActivity, payload.capturedAt)] : []
+  ))
   const [error, setError] = useState<string | null>(null)
   const [copied, setCopied] = useState(false)
   const [clockNow, setClockNow] = useState(() => Date.parse(payload.capturedAt) || 0)
+  const [summaryCapability, setSummaryCapability] = useState<PgQuerySummaryResult | null>(null)
+  const [aiSummary, setAiSummary] = useState<string | null>(null)
+  const [summaryLoading, setSummaryLoading] = useState(false)
+  const [summaryError, setSummaryError] = useState<string | null>(null)
+
+  const targetQueryId = liveActivity?.query_id ?? historicalStatement?.query_id ?? null
+  const targetQuery = liveActivity?.query ?? historicalStatement?.query ?? null
 
   const poll = useCallback(async () => {
     try {
@@ -82,10 +95,11 @@ export function PgQueryInspectorWindow({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           connectionId: payload.connectionId,
-          pid: payload.activity.pid,
-          backendStart: payload.activity.backend_start,
-          queryId: payload.activity.query_id,
-          query: payload.activity.query,
+          source: historicalStatement ? "historical" : "live",
+          pid: liveActivity?.pid ?? null,
+          backendStart: liveActivity?.backend_start ?? null,
+          queryId: targetQueryId,
+          query: targetQuery,
         }),
       })
       if (!response.ok) {
@@ -112,11 +126,13 @@ export function PgQueryInspectorWindow({
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause))
     }
-  }, [payload])
+  }, [payload.connectionId, historicalStatement, liveActivity, targetQuery, targetQueryId])
 
   usePolling(poll, intervalMs, {
     enabled: workspaceActive && !paused,
-    resetKey: `${payload.connectionId}:${payload.activity.pid}:${payload.activity.backend_start}`,
+    resetKey: historicalStatement
+      ? `${payload.connectionId}:historical:${historicalStatement.query_id}`
+      : `${payload.connectionId}:${liveActivity?.pid}:${liveActivity?.backend_start}`,
   })
 
   useEffect(() => {
@@ -125,23 +141,76 @@ export function PgQueryInspectorWindow({
     return () => window.clearInterval(timer)
   }, [workspaceActive])
 
-  const capturedQuery = payload.activity.query?.trim() ?? ""
+  useEffect(() => {
+    let cancelled = false
+    void fetch(`/api/db/pg-query-summary?connectionId=${encodeURIComponent(payload.connectionId)}`, { cache: "no-store" })
+      .then((response) => response.json())
+      .then((result: PgQuerySummaryResult) => {
+        if (!cancelled) setSummaryCapability(result)
+      })
+      .catch((cause) => {
+        if (!cancelled) setSummaryCapability({
+          available: false,
+          model: null,
+          summary: null,
+          error: cause instanceof Error ? cause.message : String(cause),
+        })
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [payload.connectionId, targetQueryId])
+
+  const capturedQuery = targetQuery?.trim() ?? ""
   const formattedQuery = useMemo(
     () => formatSqlSafe(capturedQuery) || "-- Query text is not available to the current role.",
     [capturedQuery],
   )
-  const stats = latest?.statement_stats ?? null
+  const stats = latest?.statement_stats ?? historicalStatement ?? null
   const callsSinceOpen = stats && baseline ? Math.max(0, stats.calls - baseline.calls) : null
-  const minutesSinceBaseline = baseline ? Math.max((clockNow - baseline.at) / 60_000, 1 / 60) : null
-  const callsPerMinute = callsSinceOpen != null && minutesSinceBaseline
-    ? callsSinceOpen / minutesSinceBaseline
-    : null
   const rateValues = useMemo(() => statementRateValues(history), [history])
+  const latencyValues = useMemo(
+    () => history.map((entry) => (
+      entry.snapshot.statement_stats?.mean_exec_time_ms
+        ?? historicalStatement?.mean_exec_time_ms
+        ?? 0
+    )),
+    [history, historicalStatement],
+  )
   const concurrencyValues = useMemo(
     () => history.map((entry) => entry.snapshot.matching_sessions.length),
     [history],
   )
-  const originalStatus = describeOriginalStatus(payload.activity, latest)
+  const originalStatus = describeOriginalStatus(liveActivity, latest)
+
+  const generateSummary = useCallback(async () => {
+    if (!capturedQuery || summaryLoading) return
+    setSummaryLoading(true)
+    setSummaryError(null)
+    try {
+      const response = await fetch("/api/db/pg-query-summary", {
+        method: "POST",
+        cache: "no-store",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          connectionId: payload.connectionId,
+          query: capturedQuery,
+          stats,
+        }),
+      })
+      const result = await response.json() as PgQuerySummaryResult
+      if (!response.ok || result.error) {
+        setSummaryError(result.error ?? `HTTP ${response.status}`)
+      } else {
+        setAiSummary(result.summary)
+        setSummaryCapability(result)
+      }
+    } catch (cause) {
+      setSummaryError(cause instanceof Error ? cause.message : String(cause))
+    } finally {
+      setSummaryLoading(false)
+    }
+  }, [capturedQuery, payload.connectionId, stats, summaryLoading])
 
   const copyQuery = useCallback(async () => {
     if (!capturedQuery) return
@@ -170,11 +239,11 @@ export function PgQueryInspectorWindow({
         </span>
         <span className="inline-flex items-center gap-1 font-mono text-chrome-text/80">
           <Hash className="h-3 w-3" />
-          {payload.activity.query_id ?? `pid ${payload.activity.pid}`}
+          {targetQueryId ?? (liveActivity ? `pid ${liveActivity.pid}` : "query identity unavailable")}
         </span>
         <span className="text-chrome-text/35">·</span>
         <span className="truncate text-chrome-text/65">
-          captured {fmtTimestamp(payload.capturedAt)}
+          {historicalStatement ? "aggregate opened" : "captured"} {fmtTimestamp(payload.capturedAt)}
         </span>
         <div className="ml-auto flex items-center gap-1">
           {error ? (
@@ -212,90 +281,126 @@ export function PgQueryInspectorWindow({
       </header>
 
       <main className="min-h-0 flex-1 overflow-y-auto p-3">
+        <AiSummaryPanel
+          capability={summaryCapability}
+          summary={aiSummary}
+          error={summaryError}
+          loading={summaryLoading}
+          queryAvailable={!!capturedQuery}
+          onGenerate={() => void generateSummary()}
+        />
+
         <section className="grid grid-cols-2 gap-2 md:grid-cols-3 xl:grid-cols-6">
           <MetricCard
-            label="calls"
-            value={stats ? fmtCount(stats.calls) : "—"}
-            detail={stats ? "pg_stat_statements" : "extension data unavailable"}
+            label="query latency"
+            value={stats ? fmtMs(stats.mean_exec_time_ms) : "—"}
+            detail={stats
+              ? `${stats.min_exec_time_ms == null ? "—" : fmtMs(stats.min_exec_time_ms)} – ${stats.max_exec_time_ms == null ? "—" : fmtMs(stats.max_exec_time_ms)} range`
+              : "pg_stat_statements unavailable"}
             accent
           />
           <MetricCard
-            label="since opened"
-            value={callsSinceOpen == null ? "—" : fmtCount(callsSinceOpen)}
-            detail={callsPerMinute == null ? "waiting for counters" : `${fmtRate(callsPerMinute)}/min`}
+            label="total query time"
+            value={stats ? fmtMs(stats.total_exec_time_ms) : "—"}
+            detail={stats ? "cumulative execution time" : "extension data unavailable"}
+          />
+          <MetricCard
+            label="index usage"
+            value="—"
+            detail="plans are not retained by pg_stat_statements"
+          />
+          <MetricCard
+            label="calls"
+            value={stats ? fmtCount(stats.calls) : "—"}
+            detail={callsSinceOpen == null ? "since stats reset" : `${fmtCount(callsSinceOpen)} since opened`}
+          />
+          <MetricCard
+            label="rows returned"
+            value={stats ? fmtCount(stats.rows) : "—"}
+            detail={stats && stats.calls > 0 ? `${fmtCount(stats.rows / stats.calls)} per call` : "no cumulative rows"}
           />
           <MetricCard
             label="active now"
             value={String(latest?.matching_sessions.length ?? 0)}
-            detail="matching executions"
+            detail={`${fmtCount(observed.length)} sampled execution${observed.length === 1 ? "" : "s"}`}
             tone={(latest?.matching_sessions.length ?? 0) > 0 ? "success" : undefined}
-          />
-          <MetricCard
-            label="sampled runs"
-            value={fmtCount(observed.length)}
-            detail="seen by this window"
-          />
-          <MetricCard
-            label="mean runtime"
-            value={stats ? fmtMs(stats.mean_exec_time_ms) : "—"}
-            detail={stats?.max_exec_time_ms == null ? "no cumulative timing" : `max ${fmtMs(stats.max_exec_time_ms)}`}
-          />
-          <MetricCard
-            label="rows / call"
-            value={stats && stats.calls > 0 ? fmtCount(stats.rows / stats.calls) : "—"}
-            detail={stats ? `${fmtCount(stats.rows)} rows total` : "no cumulative rows"}
           />
         </section>
 
         <section className="mt-3 grid grid-cols-1 gap-3 xl:grid-cols-[minmax(0,1.35fr)_minmax(280px,0.65fr)]">
-          <Panel title={stats ? "Observed call rate" : "Observed concurrency"} icon={LineChart}>
-            <div className="flex items-end gap-3">
-              <div className="min-w-0 flex-1">
-                <Sparkline
-                  values={stats ? rateValues : concurrencyValues}
-                  height={52}
-                  maxPoints={HISTORY_LIMIT}
+          <Panel title={stats ? "Observed query telemetry" : "Observed concurrency"} icon={LineChart}>
+            {stats ? (
+              <div className="grid grid-cols-2 gap-3">
+                <TelemetryStrip
+                  label="mean latency"
+                  value={fmtMs(stats.mean_exec_time_ms)}
+                  values={latencyValues}
+                  color="var(--warning)"
+                />
+                <TelemetryStrip
+                  label="calls / min"
+                  value={fmtRate(rateValues.at(-1) ?? 0)}
+                  values={rateValues}
                   color="var(--rvbbit-accent)"
                 />
               </div>
-              <div className="w-24 shrink-0 text-right">
-                <div className="font-mono text-lg text-foreground">
-                  {stats ? `${fmtRate(rateValues.at(-1) ?? 0)}` : String(latest?.matching_sessions.length ?? 0)}
+            ) : (
+              <div className="flex items-end gap-3">
+                <div className="min-w-0 flex-1">
+                  <Sparkline values={concurrencyValues} height={52} maxPoints={HISTORY_LIMIT} color="var(--rvbbit-accent)" />
                 </div>
-                <div className="text-[8px] uppercase tracking-wider text-chrome-text/45">
-                  {stats ? "calls / min" : "running now"}
+                <div className="w-24 shrink-0 text-right">
+                  <div className="font-mono text-lg text-foreground">{String(latest?.matching_sessions.length ?? 0)}</div>
+                  <div className="text-[8px] uppercase tracking-wider text-chrome-text/45">running now</div>
                 </div>
               </div>
-            </div>
+            )}
             <div className="mt-1 text-[9px] text-chrome-text/45">
-              {history.length} live sample{history.length === 1 ? "" : "s"}; the window keeps the captured query even after its original backend ends.
+              {history.length} live sample{history.length === 1 ? "" : "s"}; {historicalStatement
+                ? "this trajectory begins when the detail window opens—the aggregate counters began earlier."
+                : "the window keeps the captured query even after its original backend ends."}
             </div>
           </Panel>
 
-          <Panel title="Identity" icon={Database}>
-            <div className="grid grid-cols-2 gap-x-4 gap-y-1.5">
-              <CompactMeta label="database" value={payload.activity.datname ?? "—"} />
-              <CompactMeta label="user" value={payload.activity.usename ?? "—"} />
-              <CompactMeta label="application" value={payload.activity.application_name ?? "—"} />
-              <CompactMeta label="client" value={clientLabel(payload.activity)} />
-              <CompactMeta label="captured pid" value={String(payload.activity.pid)} mono />
-              <CompactMeta label="match" value={matchModeLabel(latest?.match_mode)} />
-              <CompactMeta label="query started" value={fmtTimestamp(payload.activity.query_start)} />
-              <CompactMeta label="backend started" value={fmtTimestamp(payload.activity.backend_start)} />
-            </div>
-          </Panel>
+          {liveActivity ? (
+            <Panel title="Live identity" icon={Database}>
+              <div className="grid grid-cols-2 gap-x-4 gap-y-1.5">
+                <CompactMeta label="database" value={liveActivity.datname ?? "—"} />
+                <CompactMeta label="user" value={liveActivity.usename ?? "—"} />
+                <CompactMeta label="application" value={liveActivity.application_name ?? "—"} />
+                <CompactMeta label="client" value={clientLabel(liveActivity)} />
+                <CompactMeta label="captured pid" value={String(liveActivity.pid)} mono />
+                <CompactMeta label="match" value={matchModeLabel(latest?.match_mode)} />
+                <CompactMeta label="query started" value={fmtTimestamp(liveActivity.query_start)} />
+                <CompactMeta label="backend started" value={fmtTimestamp(liveActivity.backend_start)} />
+              </div>
+            </Panel>
+          ) : (
+            <Panel title="Historical identity" icon={Database}>
+              <div className="grid grid-cols-2 gap-x-4 gap-y-1.5">
+                <CompactMeta label="query id" value={historicalStatement?.query_id ?? "—"} mono />
+                <CompactMeta label="roles" value={historicalStatement?.users.join(", ") || "—"} />
+                <CompactMeta label="scope" value={historicalStatement?.toplevel === false ? "nested statement" : "top-level statement"} />
+                <CompactMeta label="match" value={matchModeLabel(latest?.match_mode)} />
+                <CompactMeta label="stats since" value={fmtTimestamp(historicalStatement?.stats_since ?? null)} />
+                <CompactMeta label="min/max since" value={fmtTimestamp(historicalStatement?.minmax_stats_since ?? null)} />
+                <CompactMeta label="reset boundary" value={fmtTimestamp(latest?.pg_stat_statements_reset ?? null)} />
+                <CompactMeta label="provenance" value="pg_stat_statements aggregate" />
+              </div>
+            </Panel>
+          )}
         </section>
 
-        <CapturedSessionPanel row={payload.activity} />
+        {liveActivity ? <CapturedSessionPanel row={liveActivity} /> : null}
 
-        <Panel title="Captured SQL" icon={TerminalSquare} className="mt-3">
+        <Panel title={historicalStatement ? "Normalized SQL" : "Captured SQL"} icon={TerminalSquare} className="mt-3">
           <div className="mb-2 flex flex-wrap items-center gap-1">
             <ActionButton icon={ClipboardCopy} label={copied ? "Copied" : "Copy SQL"} disabled={!capturedQuery} onClick={() => void copyQuery()} />
-            <ActionButton icon={TerminalSquare} label="Open SQL" disabled={!capturedQuery} onClick={() => onOpenSql(`Query from pid ${payload.activity.pid}`, capturedQuery, false)} />
-            <ActionButton icon={Eye} label="Inspect captured session" onClick={() => openSessionInspectSql(payload.activity, onOpenSql)} />
-            <ActionButton icon={LineChart} label="Explain" disabled={!capturedQuery} onClick={() => openExplainSql(payload.activity, onOpenSql)} />
-            <ActionButton icon={AlertTriangle} label="Cancel captured query" tone="warning" onClick={() => openActivitySignalSql("cancel", payload.activity, onOpenSql)} />
-            <ActionButton icon={Wrench} label="Terminate captured session" tone="danger" onClick={() => openActivitySignalSql("terminate", payload.activity, onOpenSql)} />
+            <ActionButton icon={TerminalSquare} label="Open SQL" disabled={!capturedQuery} onClick={() => onOpenSql(historicalStatement ? `Historical query #${historicalStatement.query_id}` : `Query from pid ${liveActivity?.pid}`, capturedQuery, false)} />
+            <ActionButton icon={LineChart} label="Explain" disabled={!capturedQuery} onClick={() => openExplainSql(capturedQuery, historicalStatement ? `query #${historicalStatement.query_id}` : `pid ${liveActivity?.pid}`, onOpenSql)} />
+            {liveActivity ? <ActionButton icon={Eye} label="Inspect captured session" onClick={() => openSessionInspectSql(liveActivity, onOpenSql)} /> : null}
+            {liveActivity ? <ActionButton icon={AlertTriangle} label="Cancel captured query" tone="warning" onClick={() => openActivitySignalSql("cancel", liveActivity, onOpenSql)} /> : null}
+            {liveActivity ? <ActionButton icon={Wrench} label="Terminate captured session" tone="danger" onClick={() => openActivitySignalSql("terminate", liveActivity, onOpenSql)} /> : null}
           </div>
           <div className="h-52 overflow-hidden rounded border border-chrome-border/55 bg-background/45">
             <SqlEditor
@@ -317,6 +422,8 @@ export function PgQueryInspectorWindow({
             </div>
           </Panel>
         )}
+
+        {stats ? <NotableEvidencePanel stats={stats} /> : null}
 
         <Panel
           title="Matching executions"
@@ -350,6 +457,120 @@ function CapturedSessionPanel({ row }: { row: ActivityRow }) {
         <StatCell label="backend xmin" value={row.backend_xmin ?? "—"} />
       </div>
     </Panel>
+  )
+}
+
+function AiSummaryPanel({
+  capability,
+  summary,
+  error,
+  loading,
+  queryAvailable,
+  onGenerate,
+}: {
+  capability: PgQuerySummaryResult | null
+  summary: string | null
+  error: string | null
+  loading: boolean
+  queryAvailable: boolean
+  onGenerate: () => void
+}) {
+  return (
+    <section className="mb-3 overflow-hidden rounded border border-rvbbit-accent/25 bg-rvbbit-accent/[0.035]">
+      <header className="flex min-h-9 items-center gap-2 border-b border-rvbbit-accent/15 px-3 py-1.5">
+        <div className="grid h-6 w-6 place-items-center rounded-sm border border-rvbbit-accent/30 bg-rvbbit-accent/8">
+          <Brain className="h-3.5 w-3.5 text-rvbbit-accent" />
+        </div>
+        <div>
+          <div className="text-[9px] uppercase tracking-wider text-rvbbit-accent">AI query summary</div>
+          <div className="font-mono text-[8px] text-chrome-text/40">
+            {capability?.model ? `General Semantic · ${capability.model}` : "user-configured General Semantic model"}
+          </div>
+        </div>
+        {capability?.available ? (
+          <button
+            type="button"
+            disabled={!queryAvailable || loading}
+            onClick={onGenerate}
+            className="ml-auto inline-flex h-6 items-center gap-1 rounded border border-rvbbit-accent/35 bg-rvbbit-accent/8 px-2 text-[9px] text-rvbbit-accent transition hover:bg-rvbbit-accent/12 disabled:opacity-40"
+          >
+            {loading ? <Loader2 className="h-3 w-3 animate-spin" /> : <Sparkles className="h-3 w-3" />}
+            {summary ? "Regenerate" : loading ? "Summarizing…" : "Generate summary"}
+          </button>
+        ) : null}
+      </header>
+      <div className="px-3 py-2.5">
+        {summary ? (
+          <p className="text-[11px] leading-relaxed text-foreground/80">{summary}</p>
+        ) : error || capability?.error ? (
+          <p className="font-mono text-[9px] text-danger/75">{error ?? capability?.error}</p>
+        ) : capability == null ? (
+          <div className="flex items-center gap-1.5 text-[9px] text-chrome-text/45"><Loader2 className="h-3 w-3 animate-spin" /> checking configured model…</div>
+        ) : capability.available ? (
+          <p className="text-[9px] text-chrome-text/50">Generate a one-sentence explanation using the configured model. This is an explicit action because semantic operators may be metered.</p>
+        ) : (
+          <p className="text-[9px] text-chrome-text/50">No General Semantic summarizer is configured on this connection. Configure the <span className="font-mono">summarize</span> operator in Model Settings to enable this panel.</p>
+        )}
+      </div>
+    </section>
+  )
+}
+
+function NotableEvidencePanel({ stats }: { stats: PgStatementStats }) {
+  const meanRows = stats.calls > 0 ? stats.rows / stats.calls : 0
+  const slow = (stats.max_exec_time_ms ?? 0) > 1000
+  const wide = meanRows > 10_000
+  return (
+    <Panel
+      title="Notable evidence"
+      icon={AlertTriangle}
+      className="mt-3"
+      right={<span>thresholds · 1s / 10k rows</span>}
+    >
+      <div className="grid grid-cols-[repeat(auto-fit,minmax(190px,1fr))] gap-2">
+        <EvidenceCard
+          notable={slow}
+          label="slow execution"
+          value={stats.max_exec_time_ms == null ? "not recorded" : `max ${fmtMs(stats.max_exec_time_ms)}`}
+          detail={slow
+            ? "At least one execution crossed 1 second; pg_stat_statements does not retain when it happened."
+            : "No recorded maximum above 1 second in the current aggregate window."}
+        />
+        <EvidenceCard
+          notable={wide}
+          label="wide result"
+          value={`${fmtCount(meanRows)} rows / call`}
+          detail={wide
+            ? "The average execution returned more than 10k rows, so at least one execution crossed that threshold."
+            : "Average rows per call is below 10k; individual row-count outliers are not retained."}
+        />
+        <EvidenceCard
+          label="index-backed calls"
+          value="not recorded"
+          detail="Index-use percentage requires per-execution plan telemetry such as auto_explain or pg_stat_monitor. Block counters are not a safe proxy."
+        />
+      </div>
+    </Panel>
+  )
+}
+
+function EvidenceCard({
+  notable = false,
+  label,
+  value,
+  detail,
+}: {
+  notable?: boolean
+  label: string
+  value: string
+  detail: string
+}) {
+  return (
+    <div className={cn("rounded border px-2.5 py-2", notable ? "border-warning/35 bg-warning/[0.045]" : "border-chrome-border/40 bg-background/25")}>
+      <div className={cn("text-[8px] uppercase tracking-wider", notable ? "text-warning" : "text-chrome-text/40")}>{label}</div>
+      <div className={cn("mt-0.5 font-mono text-sm", notable ? "text-warning" : "text-foreground/75")}>{value}</div>
+      <p className="mt-1 text-[8px] leading-relaxed text-chrome-text/45">{detail}</p>
+    </div>
   )
 }
 
@@ -411,15 +632,38 @@ function CompactMeta({ label, value, mono = false }: { label: string; value: str
   )
 }
 
+function TelemetryStrip({
+  label,
+  value,
+  values,
+  color,
+}: {
+  label: string
+  value: string
+  values: number[]
+  color: string
+}) {
+  return (
+    <div className="min-w-0">
+      <div className="flex items-baseline justify-between gap-2">
+        <span className="text-[8px] uppercase tracking-wider text-chrome-text/40">{label}</span>
+        <span className="font-mono text-sm text-foreground">{value}</span>
+      </div>
+      <Sparkline values={values} height={42} maxPoints={HISTORY_LIMIT} color={color} />
+    </div>
+  )
+}
+
 function StatementStatsPanel({ stats, resetAt }: { stats: PgStatementStats; resetAt: string | null }) {
   const hitTotal = stats.shared_blks_hit + stats.shared_blks_read
   const hitRatio = hitTotal > 0 ? stats.shared_blks_hit / hitTotal : null
   return (
     <Panel title="pg_stat_statements" icon={Activity} className="mt-3" right={<span>reset {fmtTimestamp(resetAt)}</span>}>
-      <div className="grid grid-cols-2 gap-px overflow-hidden rounded border border-chrome-border/40 bg-chrome-border/30 md:grid-cols-4 xl:grid-cols-8">
+      <div className="grid grid-cols-[repeat(auto-fit,minmax(105px,1fr))] gap-px overflow-hidden rounded border border-chrome-border/40 bg-chrome-border/30">
         <StatCell label="total runtime" value={fmtMs(stats.total_exec_time_ms)} />
         <StatCell label="min runtime" value={stats.min_exec_time_ms == null ? "—" : fmtMs(stats.min_exec_time_ms)} />
         <StatCell label="max runtime" value={stats.max_exec_time_ms == null ? "—" : fmtMs(stats.max_exec_time_ms)} />
+        <StatCell label="runtime σ" value={fmtMs(stats.stddev_exec_time_ms)} />
         <StatCell label="planning" value={fmtMs(stats.total_plan_time_ms)} />
         <StatCell label="cache hit" value={hitRatio == null ? "—" : `${(hitRatio * 100).toFixed(1)}%`} />
         <StatCell label="blocks read" value={fmtCount(stats.shared_blks_read)} />
@@ -602,9 +846,10 @@ function statementRateValues(history: HistoryEntry[]): number[] {
 }
 
 function describeOriginalStatus(
-  captured: ActivityRow,
+  captured: ActivityRow | null,
   latest: PgQueryObservationSnapshot | null,
 ): { label: string; tone: "success" | "warning" | "muted"; dotClass: string } {
+  if (!captured) return { label: "historical aggregate", tone: "muted", dotClass: "bg-rvbbit-accent" }
   if (!latest) return { label: "connecting", tone: "muted", dotClass: "bg-chrome-text animate-pulse" }
   const original = latest.original_session
   if (!original) return { label: "original ended", tone: "muted", dotClass: "bg-chrome-text/60" }
@@ -689,14 +934,15 @@ function fmtBytes(bytes: number): string {
 }
 
 function openExplainSql(
-  row: ActivityRow,
+  query: string,
+  sourceLabel: string,
   onOpenSql: (title: string, sql: string, run: boolean) => void,
 ) {
-  const query = row.query?.trim()
-  if (!query) return
+  const normalized = query.trim()
+  if (!normalized) return
   onOpenSql(
-    `Explain query · pid ${row.pid}`,
-    `-- Review before running. EXPLAIN plans the statement but does not execute it.\nEXPLAIN (VERBOSE, COSTS, SETTINGS, FORMAT TEXT)\n${query}`,
+    `Explain query · ${sourceLabel}`,
+    `-- Review before running. EXPLAIN plans the statement but does not execute it.\n-- Normalized historical queries may contain parameter placeholders that need concrete values.\nEXPLAIN (VERBOSE, COSTS, SETTINGS, FORMAT TEXT)\n${normalized}`,
     false,
   )
 }

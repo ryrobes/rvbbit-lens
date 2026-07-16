@@ -83,8 +83,8 @@ export interface ActivityRow {
 }
 
 export interface PgQueryObservationTarget {
-  pid: number
-  backendStart: string
+  pid: number | null
+  backendStart: string | null
   queryId: string | null
   query: string | null
 }
@@ -95,6 +95,7 @@ export interface PgStatementStats {
   total_plan_time_ms: number
   total_exec_time_ms: number
   mean_exec_time_ms: number
+  stddev_exec_time_ms: number
   min_exec_time_ms: number | null
   max_exec_time_ms: number | null
   rows: number
@@ -108,6 +109,36 @@ export interface PgStatementStats {
   blk_write_time_ms: number
   wal_records: number
   wal_bytes: number
+}
+
+/** One normalized query identity from pg_stat_statements. These are aggregate
+ * counters since stats_reset, not an execution log: pg_stat_statements does
+ * not retain per-call timestamps, row counts, or plan/index nodes. */
+export interface PgStatementCatalogRow extends PgStatementStats {
+  query_id: string
+  query: string
+  users: string[]
+  toplevel: boolean | null
+  stats_since: string | null
+  minmax_stats_since: string | null
+  runtime_share: number
+}
+
+export interface PgStatementCatalogSnapshot {
+  timestamp: string
+  available: boolean
+  reset_at: string | null
+  rows: PgStatementCatalogRow[]
+  total_entries: number
+  truncated: boolean
+  error: string | null
+}
+
+export interface PgQuerySummaryResult {
+  available: boolean
+  model: string | null
+  summary: string | null
+  error: string | null
 }
 
 export interface PgQueryObservationSnapshot {
@@ -542,8 +573,15 @@ export async function fetchPgQueryObservation(
          LIMIT 50`
       : null
 
+  const hasOriginal = target.pid != null
+    && target.pid > 0
+    && target.backendStart != null
+    && target.backendStart.length > 0
+
   const [original, matching, catalog] = await Promise.all([
-    pool.query(ORIGINAL_ACTIVITY_SQL, [target.pid, target.backendStart]),
+    hasOriginal
+      ? pool.query(ORIGINAL_ACTIVITY_SQL, [target.pid, target.backendStart])
+      : Promise.resolve({ rows: [] }),
     matchingSql
       ? pool.query(matchingSql, [matchMode === "query_id" ? target.queryId : normalizedQuery])
       : Promise.resolve({ rows: [] }),
@@ -591,6 +629,190 @@ export async function fetchPgQueryObservation(
   }
 }
 
+/**
+ * Query explorer catalog backed by pg_stat_statements. The source view can
+ * contain one row per user/database/query identity, so entries sharing a
+ * queryid are combined before they reach the UI. The fetch is capped to keep a
+ * desktop refresh cheap; `truncated` makes that boundary visible.
+ */
+export async function fetchPgStatementCatalog(
+  connectionId: string,
+  limit = 500,
+): Promise<PgStatementCatalogSnapshot> {
+  const { pool } = await getPool(connectionId, undefined, "observer")
+  const timestamp = new Date().toISOString()
+  const catalog = await pool.query(PGSS_CATALOG_SQL)
+  const catalogRow = catalog.rows[0] ?? {}
+  if (!catalogRow.statements_available) {
+    return {
+      timestamp,
+      available: false,
+      reset_at: null,
+      rows: [],
+      total_entries: 0,
+      truncated: false,
+      error: null,
+    }
+  }
+
+  const safeLimit = Math.min(Math.max(Math.trunc(limit), 1), 1000)
+  try {
+    const [statements, info] = await Promise.all([
+      pool.query(
+        `SELECT
+           to_jsonb(s) AS stats,
+           r.rolname AS user_name,
+           count(*) OVER ()::int AS source_count,
+           coalesce(sum(s.total_exec_time) OVER (), 0)::float8 AS total_runtime_all
+         FROM pg_stat_statements s
+         LEFT JOIN pg_roles r ON r.oid = s.userid
+         WHERE s.dbid = (SELECT oid FROM pg_database WHERE datname = current_database())
+           AND s.queryid IS NOT NULL
+         ORDER BY s.total_exec_time DESC
+         LIMIT $1`,
+        [safeLimit],
+      ),
+      catalogRow.info_available
+        ? pool.query(`SELECT to_char(stats_reset, 'YYYY-MM-DD"T"HH24:MI:SS.USOF') AS stats_reset FROM pg_stat_statements_info`)
+        : Promise.resolve({ rows: [] }),
+    ])
+
+    interface StatementGroup {
+      stats: Record<string, unknown>[]
+      query: string
+      users: Set<string>
+      toplevel: boolean | null
+      statsSince: string[]
+      minmaxSince: string[]
+    }
+    const groups = new Map<string, StatementGroup>()
+    for (const source of statements.rows) {
+      const raw = (source.stats ?? {}) as Record<string, unknown>
+      const queryId = raw.queryid == null ? "" : String(raw.queryid)
+      if (!queryId) continue
+      const existing = groups.get(queryId) ?? {
+        stats: [],
+        query: "",
+        users: new Set<string>(),
+        toplevel: null,
+        statsSince: [],
+        minmaxSince: [],
+      }
+      existing.stats.push(raw)
+      const query = raw.query == null ? "" : String(raw.query)
+      if (query.length > existing.query.length) existing.query = query
+      if (source.user_name != null) existing.users.add(String(source.user_name))
+      if (typeof raw.toplevel === "boolean") {
+        existing.toplevel = existing.toplevel == null ? raw.toplevel : existing.toplevel && raw.toplevel
+      }
+      if (raw.stats_since != null) existing.statsSince.push(String(raw.stats_since))
+      if (raw.minmax_stats_since != null) existing.minmaxSince.push(String(raw.minmax_stats_since))
+      groups.set(queryId, existing)
+    }
+
+    const totalRuntime = Number(statements.rows[0]?.total_runtime_all ?? 0)
+    const rows = [...groups.entries()].flatMap(([queryId, group]) => {
+      const aggregate = aggregateStatementStats(group.stats)
+      if (!aggregate) return []
+      return [{
+        query_id: queryId,
+        query: group.query,
+        users: [...group.users].sort(),
+        toplevel: group.toplevel,
+        stats_since: earliestTimestamp(group.statsSince),
+        minmax_stats_since: earliestTimestamp(group.minmaxSince),
+        runtime_share: totalRuntime > 0 ? aggregate.total_exec_time_ms / totalRuntime : 0,
+        ...aggregate,
+      } satisfies PgStatementCatalogRow]
+    }).sort((a, b) => b.total_exec_time_ms - a.total_exec_time_ms)
+
+    const totalEntries = Number(statements.rows[0]?.source_count ?? rows.length)
+    return {
+      timestamp,
+      available: true,
+      reset_at: info.rows[0]?.stats_reset ?? null,
+      rows,
+      total_entries: totalEntries,
+      truncated: totalEntries > statements.rows.length,
+      error: null,
+    }
+  } catch (error) {
+    return {
+      timestamp,
+      available: true,
+      reset_at: null,
+      rows: [],
+      total_entries: 0,
+      truncated: false,
+      error: error instanceof Error ? error.message : String(error),
+    }
+  }
+}
+
+/** Resolve the user-configured General Semantic summarizer without invoking
+ * it. Generation remains an explicit UI action because semantic SQL may be
+ * metered. */
+export async function fetchPgQuerySummaryCapability(
+  connectionId: string,
+): Promise<PgQuerySummaryResult> {
+  const { pool } = await getPool(connectionId, undefined, "observer")
+  try {
+    const catalog = await pool.query(
+      `SELECT
+         to_regclass('rvbbit.operators') IS NOT NULL AS operators_available,
+         (to_regprocedure('rvbbit.summarize(text)') IS NOT NULL
+          OR to_regprocedure('rvbbit.summarize(text,jsonb)') IS NOT NULL) AS summarize_available`,
+    )
+    const row = catalog.rows[0] ?? {}
+    if (!row.operators_available || !row.summarize_available) {
+      return { available: false, model: null, summary: null, error: null }
+    }
+    const configured = await pool.query(
+      `SELECT nullif(btrim(model), '') AS model
+       FROM rvbbit.operators
+       WHERE name = 'summarize'
+       LIMIT 1`,
+    )
+    const model = configured.rows[0]?.model == null ? null : String(configured.rows[0].model)
+    return { available: model != null, model, summary: null, error: null }
+  } catch (error) {
+    return {
+      available: false,
+      model: null,
+      summary: null,
+      error: error instanceof Error ? error.message : String(error),
+    }
+  }
+}
+
+export async function generatePgQuerySummary(
+  connectionId: string,
+  query: string,
+  stats?: Partial<PgStatementStats>,
+): Promise<PgQuerySummaryResult> {
+  const capability = await fetchPgQuerySummaryCapability(connectionId)
+  if (!capability.available) return capability
+  const { pool } = await getPool(connectionId, undefined, "observer")
+  const evidence = stats
+    ? `\nObserved aggregate evidence: calls=${numeric(stats.calls)}, mean_runtime_ms=${numeric(stats.mean_exec_time_ms)}, max_runtime_ms=${numeric(stats.max_exec_time_ms)}, total_runtime_ms=${numeric(stats.total_exec_time_ms)}, rows=${numeric(stats.rows)}.`
+    : ""
+  const prompt = `Explain what this normalized PostgreSQL query does in one crisp sentence for a database operator. Do not invent business meaning and do not make performance claims beyond the supplied evidence.${evidence}\n\nSQL:\n${query}`
+  try {
+    const result = await pool.query(`SELECT rvbbit.summarize($1::text) AS summary`, [prompt])
+    return {
+      ...capability,
+      summary: result.rows[0]?.summary == null ? null : String(result.rows[0].summary),
+      error: null,
+    }
+  } catch (error) {
+    return {
+      ...capability,
+      summary: null,
+      error: error instanceof Error ? error.message : String(error),
+    }
+  }
+}
+
 function mapActivityRow(row: Record<string, unknown>): ActivityRow {
   return {
     pid: Number(row.pid),
@@ -628,6 +850,15 @@ function aggregateStatementStats(rows: Record<string, unknown>[]): PgStatementSt
   const sum = (key: string) => rows.reduce((total, row) => total + numeric(row[key]), 0)
   const calls = sum("calls")
   const totalExec = sum("total_exec_time")
+  const meanExec = calls > 0 ? totalExec / calls : 0
+  const secondMoment = calls > 0
+    ? rows.reduce((total, row) => {
+        const rowCalls = numeric(row.calls)
+        const rowMean = numeric(row.mean_exec_time)
+        const rowStddev = numeric(row.stddev_exec_time)
+        return total + rowCalls * (rowStddev ** 2 + rowMean ** 2)
+      }, 0) / calls
+    : 0
   const extrema = (key: string, mode: "min" | "max") => {
     const values = rows
       .map((row) => Number(row[key]))
@@ -640,7 +871,8 @@ function aggregateStatementStats(rows: Record<string, unknown>[]): PgStatementSt
     plans: sum("plans"),
     total_plan_time_ms: sum("total_plan_time"),
     total_exec_time_ms: totalExec,
-    mean_exec_time_ms: calls > 0 ? totalExec / calls : 0,
+    mean_exec_time_ms: meanExec,
+    stddev_exec_time_ms: Math.sqrt(Math.max(0, secondMoment - meanExec ** 2)),
     min_exec_time_ms: extrema("min_exec_time", "min"),
     max_exec_time_ms: extrema("max_exec_time", "max"),
     rows: sum("rows"),
@@ -655,6 +887,13 @@ function aggregateStatementStats(rows: Record<string, unknown>[]): PgStatementSt
     wal_records: sum("wal_records"),
     wal_bytes: sum("wal_bytes"),
   }
+}
+
+function earliestTimestamp(values: string[]): string | null {
+  if (values.length === 0) return null
+  return values.reduce((earliest, value) => (
+    Date.parse(value) < Date.parse(earliest) ? value : earliest
+  ))
 }
 
 function numeric(value: unknown): number {

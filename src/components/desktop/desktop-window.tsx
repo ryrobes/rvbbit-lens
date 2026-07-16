@@ -1035,6 +1035,7 @@ const KIND_HUE: Record<string, number> = {
   palette: 320,
   appearance: 320,
   "pg-monitor": 150,
+  "pg-query-explorer": 150,
   "lock-explorer": 205,
   "mvcc-explorer": 115,
   "semantic-tests": 75,
