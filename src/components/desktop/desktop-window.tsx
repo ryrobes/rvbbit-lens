@@ -111,6 +111,9 @@ interface DesktopWindowProps {
   children: React.ReactNode
   /** True when this window currently holds keyboard/visual focus. */
   focused: boolean
+  /** A changing token mounts a short, high-contrast assistant callout over the
+   *  window without changing its persisted focus/chrome state. */
+  attentionToken?: number | null
   onFocus: (id: string) => void
   onClose: (id: string) => void
   onMinimize: (id: string) => void
@@ -166,6 +169,7 @@ export function DesktopWindow({
   icon: Icon,
   children,
   focused,
+  attentionToken,
   onFocus,
   onClose,
   onMinimize,
@@ -960,6 +964,20 @@ export function DesktopWindow({
           accent={semanticHover.accent}
           panelRect={semanticHover.panelRect}
           tileRect={semanticHover.tileRect}
+        />
+      ) : null}
+
+      {attentionToken != null ? (
+        <div
+          key={attentionToken}
+          aria-hidden
+          className="pointer-events-none absolute inset-0 z-[80] animate-pulse rounded-[inherit] border-2 border-main/90"
+          style={{
+            background:
+              "radial-gradient(circle at 50% 40%, color-mix(in oklch, var(--main) 13%, transparent), transparent 68%)",
+            boxShadow:
+              "inset 0 0 0 2px color-mix(in oklch, var(--main) 52%, transparent), inset 0 0 42px color-mix(in oklch, var(--main) 24%, transparent)",
+          }}
         />
       ) : null}
 

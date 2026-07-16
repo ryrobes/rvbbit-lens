@@ -98,6 +98,7 @@ import {
   ASSISTANT_COMMAND_CAP,
   assistantBlockName,
   type AssistantApplyResult,
+  type AssistantApplyOptions,
   type AssistantCommand,
 } from "@/lib/desktop/assistant"
 import { useAssistantIdentity } from "@/lib/desktop/assistant-identity"
@@ -2627,8 +2628,27 @@ export function DesktopShell() {
   // The assistant is an OS-level dock, not a workspace window — she survives
   // workspace switches and never lands in scenes or desktop state.
   const [assistantOpen, setAssistantOpen] = useState(false)
+  const [assistantAttention, setAssistantAttention] = useState<{ id: string; token: number } | null>(null)
+  const assistantAttentionSequenceRef = useRef(0)
+  const assistantAttentionTimerRef = useRef<number | null>(null)
   useEffect(() => {
     setAssistantOpen(loadAssistantDockOpen())
+  }, [])
+
+  const calloutWindow = useCallback((id: string) => {
+    focus(id)
+    assistantAttentionSequenceRef.current += 1
+    const token = assistantAttentionSequenceRef.current
+    setAssistantAttention({ id, token })
+    if (assistantAttentionTimerRef.current) clearTimeout(assistantAttentionTimerRef.current)
+    assistantAttentionTimerRef.current = window.setTimeout(() => {
+      setAssistantAttention((current) => current?.token === token ? null : current)
+      assistantAttentionTimerRef.current = null
+    }, 1450)
+  }, [focus])
+
+  useEffect(() => () => {
+    if (assistantAttentionTimerRef.current) clearTimeout(assistantAttentionTimerRef.current)
   }, [])
 
   const openAssistant = useCallback(() => {
@@ -2674,7 +2694,10 @@ export function DesktopShell() {
    * commitSnapshotNow() first makes the whole turn one undo step.
    */
   const applyAssistantCommands = useCallback(
-    (commands: AssistantCommand[]): AssistantApplyResult[] => {
+    (
+      commands: AssistantCommand[],
+      options?: AssistantApplyOptions,
+    ): AssistantApplyResult[] => {
       commitSnapshotNow()
       const report: AssistantApplyResult[] = []
       const created: DesktopWindowState[] = []
@@ -2740,7 +2763,7 @@ export function DesktopShell() {
       }
 
       commands.forEach((cmd, index) => {
-        if (index >= ASSISTANT_COMMAND_CAP) {
+        if (!options?.historicalReplay && index >= ASSISTANT_COMMAND_CAP) {
           report.push({ op: cmd.op, status: "skipped", detail: `over the ${ASSISTANT_COMMAND_CAP}-command per-turn cap` })
           return
         }
@@ -2919,7 +2942,7 @@ export function DesktopShell() {
               if (target.minimized) {
                 setWindows((ws) => ws.map((w) => (w.id === target.id ? { ...w, minimized: false } : w)))
               }
-              focus(target.id)
+              calloutWindow(target.id)
               report.push({ op: cmd.op, target: assistantBlockName(target), status: "applied" })
               return
             }
@@ -2950,7 +2973,7 @@ export function DesktopShell() {
       })
       return report
     },
-    [commitSnapshotNow, liveWindows, openWindow, updatePayload, emitParam, focus, close, setWindows, setRunSignals],
+    [commitSnapshotNow, liveWindows, openWindow, updatePayload, emitParam, calloutWindow, close, setWindows, setRunSignals],
   )
 
   const openSyncMirror = useCallback(() => {
@@ -5490,6 +5513,7 @@ export function DesktopShell() {
                   requestSemanticDrop={requestSemanticDrop}
                   semanticOps={semanticOps}
                   assistantName={assistantIdentity.name}
+                  assistantAttentionToken={assistantAttention?.id === w.id ? assistantAttention.token : null}
                 />
               )
             })}
@@ -5695,7 +5719,10 @@ interface WindowContext {
   updatePayload: (id: string, mutator: (payload: unknown) => unknown) => void
   /** Apply one assistant turn's command batch; returns the per-command report
    *  that rides back to the agent in the next turn's desktop_context. */
-  applyAssistantCommands: (commands: AssistantCommand[]) => AssistantApplyResult[]
+  applyAssistantCommands: (
+    commands: AssistantCommand[],
+    options?: AssistantApplyOptions,
+  ) => AssistantApplyResult[]
   /** Summon the OS-level Assistant dock (e.g. from a block's biography panel). */
   openAssistant: () => void
   windows: DesktopWindowState[]
@@ -5774,6 +5801,7 @@ const WindowFrame = memo(function WindowFrame({
   requestSemanticDrop,
   semanticOps,
   assistantName,
+  assistantAttentionToken,
 }: {
   window: DesktopWindowState
   baseCtx: BaseWindowContext
@@ -5793,6 +5821,7 @@ const WindowFrame = memo(function WindowFrame({
   requestSemanticDrop: (payload: DesktopColumnDragPayload, op: SemanticOpMeta, at: { x: number; y: number }, targetWindowId?: string) => void
   semanticOps: SemanticOpMeta[]
   assistantName: string
+  assistantAttentionToken: number | null
 }) {
   const ctx = useMemo<WindowContext>(
     () => ({ ...baseCtx, windows: slotWindows, params: slotParams, runSignal, workspaceActive }),
@@ -5824,6 +5853,7 @@ const WindowFrame = memo(function WindowFrame({
       displayTitle={w.kind === "assistant-settings" ? `${assistantName} Settings` : undefined}
       icon={iconForKind(w.kind)}
       focused={focused}
+      attentionToken={assistantAttentionToken}
       onFocus={onFocus}
       onClose={onClose}
       onMinimize={onMinimize}

@@ -93,6 +93,12 @@ export interface AssistantApplyResult {
   detail?: string
 }
 
+export interface AssistantApplyOptions {
+  /** Replaying already-approved transcript commands is not a new model turn and
+   *  may legitimately span more than the per-turn command cap. */
+  historicalReplay?: boolean
+}
+
 export const ASSISTANT_COMMAND_CAP = 12
 
 export interface AssistantMessage {
@@ -209,6 +215,14 @@ function sqlJsonLiteral(value: unknown): string {
 }
 
 const CONVERSATION_WINDOW = 24
+const INCOMPLETE_COMMAND_REPLY =
+  "I ran out of output space while building that, so I left the desktop unchanged. Try asking me to split it into smaller blocks."
+
+function looksLikeIncompleteCommandEnvelope(value: unknown): boolean {
+  if (typeof value !== "string") return false
+  const text = value.trim()
+  return text.startsWith("{") && (!text.endsWith("}") || /"(?:reply|commands|op)"\s*:/.test(text))
+}
 
 export async function runAssistantTurn(
   connectionId: string,
@@ -284,17 +298,25 @@ export async function runAssistantTurn(
   // return arrives as {result: {...}} — unwrap one level when present.
   const outer = (value ?? {}) as Record<string, unknown>
   const inner = (outer.result ?? outer) as Record<string, unknown>
-  const commands = Array.isArray(inner.commands)
+  const status = typeof inner.status === "string" ? inner.status : "unknown"
+  const rawReply = typeof inner.reply === "string" ? inner.reply : ""
+  const incompleteOutput =
+    status === "output_truncated" ||
+    status === "invalid_structured_output" ||
+    (!Array.isArray(inner.commands) && looksLikeIncompleteCommandEnvelope(rawReply))
+  const commands = !incompleteOutput && Array.isArray(inner.commands)
     ? (inner.commands as AssistantCommand[])
     : []
   return {
     reply:
-      typeof inner.reply === "string" && inner.reply.trim().length > 0
-        ? inner.reply
+      incompleteOutput
+        ? INCOMPLETE_COMMAND_REPLY
+        : rawReply.trim().length > 0
+        ? rawReply
         : "(no reply)",
     commands,
     agentRunId: typeof inner.agent_run_id === "string" ? inner.agent_run_id : null,
-    status: typeof inner.status === "string" ? inner.status : "unknown",
+    status,
   }
 }
 
@@ -327,22 +349,39 @@ export function saveThreadLocal(messages: AssistantMessage[]): void {
   }
 }
 
+/** Reconcile the durable thread with the browser's current in-memory tail.
+ *  Later arguments win duplicate ids; timestamps restore transcript order. */
+export function mergeAssistantThreads(...threads: AssistantMessage[][]): AssistantMessage[] {
+  const byId = new Map<string, AssistantMessage>()
+  for (const thread of threads) {
+    for (const message of thread) {
+      if (message?.id) byId.set(message.id, message)
+    }
+  }
+  return [...byId.values()].sort((a, b) => a.at - b.at)
+}
+
 /** Best-effort append to homebase (fire-and-forget, like server-sync). */
 export function appendThreadRemote(messages: AssistantMessage[]): void {
   if (typeof window === "undefined" || messages.length === 0) return
   try {
+    const body = JSON.stringify({ home: getHomeId(), messages })
     void fetch("/api/lens/assistant", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ home: getHomeId(), messages }),
-      keepalive: true,
+      body,
+      // Browsers reject keepalive request bodies above roughly 64 KiB. Full
+      // HTML app commands routinely cross that line; send those normally so
+      // their resurrection payload reaches durable storage.
+      keepalive: body.length <= 60_000,
     }).catch(() => {})
   } catch {
     // best-effort
   }
 }
 
-/** Hydrate from homebase when localStorage is empty (new browser, same home). */
+/** Fetch the durable tail. Callers merge it even when localStorage is nonempty:
+ *  a large command may have exceeded localStorage while still reaching homebase. */
 export async function fetchThreadRemote(): Promise<AssistantMessage[]> {
   try {
     const res = await fetch(

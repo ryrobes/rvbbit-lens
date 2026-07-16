@@ -24,10 +24,12 @@ import {
   buildAssistantDesktopContext,
   fetchThreadRemote,
   loadThreadLocal,
+  mergeAssistantThreads,
   newAssistantMessage,
   runAssistantTurn,
   saveThreadLocal,
   type AssistantApplyResult,
+  type AssistantApplyOptions,
   type AssistantCommand,
   type AssistantMessage,
 } from "@/lib/desktop/assistant"
@@ -39,7 +41,10 @@ interface AssistantWindowProps {
   schema: SchemaSnapshot | null
   allWindows: DesktopWindowState[]
   params: DesktopParamValue[]
-  applyCommands: (commands: AssistantCommand[]) => AssistantApplyResult[]
+  applyCommands: (
+    commands: AssistantCommand[],
+    options?: AssistantApplyOptions,
+  ) => AssistantApplyResult[]
 }
 
 function commandChipLabel(cmd: AssistantCommand, report?: AssistantApplyResult): string {
@@ -77,6 +82,57 @@ function chipTarget(cmd: AssistantCommand, report?: AssistantApplyResult): strin
     default:
       return null
   }
+}
+
+function sameBlockTarget(left: string | null, right: string | null): boolean {
+  return !!left && !!right && left.trim().toLowerCase() === right.trim().toLowerCase()
+}
+
+/** Rebuild the exact command lineage through one historical pill. Create
+ * commands are full snapshots; app updates replace their app with another full
+ * snapshot, while SQL/chart patches layer in order. Replaying the lineage keeps
+ * both those semantics and each intermediate revision intact. */
+function historicalReplayFor(
+  messages: AssistantMessage[],
+  selectedMessageIndex: number,
+  selectedCommandIndex: number,
+): { commands: AssistantCommand[]; target: string } | null {
+  const selectedMessage = messages[selectedMessageIndex]
+  const selected = selectedMessage?.commands?.[selectedCommandIndex]
+  const selectedReport = selectedMessage?.report?.[selectedCommandIndex]
+  if (!selected || selectedReport?.status === "skipped") return null
+  const target = chipTarget(selected, selectedReport)
+  if (!target || (selected.op !== "create_block" && selected.op !== "update_block")) return null
+
+  if (selected.op === "create_block") {
+    return {
+      commands: [{ ...selected, name: target, place: "auto" }],
+      target,
+    }
+  }
+
+  let lineage: AssistantCommand[] | null = null
+  for (let messageIndex = 0; messageIndex <= selectedMessageIndex; messageIndex += 1) {
+    const message = messages[messageIndex]
+    const commands = message.commands ?? []
+    const lastCommand = messageIndex === selectedMessageIndex
+      ? selectedCommandIndex
+      : commands.length - 1
+    for (let commandIndex = 0; commandIndex <= lastCommand; commandIndex += 1) {
+      const command = commands[commandIndex]
+      const report = message.report?.[commandIndex]
+      if (!command || report?.status === "skipped") continue
+      const commandTarget = chipTarget(command, report)
+      if (!sameBlockTarget(commandTarget, target)) continue
+      if (command.op === "create_block") {
+        // A later create with the same canonical handle begins a new lineage.
+        lineage = [{ ...command, name: target, place: "auto" }]
+      } else if (command.op === "update_block" && lineage) {
+        lineage.push({ ...command, target })
+      }
+    }
+  }
+  return lineage?.length ? { commands: lineage, target } : null
 }
 
 // ── OS dock — the assistant is NOT a workspace window ───────────────────
@@ -279,21 +335,22 @@ export function AssistantWindow({
   const messagesRef = useRef<AssistantMessage[]>([])
   messagesRef.current = messages
 
-  // One unbroken thread: localStorage L1, homebase behind it.
+  // One unbroken thread: show localStorage immediately, then reconcile the
+  // durable tail even when local is nonempty. Large HTML commands can exceed
+  // localStorage while still being safely present in homebase.
   useEffect(() => {
     let cancelled = false
     const local = loadThreadLocal()
     if (local.length > 0) {
       setMessages(local)
-      setHydrated(true)
-      return
     }
     void fetchThreadRemote().then((remote) => {
       if (cancelled) return
-      if (remote.length > 0) {
-        setMessages(remote)
-        saveThreadLocal(remote)
-      }
+      setMessages((current) => {
+        const merged = mergeAssistantThreads(remote, current)
+        saveThreadLocal(merged)
+        return merged
+      })
       setHydrated(true)
     })
     return () => {
@@ -392,7 +449,7 @@ export function AssistantWindow({
           </div>
         ) : null}
         <div className="flex flex-col gap-4">
-          {messages.map((m) =>
+          {messages.map((m, messageIndex) =>
             m.role === "user" ? (
               <div key={m.id} className="flex justify-end">
                 <div
@@ -443,38 +500,66 @@ export function AssistantWindow({
                         !skipped &&
                         !!target &&
                         liveBlockNames.has(target.toLowerCase())
+                      const canRestore =
+                        !alive &&
+                        !skipped &&
+                        (cmd.op === "create_block" || cmd.op === "update_block") &&
+                        historicalReplayFor(messages, messageIndex, i) !== null
+                      const actionable = alive || canRestore
                       return (
                         <button
                           key={i}
                           type="button"
-                          disabled={!alive}
+                          disabled={!actionable}
                           onClick={() => {
                             if (alive && target) {
-                              applyCommands([{ op: "focus_block", target }])
+                              if (cmd.op === "update_block") {
+                                applyCommands(
+                                  [{ ...cmd, target }, { op: "focus_block", target }],
+                                  { historicalReplay: true },
+                                )
+                              } else {
+                                applyCommands([{ op: "focus_block", target }])
+                              }
+                              return
+                            }
+                            if (canRestore) {
+                              const replay = historicalReplayFor(messages, messageIndex, i)
+                              if (replay) {
+                                applyCommands(
+                                  [...replay.commands, { op: "focus_block", target: replay.target }],
+                                  { historicalReplay: true },
+                                )
+                              }
                             }
                           }}
                           title={
-                            rep?.detail ??
                             (alive
-                              ? "focus this block"
+                              ? cmd.op === "update_block"
+                                ? "reapply this revision and show the block"
+                                : "show this block"
+                              : canRestore
+                                ? "restore this historical version"
                               : skipped
-                                ? undefined
+                                ? rep?.detail
                                 : target
-                                  ? "no longer on the desktop"
-                                  : undefined)
+                                  ? "the original create command is no longer in history"
+                                  : rep?.detail)
                           }
                           className="inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-[11px] transition-opacity"
                           style={{
-                            border: `1px solid color-mix(in oklch, var(--main) ${skipped ? 18 : alive ? 40 : 22}%, transparent)`,
-                            background: `color-mix(in oklch, color-mix(in oklch, var(--main) ${skipped ? 8 : alive ? 18 : 9}%, var(--background)) 72%, transparent)`,
+                            border: `1px solid color-mix(in oklch, var(--main) ${skipped ? 18 : alive ? 40 : canRestore ? 32 : 18}%, transparent)`,
+                            background: `color-mix(in oklch, color-mix(in oklch, var(--main) ${skipped ? 8 : alive ? 18 : canRestore ? 13 : 7}%, var(--background)) 72%, transparent)`,
                             backdropFilter: "blur(10px)",
                             color: skipped
                               ? "color-mix(in oklch, var(--foreground) 50%, transparent)"
                               : alive
                                 ? "color-mix(in oklch, var(--main) 80%, var(--foreground))"
+                                : canRestore
+                                  ? "color-mix(in oklch, var(--main) 62%, var(--foreground))"
                                 : "color-mix(in oklch, var(--foreground) 38%, transparent)",
-                            cursor: alive ? "pointer" : "default",
-                            opacity: !skipped && !alive && target ? 0.65 : 1,
+                            cursor: actionable ? "pointer" : "default",
+                            opacity: !skipped && !alive && !canRestore && target ? 0.5 : 1,
                           }}
                         >
                           {skipped ? (
