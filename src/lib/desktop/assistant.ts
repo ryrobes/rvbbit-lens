@@ -30,6 +30,7 @@ import {
   sourceSqlForPayload,
 } from "./reactive-sql"
 import { getHomeId } from "./server-sync"
+import type { AssistantBlockExecutionObservation } from "./assistant-execution"
 
 // ── Command contract (rvbbit.desktop_commands.v1) ──────────────────────
 
@@ -117,6 +118,7 @@ export interface AssistantTurnResult {
   commands: AssistantCommand[]
   agentRunId: string | null
   status: string
+  error: string | null
 }
 
 // ── Desktop context snapshot (the "eyes") ──────────────────────────────
@@ -138,6 +140,7 @@ export function buildAssistantDesktopContext(
   params: DesktopParamValue[],
   schema: SchemaSnapshot | null,
   applyReport: AssistantApplyResult[] | null,
+  executionObservations: Record<string, AssistantBlockExecutionObservation> = {},
 ): Record<string, unknown> {
   // Resolved SQL (post reactive-rewrite) is what actually executes; raw
   // payload.sql may contain block./param. refs. Compile defensively — a broken
@@ -169,6 +172,8 @@ export function buildAssistantDesktopContext(
         base.resolved_sql = block.compiledSql
       }
       if (block?.missingParams?.length) base.missing_params = block.missingParams
+      const execution = executionObservations[w.id]
+      if (execution) base.execution = execution
       // App blocks: the artifact IS the current truth she patches against —
       // it rides in the snapshot (fresh every turn), never in conversation.
       if (payload?.htmlBlock) {
@@ -217,11 +222,20 @@ function sqlJsonLiteral(value: unknown): string {
 const CONVERSATION_WINDOW = 24
 const INCOMPLETE_COMMAND_REPLY =
   "I ran out of output space while building that, so I left the desktop unchanged. Try asking me to split it into smaller blocks."
+const INVALID_COMMAND_REPLY =
+  "I could not finish a valid desktop command, so I left the desktop unchanged. Please try that again."
 
 function looksLikeIncompleteCommandEnvelope(value: unknown): boolean {
   if (typeof value !== "string") return false
   const text = value.trim()
   return text.startsWith("{") && (!text.endsWith("}") || /"(?:reply|commands|op)"\s*:/.test(text))
+}
+
+/** Keep legacy malformed envelopes out of both the visible transcript and the
+ * next model turn. The raw durable record stays untouched for diagnostics. */
+export function assistantReplyForDisplay(text: string): string {
+  if (!looksLikeIncompleteCommandEnvelope(text)) return text
+  return text.trim().endsWith("}") ? INVALID_COMMAND_REPLY : INCOMPLETE_COMMAND_REPLY
 }
 
 export async function runAssistantTurn(
@@ -237,7 +251,7 @@ export async function runAssistantTurn(
     .slice(-CONVERSATION_WINDOW)
     .map((m) => ({
       role: m.role,
-      text: m.text,
+      text: m.role === "assistant" ? assistantReplyForDisplay(m.text) : m.text,
       ...(m.commands?.length
         ? {
             did: m.commands.map((c, i) => {
@@ -300,23 +314,40 @@ export async function runAssistantTurn(
   const inner = (outer.result ?? outer) as Record<string, unknown>
   const status = typeof inner.status === "string" ? inner.status : "unknown"
   const rawReply = typeof inner.reply === "string" ? inner.reply : ""
+  const rawError = typeof inner.error === "string" && inner.error.trim()
+    ? inner.error.trim()
+    : null
+  // Older pg_rvbbit runtimes returned a raw, partial command envelope as the
+  // reply *and* supplied commands: []. Do not let that empty array mask the
+  // malformed response while the extension and Lens are briefly on different
+  // upgrade revisions.
+  const incompleteCommandEnvelope = looksLikeIncompleteCommandEnvelope(rawReply)
+  const normalizedStatus = incompleteCommandEnvelope
+    ? rawReply.trim().endsWith("}")
+      ? "invalid_structured_output"
+      : "output_truncated"
+    : status
   const incompleteOutput =
-    status === "output_truncated" ||
-    status === "invalid_structured_output" ||
-    (!Array.isArray(inner.commands) && looksLikeIncompleteCommandEnvelope(rawReply))
+    normalizedStatus === "output_truncated" ||
+    normalizedStatus === "invalid_structured_output"
   const commands = !incompleteOutput && Array.isArray(inner.commands)
     ? (inner.commands as AssistantCommand[])
     : []
   return {
     reply:
       incompleteOutput
-        ? INCOMPLETE_COMMAND_REPLY
+        ? normalizedStatus === "output_truncated"
+          ? INCOMPLETE_COMMAND_REPLY
+          : INVALID_COMMAND_REPLY
         : rawReply.trim().length > 0
         ? rawReply
-        : "(no reply)",
+        : rawError
+          ? `The assistant could not complete this turn: ${rawError}`
+          : "The assistant turn ended without a reply.",
     commands,
     agentRunId: typeof inner.agent_run_id === "string" ? inner.agent_run_id : null,
-    status,
+    status: normalizedStatus,
+    error: rawError,
   }
 }
 

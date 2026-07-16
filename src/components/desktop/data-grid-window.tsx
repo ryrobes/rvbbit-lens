@@ -121,6 +121,10 @@ import {
 } from "@/lib/desktop/app-block"
 import { publishAppBlock } from "@/lib/rvbbit/dashboards"
 import { useAssistantIdentity } from "@/lib/desktop/assistant-identity"
+import {
+  buildAssistantExecutionObservation,
+  type AssistantBlockExecutionObservation,
+} from "@/lib/desktop/assistant-execution"
 import { AssistantIdentityMark } from "./assistant-identity-mark"
 
 interface DataGridWindowProps {
@@ -138,6 +142,12 @@ interface DataGridWindowProps {
   params: DesktopParamValue[]
   runSignal: number
   onChangePayload: (mutate: (payload: DataPayload) => DataPayload) => void
+  /** Publish a bounded, ephemeral view of the query that actually ran so the
+   * Desktop Assistant can see success, samples, and SQL errors next turn. */
+  onExecutionObservation: (
+    windowId: string,
+    observation: AssistantBlockExecutionObservation | null,
+  ) => void
   onSaveAsViewApp: (seed: {
     sql: string
     title?: string
@@ -937,6 +947,7 @@ export function DataGridWindow({
   params,
   runSignal,
   onChangePayload,
+  onExecutionObservation,
   onSaveAsViewApp,
   onOpenRow,
   onEmitParam,
@@ -1059,6 +1070,20 @@ export function DataGridWindow({
     if (payload.reactive?.blockName) return payload.reactive.blockName
     return uniqueBlockName(payload.title || w.title || w.id, allWindows, w.id)
   }, [allWindows, payload.reactive?.blockName, payload.title, w.id, w.title])
+
+  const assistantExecutionObservation = useMemo(
+    () => buildAssistantExecutionObservation(runState, lastExecutedSqlRef.current, htmlBlock),
+    [htmlBlock, runState],
+  )
+
+  useEffect(() => {
+    onExecutionObservation(w.id, assistantExecutionObservation)
+  }, [assistantExecutionObservation, onExecutionObservation, w.id])
+
+  useEffect(
+    () => () => onExecutionObservation(w.id, null),
+    [onExecutionObservation, w.id],
+  )
 
   // Map of every block's `{name}` → its title + SQL, powering the editor's
   // cross-block reference highlighting + hover cards. Memoized on reference

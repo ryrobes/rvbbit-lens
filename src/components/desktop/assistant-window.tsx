@@ -20,6 +20,7 @@ import type {
 import type { SchemaSnapshot } from "@/lib/db/types"
 import {
   appendThreadRemote,
+  assistantReplyForDisplay,
   assistantBlockName,
   buildAssistantDesktopContext,
   fetchThreadRemote,
@@ -34,6 +35,7 @@ import {
   type AssistantMessage,
 } from "@/lib/desktop/assistant"
 import { useAssistantIdentity } from "@/lib/desktop/assistant-identity"
+import type { AssistantBlockExecutionObservation } from "@/lib/desktop/assistant-execution"
 import { AssistantIdentityMark } from "./assistant-identity-mark"
 
 interface AssistantWindowProps {
@@ -41,6 +43,7 @@ interface AssistantWindowProps {
   schema: SchemaSnapshot | null
   allWindows: DesktopWindowState[]
   params: DesktopParamValue[]
+  getExecutionObservations: () => Record<string, AssistantBlockExecutionObservation>
   applyCommands: (
     commands: AssistantCommand[],
     options?: AssistantApplyOptions,
@@ -307,6 +310,7 @@ export function AssistantWindow({
   schema,
   allWindows,
   params,
+  getExecutionObservations,
   applyCommands,
 }: AssistantWindowProps) {
   // Chips dim when their block leaves the canvas — the transcript visibly
@@ -380,6 +384,7 @@ export function AssistantWindow({
         paramsRef.current,
         schemaRef.current,
         lastReportRef.current,
+        getExecutionObservations(),
       )
       const turn = await runAssistantTurn(activeConnectionId, text, thread, context)
       let report: AssistantApplyResult[] = []
@@ -391,6 +396,7 @@ export function AssistantWindow({
         agentRunId: turn.agentRunId,
         commands: turn.commands.length > 0 ? turn.commands : undefined,
         report: report.length > 0 ? report : undefined,
+        error: !!turn.error || turn.status === "provider_error" || turn.status === "memory_error",
       })
       setMessages((prev) => {
         const next = [...prev, assistantMsg]
@@ -413,7 +419,7 @@ export function AssistantWindow({
       setBusy(false)
       inputRef.current?.focus()
     }
-  }, [draft, busy, activeConnectionId, applyCommands])
+  }, [draft, busy, activeConnectionId, applyCommands, getExecutionObservations])
 
   // Bubble plate: each utterance carries its own translucent blur backdrop so
   // the transcript floats over any wallpaper — the container paints nothing.
@@ -487,7 +493,7 @@ export function AssistantWindow({
                         : "var(--foreground)",
                     }}
                   >
-                    {m.text}
+                    {assistantReplyForDisplay(m.text)}
                   </div>
                 </div>
                 {m.commands?.length ? (

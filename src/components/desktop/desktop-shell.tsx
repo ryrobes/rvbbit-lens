@@ -102,6 +102,7 @@ import {
   type AssistantCommand,
 } from "@/lib/desktop/assistant"
 import { useAssistantIdentity } from "@/lib/desktop/assistant-identity"
+import type { AssistantBlockExecutionObservation } from "@/lib/desktop/assistant-execution"
 import {
   buildHtmlBlockSql,
   normalizeHtmlBlockSpec,
@@ -2628,12 +2629,26 @@ export function DesktopShell() {
   // The assistant is an OS-level dock, not a workspace window — she survives
   // workspace switches and never lands in scenes or desktop state.
   const [assistantOpen, setAssistantOpen] = useState(false)
+  const assistantExecutionObservationsRef = useRef<Record<string, AssistantBlockExecutionObservation>>({})
   const [assistantAttention, setAssistantAttention] = useState<{ id: string; token: number } | null>(null)
   const assistantAttentionSequenceRef = useRef(0)
   const assistantAttentionTimerRef = useRef<number | null>(null)
   useEffect(() => {
     setAssistantOpen(loadAssistantDockOpen())
   }, [])
+
+  const reportAssistantExecution = useCallback((
+    windowId: string,
+    observation: AssistantBlockExecutionObservation | null,
+  ) => {
+    if (observation) assistantExecutionObservationsRef.current[windowId] = observation
+    else delete assistantExecutionObservationsRef.current[windowId]
+  }, [])
+
+  const getAssistantExecutionObservations = useCallback(
+    () => assistantExecutionObservationsRef.current,
+    [],
+  )
 
   const calloutWindow = useCallback((id: string) => {
     focus(id)
@@ -5092,6 +5107,7 @@ export function DesktopShell() {
       updatePayload,
       applyAssistantCommands,
       openAssistant,
+      reportAssistantExecution,
       emitParam,
       subscribeParam,
       editRollupSpec,
@@ -5152,7 +5168,7 @@ export function DesktopShell() {
       openTableFromFinder, openSqlInWindow, openPgQueryExplorer, openPgQueryInspector, openPgHistoricalQueryInspector, openMvccExplorer, viewObjectDdl, openField, openViewAppBuilder, openViewApp,
       addLauncherShortcut, addViewAppShortcut, addDashboardShortcut, openDashboardApp, openArtifact,
       openQueryDocument, openSqlData, openRowInspector, openCsvImport, openExtensions, openRvbbitCache, openCache, openConnections,
-      loadSchema, loadConnections, updatePayload, applyAssistantCommands, openAssistant, emitParam, subscribeParam,
+      loadSchema, loadConnections, updatePayload, applyAssistantCommands, openAssistant, reportAssistantExecution, emitParam, subscribeParam,
       editRollupSpec, repivotWindow, probeColumnValues, activePalette, paletteOverrides,
       wallpaperUrl, onPickWallpaper, onClearWallpaper, onApplyLibraryWallpaper, applyUploadedWallpaper,
       onReExtractPalette, onReExtractWithRvbbit, setPaletteOverrides,
@@ -5191,6 +5207,7 @@ export function DesktopShell() {
         schema={schema}
         allWindows={windows}
         params={desktopParams}
+        getExecutionObservations={getAssistantExecutionObservations}
         applyCommands={applyAssistantCommands}
       />
       {wallpaperUrl ? (
@@ -5723,6 +5740,10 @@ interface WindowContext {
     commands: AssistantCommand[],
     options?: AssistantApplyOptions,
   ) => AssistantApplyResult[]
+  reportAssistantExecution: (
+    windowId: string,
+    observation: AssistantBlockExecutionObservation | null,
+  ) => void
   /** Summon the OS-level Assistant dock (e.g. from a block's biography panel). */
   openAssistant: () => void
   windows: DesktopWindowState[]
@@ -5905,6 +5926,7 @@ function renderWindowContent(
           params={ctx.params}
           runSignal={ctx.runSignal}
           onChangePayload={(mut) => ctx.updatePayload(w.id, (p) => mut(p as DataPayload))}
+          onExecutionObservation={ctx.reportAssistantExecution}
           onSaveAsViewApp={(seed) =>
             ctx.openViewAppBuilder({
               initialSql: seed.sql,
