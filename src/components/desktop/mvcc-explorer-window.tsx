@@ -726,9 +726,9 @@ function TableInspector({ table, sample, onOpenSql }: {
       <InspectorStatement title="Unknown">
         {sample.permissions.pgstattuple || sample.permissions.pageinspect
           ? "Exact physical tuple state requires an explicit forensic scan; this live view intentionally does not run one on every refresh."
-          : "Exact bloat and reclaimable bytes require pgstattuple or pageinspect. Dead tuples and heap bytes shown here are estimates."}
+          : "Exact bloat and reclaimable bytes require pgstattuple or pageinspect. Both ship inside PostgreSQL — enabling is one CREATE EXTENSION, built below. Until then, dead tuples and heap bytes are estimates."}
       </InspectorStatement>
-      <div className="border-t border-chrome-border/45 p-3">
+      <div className="flex flex-wrap gap-1.5 border-t border-chrome-border/45 p-3">
         <button
           type="button"
           onClick={() => openVacuumSql(table, onOpenSql)}
@@ -736,6 +736,23 @@ function TableInspector({ table, sample, onOpenSql }: {
         >
           <TerminalSquare className="h-3 w-3" /> Review VACUUM SQL
         </button>
+        {sample.permissions.pgstattuple ? (
+          <button
+            type="button"
+            onClick={() => openForensicScanSql(table, onOpenSql)}
+            className="inline-flex h-7 items-center gap-1.5 rounded-sm border border-brand-mvcc-explorer/40 bg-brand-mvcc-explorer/8 px-2 text-[9px] text-brand-mvcc-explorer transition hover:bg-brand-mvcc-explorer/14"
+          >
+            <Wrench className="h-3 w-3" /> Forensic scan SQL
+          </button>
+        ) : !sample.permissions.pageinspect ? (
+          <button
+            type="button"
+            onClick={() => openEnableExactStatsSql(onOpenSql)}
+            className="inline-flex h-7 items-center gap-1.5 rounded-sm border border-brand-mvcc-explorer/40 bg-brand-mvcc-explorer/8 px-2 text-[9px] text-brand-mvcc-explorer transition hover:bg-brand-mvcc-explorer/14"
+          >
+            <Wrench className="h-3 w-3" /> Enable exact stats (SQL)
+          </button>
+        ) : null}
       </div>
     </div>
   )
@@ -1035,6 +1052,40 @@ function openVacuumSql(table: MvccExplorerTable, onOpenSql: SqlOpener) {
   const relation = `${quoteIdent(table.schema)}.${quoteIdent(table.name)}`
   const sql = `-- Review timing and I/O impact before running.\nVACUUM (VERBOSE, ANALYZE) ${relation};`
   onOpenSql(`Vacuum ${table.schema}.${table.name}`, sql, false)
+}
+
+/** The explicit forensic scan the live view refuses to run on refresh: exact
+ *  tuple-level stats via pgstattuple, built as SQL for the user to fire. */
+function openForensicScanSql(table: MvccExplorerTable, onOpenSql: SqlOpener) {
+  const relation = sqlLiteral(`${quoteIdent(table.schema)}.${quoteIdent(table.name)}`)
+  const sql = [
+    `-- Exact tuple forensics for ${table.schema}.${table.name} (pgstattuple).`,
+    "-- The approx variant uses the visibility map and skips all-visible pages —",
+    "-- start there on large relations.",
+    `SELECT * FROM pgstattuple_approx(${relation}::regclass);`,
+    "",
+    "-- Full scan — reads the ENTIRE relation; exact dead tuples + free space:",
+    `-- SELECT * FROM pgstattuple(${relation}::regclass);`,
+  ].join("\n")
+  onOpenSql(`Forensic scan ${table.schema}.${table.name}`, sql, false)
+}
+
+/** Both forensic extensions ship inside PostgreSQL itself (contrib) — there is
+ *  nothing to install on the server. CREATE EXTENSION just enables them in the
+ *  connected database, so this builds the SQL instead of hiding the gap. */
+function openEnableExactStatsSql(onOpenSql: SqlOpener) {
+  const sql = [
+    "-- Unlock exact MVCC forensics (bloat, reclaimable bytes, tuple state).",
+    "-- Both extensions ship with PostgreSQL — nothing to install on the server;",
+    "-- CREATE EXTENSION enables them in THIS database only.",
+    "",
+    "-- Trusted extension: the database owner can create it (no superuser needed).",
+    "CREATE EXTENSION IF NOT EXISTS pgstattuple;",
+    "",
+    "-- Optional and superuser-only: raw page inspection (per-tuple xmin/xmax).",
+    "-- CREATE EXTENSION IF NOT EXISTS pageinspect;",
+  ].join("\n")
+  onOpenSql("Enable exact MVCC forensics", sql, false)
 }
 
 function quoteIdent(value: string): string {
