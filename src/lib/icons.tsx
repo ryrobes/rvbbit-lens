@@ -131,6 +131,7 @@ export {
   TrendUp as TrendingUp,
   Trophy,
   UploadSimple as Upload,
+  User,
   Users,
   Warning as AlertTriangle,
   Wrench,

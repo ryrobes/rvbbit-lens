@@ -259,7 +259,13 @@ function SceneHoverPreview({ scene }: { scene: Scene }) {
   )
 }
 
-// ── Scene Library — scenes other homes have shared ───────────────────
+// ── Scene Library — scenes other profiles have shared ────────────────
+
+/** Owner attribution: an unnamed profile is a raw UUID — show "unnamed"
+ *  instead of leaking plumbing, and let the tooltip nudge toward naming. */
+function displayOwner(owner: string): string {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-/i.test(owner) ? "unnamed" : owner
+}
 
 function SharedSceneLibrary() {
   const [shared, setShared] = useState<SharedScene[]>([])
@@ -283,7 +289,7 @@ function SharedSceneLibrary() {
   return (
     <div className="border-t border-chrome-border/60">
       <div className="flex items-center gap-1 px-2.5 pb-1 pt-2 text-[9px] uppercase tracking-wider text-chrome-text/45">
-        <Globe className="h-3 w-3" /> Shared by other homes
+        <Globe className="h-3 w-3" /> Shared by others
       </div>
       <div className="max-h-[30vh] overflow-auto pb-1">
         {shared.map(({ owner, scene }) => (
@@ -294,8 +300,16 @@ function SharedSceneLibrary() {
             <Globe className="h-3 w-3 shrink-0 text-rvbbit-accent/70" />
             <div className="min-w-0 flex-1">
               <div className="truncate text-foreground">{scene.name}</div>
-              <div className="truncate text-[9px] text-chrome-text/45">
-                {owner} · {scene.windowCount} {scene.windowCount === 1 ? "window" : "windows"}
+              <div
+                className="truncate text-[9px] text-chrome-text/45"
+                title={
+                  displayOwner(owner) === "unnamed"
+                    ? "Shared from an unnamed profile — naming your profile signs your shared scenes"
+                    : `Shared by ${owner}`
+                }
+              >
+                {displayOwner(owner)} · {scene.windowCount}{" "}
+                {scene.windowCount === 1 ? "window" : "windows"}
               </div>
             </div>
             <button
@@ -305,7 +319,7 @@ function SharedSceneLibrary() {
                 setForked((f) => new Set(f).add(scene.id))
               }}
               disabled={forked.has(scene.id)}
-              title="Copy this scene into your home"
+              title="Copy this scene into your profile"
               className="inline-flex shrink-0 items-center gap-1 rounded border border-chrome-border px-1.5 py-0.5 text-[10px] text-chrome-text/80 hover:border-rvbbit-accent/40 hover:text-foreground disabled:opacity-45"
             >
               <Download className="h-3 w-3" /> {forked.has(scene.id) ? "Forked" : "Fork"}
