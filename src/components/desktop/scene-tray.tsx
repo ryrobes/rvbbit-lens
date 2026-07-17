@@ -11,6 +11,7 @@ import {
 } from "@/lib/desktop/scenes"
 import { getHomeId } from "@/lib/desktop/server-sync"
 import { renderSceneThumbnail } from "@/lib/desktop/scene-thumbnail"
+import { extractSceneFacets } from "@/lib/desktop/scene-facets"
 import type { Scene } from "@/lib/desktop/types"
 
 /** Stored thumbnail if present, else render one on the fly from the scene's
@@ -230,10 +231,13 @@ export function SceneList({
   emptyHint = "No saved Scenes yet.",
   onAfterAction,
   variant = "list",
+  onFacetClick,
 }: SceneActions & {
   emptyHint?: string
   onAfterAction?: () => void
   variant?: "list" | "grid"
+  /** Gallery-search integration: clicking a facet chip filters by it. */
+  onFacetClick?: (facet: string) => void
 }) {
   // Most-recently-updated first — a gallery you scan, not an alphabetized index.
   const sorted = useMemo(
@@ -250,11 +254,12 @@ export function SceneList({
 
   if (variant === "grid") {
     return (
-      <div className="grid max-h-[64vh] grid-cols-2 gap-2 overflow-auto p-1 md:grid-cols-3">
+      <div className="grid grid-cols-2 gap-2 p-1 md:grid-cols-3">
         {sorted.map((s) => (
           <SceneCard
             key={s.id}
             scene={s}
+            onFacetClick={onFacetClick}
             isCurrent={s.id === currentSceneId}
             onOpen={() => {
               onOpen(s.id)
@@ -308,6 +313,7 @@ function SceneCard({
   onRename,
   onDelete,
   nameExists,
+  onFacetClick,
 }: {
   scene: Scene
   isCurrent: boolean
@@ -315,8 +321,10 @@ function SceneCard({
   onRename: (name: string) => void
   onDelete: () => void
   nameExists: (name: string) => boolean
+  onFacetClick?: (facet: string) => void
 }) {
   const [confirmDel, setConfirmDel] = useState(false)
+  const facets = useMemo(() => extractSceneFacets(scene), [scene.id, scene.contentHash])
   return (
     <div
       className={cn(
@@ -330,13 +338,35 @@ function SceneCard({
           <span className="truncate text-[11px] font-medium text-foreground">{scene.name}</span>
           {isCurrent ? <span className="shrink-0 text-[9px] uppercase tracking-wide text-main">open</span> : null}
         </div>
-        <div className="flex items-center justify-between gap-1 px-2 pb-1.5 text-[9px] text-chrome-text/45">
+        <div className="flex items-center justify-between gap-1 px-2 pb-1 text-[9px] text-chrome-text/45">
           <span>
             {scene.windowCount} {scene.windowCount === 1 ? "window" : "windows"}
+            {facets.connectionLabel ? <span className="text-chrome-text/35"> · {facets.connectionLabel}</span> : null}
           </span>
           <span>{fmtAge(scene.updatedAt)}</span>
         </div>
       </button>
+      {facets.tables.length > 0 ? (
+        <div className="flex flex-wrap gap-1 px-2 pb-1.5">
+          {facets.tables.slice(0, 3).map((t) => (
+            <button
+              key={t}
+              type="button"
+              onClick={() => onFacetClick?.(t)}
+              title={onFacetClick ? `Filter scenes touching ${t}` : t}
+              className={cn(
+                "max-w-[9rem] truncate rounded-sm border border-chrome-border/60 bg-foreground/[0.04] px-1 py-px text-[8.5px] text-chrome-text/60",
+                onFacetClick && "hover:border-main/50 hover:text-main",
+              )}
+            >
+              {t.split(".").pop()}
+            </button>
+          ))}
+          {facets.tables.length > 3 ? (
+            <span className="px-0.5 text-[8.5px] text-chrome-text/35">+{facets.tables.length - 3}</span>
+          ) : null}
+        </div>
+      ) : null}
 
       {/* hover actions */}
       <div className="absolute right-1 top-1 flex items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100">

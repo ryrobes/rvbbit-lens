@@ -81,6 +81,7 @@ import { AppearanceWindow } from "./appearance-window"
 import { CommandPalette, type PaletteGroup, type PaletteItem } from "./command-palette"
 import { PgMonitorWindow } from "./pg-monitor-window"
 import { SystemHealthWindow } from "./system-health-window"
+import { ScenesWindow } from "./scenes-window"
 import { PgQueryExplorerWindow } from "./pg-query-explorer-window"
 import { PgQueryInspectorWindow } from "./pg-query-inspector-window"
 import { LockExplorerWindow } from "./lock-explorer-window"
@@ -237,6 +238,7 @@ import type {
   AppearancePayload,
   PalettePayload,
   PgMonitorPayload,
+  ScenesPayload,
   SystemHealthPayload,
   PgQueryExplorerPayload,
   PgQueryInspectorPayload,
@@ -2316,6 +2318,18 @@ export function DesktopShell() {
       title: "System Health",
       x: 140, y: 90, width: 880, height: 700,
       payload: { kind: "system-health" } satisfies SystemHealthPayload,
+    })
+  }, [focus, openWindow, liveWindows])
+
+  const openScenesWindow = useCallback(() => {
+    const existing = liveWindows().find((w) => w.kind === "scenes")
+    if (existing) return focus(existing.id)
+    openWindow({
+      id: randomUUID(),
+      kind: "scenes",
+      title: "Scenes",
+      x: 160, y: 100, width: 860, height: 620,
+      payload: { kind: "scenes" } satisfies ScenesPayload,
     })
   }, [focus, openWindow, liveWindows])
 
@@ -4843,6 +4857,7 @@ export function DesktopShell() {
   // lives on the desktop); `rvbbit` gates it to rvbbit connections.
   const launchers: LauncherItem[] = useMemo(() => [
     { id: "finder", label: "Finder", icon: FolderOpen, color: "var(--brand-finder)", description: "Browse schemas, tables & columns with live rvbbit vitals", activate: openFinder },
+    { id: "scenes", label: "Scenes", icon: Layers, color: "var(--brand-view-apps)", description: "Saved desktops — browse, search & load", activate: openScenesWindow },
     { id: "sql-scratch", label: "SQL Scratch", icon: FileCode2, color: "var(--brand-sql-scratch)", description: "A scratch editor — write SQL, run it, chart the result", activate: openSqlScratch },
     { id: "view-apps", label: "Saved Views", icon: Boxes, color: "var(--brand-view-apps)", sublabel: viewAppCount ? `${viewAppCount} saved` : undefined, description: "Your saved queries, charts & HTML app blocks", activate: openViewApps },
     { id: "connections", label: "Connections", icon: Plug, color: "var(--brand-connections)", description: "Manage Postgres connections", activate: openConnections },
@@ -5197,6 +5212,12 @@ export function DesktopShell() {
       openHfDeploy,
       openWarren,
       openWarrenJob,
+      scenes,
+      currentSceneId,
+      openScene,
+      renameSceneById,
+      deleteSceneById,
+      sceneNameExists,
     }),
     [
       activeConnectionId, hasRvbbit, launchers, schema, semanticOps, schemaLoading, busy, setBusy,
@@ -5214,6 +5235,7 @@ export function DesktopShell() {
       openDataSearch, openDrift, openModelSettings, openModelStudio, openMetricCatalog, openMetricCreator,
       openMetricInspector, openCubeCreator, openCubeInspector, openCosts, openDuck, openCapabilities, openCapabilityDetail,
       openHfDeploy, openWarren, openWarrenJob,
+      scenes, currentSceneId, openScene, renameSceneById, deleteSceneById, sceneNameExists,
     ],
   )
 
@@ -5575,7 +5597,7 @@ export function DesktopShell() {
             {/* Empty Scene slot = the Scene gallery: pick one to load, or
                 save the current desktop from the Scenes menu. */}
             {wsId === SCENE_SLOT && canvas.windows.length === 0 ? (
-              <div className="pointer-events-auto absolute left-1/2 top-1/2 max-h-[80vh] w-[min(56rem,90vw)] -translate-x-1/2 -translate-y-1/2 rounded-xl border border-chrome-border bg-chrome-bg/85 p-3 shadow-2xl backdrop-blur">
+              <div className="pointer-events-auto absolute left-1/2 top-1/2 max-h-[80vh] w-[min(56rem,90vw)] -translate-x-1/2 -translate-y-1/2 overflow-y-auto rounded-xl border border-chrome-border bg-chrome-bg/85 p-3 shadow-2xl backdrop-blur">
                 <div className="flex items-center gap-1.5 px-1 pb-2 pt-0.5 text-[12px] font-medium text-chrome-text/75">
                   <Layers className="h-4 w-4" /> Scenes — saved desktops
                   <span className="ml-auto text-[10px] font-normal text-chrome-text/40">
@@ -5713,6 +5735,12 @@ interface WindowContext {
   openField: (schema: string, rel: string, col: string) => void
   openViewAppBuilder: (seed?: ViewAppBuilderPayload) => void
   openViewApp: (appId: string) => void
+  scenes: Scene[]
+  currentSceneId: string | null
+  openScene: (id: string) => void
+  renameSceneById: (id: string, name: string) => void
+  deleteSceneById: (id: string) => void
+  sceneNameExists: (name: string, exceptId?: string) => boolean
   addLauncherShortcut: (launcher: LauncherItem) => void
   addViewAppShortcut: (app: ViewApp) => void
   addDashboardShortcut: (dashboard: DashboardRow) => void
@@ -6059,6 +6087,17 @@ function renderWindowContent(
       return <ArtifactWindow payload={w.payload as ArtifactPayload} activeConnectionId={ctx.activeConnectionId} />
     case "query-document":
       return <QueryDocumentWindow payload={w.payload as QueryDocumentPayload} />
+    case "scenes":
+      return (
+        <ScenesWindow
+          scenes={ctx.scenes}
+          currentSceneId={ctx.currentSceneId}
+          onOpen={ctx.openScene}
+          onRename={ctx.renameSceneById}
+          onDelete={ctx.deleteSceneById}
+          nameExists={ctx.sceneNameExists}
+        />
+      )
     case "system-health":
       return (
         <SystemHealthWindow
@@ -6708,6 +6747,7 @@ function iconForKind(kind: DesktopWindowState["kind"]) {
     case "palette":
     case "appearance":
       return PaletteIcon
+    case "scenes": return Layers
     case "system-health": return Wrench
     case "pg-monitor": return Activity
     case "pg-query-explorer": return LineChart

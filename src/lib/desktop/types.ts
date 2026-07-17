@@ -27,6 +27,7 @@ export type DesktopWindowKind =
   | "appearance"
   | "pg-monitor"
   | "system-health"
+  | "scenes"
   | "pg-query-explorer"
   | "pg-query-inspector"
   | "lock-explorer"
@@ -129,6 +130,7 @@ export type WindowPayload =
   | AppearancePayload
   | PgMonitorPayload
   | SystemHealthPayload
+  | ScenesPayload
   | PgQueryExplorerPayload
   | PgQueryInspectorPayload
   | LockExplorerPayload
@@ -969,6 +971,10 @@ export interface PgMonitorPayload {
 
 export interface SystemHealthPayload {
   kind?: "system-health"
+}
+
+export interface ScenesPayload {
+  kind?: "scenes"
 }
 
 export interface PgQueryExplorerPayload {
