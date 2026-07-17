@@ -54,8 +54,16 @@ function readStore(): Scene[] {
 function writeStore(scenes: Scene[]): void {
   if (typeof window === "undefined") return
   try {
-    const store: SceneStoreV1 = { schemaVersion: SCENE_SCHEMA_VERSION, scenes }
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(store))
+    try {
+      const store: SceneStoreV1 = { schemaVersion: SCENE_SCHEMA_VERSION, scenes }
+      window.localStorage.setItem(STORAGE_KEY, JSON.stringify(store))
+    } catch {
+      // Quota. Snapshots (real DOM captures) are the only heavy field — shed
+      // them and retry so the save itself survives; mini-maps still render.
+      scenes = scenes.map(({ snapshot: _drop, ...rest }) => rest)
+      const store: SceneStoreV1 = { schemaVersion: SCENE_SCHEMA_VERSION, scenes }
+      window.localStorage.setItem(STORAGE_KEY, JSON.stringify(store))
+    }
     // Same-tab listeners (the tray, the empty-slot gallery) refresh off this;
     // cross-tab refresh rides the native `storage` event on STORAGE_KEY.
     window.dispatchEvent(new Event(SCENES_CHANGED_EVENT))
@@ -186,6 +194,7 @@ export interface SceneInput {
   bundle?: SceneBundle
   visibility?: "private" | "shared"
   thumbnail?: string
+  snapshot?: string
 }
 
 export function upsertScene(input: SceneInput): Scene {
@@ -208,6 +217,7 @@ export function upsertScene(input: SceneInput): Scene {
     contentHash: contentHashOf(input.body),
     windowCount: input.body.windows.length,
     thumbnail: input.thumbnail ?? existing?.thumbnail,
+    snapshot: input.snapshot ?? existing?.snapshot,
     visibility: input.visibility ?? existing?.visibility ?? "private",
     createdAt: existing?.createdAt ?? now,
     updatedAt: now,
@@ -294,6 +304,7 @@ export function forkScene(remote: Scene): Scene {
     connection: remote.connection,
     bundle: remote.bundle,
     thumbnail: remote.thumbnail,
+    snapshot: remote.snapshot,
     visibility: "private",
   })
 }

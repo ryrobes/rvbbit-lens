@@ -319,6 +319,7 @@ import {
   upsertScene,
 } from "@/lib/desktop/scenes"
 import { renderSceneThumbnail } from "@/lib/desktop/scene-thumbnail"
+import { afterMenusSettle, captureSceneSnapshot } from "@/lib/desktop/scene-snapshot"
 import { SceneList } from "./scene-tray"
 import {
   applyRollupOp,
@@ -1494,8 +1495,12 @@ export function DesktopShell() {
   // same window ids as the still-live source — benign: focus is per-canvas,
   // only the global runSignals map can cross-fire a re-run on both.)
   const saveDesktopAsScene = useCallback(
-    (name: string) => {
+    async (name: string) => {
       const body = cloneCanvas(workspaces[activeWorkspace])
+      // Photograph BEFORE switching into the Scene slot — the DOM on screen
+      // right now IS the canvas being saved. Best-effort; null is fine.
+      await afterMenusSettle()
+      const snapshot = await captureSceneSnapshot()
       const scene = upsertScene({
         name,
         body,
@@ -1503,6 +1508,7 @@ export function DesktopShell() {
         connection: sceneConnectionFingerprint(),
         bundle: buildSceneBundle(body.windows),
         thumbnail: renderSceneThumbnail(body) ?? undefined,
+        snapshot: snapshot ?? undefined,
       })
       setWorkspaces((prev) => ({ ...prev, [SCENE_SLOT]: cloneCanvas(body) }))
       setCurrentSceneId(scene.id)
@@ -1512,12 +1518,19 @@ export function DesktopShell() {
   )
 
   // Save — overwrite the open Scene with the live Scene-slot canvas.
-  const saveCurrentScene = useCallback(() => {
+  const saveCurrentScene = useCallback(async () => {
     if (!currentSceneId) return
     const existing = getScene(currentSceneId)
     // Deleted out from under us (e.g. another tab) — don't resurrect it.
     if (!existing) return
     const body = cloneCanvas(workspaces[SCENE_SLOT])
+    // Only photograph when the Scene slot is what's actually on screen —
+    // Save can fire while viewing a numbered slot, and that DOM is a
+    // different desktop than the body being written.
+    const snapshot =
+      activeWorkspace === SCENE_SLOT
+        ? (await afterMenusSettle(), await captureSceneSnapshot())
+        : null
     upsertScene({
       id: currentSceneId,
       name: existing.name,
@@ -1526,8 +1539,9 @@ export function DesktopShell() {
       connection: sceneConnectionFingerprint(),
       bundle: buildSceneBundle(body.windows),
       thumbnail: renderSceneThumbnail(body) ?? undefined,
+      snapshot: snapshot ?? undefined,
     })
-  }, [currentSceneId, workspaces, viewport, sceneConnectionFingerprint])
+  }, [currentSceneId, workspaces, activeWorkspace, viewport, sceneConnectionFingerprint])
 
   // Open — restore a Scene into the Scene slot and switch to it.
   const openScene = useCallback(
@@ -5276,6 +5290,7 @@ export function DesktopShell() {
     <PhosphorIconProvider>
     <div
       className="rvbbit-lens-desktop relative h-screen w-screen overflow-hidden bg-background text-foreground"
+      data-scene-capture-root=""
       data-connection-health={connectionHealth.state}
       onDragEnter={handleCanvasDragEnter}
       onDragLeave={handleCanvasDragLeave}

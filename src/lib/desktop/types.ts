@@ -1281,6 +1281,10 @@ export interface Scene {
   windowCount: number
   /** webp data URL of the window-layout mini-map, generated on save. */
   thumbnail?: string
+  /** webp data URL of a real DOM capture of the desktop at save time.
+   *  Best-effort: cross-origin iframe content comes out blank and capture can
+   *  fail outright — the geometry `thumbnail` is the always-works fallback. */
+  snapshot?: string
   /** Sharing: 'shared' scenes appear in other homes' Scene Library. Client-
    *  tracked and carried to the server shadow (default 'private'). */
   visibility?: "private" | "shared"

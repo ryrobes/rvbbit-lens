@@ -30,6 +30,31 @@ function SceneThumb({ scene, className }: { scene: Scene; className?: string }) 
   return <img src={src} alt="" aria-hidden className={cn("object-cover", className)} />
 }
 
+/** The photograph (real DOM capture) when the scene has one, with the derived
+ *  object map inset in the corner; scenes without a snapshot get the map
+ *  full-bleed, exactly as before. */
+function SceneShot({ scene, className }: { scene: Scene; className?: string }) {
+  const map = useSceneThumb(scene)
+  const photo = scene.snapshot ?? null
+  const main = photo ?? map
+  if (!main) return <div className={cn("bg-foreground/[0.04]", className)} />
+  return (
+    <div className={cn("relative overflow-hidden", className)}>
+      {/* eslint-disable-next-line @next/next/no-img-element */}
+      <img src={main} alt="" aria-hidden className="h-full w-full object-cover" />
+      {photo && map ? (
+        // eslint-disable-next-line @next/next/no-img-element
+        <img
+          src={map}
+          alt=""
+          aria-hidden
+          className="absolute bottom-1 right-1 w-[30%] rounded-sm border border-chrome-border/80 bg-chrome-bg/90 shadow-md"
+        />
+      ) : null}
+    </div>
+  )
+}
+
 /** Copy a share link. Copying IS sharing: the scene is marked shared (the
  *  server only resolves shared ids), then the URL lands on the clipboard. */
 function useCopySceneLink(scene: Scene): { copied: boolean; copy: () => void } {
@@ -83,14 +108,21 @@ export function SceneTray({
   const [hovered, setHovered] = useState<Scene | null>(null)
   const wrapRef = useRef<HTMLDivElement>(null)
 
-  useEffect(() => {
-    if (!open) setHovered(null)
-  }, [open])
+  // Open/close both reset the hover panel — done at the transition sites
+  // rather than an effect (setState-in-effect cascades renders).
+  const toggleOpen = () => {
+    setHovered(null)
+    setOpen((v) => !v)
+  }
+  const close = () => {
+    setHovered(null)
+    setOpen(false)
+  }
 
   useEffect(() => {
     if (!open) return
     const h = (e: MouseEvent) => {
-      if (wrapRef.current && !wrapRef.current.contains(e.target as Node)) setOpen(false)
+      if (wrapRef.current && !wrapRef.current.contains(e.target as Node)) close()
     }
     document.addEventListener("mousedown", h, true)
     return () => document.removeEventListener("mousedown", h, true)
@@ -106,14 +138,14 @@ export function SceneTray({
     if (!canSaveAs) return
     onSaveAs(draftName)
     setDraft("")
-    setOpen(false)
+    close()
   }
 
   return (
     <div ref={wrapRef} className="relative" style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}>
       <button
         type="button"
-        onClick={() => setOpen((v) => !v)}
+        onClick={toggleOpen}
         aria-pressed={open}
         title={sceneName ? `Scene: ${sceneName}${dirty ? " (unsaved)" : ""}` : "Scenes — save / open a desktop"}
         className={cn(
@@ -127,7 +159,7 @@ export function SceneTray({
       </button>
 
       {open ? (
-        <div className="absolute left-0 top-7 z-50 w-72 overflow-hidden rounded-md border border-chrome-border bg-chrome-bg shadow-xl">
+        <div data-no-snapshot="" className="absolute left-0 top-7 z-50 w-72 overflow-hidden rounded-md border border-chrome-border bg-chrome-bg shadow-xl">
           {/* Save / Save As */}
           <div className="space-y-1.5 border-b border-chrome-border/60 p-2">
             {canSave ? (
@@ -135,7 +167,7 @@ export function SceneTray({
                 type="button"
                 onClick={() => {
                   onSave()
-                  setOpen(false)
+                  close()
                 }}
                 className="flex w-full items-center gap-1.5 rounded bg-main/15 px-2 py-1 text-[11px] font-medium text-main hover:bg-main/25"
               >
@@ -173,7 +205,7 @@ export function SceneTray({
           <SceneList
             {...actions}
             emptyHint="No saved Scenes yet."
-            onAfterAction={() => setOpen(false)}
+            onAfterAction={close}
             onHoverScene={setHovered}
           />
 
@@ -192,8 +224,8 @@ export function SceneTray({
 function SceneHoverPreview({ scene }: { scene: Scene }) {
   const facets = extractSceneFacets(scene)
   return (
-    <div className="pointer-events-none absolute left-[18.75rem] top-7 z-50 w-64 overflow-hidden rounded-md border border-chrome-border bg-chrome-bg shadow-xl">
-      <SceneThumb scene={scene} className="aspect-[16/10] w-full" />
+    <div data-no-snapshot="" className="pointer-events-none absolute left-[18.75rem] top-7 z-50 w-64 overflow-hidden rounded-md border border-chrome-border bg-chrome-bg shadow-xl">
+      <SceneShot scene={scene} className="aspect-[16/10] w-full" />
       <div className="space-y-1 p-2">
         <div className="flex items-baseline justify-between gap-2">
           <span className="truncate text-[11.5px] font-medium text-foreground">{scene.name}</span>
@@ -397,7 +429,7 @@ function SceneCard({
       )}
     >
       <button type="button" onClick={onOpen} className="block w-full text-left" title={`Open “${scene.name}”`}>
-        <SceneThumb scene={scene} className="aspect-[16/10] w-full" />
+        <SceneShot scene={scene} className="aspect-[16/10] w-full" />
         <div className="flex items-baseline justify-between gap-1 px-2 py-1">
           <span className="truncate text-[11px] font-medium text-foreground">{scene.name}</span>
           {isCurrent ? <span className="shrink-0 text-[9px] uppercase tracking-wide text-main">open</span> : null}
