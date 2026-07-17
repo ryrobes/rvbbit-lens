@@ -152,3 +152,6 @@ export {
   SpeakerSlash as VolumeX,
   Waveform as Waveform,
 } from "@phosphor-icons/react"
+
+// Scene share-link.
+export { LinkSimple as Link2 } from "@phosphor-icons/react"

@@ -274,19 +274,40 @@ export function setSceneVisibility(id: string, shared: boolean): Scene | null {
   })
 }
 
-/** Copy a (typically shared, from another home) scene into your own home. */
+/** Copy a (typically shared, from another home) scene into your own home.
+ *  The body arrived over the wire — normalize the shapes every consumer
+ *  assumes (arrays are arrays) instead of trusting the sender. */
 export function forkScene(remote: Scene): Scene {
   const name = sceneNameExists(remote.name) ? `${remote.name} (copy)` : remote.name
+  const body: WorkspaceCanvas = {
+    windows: Array.isArray(remote.body?.windows) ? remote.body.windows : [],
+    zSeed: typeof remote.body?.zSeed === "number" ? remote.body.zSeed : 1,
+    params: Array.isArray(remote.body?.params) ? remote.body.params : [],
+    focusedWindowId: remote.body?.focusedWindowId ?? null,
+  }
   return upsertScene({
     // no id → a fresh scene owned by this home
     name,
     description: remote.description,
-    body: remote.body,
+    body,
     viewport: remote.viewport,
     connection: remote.connection,
     bundle: remote.bundle,
+    thumbnail: remote.thumbnail,
     visibility: "private",
   })
+}
+
+/** Fetch one shared scene by id (the share-link path). Null on miss/private. */
+export async function fetchSharedSceneById(id: string): Promise<Scene | null> {
+  try {
+    const r = (await fetch(`/api/lens/scene?id=${encodeURIComponent(id)}`).then((x) =>
+      x.ok ? x.json() : null,
+    )) as { ok?: boolean; scene?: Scene } | null
+    return r?.ok && r.scene ? r.scene : null
+  } catch {
+    return null
+  }
 }
 
 export interface SharedScene {

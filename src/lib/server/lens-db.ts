@@ -323,6 +323,23 @@ export function listSharedScenes(excludeHome: string): Array<{ owner: string; sc
 }
 
 /**
+ * Fetch ONE scene by id for the share-link path. Gated to visibility='shared':
+ * copying a link is what shares a scene, so a private scene's id — even if it
+ * leaks — resolves to nothing. Returns { owner, scene } or null.
+ */
+export function getSharedSceneById(id: string): { owner: string; scene: unknown } | null {
+  const row = lensDb()
+    .prepare(`SELECT home_id, spec_json FROM lens_scene WHERE id = ? AND visibility = 'shared'`)
+    .get(id) as { home_id?: string; spec_json?: string } | undefined
+  if (!row?.spec_json) return null
+  try {
+    return { owner: row.home_id ?? "", scene: JSON.parse(row.spec_json) }
+  } catch {
+    return null
+  }
+}
+
+/**
  * Replace this home's scene set with the supplied list: upsert each incoming
  * scene (preserving its original created_at) and delete any of the home's
  * scenes no longer present. Runs in one transaction so a reader never sees a

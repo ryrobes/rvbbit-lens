@@ -308,6 +308,8 @@ import {
   buildSceneBundle,
   contentHashOf,
   deleteScene,
+  fetchSharedSceneById,
+  forkScene,
   getScene,
   listScenes,
   renameScene,
@@ -1555,6 +1557,31 @@ export function DesktopShell() {
     },
     [currentSceneId, workspaces, connections, switchWorkspace],
   )
+
+  // Share-link entry: /?scene=<id>. A local scene opens directly; a foreign
+  // one is fetched from the server shadow (shared-only) and FORKED — scene ids
+  // are a global PK server-side, so adopting the id would let a later save
+  // hijack the original owner's row. The param is stripped either way.
+  const sceneLinkHandledRef = useRef(false)
+  useEffect(() => {
+    if (sceneLinkHandledRef.current) return
+    const params = new URLSearchParams(window.location.search)
+    const linkId = params.get("scene")
+    if (!linkId) return
+    sceneLinkHandledRef.current = true
+    params.delete("scene")
+    const clean = `${window.location.pathname}${params.size ? `?${params}` : ""}`
+    window.history.replaceState(null, "", clean)
+    if (getScene(linkId)) {
+      openScene(linkId)
+      return
+    }
+    void fetchSharedSceneById(linkId).then((remote) => {
+      if (!remote) return
+      const mine = forkScene(remote)
+      openScene(mine.id)
+    })
+  }, [openScene])
 
   const renameSceneById = useCallback((id: string, name: string) => {
     renameScene(id, name)
@@ -5982,7 +6009,15 @@ function renderWindowContent(
         />
       )
     case "data": {
-      const dataPayload = w.payload as DataPayload
+      // Imported scenes arrive over the wire — never trust a payload to exist.
+      const dataPayload = (w.payload ?? {}) as DataPayload
+      if (typeof dataPayload.sql !== "string") {
+        return (
+          <div className="flex h-full items-center justify-center p-4 text-center text-[11.5px] text-chrome-text/50">
+            This window arrived without its query and can’t be restored.
+          </div>
+        )
+      }
       const windowConnectionId = dataPayload.connectionId ?? ctx.activeConnectionId
       const usesActiveConnection = !dataPayload.connectionId || dataPayload.connectionId === ctx.activeConnectionId
       return (
@@ -6625,7 +6660,7 @@ function renderWindowContent(
         />
       )
     case "dashboard-app": {
-      const appPayload = w.payload as DashboardAppPayload
+      const appPayload = (w.payload ?? {}) as DashboardAppPayload
       return (
         <DashboardsWindow
           key={`${ctx.activeConnectionId ?? "none"}:${appPayload.slug}`}

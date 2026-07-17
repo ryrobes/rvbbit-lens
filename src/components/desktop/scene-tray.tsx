@@ -1,7 +1,7 @@
 "use client"
 
 import { useEffect, useMemo, useRef, useState } from "react"
-import { Check, ChevronRight, Download, Globe, Layers, Pencil, Plus, Save, Trash2, X } from "@/lib/icons"
+import { Check, ChevronRight, Download, Globe, Layers, Link2, Pencil, Plus, Save, Trash2, X } from "@/lib/icons"
 import { cn } from "@/lib/utils"
 import {
   fetchSharedScenes,
@@ -28,6 +28,20 @@ function SceneThumb({ scene, className }: { scene: Scene; className?: string }) 
   if (!src) return <div className={cn("bg-foreground/[0.04]", className)} />
   // eslint-disable-next-line @next/next/no-img-element
   return <img src={src} alt="" aria-hidden className={cn("object-cover", className)} />
+}
+
+/** Copy a share link. Copying IS sharing: the scene is marked shared (the
+ *  server only resolves shared ids), then the URL lands on the clipboard. */
+function useCopySceneLink(scene: Scene): { copied: boolean; copy: () => void } {
+  const [copied, setCopied] = useState(false)
+  const copy = () => {
+    if (scene.visibility !== "shared") setSceneVisibility(scene.id, true)
+    const url = `${window.location.origin}${window.location.pathname}?scene=${scene.id}`
+    void navigator.clipboard?.writeText(url).catch(() => {})
+    setCopied(true)
+    window.setTimeout(() => setCopied(false), 1500)
+  }
+  return { copied, copy }
 }
 
 interface SceneActions {
@@ -66,7 +80,12 @@ export function SceneTray({
 }: SceneTrayProps) {
   const [open, setOpen] = useState(false)
   const [draft, setDraft] = useState("")
+  const [hovered, setHovered] = useState<Scene | null>(null)
   const wrapRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    if (!open) setHovered(null)
+  }, [open])
 
   useEffect(() => {
     if (!open) return
@@ -151,12 +170,53 @@ export function SceneTray({
           </div>
 
           {/* Your saved desktops */}
-          <SceneList {...actions} emptyHint="No saved Scenes yet." onAfterAction={() => setOpen(false)} />
+          <SceneList
+            {...actions}
+            emptyHint="No saved Scenes yet."
+            onAfterAction={() => setOpen(false)}
+            onHoverScene={setHovered}
+          />
 
           {/* Scenes other homes have shared — fork to grab a copy */}
           <SharedSceneLibrary />
         </div>
       ) : null}
+
+      {/* Hover preview - a side panel, deliberately NOT a tooltip: it never
+          steals the pointer and sits beside the dropdown. */}
+      {open && hovered ? <SceneHoverPreview scene={hovered} /> : null}
+    </div>
+  )
+}
+
+function SceneHoverPreview({ scene }: { scene: Scene }) {
+  const facets = extractSceneFacets(scene)
+  return (
+    <div className="pointer-events-none absolute left-[18.75rem] top-7 z-50 w-64 overflow-hidden rounded-md border border-chrome-border bg-chrome-bg shadow-xl">
+      <SceneThumb scene={scene} className="aspect-[16/10] w-full" />
+      <div className="space-y-1 p-2">
+        <div className="flex items-baseline justify-between gap-2">
+          <span className="truncate text-[11.5px] font-medium text-foreground">{scene.name}</span>
+          <span className="shrink-0 text-[9px] text-chrome-text/45">{fmtAge(scene.updatedAt)}</span>
+        </div>
+        <div className="text-[10px] text-chrome-text/55">
+          {scene.windowCount} {scene.windowCount === 1 ? "window" : "windows"}
+          {facets.connectionLabel ? ` \u00b7 ${facets.connectionLabel}` : null}
+          {scene.visibility === "shared" ? " \u00b7 shared" : null}
+        </div>
+        {facets.tables.length > 0 ? (
+          <div className="flex flex-wrap gap-1 pt-0.5">
+            {facets.tables.slice(0, 6).map((t) => (
+              <span key={t} className="max-w-[10rem] truncate rounded-sm border border-chrome-border/60 bg-foreground/[0.04] px-1 py-px text-[8.5px] text-chrome-text/60">
+                {t.split(".").pop()}
+              </span>
+            ))}
+            {facets.tables.length > 6 ? (
+              <span className="px-0.5 text-[8.5px] text-chrome-text/35">+{facets.tables.length - 6}</span>
+            ) : null}
+          </div>
+        ) : null}
+      </div>
     </div>
   )
 }
@@ -232,12 +292,15 @@ export function SceneList({
   onAfterAction,
   variant = "list",
   onFacetClick,
+  onHoverScene,
 }: SceneActions & {
   emptyHint?: string
   onAfterAction?: () => void
   variant?: "list" | "grid"
   /** Gallery-search integration: clicking a facet chip filters by it. */
   onFacetClick?: (facet: string) => void
+  /** List-variant hover reporting — powers the tray's side preview panel. */
+  onHoverScene?: (scene: Scene | null) => void
 }) {
   // Most-recently-updated first — a gallery you scan, not an alphabetized index.
   const sorted = useMemo(
@@ -280,6 +343,7 @@ export function SceneList({
         <SceneRow
           key={s.id}
           scene={s}
+          onHoverScene={onHoverScene}
           isCurrent={s.id === currentSceneId}
           onOpen={() => {
             onOpen(s.id)
@@ -370,6 +434,7 @@ function SceneCard({
 
       {/* hover actions */}
       <div className="absolute right-1 top-1 flex items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100">
+        <CopyLinkButton scene={scene} className="rounded bg-background/70 p-1 backdrop-blur" />
         <button
           type="button"
           onClick={() => setSceneVisibility(scene.id, scene.visibility !== "shared")}
@@ -402,6 +467,23 @@ function SceneCard({
   )
 }
 
+function CopyLinkButton({ scene, className }: { scene: Scene; className?: string }) {
+  const { copied, copy } = useCopySceneLink(scene)
+  return (
+    <button
+      type="button"
+      onClick={copy}
+      title={copied ? "Link copied — the scene is now shared" : "Copy share link (marks the scene shared)"}
+      className={cn(
+        className,
+        copied ? "text-success" : "text-chrome-text/60 hover:text-main",
+      )}
+    >
+      {copied ? <Check className="h-3 w-3" /> : <Link2 className="h-3 w-3" />}
+    </button>
+  )
+}
+
 function SceneRow({
   scene,
   isCurrent,
@@ -409,6 +491,7 @@ function SceneRow({
   onRename,
   onDelete,
   nameExists,
+  onHoverScene,
 }: {
   scene: Scene
   isCurrent: boolean
@@ -416,6 +499,7 @@ function SceneRow({
   onRename: (name: string) => void
   onDelete: () => void
   nameExists: (name: string) => boolean
+  onHoverScene?: (scene: Scene | null) => void
 }) {
   const [renaming, setRenaming] = useState(false)
   const [name, setName] = useState(scene.name)
@@ -433,6 +517,8 @@ function SceneRow({
 
   return (
     <div
+      onMouseEnter={() => onHoverScene?.(scene)}
+      onMouseLeave={() => onHoverScene?.(null)}
       className={cn(
         "group mx-1 flex items-center gap-1.5 rounded px-1.5 py-1 text-[11px]",
         isCurrent ? "bg-main/10" : "hover:bg-foreground/[0.06]",
@@ -510,6 +596,7 @@ function SceneRow({
         </div>
       ) : (
         <div className="flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100">
+          <CopyLinkButton scene={scene} className="rounded p-0.5" />
           {!renaming ? (
             <button
               type="button"
