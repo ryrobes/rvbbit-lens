@@ -43,6 +43,7 @@ import {
   TreeStructure,
   Upload,
   Wand2,
+  Wrench,
   ZoomIn,
   ZoomOut,
 } from "@/lib/icons"
@@ -79,6 +80,7 @@ import { PaletteWindow } from "./palette-window"
 import { AppearanceWindow } from "./appearance-window"
 import { CommandPalette, type PaletteGroup, type PaletteItem } from "./command-palette"
 import { PgMonitorWindow } from "./pg-monitor-window"
+import { SystemHealthWindow } from "./system-health-window"
 import { PgQueryExplorerWindow } from "./pg-query-explorer-window"
 import { PgQueryInspectorWindow } from "./pg-query-inspector-window"
 import { LockExplorerWindow } from "./lock-explorer-window"
@@ -235,6 +237,7 @@ import type {
   AppearancePayload,
   PalettePayload,
   PgMonitorPayload,
+  SystemHealthPayload,
   PgQueryExplorerPayload,
   PgQueryInspectorPayload,
   LockExplorerPayload,
@@ -2298,6 +2301,18 @@ export function DesktopShell() {
       title: "Postgres Monitor",
       x: 120, y: 80, width: 940, height: 720,
       payload: { kind: "pg-monitor" } satisfies PgMonitorPayload,
+    })
+  }, [focus, openWindow, liveWindows])
+
+  const openSystemHealth = useCallback(() => {
+    const existing = liveWindows().find((w) => w.kind === "system-health")
+    if (existing) return focus(existing.id)
+    openWindow({
+      id: randomUUID(),
+      kind: "system-health",
+      title: "System Health",
+      x: 140, y: 90, width: 880, height: 700,
+      payload: { kind: "system-health" } satisfies SystemHealthPayload,
     })
   }, [focus, openWindow, liveWindows])
 
@@ -4836,6 +4851,7 @@ export function DesktopShell() {
     { id: "system-objects", label: "System Objects", icon: Layers, color: "var(--brand-system-objects)", description: "Tables, indexes, roles, activity", activate: () => openSystemObjects("tables"), folder: "system" },
     { id: "extensions", label: "Extensions", icon: Settings2, color: "var(--brand-extensions)", description: "Installed Postgres extensions", activate: openExtensions, folder: "system" },
     { id: "monitor", label: "Monitor", icon: Activity, color: "var(--brand-pg-monitor)", description: "Live server activity & stats", activate: openPgMonitor, folder: "system" },
+    { id: "system-health", label: "Health", icon: Wrench, color: "var(--rvbbit-accent)", description: "rvbbit metadata weight & maintenance", activate: openSystemHealth, folder: "system", rvbbit: true },
     { id: "query-explorer", label: "Query Explorer", icon: LineChart, color: "var(--brand-pg-monitor)", description: "Historical normalized queries, runtime & notable evidence", activate: openPgQueryExplorer, folder: "system" },
     { id: "lock-explorer", label: "Lock Explorer", icon: Lock, color: "var(--brand-lock-explorer)", description: "Live blocker chains, resources & replay", activate: openLockExplorer, folder: "system" },
     { id: "mvcc-explorer", label: "MVCC Explorer", icon: Layers, color: "var(--brand-mvcc-explorer)", description: "Vacuum horizons, pressure & workers", activate: () => openMvccExplorer(), folder: "system" },
@@ -6036,6 +6052,13 @@ function renderWindowContent(
       return <ArtifactWindow payload={w.payload as ArtifactPayload} activeConnectionId={ctx.activeConnectionId} />
     case "query-document":
       return <QueryDocumentWindow payload={w.payload as QueryDocumentPayload} />
+    case "system-health":
+      return (
+        <SystemHealthWindow
+          activeConnectionId={ctx.activeConnectionId}
+          onOpenSql={ctx.openSqlInWindow}
+        />
+      )
     case "pg-monitor":
       return (
         <PgMonitorWindow
@@ -6678,6 +6701,7 @@ function iconForKind(kind: DesktopWindowState["kind"]) {
     case "palette":
     case "appearance":
       return PaletteIcon
+    case "system-health": return Wrench
     case "pg-monitor": return Activity
     case "pg-query-explorer": return LineChart
     case "lock-explorer": return Lock
