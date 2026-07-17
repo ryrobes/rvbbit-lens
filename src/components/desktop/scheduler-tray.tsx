@@ -17,6 +17,7 @@ import {
   Plus,
   RefreshCw,
   Trash2,
+  Wrench,
   X,
   Zap,
 } from "@/lib/icons"
@@ -40,6 +41,8 @@ import {
   listCronJobs,
   listCronRuns,
   runDetached,
+  isMaintainJob,
+  maintenanceInstallSql,
   scheduleSql,
   BRAIN_SYNC_COMMAND,
   ROUTE_OPTIMIZE_COMMAND,
@@ -225,6 +228,7 @@ export function SchedulerTray({ activeConnectionId, hasRvbbit, onOpenSql, onOpen
   const status = useMemo(() => trayStatus(state, jobs), [state, jobs])
   const crawlJob = jobs.find(isCatalogJob)
   const accelTickJob = jobs.find(isAccelTickJob)
+  const maintainJobs = jobs.filter(isMaintainJob)
   const syncJob = jobs.find(isSyncJob)
   const alertJobs = jobs.filter(isAlertJob)
   const metricsJob = jobs.find(isMetricsJob)
@@ -334,6 +338,17 @@ export function SchedulerTray({ activeConnectionId, hasRvbbit, onOpenSql, onOpen
                       onSchedule={() =>
                         void mutate(scheduleSql("rvbbit_olap_autopilot", "* * * * *", ACCEL_TICK_COMMAND, targetDb))
                       }
+                    />
+                  </div>
+                ) : null}
+
+                {/* metadata maintenance preset */}
+                {hasRvbbit ? (
+                  <div className="mt-1">
+                    <MaintenancePreset
+                      jobs={maintainJobs}
+                      busy={busy}
+                      onSchedule={() => void mutate(maintenanceInstallSql(targetDb))}
                     />
                   </div>
                 ) : null}
@@ -581,6 +596,38 @@ function AccelTickPreset({ job, busy, onSchedule }: { job?: CronJob; busy: boole
         className="ml-auto rounded bg-rvbbit-accent/15 px-2 py-0.5 text-[11px] font-medium text-rvbbit-accent hover:bg-rvbbit-accent/25 disabled:opacity-40"
       >
         Schedule autopilot
+      </button>
+    </div>
+  )
+}
+
+// ── Metadata maintenance preset ─────────────────────────────────────
+
+function MaintenancePreset({ jobs, busy, onSchedule }: { jobs: CronJob[]; busy: boolean; onSchedule: () => void }) {
+  if (jobs.length > 0) {
+    return (
+      <div className="flex items-center gap-2 rounded-md border border-rvbbit-accent/30 bg-rvbbit-bg/30 px-2.5 py-1.5">
+        <Wrench className="h-3.5 w-3.5 shrink-0 text-rvbbit-accent" />
+        <span className="text-[11px] text-chrome-text/80">
+          Metadata maintenance — <span className="text-foreground">{jobs.length} job{jobs.length > 1 ? "s" : ""}</span>
+        </span>
+        <span className={cn("ml-auto h-1.5 w-1.5 rounded-full", jobs.some((j) => j.active) ? "bg-success" : "bg-chrome-text/40")} />
+      </div>
+    )
+  }
+  return (
+    <div className="flex items-center gap-2 rounded-md border border-chrome-border bg-secondary-background/40 px-2.5 py-1.5">
+      <Wrench className="h-3.5 w-3.5 shrink-0 text-chrome-text/60" />
+      <span className="text-[11px] text-chrome-text/70">
+        Keep rvbbit metadata lean — 15-min maintenance sweep + hourly storage pass.
+      </span>
+      <button
+        type="button"
+        disabled={busy}
+        onClick={onSchedule}
+        className="ml-auto rounded bg-rvbbit-accent/15 px-2 py-0.5 text-[11px] font-medium text-rvbbit-accent hover:bg-rvbbit-accent/25 disabled:opacity-40"
+      >
+        Schedule maintenance
       </button>
     </div>
   )

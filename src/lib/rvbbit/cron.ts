@@ -258,6 +258,27 @@ export function alertsInstallSql(targetDb: string): string {
     ].join(",\n       ")
   )
 }
+/** Install the two metadata-maintenance jobs (matches what
+ *  rvbbit.install_maintenance_jobs() schedules when run in the home db):
+ *  a 15-minute maintain() sweep and an hourly storage pass. Same
+ *  home-db→target-db model as the alerts installer. */
+export function maintenanceInstallSql(targetDb: string): string {
+  const sched = (name: string, schedule: string, cmd: string) =>
+    `cron.schedule_in_database(${q(name)}, ${q(schedule)}, ${q(cmd)}, ${q(targetDb)})`
+  return (
+    "SELECT " +
+    [
+      sched("rvbbit-maintain", "*/15 * * * *", "SELECT rvbbit.maintain();"),
+      sched("rvbbit-storage-maintain", "0 * * * *", "SELECT rvbbit.maintain(storage_tables => 2);"),
+    ].join(",\n       ")
+  )
+}
+
+/** Does this job run the metadata maintenance sweep? */
+export function isMaintainJob(j: CronJob): boolean {
+  return /rvbbit[-_](storage[-_])?maintain/i.test(j.jobname ?? "") || /rvbbit\.maintain\(/i.test(j.command)
+}
+
 export function setActiveSql(jobid: number, active: boolean): string {
   return `SELECT cron.alter_job(job_id := ${jobid}, active := ${active})`
 }
