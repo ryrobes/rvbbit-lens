@@ -33,9 +33,11 @@ import {
   loadVoiceSettings,
   saveVoiceSettings,
   synthesizeSpeech,
+  listVoices,
   ttsReady,
   getVoicePlayer,
   type VoiceSettings,
+  type VoiceOption,
 } from "@/lib/desktop/assistant-voice"
 import { Loader2 } from "@/lib/icons"
 import { AssistantIdentityMark } from "./assistant-identity-mark"
@@ -79,6 +81,9 @@ export function AssistantSettingsWindow({
   const [voice, setVoice] = useState<VoiceSettings>(() => loadVoiceSettings())
   const [voiceTest, setVoiceTest] = useState<string | null>(null)
   const [voiceTesting, setVoiceTesting] = useState(false)
+  const [voiceList, setVoiceList] = useState<VoiceOption[]>([])
+  const [voicesLoading, setVoicesLoading] = useState(false)
+  const [voicesNote, setVoicesNote] = useState<string | null>(null)
 
   const updateVoice = useCallback((patch: Partial<VoiceSettings>) => {
     setVoice((prev) => {
@@ -87,6 +92,24 @@ export function AssistantSettingsWindow({
       return next
     })
   }, [])
+
+  const onLoadVoices = useCallback(async () => {
+    setVoicesNote(null)
+    if (!voice.elevenKey.trim()) {
+      setVoicesNote("Add your key first.")
+      return
+    }
+    setVoicesLoading(true)
+    try {
+      const list = await listVoices(voice.elevenKey)
+      setVoiceList(list)
+      setVoicesNote(list.length ? `${list.length} voices loaded` : "No voices on this account.")
+    } catch (e) {
+      setVoicesNote(e instanceof Error ? e.message : "couldn't load voices")
+    } finally {
+      setVoicesLoading(false)
+    }
+  }, [voice.elevenKey])
 
   const onTestVoice = useCallback(async () => {
     setVoiceTest(null)
@@ -417,14 +440,40 @@ export function AssistantSettingsWindow({
             />
           </div>
           <div>
-            <label className="mb-1 block text-[11px] text-chrome-text/70">
-              Voice ID
-            </label>
+            <div className="mb-1 flex items-center justify-between">
+              <label className="text-[11px] text-chrome-text/70">Voice</label>
+              <button
+                type="button"
+                onClick={() => void onLoadVoices()}
+                disabled={voicesLoading}
+                className="flex items-center gap-1 text-[10px] uppercase tracking-wide text-main/70 hover:text-main disabled:opacity-40"
+              >
+                {voicesLoading ? <Loader2 className="h-3 w-3 animate-spin" /> : null}
+                Load my voices
+              </button>
+            </div>
+            {voiceList.length > 0 ? (
+              <select
+                value={voiceList.some((v) => v.id === voice.voiceId) ? voice.voiceId : ""}
+                onChange={(e) => updateVoice({ voiceId: e.target.value })}
+                className="mb-1.5 w-full rounded-md border border-chrome-border/60 bg-chrome-bg/30 px-2.5 py-1.5 text-[12px] outline-none focus:border-main/50"
+              >
+                <option value="" disabled>
+                  Choose a voice…
+                </option>
+                {voiceList.map((v) => (
+                  <option key={v.id} value={v.id}>
+                    {v.name}
+                    {v.category ? ` · ${v.category}` : ""}
+                  </option>
+                ))}
+              </select>
+            ) : null}
             <div className="flex gap-1.5">
               <input
                 value={voice.voiceId}
                 onChange={(e) => updateVoice({ voiceId: e.target.value })}
-                placeholder="e.g. 21m00Tcm4TlvDq8ikWAM"
+                placeholder="or paste a voice ID"
                 autoComplete="off"
                 spellCheck={false}
                 className="flex-1 rounded-md border border-chrome-border/60 bg-chrome-bg/30 px-2.5 py-1.5 text-[12px] outline-none focus:border-main/50"
@@ -439,6 +488,9 @@ export function AssistantSettingsWindow({
                 Test
               </button>
             </div>
+            {voicesNote ? (
+              <p className="mt-1 text-[10.5px] text-chrome-text/60">{voicesNote}</p>
+            ) : null}
             {voiceTest ? (
               <p className="mt-1 text-[10.5px] text-chrome-text/60">{voiceTest}</p>
             ) : null}

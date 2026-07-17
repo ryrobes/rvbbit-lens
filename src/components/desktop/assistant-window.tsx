@@ -347,7 +347,14 @@ export function AssistantWindow({
   const [recording, setRecording] = useState(false)
   const [voiceBusy, setVoiceBusy] = useState(false)
   const recorderRef = useRef<MediaRecorder | null>(null)
+  const micCtxRef = useRef<AudioContext | null>(null)
+  const micAnalyserRef = useRef<AnalyserNode | null>(null)
+  const sendAfterRef = useRef(false)
+  const cancelledRef = useRef(false)
   const spokenIdRef = useRef<string | null>(null)
+  // send() is declared below; recording finishes async and may fire it, so
+  // reach it through a ref rather than a declaration-order dependency.
+  const sendRef = useRef<(text?: string) => void>(() => {})
   const player = getVoicePlayer()
 
   // Voice settings live in localStorage (browser-local L1); re-read on focus so
@@ -402,28 +409,63 @@ export function AssistantWindow({
     void speakMessage(last.id, last.text)
   }, [messages, busy, voice.ttsEnabled, voice.autoSpeak, speakMessage])
 
-  const toggleMic = useCallback(async () => {
-    if (recording) {
-      recorderRef.current?.stop()
-      return
-    }
+  // Finish the current recording. `send` => transcribe and fire the turn with
+  // no edit phase; otherwise the transcript lands in the draft for review.
+  const finishRecording = useCallback((send: boolean) => {
+    if (!recorderRef.current) return
+    sendAfterRef.current = send
+    cancelledRef.current = false
+    recorderRef.current.stop()
+  }, [])
+
+  const cancelRecording = useCallback(() => {
+    if (!recorderRef.current) return
+    cancelledRef.current = true
+    recorderRef.current.stop()
+  }, [])
+
+  const startRecording = useCallback(async () => {
     const settings = loadVoiceSettings()
-    if (!sttReady(settings)) return
+    if (!sttReady(settings) || recording) return
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      // Live level metering for the overlay orb — analyser only, never routed
+      // to the speakers (no self-monitoring).
+      const Ctor =
+        window.AudioContext ||
+        (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext
+      const ctx = new Ctor()
+      const srcNode = ctx.createMediaStreamSource(stream)
+      const analyser = ctx.createAnalyser()
+      analyser.fftSize = 256
+      analyser.smoothingTimeConstant = 0.8
+      srcNode.connect(analyser)
+      micCtxRef.current = ctx
+      micAnalyserRef.current = analyser
+
       const rec = new MediaRecorder(stream)
       const chunks: Blob[] = []
       rec.ondataavailable = (e) => e.data.size > 0 && chunks.push(e.data)
       rec.onstop = async () => {
         stream.getTracks().forEach((t) => t.stop())
+        void micCtxRef.current?.close().catch(() => {})
+        micCtxRef.current = null
+        micAnalyserRef.current = null
         setRecording(false)
+        const wantSend = sendAfterRef.current
+        if (cancelledRef.current) return
         const blob = new Blob(chunks, { type: rec.mimeType || "audio/webm" })
         if (blob.size < 1200) return // too short to be speech
         setVoiceBusy(true)
         try {
           const text = await transcribeSpeech(blob, settings)
-          if (text) setDraft((d) => (d ? `${d} ${text}` : text))
-          inputRef.current?.focus()
+          if (text) {
+            if (wantSend) void sendRef.current(text)
+            else {
+              setDraft((d) => (d ? `${d} ${text}` : text))
+              inputRef.current?.focus()
+            }
+          }
         } catch {
           // silent — the mic just did nothing useful
         } finally {
@@ -431,12 +473,40 @@ export function AssistantWindow({
         }
       }
       recorderRef.current = rec
+      sendAfterRef.current = false
+      cancelledRef.current = false
       rec.start()
       setRecording(true)
     } catch {
       setRecording(false)
     }
   }, [recording])
+
+  const toggleMic = useCallback(() => {
+    if (recording) finishRecording(false)
+    else void startRecording()
+  }, [recording, finishRecording, startRecording])
+
+  // While recording: Space transcribes into the draft, Enter transcribes and
+  // sends immediately, Esc cancels. Captured at the window level so the user
+  // never has to aim at a button.
+  useEffect(() => {
+    if (!recording) return
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === " ") {
+        e.preventDefault()
+        finishRecording(false)
+      } else if (e.key === "Enter") {
+        e.preventDefault()
+        finishRecording(true)
+      } else if (e.key === "Escape") {
+        e.preventDefault()
+        cancelRecording()
+      }
+    }
+    window.addEventListener("keydown", onKey, true)
+    return () => window.removeEventListener("keydown", onKey, true)
+  }, [recording, finishRecording, cancelRecording])
   const lastReportRef = useRef<AssistantApplyResult[] | null>(null)
   const scrollRef = useRef<HTMLDivElement | null>(null)
   const inputRef = useRef<HTMLTextAreaElement | null>(null)
@@ -482,9 +552,9 @@ export function AssistantWindow({
     if (el) el.scrollTop = el.scrollHeight
   }, [messages, busy])
 
-  const send = useCallback(async () => {
+  const send = useCallback(async (textOverride?: string) => {
     const pendingAttachments = queuedAttachments
-    const text = draft.trim() || (pendingAttachments.length > 0 ? "Take a look at this current block view." : "")
+    const text = (textOverride ?? draft).trim() || (pendingAttachments.length > 0 ? "Take a look at this current block view." : "")
     if ((!text && pendingAttachments.length === 0) || busy) return
     if (!activeConnectionId) return
     setDraft("")
@@ -547,6 +617,9 @@ export function AssistantWindow({
     }
   }, [draft, queuedAttachments, busy, activeConnectionId, applyCommands, getExecutionObservations, onConsumeQueuedAttachments])
 
+  // Keep the ref current so a recording that finishes async fires the latest send.
+  sendRef.current = send
+
   // Bubble plate: each utterance carries its own translucent blur backdrop so
   // the transcript floats over any wallpaper — the container paints nothing.
   const plate = (extra?: Record<string, string>) => ({
@@ -556,7 +629,45 @@ export function AssistantWindow({
   })
 
   return (
-    <div className="flex h-full flex-col">
+    <div className="relative flex h-full flex-col">
+      {recording ? (
+        <div
+          className="absolute inset-0 z-30 flex flex-col items-center justify-center gap-4"
+          style={{
+            background: "color-mix(in oklch, var(--background) 82%, transparent)",
+            backdropFilter: "blur(10px)",
+          }}
+          onClick={() => finishRecording(false)}
+        >
+          <VoiceOrb getAnalyser={() => micAnalyserRef.current} active size={132} />
+          <div className="text-[12px] font-medium tracking-wide text-main">Listening…</div>
+          <div className="flex flex-col items-center gap-1 text-[10.5px] text-chrome-text/60">
+            <div className="flex gap-3">
+              <span><Kbd>Space</Kbd> transcribe</span>
+              <span><Kbd>Enter</Kbd> transcribe &amp; send</span>
+              <span><Kbd>Esc</Kbd> cancel</span>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {speaking && !recording ? (
+        <div className="pointer-events-none absolute right-2 top-2 z-20 flex items-center gap-1.5">
+          <VoiceOrb getAnalyser={() => player.getAnalyser()} active size={40} />
+          <button
+            type="button"
+            onClick={() => {
+              player.stop()
+              setSpeakingId(null)
+            }}
+            className="pointer-events-auto grid h-6 w-6 place-items-center rounded-full border border-main/40 bg-background/70 text-main/70 backdrop-blur hover:text-main"
+            title="Stop speaking"
+          >
+            <VolumeX className="h-3 w-3" />
+          </button>
+        </div>
+      ) : null}
+
       <div
         ref={scrollRef}
         className="flex-1 overflow-y-auto px-2 py-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
@@ -846,6 +957,14 @@ export function AssistantWindow({
         </div>
       </div>
     </div>
+  )
+}
+
+function Kbd({ children }: { children: React.ReactNode }) {
+  return (
+    <kbd className="rounded border border-chrome-border/70 bg-chrome-bg/60 px-1 py-px font-mono text-[9.5px] text-chrome-text/80">
+      {children}
+    </kbd>
   )
 }
 

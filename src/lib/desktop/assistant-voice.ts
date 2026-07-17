@@ -79,6 +79,24 @@ export async function synthesizeSpeech(text: string, v: VoiceSettings): Promise<
   return res.blob()
 }
 
+export interface VoiceOption {
+  id: string
+  name: string
+  category?: string
+}
+
+/** List the account's ElevenLabs voices for the settings dropdown. */
+export async function listVoices(key: string): Promise<VoiceOption[]> {
+  const res = await fetch("/api/assistant/voices", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ key }),
+  })
+  const body = (await res.json()) as { voices?: VoiceOption[]; error?: string }
+  if (!res.ok || body.error) throw new Error(body.error || `voices failed (${res.status})`)
+  return body.voices ?? []
+}
+
 /** Transcribe recorded audio via ElevenLabs Scribe; returns the text. */
 export async function transcribeSpeech(audio: Blob, v: VoiceSettings): Promise<string> {
   const fd = new FormData()
