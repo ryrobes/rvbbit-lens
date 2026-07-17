@@ -31,25 +31,31 @@ function SceneThumb({ scene, className }: { scene: Scene; className?: string }) 
 }
 
 /** The photograph (real DOM capture) when the scene has one, with the derived
- *  object map inset in the corner; scenes without a snapshot get the map
- *  full-bleed, exactly as before. */
+ *  object map as a faint full-bleed overlay — a ghost layer that blends in on
+ *  hover until the window outlines are readable. `mix-blend-screen` drops the
+ *  map's dark background out, so only the outlines ride the photo; the veil
+ *  dims the photo on hover so they read over bright regions too. Scenes
+ *  without a snapshot get the map full-bleed, exactly as before. */
 function SceneShot({ scene, className }: { scene: Scene; className?: string }) {
   const map = useSceneThumb(scene)
   const photo = scene.snapshot ?? null
   const main = photo ?? map
   if (!main) return <div className={cn("bg-foreground/[0.04]", className)} />
   return (
-    <div className={cn("relative overflow-hidden", className)}>
+    <div className={cn("group/shot relative overflow-hidden", className)}>
       {/* eslint-disable-next-line @next/next/no-img-element */}
       <img src={main} alt="" aria-hidden className="h-full w-full object-cover" />
       {photo && map ? (
-        // eslint-disable-next-line @next/next/no-img-element
-        <img
-          src={map}
-          alt=""
-          aria-hidden
-          className="absolute bottom-1 right-1 w-[30%] rounded-sm border border-chrome-border/80 bg-chrome-bg/90 shadow-md"
-        />
+        <>
+          <div className="absolute inset-0 bg-black/0 transition-colors duration-300 group-hover/shot:bg-black/45" />
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img
+            src={map}
+            alt=""
+            aria-hidden
+            className="absolute inset-0 h-full w-full object-cover opacity-[0.16] mix-blend-screen transition-opacity duration-300 group-hover/shot:opacity-95"
+          />
+        </>
       ) : null}
     </div>
   )
