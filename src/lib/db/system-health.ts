@@ -407,7 +407,7 @@ VACUUM (ANALYZE) rvbbit.catalog_snapshots;
 -- To hand disk back to the OS (ACCESS EXCLUSIVE lock — quiet window only):
 -- VACUUM FULL rvbbit.catalog_snapshots;
 `
-      return { sql, statements: 2 }
+      return { sql, statements: 3 }
     }
 
     if (kind === "orphaned-files") {
@@ -451,6 +451,12 @@ ${META_TABLES.map((t) => `-- VACUUM FULL rvbbit.${t};`).join("\n")}
 -- (In Data Rabbit: switch to / add a connection for ${qlit(cronHome)} on this
 --  server, open a SQL window there, and paste this. Or: psql -d ${cronHome})
 -- The jobs it schedules will EXECUTE in ${qlit(db)} — that part is correct.
+--
+-- Symptom decoder:
+--   "schema cron does not exist"  -> you're still connected to ${qlit(db)}; switch.
+--   "can only be created in ..."  -> wrong database for the extension; switch.
+
+CREATE EXTENSION IF NOT EXISTS pg_cron;
 
 SELECT cron.schedule_in_database('rvbbit-maintain', '*/15 * * * *', 'SELECT rvbbit.maintain();', ${qlit(db)});
 SELECT cron.schedule_in_database('rvbbit-storage-maintain', '0 * * * *', 'SELECT rvbbit.maintain(storage_tables => 2);', ${qlit(db)});
