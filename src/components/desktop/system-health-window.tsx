@@ -386,8 +386,14 @@ export function SystemHealthWindow({ activeConnectionId, onOpenSql }: SystemHeal
                 )
               ) : (
                 <>
-                  cron tables not readable from this database (pg_cron home is <code>postgres</code>) —
-                  install below is still safe to run.
+                  cron tables not readable from this database
+                  {health.cron.home ? (
+                    <>
+                      {" "}(pg_cron home is <code>{health.cron.home}</code> — the install script below
+                      is built to run there)
+                    </>
+                  ) : null}
+                  .
                 </>
               )
             }

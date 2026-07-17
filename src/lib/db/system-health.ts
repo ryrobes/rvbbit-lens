@@ -74,9 +74,9 @@ export interface SystemHealth {
   } | null
   orphaned: { backlog: number; erroring: number; oldestQueuedAt: string | null } | null
   vacuum: { top: VacuumRow[]; running: number }
-  /** cron.* lives only in the pg_cron home database ('postgres') — on the
-   *  app database this reads as readable=false, which is itself a finding. */
-  cron: { readable: boolean; jobs: CronJobRow[] }
+  /** cron.* lives only in the pg_cron home database — on the app database
+   *  this reads as readable=false, which is itself a finding. */
+  cron: { readable: boolean; home: string | null; jobs: CronJobRow[] }
   /** Availability of the remedy functions on this extension version. */
   fns: Record<string, boolean>
 }
@@ -124,7 +124,7 @@ export async function loadSystemHealth(connectionId: string): Promise<SystemHeal
         () => ({ ok: false as const, rows: [] as Array<Record<string, unknown>> }),
       )
 
-    const [ext, dbSize, meta, dlTotal, dlTop, gens, cat, orph, vac, vacRunning, cron, fns] =
+    const [ext, dbSize, meta, dlTotal, dlTop, gens, cat, orph, vac, vacRunning, cron, cronHome, fns] =
       await Promise.all([
         q(`SELECT 1 FROM pg_extension WHERE extname = 'pg_rvbbit'`),
         q(`SELECT pg_database_size(current_database())::int8 AS b`),
@@ -176,6 +176,7 @@ export async function loadSystemHealth(connectionId: string): Promise<SystemHeal
             LIMIT 10`),
         q(`SELECT count(*)::int4 AS n FROM pg_stat_progress_vacuum`),
         q(`SELECT jobname, schedule, active FROM cron.job ORDER BY jobname`),
+        q(`SELECT setting AS home FROM pg_settings WHERE name = 'cron.database_name'`),
         q(
           `SELECT ${Object.entries(REMEDY_FNS)
             .map(([k, sig]) => `(to_regprocedure('${sig}') IS NOT NULL) AS ${k}`)
@@ -252,6 +253,7 @@ export async function loadSystemHealth(connectionId: string): Promise<SystemHeal
       },
       cron: {
         readable: cron.ok,
+        home: cronHome.ok ? str(cronHome.rows[0]?.home) : null,
         jobs: cron.rows.map((r) => ({
           jobname: String(r.jobname),
           schedule: String(r.schedule),
@@ -429,11 +431,39 @@ ${META_TABLES.map((t) => `-- VACUUM FULL rvbbit.${t};`).join("\n")}
       return { sql, statements: lines.length }
     }
 
-    // install-jobs
+    // install-jobs — cron.* is only callable in pg_cron's home database.
+    // The home is a server-wide GUC readable from anywhere, so build the
+    // right script for where the user actually is instead of letting
+    // install_maintenance_jobs() bounce with pg_cron_not_home_db.
+    const info = await client.query<{ db: string; cron_home: string | null }>(
+      `SELECT current_database() AS db,
+              (SELECT setting FROM pg_settings WHERE name = 'cron.database_name') AS cron_home`,
+    )
+    const db = String(info.rows[0]?.db ?? "")
+    const cronHome = info.rows[0]?.cron_home ?? null
+
+    if (cronHome && cronHome !== db) {
+      const sql = `${REVIEW_HEADER("install the metadata maintenance cron jobs (cross-database)")}
+-- pg_cron's home database is ${qlit(cronHome)} — cron.* is ONLY callable there.
+--
+--   >>> RUN THIS SCRIPT CONNECTED TO THE ${qlit(cronHome)} DATABASE <<<
+--
+-- (In Data Rabbit: switch to / add a connection for ${qlit(cronHome)} on this
+--  server, open a SQL window there, and paste this. Or: psql -d ${cronHome})
+-- The jobs it schedules will EXECUTE in ${qlit(db)} — that part is correct.
+
+SELECT cron.schedule_in_database('rvbbit-maintain', '*/15 * * * *', 'SELECT rvbbit.maintain();', ${qlit(db)});
+SELECT cron.schedule_in_database('rvbbit-storage-maintain', '0 * * * *', 'SELECT rvbbit.maintain(storage_tables => 2);', ${qlit(db)});
+
+-- Runnable right now in ${qlit(db)} (one manual maintenance pass, no cron):
+-- SELECT rvbbit.maintain();
+`
+      return { sql, statements: 2 }
+    }
+
     const sql = `${REVIEW_HEADER("install the metadata maintenance cron jobs")}
 -- Schedules the recurring vacuum/prune machinery (defaults: maintenance
--- every 15 min, storage sweep hourly). Jobs land in the pg_cron home
--- database ('postgres'); manage them there via cron.job.
+-- every 15 min, storage sweep hourly).
 
 SELECT rvbbit.install_maintenance_jobs();
 `
