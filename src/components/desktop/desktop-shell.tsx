@@ -314,6 +314,7 @@ import {
   SCENES_CHANGED_EVENT,
   upsertScene,
 } from "@/lib/desktop/scenes"
+import { renderSceneThumbnail } from "@/lib/desktop/scene-thumbnail"
 import { SceneList } from "./scene-tray"
 import {
   applyRollupOp,
@@ -1497,6 +1498,7 @@ export function DesktopShell() {
         viewport,
         connection: sceneConnectionFingerprint(),
         bundle: buildSceneBundle(body.windows),
+        thumbnail: renderSceneThumbnail(body) ?? undefined,
       })
       setWorkspaces((prev) => ({ ...prev, [SCENE_SLOT]: cloneCanvas(body) }))
       setCurrentSceneId(scene.id)
@@ -1519,6 +1521,7 @@ export function DesktopShell() {
       viewport,
       connection: sceneConnectionFingerprint(),
       bundle: buildSceneBundle(body.windows),
+      thumbnail: renderSceneThumbnail(body) ?? undefined,
     })
   }, [currentSceneId, workspaces, viewport, sceneConnectionFingerprint])
 
@@ -5572,9 +5575,12 @@ export function DesktopShell() {
             {/* Empty Scene slot = the Scene gallery: pick one to load, or
                 save the current desktop from the Scenes menu. */}
             {wsId === SCENE_SLOT && canvas.windows.length === 0 ? (
-              <div className="pointer-events-auto absolute left-1/2 top-1/2 w-80 -translate-x-1/2 -translate-y-1/2 rounded-lg border border-chrome-border bg-chrome-bg/85 p-2 shadow-2xl backdrop-blur">
-                <div className="flex items-center gap-1.5 px-1 pb-1.5 pt-0.5 text-[11px] font-medium text-chrome-text/70">
-                  <Layers className="h-3.5 w-3.5" /> Scenes — saved desktops
+              <div className="pointer-events-auto absolute left-1/2 top-1/2 max-h-[80vh] w-[min(56rem,90vw)] -translate-x-1/2 -translate-y-1/2 rounded-xl border border-chrome-border bg-chrome-bg/85 p-3 shadow-2xl backdrop-blur">
+                <div className="flex items-center gap-1.5 px-1 pb-2 pt-0.5 text-[12px] font-medium text-chrome-text/75">
+                  <Layers className="h-4 w-4" /> Scenes — saved desktops
+                  <span className="ml-auto text-[10px] font-normal text-chrome-text/40">
+                    pick one to load · save the current desktop from the Scenes menu
+                  </span>
                 </div>
                 <SceneList
                   scenes={scenes}
@@ -5583,6 +5589,7 @@ export function DesktopShell() {
                   onRename={renameSceneById}
                   onDelete={deleteSceneById}
                   nameExists={sceneNameExists}
+                  variant="grid"
                   emptyHint="No saved Scenes yet. Use the Scenes menu in the top bar to save the current desktop."
                 />
               </div>

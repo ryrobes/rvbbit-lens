@@ -185,6 +185,7 @@ export interface SceneInput {
   connection?: SceneConnectionFingerprint
   bundle?: SceneBundle
   visibility?: "private" | "shared"
+  thumbnail?: string
 }
 
 export function upsertScene(input: SceneInput): Scene {
@@ -206,6 +207,7 @@ export function upsertScene(input: SceneInput): Scene {
     bundle: "bundle" in input ? input.bundle : existing?.bundle,
     contentHash: contentHashOf(input.body),
     windowCount: input.body.windows.length,
+    thumbnail: input.thumbnail ?? existing?.thumbnail,
     visibility: input.visibility ?? existing?.visibility ?? "private",
     createdAt: existing?.createdAt ?? now,
     updatedAt: now,

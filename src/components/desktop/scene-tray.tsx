@@ -10,7 +10,24 @@ import {
   type SharedScene,
 } from "@/lib/desktop/scenes"
 import { getHomeId } from "@/lib/desktop/server-sync"
+import { renderSceneThumbnail } from "@/lib/desktop/scene-thumbnail"
 import type { Scene } from "@/lib/desktop/types"
+
+/** Stored thumbnail if present, else render one on the fly from the scene's
+ *  own geometry (so scenes saved before thumbnails existed still show). */
+function useSceneThumb(scene: Scene): string | null {
+  return useMemo(
+    () => scene.thumbnail ?? renderSceneThumbnail(scene.body),
+    [scene.thumbnail, scene.id, scene.contentHash],
+  )
+}
+
+function SceneThumb({ scene, className }: { scene: Scene; className?: string }) {
+  const src = useSceneThumb(scene)
+  if (!src) return <div className={cn("bg-foreground/[0.04]", className)} />
+  // eslint-disable-next-line @next/next/no-img-element
+  return <img src={src} alt="" aria-hidden className={cn("object-cover", className)} />
+}
 
 interface SceneActions {
   scenes: Scene[]
@@ -212,11 +229,44 @@ export function SceneList({
   nameExists,
   emptyHint = "No saved Scenes yet.",
   onAfterAction,
-}: SceneActions & { emptyHint?: string; onAfterAction?: () => void }) {
-  const sorted = useMemo(() => [...scenes].sort((a, b) => a.name.localeCompare(b.name)), [scenes])
+  variant = "list",
+}: SceneActions & {
+  emptyHint?: string
+  onAfterAction?: () => void
+  variant?: "list" | "grid"
+}) {
+  // Most-recently-updated first — a gallery you scan, not an alphabetized index.
+  const sorted = useMemo(
+    () =>
+      [...scenes].sort(
+        (a, b) => (b.updatedAt ?? "").localeCompare(a.updatedAt ?? "") || a.name.localeCompare(b.name),
+      ),
+    [scenes],
+  )
 
   if (sorted.length === 0) {
     return <div className="px-3 py-4 text-center text-[11px] text-chrome-text/50">{emptyHint}</div>
+  }
+
+  if (variant === "grid") {
+    return (
+      <div className="grid max-h-[64vh] grid-cols-2 gap-2 overflow-auto p-1 md:grid-cols-3">
+        {sorted.map((s) => (
+          <SceneCard
+            key={s.id}
+            scene={s}
+            isCurrent={s.id === currentSceneId}
+            onOpen={() => {
+              onOpen(s.id)
+              onAfterAction?.()
+            }}
+            onRename={(name) => onRename(s.id, name)}
+            onDelete={() => onDelete(s.id)}
+            nameExists={(name) => nameExists(name, s.id)}
+          />
+        ))}
+      </div>
+    )
   }
 
   return (
@@ -235,6 +285,89 @@ export function SceneList({
           nameExists={(name) => nameExists(name, s.id)}
         />
       ))}
+    </div>
+  )
+}
+
+function fmtAge(iso?: string): string {
+  if (!iso) return ""
+  const ms = Date.now() - new Date(iso).getTime()
+  const m = Math.floor(ms / 60000)
+  if (m < 1) return "just now"
+  if (m < 60) return `${m}m ago`
+  const h = Math.floor(m / 60)
+  if (h < 24) return `${h}h ago`
+  const d = Math.floor(h / 24)
+  return d < 7 ? `${d}d ago` : `${Math.floor(d / 7)}w ago`
+}
+
+function SceneCard({
+  scene,
+  isCurrent,
+  onOpen,
+  onRename,
+  onDelete,
+  nameExists,
+}: {
+  scene: Scene
+  isCurrent: boolean
+  onOpen: () => void
+  onRename: (name: string) => void
+  onDelete: () => void
+  nameExists: (name: string) => boolean
+}) {
+  const [confirmDel, setConfirmDel] = useState(false)
+  return (
+    <div
+      className={cn(
+        "group relative overflow-hidden rounded-lg border transition-colors",
+        isCurrent ? "border-main/70 ring-1 ring-main/40" : "border-chrome-border/70 hover:border-main/40",
+      )}
+    >
+      <button type="button" onClick={onOpen} className="block w-full text-left" title={`Open “${scene.name}”`}>
+        <SceneThumb scene={scene} className="aspect-[16/10] w-full" />
+        <div className="flex items-baseline justify-between gap-1 px-2 py-1">
+          <span className="truncate text-[11px] font-medium text-foreground">{scene.name}</span>
+          {isCurrent ? <span className="shrink-0 text-[9px] uppercase tracking-wide text-main">open</span> : null}
+        </div>
+        <div className="flex items-center justify-between gap-1 px-2 pb-1.5 text-[9px] text-chrome-text/45">
+          <span>
+            {scene.windowCount} {scene.windowCount === 1 ? "window" : "windows"}
+          </span>
+          <span>{fmtAge(scene.updatedAt)}</span>
+        </div>
+      </button>
+
+      {/* hover actions */}
+      <div className="absolute right-1 top-1 flex items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100">
+        <button
+          type="button"
+          onClick={() => setSceneVisibility(scene.id, scene.visibility !== "shared")}
+          title={scene.visibility === "shared" ? "Shared — click to make private" : "Private — click to share"}
+          className={cn(
+            "rounded p-1 backdrop-blur",
+            scene.visibility === "shared"
+              ? "bg-background/70 text-rvbbit-accent"
+              : "bg-background/70 text-chrome-text/60 hover:text-chrome-text",
+          )}
+        >
+          <Globe className="h-3 w-3" />
+        </button>
+        {confirmDel ? (
+          <>
+            <button type="button" onClick={onDelete} title="Confirm delete" className="rounded bg-background/70 p-1 text-danger backdrop-blur">
+              <Check className="h-3 w-3" />
+            </button>
+            <button type="button" onClick={() => setConfirmDel(false)} title="Cancel" className="rounded bg-background/70 p-1 text-chrome-text/60 backdrop-blur">
+              <X className="h-3 w-3" />
+            </button>
+          </>
+        ) : (
+          <button type="button" onClick={() => setConfirmDel(true)} title="Delete" className="rounded bg-background/70 p-1 text-chrome-text/60 backdrop-blur hover:text-danger">
+            <Trash2 className="h-3 w-3" />
+          </button>
+        )}
+      </div>
     </div>
   )
 }
@@ -300,7 +433,13 @@ function SceneRow({
           title={`Open “${scene.name}” into the Scene slot`}
           className="flex min-w-0 flex-1 items-center gap-1.5 text-left"
         >
-          <ChevronRight className={cn("h-3 w-3 shrink-0", isCurrent ? "text-main" : "text-chrome-text/40")} />
+          <SceneThumb
+            scene={scene}
+            className={cn(
+              "h-6 w-10 shrink-0 rounded-sm border",
+              isCurrent ? "border-main/50" : "border-chrome-border/60",
+            )}
+          />
           <span className="truncate text-foreground">{scene.name}</span>
           <span className="shrink-0 text-[10px] text-chrome-text/40">
             {scene.windowCount} {scene.windowCount === 1 ? "window" : "windows"}

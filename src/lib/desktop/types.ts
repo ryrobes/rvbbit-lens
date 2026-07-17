@@ -1273,6 +1273,8 @@ export interface Scene {
   /** Hash of `body` — drives the dirty dot on the open Scene. */
   contentHash: string
   windowCount: number
+  /** webp data URL of the window-layout mini-map, generated on save. */
+  thumbnail?: string
   /** Sharing: 'shared' scenes appear in other homes' Scene Library. Client-
    *  tracked and carried to the server shadow (default 'private'). */
   visibility?: "private" | "shared"
