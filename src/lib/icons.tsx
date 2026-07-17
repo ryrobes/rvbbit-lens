@@ -144,3 +144,11 @@ export type { Icon as LucideIcon } from "@phosphor-icons/react"
 // disambiguates. Re-export it under the second name separately so we
 // don't have a duplicate-binding error in the main export block above.
 export { SidebarSimple as PanelLeftOpen } from "@phosphor-icons/react"
+
+// Voice (TTS/STT) aliases.
+export {
+  Microphone as Mic,
+  SpeakerHigh as Volume2,
+  SpeakerSlash as VolumeX,
+  Waveform as Waveform,
+} from "@phosphor-icons/react"

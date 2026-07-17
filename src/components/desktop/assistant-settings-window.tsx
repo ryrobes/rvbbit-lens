@@ -29,6 +29,15 @@ import {
   saveSpendThreshold,
   PERSONA_MAX_CHARS,
 } from "@/lib/desktop/assistant"
+import {
+  loadVoiceSettings,
+  saveVoiceSettings,
+  synthesizeSpeech,
+  ttsReady,
+  getVoicePlayer,
+  type VoiceSettings,
+} from "@/lib/desktop/assistant-voice"
+import { Loader2 } from "@/lib/icons"
 import { AssistantIdentityMark } from "./assistant-identity-mark"
 
 const OPERATOR = "desktop_assistant_turn"
@@ -67,6 +76,38 @@ export function AssistantSettingsWindow({
   const [personaSaved, setPersonaSaved] = useState(false)
   const [spend, setSpend] = useState(() => loadSpendThreshold().toFixed(2))
   const [spendSaved, setSpendSaved] = useState(false)
+  const [voice, setVoice] = useState<VoiceSettings>(() => loadVoiceSettings())
+  const [voiceTest, setVoiceTest] = useState<string | null>(null)
+  const [voiceTesting, setVoiceTesting] = useState(false)
+
+  const updateVoice = useCallback((patch: Partial<VoiceSettings>) => {
+    setVoice((prev) => {
+      const next = { ...prev, ...patch }
+      saveVoiceSettings(next)
+      return next
+    })
+  }, [])
+
+  const onTestVoice = useCallback(async () => {
+    setVoiceTest(null)
+    if (!ttsReady({ ...voice, ttsEnabled: true })) {
+      setVoiceTest("Add a key and voice ID first.")
+      return
+    }
+    setVoiceTesting(true)
+    try {
+      const blob = await synthesizeSpeech(
+        "Hi — this is how I'll sound when I read the desktop to you.",
+        { ...voice, ttsEnabled: true },
+      )
+      await getVoicePlayer().play(blob)
+      setVoiceTest("✓ that's the voice")
+    } catch (e) {
+      setVoiceTest(e instanceof Error ? e.message : "voice test failed")
+    } finally {
+      setVoiceTesting(false)
+    }
+  }, [voice])
 
   const onNameBlur = useCallback(() => {
     const saved = saveAssistantName(name)
@@ -360,19 +401,84 @@ export function AssistantSettingsWindow({
 
       <section>
         {sectionTitle("Voice")}
-        <div className="space-y-1.5 opacity-55">
-          <label className="flex items-center justify-between rounded-md border border-chrome-border/60 bg-chrome-bg/30 px-2.5 py-1.5">
-            <span>Voice input (STT)</span>
-            <span className="text-[10px] uppercase tracking-wide text-chrome-text/50">soon</span>
+        <div className="space-y-2">
+          <div>
+            <label className="mb-1 block text-[11px] text-chrome-text/70">
+              ElevenLabs API key
+            </label>
+            <input
+              type="password"
+              value={voice.elevenKey}
+              onChange={(e) => updateVoice({ elevenKey: e.target.value })}
+              placeholder="xi-…"
+              autoComplete="off"
+              spellCheck={false}
+              className="w-full rounded-md border border-chrome-border/60 bg-chrome-bg/30 px-2.5 py-1.5 text-[12px] outline-none focus:border-main/50"
+            />
+          </div>
+          <div>
+            <label className="mb-1 block text-[11px] text-chrome-text/70">
+              Voice ID
+            </label>
+            <div className="flex gap-1.5">
+              <input
+                value={voice.voiceId}
+                onChange={(e) => updateVoice({ voiceId: e.target.value })}
+                placeholder="e.g. 21m00Tcm4TlvDq8ikWAM"
+                autoComplete="off"
+                spellCheck={false}
+                className="flex-1 rounded-md border border-chrome-border/60 bg-chrome-bg/30 px-2.5 py-1.5 text-[12px] outline-none focus:border-main/50"
+              />
+              <button
+                type="button"
+                onClick={() => void onTestVoice()}
+                disabled={voiceTesting}
+                className="flex shrink-0 items-center gap-1 rounded-md border border-main/40 bg-main/10 px-2.5 text-[11px] text-main hover:bg-main/20 disabled:opacity-40"
+              >
+                {voiceTesting ? <Loader2 className="h-3 w-3 animate-spin" /> : null}
+                Test
+              </button>
+            </div>
+            {voiceTest ? (
+              <p className="mt-1 text-[10.5px] text-chrome-text/60">{voiceTest}</p>
+            ) : null}
+          </div>
+
+          <label className="flex cursor-pointer items-center justify-between rounded-md border border-chrome-border/60 bg-chrome-bg/30 px-2.5 py-1.5">
+            <span className="text-[12px]">Spoken replies (TTS)</span>
+            <input
+              type="checkbox"
+              checked={voice.ttsEnabled}
+              onChange={(e) => updateVoice({ ttsEnabled: e.target.checked })}
+              className="accent-main"
+            />
           </label>
-          <label className="flex items-center justify-between rounded-md border border-chrome-border/60 bg-chrome-bg/30 px-2.5 py-1.5">
-            <span>Spoken replies (TTS)</span>
-            <span className="text-[10px] uppercase tracking-wide text-chrome-text/50">soon</span>
+          {voice.ttsEnabled ? (
+            <label className="flex cursor-pointer items-center justify-between rounded-md border border-chrome-border/40 bg-chrome-bg/20 px-2.5 py-1.5 text-chrome-text/80">
+              <span className="text-[11.5px]">Speak every reply automatically</span>
+              <input
+                type="checkbox"
+                checked={voice.autoSpeak}
+                onChange={(e) => updateVoice({ autoSpeak: e.target.checked })}
+                className="accent-main"
+              />
+            </label>
+          ) : null}
+          <label className="flex cursor-pointer items-center justify-between rounded-md border border-chrome-border/60 bg-chrome-bg/30 px-2.5 py-1.5">
+            <span className="text-[12px]">Voice input (STT · Scribe)</span>
+            <input
+              type="checkbox"
+              checked={voice.sttEnabled}
+              onChange={(e) => updateVoice({ sttEnabled: e.target.checked })}
+              className="accent-main"
+            />
           </label>
         </div>
         <p className="mt-1.5 text-[11px] leading-snug text-chrome-text/55">
-          Her utterances are already sized for speech — voice is icing, and the
-          cake is baked.
+          One ElevenLabs key powers both directions — spoken replies and voice
+          input (Scribe). Grab a voice ID from your ElevenLabs voice library. The
+          key stays in this browser and is proxied per request; it&apos;s never
+          stored in the database.
         </p>
       </section>
     </div>

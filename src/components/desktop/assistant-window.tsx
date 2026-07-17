@@ -38,6 +38,18 @@ import {
 import { useAssistantIdentity } from "@/lib/desktop/assistant-identity"
 import type { AssistantBlockExecutionObservation } from "@/lib/desktop/assistant-execution"
 import { AssistantIdentityMark } from "./assistant-identity-mark"
+import { VoiceOrb } from "./voice-orb"
+import {
+  loadVoiceSettings,
+  synthesizeSpeech,
+  transcribeSpeech,
+  ttsReady,
+  sttReady,
+  getVoicePlayer,
+  type VoiceSettings,
+} from "@/lib/desktop/assistant-voice"
+import { Mic, Volume2, VolumeX, Loader2 } from "@/lib/icons"
+import { cn } from "@/lib/utils"
 
 interface AssistantWindowProps {
   activeConnectionId: string | null
@@ -327,6 +339,104 @@ export function AssistantWindow({
   const [draft, setDraft] = useState("")
   const [busy, setBusy] = useState(false)
   const [hydrated, setHydrated] = useState(false)
+
+  // ── Voice ──────────────────────────────────────────────────────────
+  const [voice, setVoice] = useState<VoiceSettings>(() => loadVoiceSettings())
+  const [speaking, setSpeaking] = useState(false)
+  const [speakingId, setSpeakingId] = useState<string | null>(null)
+  const [recording, setRecording] = useState(false)
+  const [voiceBusy, setVoiceBusy] = useState(false)
+  const recorderRef = useRef<MediaRecorder | null>(null)
+  const spokenIdRef = useRef<string | null>(null)
+  const player = getVoicePlayer()
+
+  // Voice settings live in localStorage (browser-local L1); re-read on focus so
+  // a change in the settings window is picked up without a remount.
+  useEffect(() => {
+    const reload = () => setVoice(loadVoiceSettings())
+    window.addEventListener("focus", reload)
+    return () => window.removeEventListener("focus", reload)
+  }, [])
+
+  useEffect(() => player.onChange(setSpeaking), [player])
+
+  const speakMessage = useCallback(
+    async (id: string, text: string) => {
+      const clean = assistantReplyForDisplay(text).trim()
+      if (!clean) return
+      const settings = loadVoiceSettings()
+      if (!ttsReady(settings)) return
+      try {
+        setSpeakingId(id)
+        const blob = await synthesizeSpeech(clean, settings)
+        await player.play(blob)
+      } catch {
+        // voice is icing — a TTS failure never disrupts the transcript
+      } finally {
+        setSpeakingId((cur) => (cur === id ? null : cur))
+      }
+    },
+    [player],
+  )
+
+  const toggleSpeak = useCallback(
+    (id: string, text: string) => {
+      if (speaking && speakingId === id) {
+        player.stop()
+        setSpeakingId(null)
+      } else {
+        void speakMessage(id, text)
+      }
+    },
+    [speaking, speakingId, player, speakMessage],
+  )
+
+  // Auto-speak: when a new completed assistant reply lands and autoSpeak is on,
+  // read it. Guarded by an id ref so re-renders don't re-trigger.
+  useEffect(() => {
+    if (!voice.ttsEnabled || !voice.autoSpeak || busy) return
+    const last = messages[messages.length - 1]
+    if (!last || last.role !== "assistant" || last.error) return
+    if (spokenIdRef.current === last.id) return
+    spokenIdRef.current = last.id
+    void speakMessage(last.id, last.text)
+  }, [messages, busy, voice.ttsEnabled, voice.autoSpeak, speakMessage])
+
+  const toggleMic = useCallback(async () => {
+    if (recording) {
+      recorderRef.current?.stop()
+      return
+    }
+    const settings = loadVoiceSettings()
+    if (!sttReady(settings)) return
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      const rec = new MediaRecorder(stream)
+      const chunks: Blob[] = []
+      rec.ondataavailable = (e) => e.data.size > 0 && chunks.push(e.data)
+      rec.onstop = async () => {
+        stream.getTracks().forEach((t) => t.stop())
+        setRecording(false)
+        const blob = new Blob(chunks, { type: rec.mimeType || "audio/webm" })
+        if (blob.size < 1200) return // too short to be speech
+        setVoiceBusy(true)
+        try {
+          const text = await transcribeSpeech(blob, settings)
+          if (text) setDraft((d) => (d ? `${d} ${text}` : text))
+          inputRef.current?.focus()
+        } catch {
+          // silent — the mic just did nothing useful
+        } finally {
+          setVoiceBusy(false)
+        }
+      }
+      recorderRef.current = rec
+      rec.start()
+      setRecording(true)
+    } catch {
+      setRecording(false)
+    }
+  }, [recording])
   const lastReportRef = useRef<AssistantApplyResult[] | null>(null)
   const scrollRef = useRef<HTMLDivElement | null>(null)
   const inputRef = useRef<HTMLTextAreaElement | null>(null)
@@ -457,13 +567,25 @@ export function AssistantWindow({
             style={plate({ color: "color-mix(in oklch, var(--foreground) 55%, transparent)" })}
           >
             <div className="mb-2 flex justify-center">
-              <AssistantIdentityMark
-                className="grid h-7 w-7 place-items-center text-lg"
-                fallbackStyle={{
-                  color: "var(--main)",
-                  textShadow: "0 0 18px color-mix(in oklch, var(--main) 55%, transparent)",
-                }}
-              />
+              {voice.ttsEnabled ? (
+                <div className="relative grid place-items-center">
+                  <VoiceOrb getAnalyser={() => player.getAnalyser()} active={speaking} size={72} />
+                  <div className="pointer-events-none absolute inset-0 grid place-items-center">
+                    <AssistantIdentityMark
+                      className="grid h-6 w-6 place-items-center text-base"
+                      fallbackStyle={{ color: "var(--main)" }}
+                    />
+                  </div>
+                </div>
+              ) : (
+                <AssistantIdentityMark
+                  className="grid h-7 w-7 place-items-center text-lg"
+                  fallbackStyle={{
+                    color: "var(--main)",
+                    textShadow: "0 0 18px color-mix(in oklch, var(--main) 55%, transparent)",
+                  }}
+                />
+              )}
             </div>
             I can see the desktop — every block, every filter.
             <br />
@@ -517,6 +639,20 @@ export function AssistantWindow({
                     ) : null}
                     {assistantReplyForDisplay(m.text)}
                   </div>
+                  {ttsReady(voice) && !m.error ? (
+                    <button
+                      type="button"
+                      onClick={() => toggleSpeak(m.id, m.text)}
+                      title={speaking && speakingId === m.id ? "Stop" : "Read aloud"}
+                      className="mt-[3px] shrink-0 self-start text-main/50 transition-colors hover:text-main"
+                    >
+                      {speaking && speakingId === m.id ? (
+                        <VolumeX className="h-3.5 w-3.5" />
+                      ) : (
+                        <Volume2 className="h-3.5 w-3.5" />
+                      )}
+                    </button>
+                  ) : null}
                 </div>
                 {m.commands?.length ? (
                   <div className="ml-6 flex flex-wrap gap-1.5">
@@ -660,27 +796,53 @@ export function AssistantWindow({
               ))}
             </div>
           ) : null}
-          <textarea
-            ref={inputRef}
-            value={draft}
-            disabled={busy || !activeConnectionId}
-            onChange={(e) => setDraft(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && !e.shiftKey) {
-                e.preventDefault()
-                void send()
+          <div className="flex items-end gap-1.5">
+            <textarea
+              ref={inputRef}
+              value={draft}
+              disabled={busy || !activeConnectionId}
+              onChange={(e) => setDraft(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !e.shiftKey) {
+                  e.preventDefault()
+                  void send()
+                }
+              }}
+              rows={2}
+              placeholder={
+                recording
+                  ? "listening…"
+                  : activeConnectionId
+                    ? "ask the desktop…"
+                    : "connect to a database first"
               }
-            }}
-            rows={2}
-            placeholder={
-              activeConnectionId ? "ask the desktop…" : "connect to a database first"
-            }
-            className="w-full resize-none bg-transparent text-[13px] leading-relaxed outline-none"
-            style={{
-              color: "var(--foreground)",
-              caretColor: "var(--main)",
-            }}
-          />
+              className="w-full flex-1 resize-none bg-transparent text-[13px] leading-relaxed outline-none"
+              style={{
+                color: "var(--foreground)",
+                caretColor: "var(--main)",
+              }}
+            />
+            {sttReady(voice) ? (
+              <button
+                type="button"
+                onClick={() => void toggleMic()}
+                disabled={voiceBusy || busy || !activeConnectionId}
+                title={recording ? "Stop & transcribe" : "Speak"}
+                className={cn(
+                  "mb-1 grid h-7 w-7 shrink-0 place-items-center rounded-full border transition-colors disabled:opacity-40",
+                  recording
+                    ? "animate-pulse border-main bg-main/20 text-main"
+                    : "border-main/30 text-main/60 hover:border-main/60 hover:text-main",
+                )}
+              >
+                {voiceBusy ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                ) : (
+                  <Mic className="h-3.5 w-3.5" />
+                )}
+              </button>
+            ) : null}
+          </div>
         </div>
       </div>
     </div>
