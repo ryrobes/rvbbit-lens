@@ -639,7 +639,7 @@ export function AssistantWindow({
           }}
           onClick={() => finishRecording(false)}
         >
-          <VoiceOrb getAnalyser={() => micAnalyserRef.current} active size={132} />
+          <VoiceOrb getAnalyser={() => micAnalyserRef.current} active size={172} />
           <div className="text-[12px] font-medium tracking-wide text-main">Listening…</div>
           <div className="flex flex-col items-center gap-1 text-[10.5px] text-chrome-text/60">
             <div className="flex gap-3">
@@ -652,18 +652,18 @@ export function AssistantWindow({
       ) : null}
 
       {speaking && !recording ? (
-        <div className="pointer-events-none absolute right-2 top-2 z-20 flex items-center gap-1.5">
-          <VoiceOrb getAnalyser={() => player.getAnalyser()} active size={40} />
+        <div className="pointer-events-none absolute inset-x-0 top-3 z-20 flex flex-col items-center gap-1">
+          <VoiceOrb getAnalyser={() => player.getAnalyser()} active size={120} />
           <button
             type="button"
             onClick={() => {
               player.stop()
               setSpeakingId(null)
             }}
-            className="pointer-events-auto grid h-6 w-6 place-items-center rounded-full border border-main/40 bg-background/70 text-main/70 backdrop-blur hover:text-main"
+            className="pointer-events-auto -mt-2 flex items-center gap-1 rounded-full border border-main/40 bg-background/70 px-2 py-0.5 text-[10px] text-main/80 backdrop-blur hover:text-main"
             title="Stop speaking"
           >
-            <VolumeX className="h-3 w-3" />
+            <VolumeX className="h-3 w-3" /> stop
           </button>
         </div>
       ) : null}
@@ -680,7 +680,7 @@ export function AssistantWindow({
             <div className="mb-2 flex justify-center">
               {voice.ttsEnabled ? (
                 <div className="relative grid place-items-center">
-                  <VoiceOrb getAnalyser={() => player.getAnalyser()} active={speaking} size={72} />
+                  <VoiceOrb getAnalyser={() => player.getAnalyser()} active={speaking} size={96} />
                   <div className="pointer-events-none absolute inset-0 grid place-items-center">
                     <AssistantIdentityMark
                       className="grid h-6 w-6 place-items-center text-base"
