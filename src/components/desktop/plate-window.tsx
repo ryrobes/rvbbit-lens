@@ -48,6 +48,8 @@ interface RenderedPlate {
   params?: Record<string, unknown>
   /** Params declared from_bus: true — subscribed to the desktop param bus. */
   busFields?: string[]
+  /** Extra kits whose data events also refresh this plate. */
+  listens?: string[]
 }
 
 /** Fired after any plate action mutates data. Plates in the same kit
@@ -207,17 +209,20 @@ export function PlateWindow({
 
   // Reactivity: when a sibling plate's action mutates data, refresh.
   // Kit is the sharing scope — plates in one kit are presumed to look at
-  // the same tables (kit-less plates form their own bucket).
+  // the same tables (kit-less plates form their own bucket). A plate may
+  // additionally LISTEN to other kits (foundation-kit overlays).
   useEffect(() => {
     const onData = (e: Event) => {
       const detail = (e as CustomEvent<PlateDataDetail>).detail
       if (!detail || detail.plateId === plateId) return
-      if ((detail.kit ?? null) !== (plate?.kit ?? null)) return
+      const sameKit = (detail.kit ?? null) === (plate?.kit ?? null)
+      const listening = detail.kit != null && (plate?.listens ?? []).includes(detail.kit)
+      if (!sameKit && !listening) return
       void refresh()
     }
     window.addEventListener(PLATE_DATA_EVENT, onData)
     return () => window.removeEventListener(PLATE_DATA_EVENT, onData)
-  }, [plateId, plate?.kit, refresh])
+  }, [plateId, plate?.kit, plate?.listens, refresh])
 
   // The plate HTML is applied IMPERATIVELY, never via dangerouslySetInnerHTML.
   // React must not own these children: our island relocation mutates the

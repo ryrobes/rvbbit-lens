@@ -54,6 +54,9 @@ export interface RenderedPlate {
    *  the desktop param bus, so ANY window emitting the field drives this
    *  plate (cross-plate / cross-window filtering). */
   busFields: string[]
+  /** Extra kits whose data events also refresh this plate (foundation-kit
+   *  overlays: an hvac plate listening to scheduling's actions). */
+  listens: string[]
 }
 
 interface PlateRow {
@@ -77,6 +80,7 @@ interface PlateRow {
   >
   params: Array<{ name: string; type?: string; default?: unknown; from_bus?: boolean }>
   requires_role?: string | null
+  listens?: string[] | null
 }
 
 function sqlLit(v: string): string {
@@ -153,7 +157,8 @@ async function loadPlate(connectionId: string, plateId: string): Promise<PlateRo
     connectionId,
     `SELECT plate_id, kit, module, title, description, template_version, template,
             queries, actions, params,
-            to_jsonb(p)->>'requires_role' AS requires_role
+            to_jsonb(p)->>'requires_role' AS requires_role,
+            to_jsonb(p)->'listens' AS listens
      FROM rvbbit.plates p WHERE plate_id = ${sqlLit(plateId)}`,
     { readOnly: true, rowLimit: 1 },
   )
@@ -519,6 +524,7 @@ export async function renderPlate(
     actions,
     params,
     busFields: (plate.params ?? []).filter((p) => p.from_bus === true).map((p) => p.name),
+    listens: Array.isArray(plate.listens) ? plate.listens : [],
   }
 }
 
