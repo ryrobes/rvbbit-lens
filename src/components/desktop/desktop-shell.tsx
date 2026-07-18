@@ -2829,12 +2829,17 @@ export function DesktopShell() {
    * commitSnapshotNow() first makes the whole turn one undo step.
    */
   const applyAssistantCommands = useCallback(
-    (
+    async (
       commands: AssistantCommand[],
       options?: AssistantApplyOptions,
-    ): AssistantApplyResult[] => {
+    ): Promise<AssistantApplyResult[]> => {
       commitSnapshotNow()
       const report: AssistantApplyResult[] = []
+      // Server-round-trip ops (plate installs) run AFTER the sync pass, in
+      // command order, replacing their placeholder report entries — so an
+      // upsert_plate followed by open_plate in one batch opens the plate
+      // that was actually installed.
+      const pendingAsync: Array<() => Promise<void>> = []
       const created: DesktopWindowState[] = []
       const allKnown = () => [...liveWindows(), ...created]
       const findTarget = (t: string | undefined): DesktopWindowState | undefined => {
@@ -3081,6 +3086,58 @@ export function DesktopShell() {
               report.push({ op: cmd.op, target: assistantBlockName(target), status: "applied" })
               return
             }
+            case "upsert_plate": {
+              const idx = report.length
+              report.push({ op: cmd.op, target: cmd.plate_id, status: "skipped", detail: "pending" })
+              const plateCmd = cmd
+              pendingAsync.push(async () => {
+                if (!activeConnectionId) {
+                  report[idx] = { op: plateCmd.op, target: plateCmd.plate_id, status: "skipped", detail: "no active connection" }
+                  return
+                }
+                try {
+                  const res = await fetch("/api/plate/upsert", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                      connectionId: activeConnectionId,
+                      plate: {
+                        plate_id: plateCmd.plate_id,
+                        title: plateCmd.title,
+                        template: plateCmd.template,
+                        queries: plateCmd.queries,
+                        actions: plateCmd.actions,
+                        params: plateCmd.params,
+                        kit: plateCmd.kit,
+                        description: plateCmd.description,
+                      },
+                    }),
+                  })
+                  const body = (await res.json()) as { ok: boolean; error?: string }
+                  report[idx] = body.ok
+                    ? { op: plateCmd.op, target: plateCmd.plate_id, status: "applied" }
+                    : { op: plateCmd.op, target: plateCmd.plate_id, status: "skipped", detail: body.error ?? "install failed" }
+                } catch (e) {
+                  report[idx] = {
+                    op: plateCmd.op,
+                    target: plateCmd.plate_id,
+                    status: "skipped",
+                    detail: e instanceof Error ? e.message : String(e),
+                  }
+                }
+              })
+              return
+            }
+            case "open_plate": {
+              const idx = report.length
+              report.push({ op: cmd.op, target: cmd.plate_id, status: "skipped", detail: "pending" })
+              const openCmd = cmd
+              pendingAsync.push(async () => {
+                openPlate(openCmd.plate_id, openCmd.title)
+                report[idx] = { op: openCmd.op, target: openCmd.plate_id, status: "applied" }
+              })
+              return
+            }
             case "close_block": {
               const target = findTarget(cmd.target)
               if (!target) {
@@ -3106,9 +3163,12 @@ export function DesktopShell() {
           })
         }
       })
+      for (const run of pendingAsync) {
+        await run()
+      }
       return report
     },
-    [commitSnapshotNow, liveWindows, openWindow, updatePayload, emitParam, calloutWindow, close, setWindows, setRunSignals],
+    [commitSnapshotNow, liveWindows, openWindow, updatePayload, emitParam, calloutWindow, close, setWindows, setRunSignals, activeConnectionId, openPlate],
   )
 
   const openSyncMirror = useCallback(() => {
@@ -5886,7 +5946,7 @@ interface WindowContext {
   applyAssistantCommands: (
     commands: AssistantCommand[],
     options?: AssistantApplyOptions,
-  ) => AssistantApplyResult[]
+  ) => Promise<AssistantApplyResult[]>
   reportAssistantExecution: (
     windowId: string,
     observation: AssistantBlockExecutionObservation | null,

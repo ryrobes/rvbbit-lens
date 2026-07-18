@@ -71,7 +71,7 @@ interface AssistantWindowProps {
   applyCommands: (
     commands: AssistantCommand[],
     options?: AssistantApplyOptions,
-  ) => AssistantApplyResult[]
+  ) => Promise<AssistantApplyResult[]>
 }
 
 function commandChipLabel(cmd: AssistantCommand, report?: AssistantApplyResult): string {
@@ -87,6 +87,10 @@ function commandChipLabel(cmd: AssistantCommand, report?: AssistantApplyResult):
       return `→ ${cmd.target}`
     case "close_block":
       return `closed ${cmd.target}`
+    case "upsert_plate":
+      return `${skipped ? "couldn't install" : "installed"} plate ${cmd.plate_id}`
+    case "open_plate":
+      return `opened ${cmd.plate_id}`
     default:
       return (cmd as { op: string }).op
   }
@@ -708,7 +712,7 @@ export function AssistantWindow({
       )
       let report: AssistantApplyResult[] = []
       if (turn.commands.length > 0) {
-        report = applyCommands(turn.commands)
+        report = await applyCommands(turn.commands)
       }
       lastReportRef.current = report.length > 0 ? report : null
       const assistantMsg = newAssistantMessage("assistant", turn.reply, {

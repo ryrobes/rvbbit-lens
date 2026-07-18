@@ -85,6 +85,21 @@ export type AssistantCommand =
     }
   | { op: "focus_block"; target: string }
   | { op: "close_block"; target: string }
+  | {
+      /** Install (or replace) a plate — a durable server-rendered SQL surface
+       *  stored as a rvbbit.plates row. The applier round-trips the install
+       *  so apply_report carries the installer's real verdict. */
+      op: "upsert_plate"
+      plate_id: string
+      title?: string
+      template: string
+      queries?: Record<string, { sql: string; database?: string }>
+      actions?: Record<string, unknown>
+      params?: Array<Record<string, unknown>>
+      kit?: string | null
+      description?: string
+    }
+  | { op: "open_plate"; plate_id: string; title?: string }
 
 /** Per-command outcome, reported back to the agent in the NEXT turn's
  *  desktop_context.apply_report — the agent never assumes an apply succeeded. */

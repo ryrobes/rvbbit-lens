@@ -533,6 +533,46 @@ export async function runPlateAction(
   }
 }
 
+export interface PlateInstallInput {
+  plate_id: string
+  title?: string
+  template: string
+  queries?: Record<string, { sql: string; database?: string }>
+  actions?: Record<string, unknown>
+  params?: Array<Record<string, unknown>>
+  kit?: string | null
+  description?: string
+}
+
+/** Install a plate via rvbbit.upsert_plate — the engine's tripwires (script/
+ *  handler rejection, SELECT-shaped queries) are the validator; errors come
+ *  back verbatim so an agent can read the reason and iterate. */
+export async function installPlate(
+  connectionId: string,
+  plate: PlateInstallInput,
+): Promise<{ ok: boolean; plateId?: string; error?: string }> {
+  if (!plate?.plate_id || !plate?.template) {
+    return { ok: false, error: "plate_id and template are required" }
+  }
+  try {
+    const sql = `SELECT rvbbit.upsert_plate(
+      ${sqlLit(plate.plate_id)},
+      ${sqlLit(plate.title ?? plate.plate_id)},
+      ${sqlLit(plate.template)},
+      ${sqlLit(JSON.stringify(plate.queries ?? {}))}::jsonb,
+      ${sqlLit(JSON.stringify(plate.actions ?? {}))}::jsonb,
+      ${sqlLit(JSON.stringify(plate.params ?? []))}::jsonb,
+      ${plate.kit == null ? "NULL" : sqlLit(plate.kit)},
+      ${plate.description == null ? "NULL" : sqlLit(plate.description)}
+    ) AS plate_id`
+    const res = await executeQuery(connectionId, sql, { rowLimit: 1 })
+    const row = res.rows?.[0] as { plate_id?: string } | undefined
+    return { ok: true, plateId: row?.plate_id ?? plate.plate_id }
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) }
+  }
+}
+
 export interface PlateListEntry {
   plate_id: string
   kit: string | null
