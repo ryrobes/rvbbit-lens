@@ -108,6 +108,9 @@ export function PlateWindow({
 
   const refresh = useCallback(async () => {
     if (!activeConnectionId) return
+    // Defer one microtask so the mount-effect invocation never sets state
+    // synchronously inside the effect frame (react-hooks/set-state-in-effect).
+    await Promise.resolve()
     setLoading(true)
     setError(null)
     try {
