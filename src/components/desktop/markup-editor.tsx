@@ -10,6 +10,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import { createPortal } from "react-dom"
 import type { AssistantImageAttachment } from "@/lib/desktop/assistant"
 
 type Tool = "pen" | "arrow" | "rect"
@@ -177,8 +178,12 @@ export function MarkupEditor({
     return { aspectRatio: `${w} / ${h}`, maxWidth: "min(92vw, 1400px)", maxHeight: "78vh" } as const
   }, [attachment.width, attachment.height])
 
-  return (
-    <div className="fixed inset-0 z-[400] flex flex-col items-center justify-center gap-3 bg-black/70 backdrop-blur-sm">
+  // Portal to <body>: the editor can be mounted from inside the assistant
+  // dock, whose backdrop-filter/transform styling would otherwise become
+  // the containing block for position:fixed and trap the overlay in the
+  // dock's corner instead of centering it over the whole desktop.
+  return createPortal(
+    <div className="fixed inset-0 z-[1000] flex flex-col items-center justify-center gap-3 bg-black/75 backdrop-blur-sm">
       <div
         className="flex items-center gap-3 rounded-xl border border-chrome-border bg-chrome-bg/90 px-3 py-1.5 shadow-lg"
         onPointerDown={(e) => e.stopPropagation()}
@@ -267,6 +272,7 @@ export function MarkupEditor({
           {strokes.length > 0 ? "Attach annotated" : "Attach as-is"}
         </button>
       </div>
-    </div>
+    </div>,
+    document.body,
   )
 }
