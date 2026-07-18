@@ -46,6 +46,10 @@ export interface RenderedPlate {
   /** Resolved param values — the client uses the KEYS to know which
    *  rv-emit fields this plate consumes itself (param loop-back). */
   params: Record<string, unknown>
+  /** Params declared with from_bus: true — the window subscribes these to
+   *  the desktop param bus, so ANY window emitting the field drives this
+   *  plate (cross-plate / cross-window filtering). */
+  busFields: string[]
 }
 
 interface PlateRow {
@@ -340,6 +344,7 @@ export async function renderPlate(
     islands,
     actions,
     params,
+    busFields: (plate.params ?? []).filter((p) => p.from_bus === true).map((p) => p.name),
   }
 }
 

@@ -15,6 +15,7 @@ import { Layers, Loader2, RefreshCw } from "@/lib/icons"
 import { cn } from "@/lib/utils"
 import { ResultGrid } from "./result-grid"
 import type { QueryResultColumn } from "@/lib/db/types"
+import type { DesktopParamValue } from "@/lib/desktop/types"
 
 interface PlateIsland {
   id: string
@@ -44,6 +45,8 @@ interface RenderedPlate {
   /** Resolved param values; the keys tell us which rv-emit fields this
    *  plate consumes itself (param loop-back → re-render). */
   params?: Record<string, unknown>
+  /** Params declared from_bus: true — subscribed to the desktop param bus. */
+  busFields?: string[]
 }
 
 /** Fired after any plate action mutates data. Plates in the same kit
@@ -107,11 +110,13 @@ export function PlateWindow({
   activeConnectionId,
   onOpenSql,
   onEmitParam,
+  busParams,
 }: {
   plateId: string
   activeConnectionId: string | null
   onOpenSql: (title: string, sql: string, run: boolean) => void
   onEmitParam?: (field: string, value: unknown) => void
+  busParams?: DesktopParamValue[]
 }) {
   const [plate, setPlate] = useState<RenderedPlate | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -121,15 +126,34 @@ export function PlateWindow({
   const containerRef = useRef<HTMLDivElement | null>(null)
   const stageRefs = useRef<Record<string, HTMLDivElement | null>>({})
 
+  // Bus subscription: values for this plate's from_bus params, from ANY
+  // window's cascading eq emits. Serialized so refresh only re-fires when
+  // the fields THIS plate declared actually change on the bus.
+  const busFields = plate?.busFields
+  const busKey = useMemo(() => {
+    if (!busFields?.length || !busParams?.length) return "[]"
+    const pairs: Array<[string, unknown]> = []
+    for (const f of [...busFields].sort()) {
+      const hit = busParams.find((p) => p.field === f && p.cascade !== false && p.operator === "eq")
+      if (hit) pairs.push([f, hit.value])
+    }
+    return JSON.stringify(pairs)
+  }, [busFields, busParams])
+
   const refresh = useCallback(async () => {
     if (!activeConnectionId) return
     setLoading(true)
     setError(null)
     try {
+      const busValues = Object.fromEntries(JSON.parse(busKey) as Array<[string, unknown]>)
       const res = await fetch("/api/plate/render", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ connectionId: activeConnectionId, plateId, params: localParams }),
+        body: JSON.stringify({
+          connectionId: activeConnectionId,
+          plateId,
+          params: { ...busValues, ...localParams },
+        }),
       })
       const body = (await res.json()) as RenderedPlate
       if (!body.ok) throw new Error(body.error ?? "render failed")
@@ -139,7 +163,7 @@ export function PlateWindow({
     } finally {
       setLoading(false)
     }
-  }, [activeConnectionId, plateId, localParams])
+  }, [activeConnectionId, plateId, localParams, busKey])
 
   useEffect(() => {
     const timer = window.setTimeout(() => void refresh(), 0)
@@ -190,9 +214,11 @@ export function PlateWindow({
         e.preventDefault()
         const value = target.getAttribute("rv-value") ?? ""
         // Param loop-back: if this plate declares the field, re-render with
-        // it (master-detail within one plate). Still emitted to the global
-        // bus so other windows cross-filter too.
-        if (plate?.params && Object.prototype.hasOwnProperty.call(plate.params, emit)) {
+        // it (master-detail within one plate). from_bus fields skip the
+        // local copy — the bus round-trip drives them (single source of
+        // truth, and toggle-off behaves like every other desktop param).
+        const fromBus = plate?.busFields?.includes(emit)
+        if (!fromBus && plate?.params && Object.prototype.hasOwnProperty.call(plate.params, emit)) {
           setLocalParams((prev) => ({ ...prev, [emit]: value }))
         }
         onEmitParam?.(emit, value)
