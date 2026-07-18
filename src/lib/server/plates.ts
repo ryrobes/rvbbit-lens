@@ -43,6 +43,9 @@ export interface RenderedPlate {
   html: string
   islands: PlateIsland[]
   actions: Record<string, PlateActionMeta>
+  /** Resolved param values — the client uses the KEYS to know which
+   *  rv-emit fields this plate consumes itself (param loop-back). */
+  params: Record<string, unknown>
 }
 
 interface PlateRow {
@@ -336,6 +339,7 @@ export async function renderPlate(
     html,
     islands,
     actions,
+    params,
   }
 }
 

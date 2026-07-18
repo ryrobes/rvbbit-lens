@@ -37,9 +37,23 @@ interface RenderedPlate {
   plateId: string
   title: string
   description: string | null
+  kit: string | null
   html: string
   islands: PlateIsland[]
   actions: Record<string, PlateActionMeta>
+  /** Resolved param values; the keys tell us which rv-emit fields this
+   *  plate consumes itself (param loop-back → re-render). */
+  params?: Record<string, unknown>
+}
+
+/** Fired after any plate action mutates data. Plates in the same kit
+ *  refresh themselves; the shelf re-evaluates its gates. Same-browser
+ *  only — cross-client reactivity would be LISTEN/NOTIFY, later. */
+const PLATE_DATA_EVENT = "rvbbit:plate-data-changed"
+
+interface PlateDataDetail {
+  plateId: string
+  kit: string | null
 }
 
 function MetricIsland({ island }: { island: PlateIsland }) {
@@ -103,6 +117,7 @@ export function PlateWindow({
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [actionNote, setActionNote] = useState<string | null>(null)
+  const [localParams, setLocalParams] = useState<Record<string, unknown>>({})
   const containerRef = useRef<HTMLDivElement | null>(null)
   const stageRefs = useRef<Record<string, HTMLDivElement | null>>({})
 
@@ -114,7 +129,7 @@ export function PlateWindow({
       const res = await fetch("/api/plate/render", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ connectionId: activeConnectionId, plateId }),
+        body: JSON.stringify({ connectionId: activeConnectionId, plateId, params: localParams }),
       })
       const body = (await res.json()) as RenderedPlate
       if (!body.ok) throw new Error(body.error ?? "render failed")
@@ -124,12 +139,26 @@ export function PlateWindow({
     } finally {
       setLoading(false)
     }
-  }, [activeConnectionId, plateId])
+  }, [activeConnectionId, plateId, localParams])
 
   useEffect(() => {
     const timer = window.setTimeout(() => void refresh(), 0)
     return () => window.clearTimeout(timer)
   }, [refresh])
+
+  // Reactivity: when a sibling plate's action mutates data, refresh.
+  // Kit is the sharing scope — plates in one kit are presumed to look at
+  // the same tables (kit-less plates form their own bucket).
+  useEffect(() => {
+    const onData = (e: Event) => {
+      const detail = (e as CustomEvent<PlateDataDetail>).detail
+      if (!detail || detail.plateId === plateId) return
+      if ((detail.kit ?? null) !== (plate?.kit ?? null)) return
+      void refresh()
+    }
+    window.addEventListener(PLATE_DATA_EVENT, onData)
+    return () => window.removeEventListener(PLATE_DATA_EVENT, onData)
+  }, [plateId, plate?.kit, refresh])
 
   // Islands render as React-owned nodes in a staging area, then relocate
   // into their placeholder hosts before paint. (Portals targeting nodes
@@ -157,12 +186,19 @@ export function PlateWindow({
         return
       }
       const emit = target.getAttribute("rv-emit")
-      if (emit && onEmitParam) {
+      if (emit) {
         e.preventDefault()
-        onEmitParam(emit, target.getAttribute("rv-value") ?? "")
+        const value = target.getAttribute("rv-value") ?? ""
+        // Param loop-back: if this plate declares the field, re-render with
+        // it (master-detail within one plate). Still emitted to the global
+        // bus so other windows cross-filter too.
+        if (plate?.params && Object.prototype.hasOwnProperty.call(plate.params, emit)) {
+          setLocalParams((prev) => ({ ...prev, [emit]: value }))
+        }
+        onEmitParam?.(emit, value)
       }
     },
-    [onOpenSql, onEmitParam, plate?.title],
+    [onOpenSql, onEmitParam, plate],
   )
 
   const onSubmit = useCallback(
@@ -193,6 +229,11 @@ export function PlateWindow({
         return
       }
       form.reset()
+      window.dispatchEvent(
+        new CustomEvent<PlateDataDetail>(PLATE_DATA_EVENT, {
+          detail: { plateId, kit: plate.kit ?? null },
+        }),
+      )
       void refresh()
     },
     [activeConnectionId, plate, plateId, refresh],
@@ -287,6 +328,7 @@ export function PlatesWindow({
   >([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [reloadTick, setReloadTick] = useState(0)
 
   useEffect(() => {
     let cancelled = false
@@ -312,7 +354,15 @@ export function PlatesWindow({
     return () => {
       cancelled = true
     }
-  }, [activeConnectionId])
+  }, [activeConnectionId, reloadTick])
+
+  // Gates flip when plate actions change the data — re-list on the same
+  // event the plate windows use to refresh themselves.
+  useEffect(() => {
+    const onData = () => setReloadTick((t) => t + 1)
+    window.addEventListener(PLATE_DATA_EVENT, onData)
+    return () => window.removeEventListener(PLATE_DATA_EVENT, onData)
+  }, [])
 
   return (
     <div className="flex h-full flex-col text-[12px]">

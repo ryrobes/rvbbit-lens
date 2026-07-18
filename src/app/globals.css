@@ -656,3 +656,24 @@ html.dark .av-code-preview .shiki span {
 .plate-chart { border: 1px solid var(--chrome-border); border-radius: 8px; padding: 8px; margin-bottom: 14px; background: color-mix(in oklch, var(--chrome-bg) 35%, transparent); }
 .plate-island { margin-bottom: 0; }
 .plate-error { border: 1px dashed color-mix(in oklch, var(--destructive, #b5524a) 55%, transparent); color: var(--destructive, #b5524a); border-radius: 6px; padding: 6px 10px; font-size: 11px; margin: 6px 0; }
+
+/* plate layout vocabulary — bespoke arrangements from sanctioned classes
+   (no inline styles ever reach a plate; the sanitizer strips them) */
+.plate-split { display: grid; grid-template-columns: 240px minmax(0, 1fr); gap: 14px; align-items: start; }
+.plate-columns { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 14px; align-items: start; }
+.plate-rail { display: flex; flex-direction: column; gap: 4px; }
+.plate-rail button { display: flex; justify-content: space-between; gap: 8px; width: 100%; text-align: left; border: 1px solid var(--chrome-border); border-radius: 6px; padding: 6px 10px; font-size: 11.5px; background: color-mix(in oklch, var(--chrome-bg) 35%, transparent); color: var(--foreground); cursor: pointer; }
+.plate-rail button:hover { border-color: color-mix(in oklch, var(--main) 45%, transparent); background: color-mix(in oklch, var(--main) 12%, transparent); }
+.plate-rail button small { color: color-mix(in oklch, var(--foreground) 45%, transparent); }
+.plate-kv { display: grid; grid-template-columns: max-content 1fr; gap: 4px 14px; border: 1px solid var(--chrome-border); border-radius: 8px; padding: 10px 12px; background: color-mix(in oklch, var(--chrome-bg) 35%, transparent); margin-bottom: 14px; font-size: 11.5px; }
+.plate-kv dt { font-size: 9.5px; text-transform: uppercase; letter-spacing: .07em; color: color-mix(in oklch, var(--foreground) 45%, transparent); align-self: center; }
+.plate-kv dd { color: var(--foreground); margin: 0; }
+.plate-toolbar { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
+.plate-toolbar button { border: 1px solid var(--chrome-border); border-radius: 999px; padding: 3px 12px; font-size: 11px; background: color-mix(in oklch, var(--chrome-bg) 35%, transparent); color: color-mix(in oklch, var(--foreground) 80%, transparent); cursor: pointer; }
+.plate-toolbar button:hover { border-color: color-mix(in oklch, var(--main) 50%, transparent); color: var(--main); }
+.plate-feed { display: flex; flex-direction: column; gap: 8px; }
+.plate-feed-item { border-left: 2px solid color-mix(in oklch, var(--main) 55%, transparent); border-radius: 0 6px 6px 0; padding: 6px 12px; background: color-mix(in oklch, var(--chrome-bg) 30%, transparent); }
+.plate-feed-meta { font-size: 10px; text-transform: uppercase; letter-spacing: .06em; color: color-mix(in oklch, var(--foreground) 45%, transparent); margin-bottom: 2px; }
+.plate-banner { display: flex; align-items: baseline; gap: 10px; border: 1px solid var(--chrome-border); border-radius: 8px; padding: 10px 14px; margin-bottom: 14px; background: color-mix(in oklch, var(--main) 8%, transparent); }
+.plate-banner .plate-banner-big { font-size: 22px; font-weight: 700; color: var(--main); }
+.plate-banner .plate-banner-note { font-size: 11px; color: color-mix(in oklch, var(--foreground) 60%, transparent); }
