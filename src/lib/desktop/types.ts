@@ -29,6 +29,7 @@ export type DesktopWindowKind =
   | "system-health"
   | "plate"
   | "plates"
+  | "fitting"
   | "scenes"
   | "pg-query-explorer"
   | "pg-query-inspector"
@@ -133,6 +134,7 @@ export type WindowPayload =
   | PgMonitorPayload
   | PlatePayload
   | PlatesPayload
+  | FittingPayload
   | SystemHealthPayload
   | ScenesPayload
   | PgQueryExplorerPayload
@@ -981,6 +983,12 @@ export interface PlatePayload {
 
 export interface PlatesPayload {
   kind?: "plates"
+}
+
+export interface FittingPayload {
+  kind?: "fitting"
+  /** Preselect this kit's targets (rv-open="app:fitting?kit=..."). */
+  kit?: string
 }
 
 export interface SystemHealthPayload {

@@ -82,6 +82,7 @@ import { CommandPalette, type PaletteGroup, type PaletteItem } from "./command-p
 import { PgMonitorWindow } from "./pg-monitor-window"
 import { SystemHealthWindow } from "./system-health-window"
 import { PlateWindow, PlatesWindow } from "./plate-window"
+import { FittingRoomWindow } from "./fitting-room-window"
 import { ScenesWindow } from "./scenes-window"
 import { PgQueryExplorerWindow } from "./pg-query-explorer-window"
 import { PgQueryInspectorWindow } from "./pg-query-inspector-window"
@@ -241,6 +242,7 @@ import type {
   PgMonitorPayload,
   ScenesPayload,
   PlatePayload,
+  FittingPayload,
   PlatesPayload,
   SystemHealthPayload,
   PgQueryExplorerPayload,
@@ -2381,6 +2383,21 @@ export function DesktopShell() {
     },
     [focus, openWindow, liveWindows],
   )
+
+  const openFittingRoom = useCallback((kit?: string) => {
+    const existing = liveWindows().find((w) => w.kind === "fitting")
+    if (existing) {
+      if (kit) updatePayload(existing.id, (p) => ({ ...(p as FittingPayload), kind: "fitting", kit }))
+      return focus(existing.id)
+    }
+    openWindow({
+      id: randomUUID(),
+      kind: "fitting",
+      title: "Fitting Room",
+      x: 200, y: 120, width: 940, height: 640,
+      payload: { kind: "fitting", kit } satisfies FittingPayload,
+    })
+  }, [liveWindows, focus, openWindow, updatePayload])
 
   const openPlatesBrowser = useCallback(() => {
     const existing = liveWindows().find((w) => w.kind === "plates")
@@ -5015,6 +5032,7 @@ export function DesktopShell() {
     { id: "monitor", label: "Monitor", icon: Activity, color: "var(--brand-pg-monitor)", description: "Live server activity & stats", activate: openPgMonitor, folder: "system" },
     { id: "system-health", label: "Health", icon: Wrench, color: "var(--rvbbit-accent)", description: "rvbbit metadata weight & maintenance", activate: openSystemHealth, folder: "system", rvbbit: true },
     { id: "plates", label: "Plates", icon: Layers, color: "var(--brand-view-apps)", description: "Surfaces shipped as rows — kit plates & switchboards", activate: openPlatesBrowser, folder: "system", rvbbit: true },
+    { id: "fitting-room", label: "Fitting Room", icon: Wrench, color: "var(--brand-view-apps)", description: "Fit kit canonical views onto your schema", activate: () => openFittingRoom(), folder: "system", rvbbit: true },
     { id: "query-explorer", label: "Query Explorer", icon: LineChart, color: "var(--brand-pg-monitor)", description: "Historical normalized queries, runtime & notable evidence", activate: openPgQueryExplorer, folder: "system" },
     { id: "lock-explorer", label: "Lock Explorer", icon: Lock, color: "var(--brand-lock-explorer)", description: "Live blocker chains, resources & replay", activate: openLockExplorer, folder: "system" },
     { id: "mvcc-explorer", label: "MVCC Explorer", icon: Layers, color: "var(--brand-mvcc-explorer)", description: "Vacuum horizons, pressure & workers", activate: () => openMvccExplorer(), folder: "system" },
@@ -5328,6 +5346,7 @@ export function DesktopShell() {
       onClearNotifications: clearNotifications,
       openOperatorFlow,
       openPlate,
+      openFittingRoom,
       openSpecialistDetail,
       openBrain,
       openMcpServers,
@@ -5375,7 +5394,7 @@ export function DesktopShell() {
       wallpaperUrl, onPickWallpaper, onClearWallpaper, onApplyLibraryWallpaper, applyUploadedWallpaper,
       onReExtractPalette, onReExtractWithRvbbit, setPaletteOverrides,
       notifications, watchedChannels, windowChannels, notifyStatus, addWatchedChannel,
-      removeWatchedChannel, clearNotifications, openOperatorFlow, openPlate, openSpecialistDetail,
+      removeWatchedChannel, clearNotifications, openOperatorFlow, openPlate, openFittingRoom, openSpecialistDetail,
       openBrain, openMcpServers, openMcpServerDetail, openRouting, openQueryLens, openKgBrowser, openKgEntity,
       openSourceRow, openKgForSource, openKgExtractionRuns, openKgMergeReview, openKgExplorer, openHindsightMemory,
       openDataSearch, openDrift, openModelSettings, openModelStudio, openMetricCatalog, openMetricCreator,
@@ -5903,6 +5922,7 @@ interface WindowContext {
   openConnections: () => void
   openOperatorFlow: (operatorName: string | null, receiptId?: string | null) => void
   openPlate: (plateId: string, title?: string) => void
+  openFittingRoom: (kit?: string) => void
   openSpecialistDetail: (specialistName: string) => void
   openBrain: () => void
   openMcpServers: () => void
@@ -6271,6 +6291,9 @@ function renderWindowContent(
           busParams={ctx.params}
           onOpenSql={ctx.openSqlInWindow}
           onOpenPlate={ctx.openPlate}
+          onOpenApp={(appId, params) => {
+            if (appId === "fitting") ctx.openFittingRoom(params.kit)
+          }}
           onEmitParam={(field, value) =>
             ctx.emitParam({
               sourceWindowId: w.id,
@@ -6289,6 +6312,13 @@ function renderWindowContent(
         <PlatesWindow
           activeConnectionId={ctx.activeConnectionId}
           onOpenPlate={ctx.openPlate}
+        />
+      )
+    case "fitting":
+      return (
+        <FittingRoomWindow
+          activeConnectionId={ctx.activeConnectionId}
+          initialKit={(w.payload as FittingPayload | undefined)?.kit}
         />
       )
     case "pg-monitor":
@@ -6937,6 +6967,7 @@ function iconForKind(kind: DesktopWindowState["kind"]) {
     case "system-health": return Wrench
     case "plate": return Layers
     case "plates": return Layers
+    case "fitting": return Wrench
     case "pg-monitor": return Activity
     case "pg-query-explorer": return LineChart
     case "lock-explorer": return Lock

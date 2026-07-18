@@ -139,6 +139,7 @@ export function PlateWindow({
   activeConnectionId,
   onOpenSql,
   onOpenPlate,
+  onOpenApp,
   onEmitParam,
   busParams,
 }: {
@@ -146,6 +147,8 @@ export function PlateWindow({
   activeConnectionId: string | null
   onOpenSql: (title: string, sql: string, run: boolean) => void
   onOpenPlate?: (plateId: string, title?: string) => void
+  /** rv-open="app:<id>?k=v" — native desktop apps (e.g. the Fitting Room). */
+  onOpenApp?: (appId: string, params: Record<string, string>) => void
   onEmitParam?: (field: string, value: unknown) => void
   busParams?: DesktopParamValue[]
 }) {
@@ -361,10 +364,22 @@ export function PlateWindow({
       const open = target.getAttribute("rv-open")
       if (open) {
         e.preventDefault()
-        // Desktop verbs — plate: is the only scheme v1. Navigation between
-        // plates (switchboard → module, drill-through) rides this.
+        // Desktop verbs. plate: opens a sibling plate; app: opens a native
+        // desktop app with query-ish params (app:fitting?kit=field-kit).
         if (open.startsWith("plate:") && onOpenPlate) {
           onOpenPlate(open.slice(6), target.getAttribute("rv-open-title") ?? undefined)
+        } else if (open.startsWith("app:") && onOpenApp) {
+          const rest = open.slice(4)
+          const q = rest.indexOf("?")
+          const appId = q >= 0 ? rest.slice(0, q) : rest
+          const params: Record<string, string> = {}
+          if (q >= 0) {
+            for (const pair of rest.slice(q + 1).split("&")) {
+              const eq = pair.indexOf("=")
+              if (eq > 0) params[decodeURIComponent(pair.slice(0, eq))] = decodeURIComponent(pair.slice(eq + 1))
+            }
+          }
+          onOpenApp(appId, params)
         }
         return
       }
@@ -380,7 +395,7 @@ export function PlateWindow({
         handleEmit(emit, target.getAttribute("rv-value") ?? "", { toggle: true })
       }
     },
-    [onOpenSql, onOpenPlate, handleEmit, plate],
+    [onOpenSql, onOpenPlate, onOpenApp, handleEmit, plate],
   )
 
   const onSubmit = useCallback(
