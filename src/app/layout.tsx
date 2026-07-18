@@ -1,6 +1,7 @@
 import type { Metadata } from "next"
 import Script from "next/script"
 import "./globals.css"
+import "./plate-utilities.css"
 import { GOOGLE_FONTS_HREF } from "@/lib/desktop/fonts"
 
 export const metadata: Metadata = {

@@ -552,6 +552,25 @@ export async function renderPlate(
   // Restore blank markers to real empty values now that sanitation is done.
   html = html.split(BLANK).join("")
 
+  // Class scrub: the app's own compiled Tailwind utilities are GLOBAL, so
+  // without this a plate could borrow fixed/z-50/inset-0 from the lens
+  // stylesheet and overlay desktop chrome. The scoped plate palette
+  // (plate-utilities.css) is what SHOULD work; this strips what must not,
+  // including arbitrary-value classes (inline styles in a class costume).
+  {
+    const DANGEROUS =
+      /^(?:!|-)|^(?:fixed|absolute|sticky|relative|static)$|^-?(?:inset|top|right|bottom|left|z|translate|scale|rotate|skew|origin)-|^(?:w|h|min-w|min-h|max-w|max-h)-(?:screen|dvh|svh|lvh|dvw)|^pointer-events-|^(?:visible|invisible|collapse)$|[[\]]/
+    const $$ = cheerio.load(html, {}, false)
+    $$("[class]").each((_, el) => {
+      const cls = String($$(el).attr("class") ?? "")
+      const kept = cls.split(/\s+/).filter((t) => t && !DANGEROUS.test(t))
+      if (kept.length !== cls.split(/\s+/).filter(Boolean).length) {
+        $$(el).attr("class", kept.join(" "))
+      }
+    })
+    html = $$.html() ?? html
+  }
+
   const actions: Record<string, PlateActionMeta> = {}
   for (const [name, a] of Object.entries(plate.actions ?? {})) {
     const requiresRole = a.requires_role?.trim() || undefined
