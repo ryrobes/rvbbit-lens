@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent } from "react"
 
 import { usePolling } from "@/lib/desktop/use-polling"
+import { themeStyleTag } from "@/lib/desktop/assistant"
 import { Plus } from "@/lib/icons"
 import type { DashboardsPayload, DesktopParamValue } from "@/lib/desktop/types"
 import type { QueryResultColumn, SchemaSnapshot } from "@/lib/db/types"
@@ -78,6 +79,9 @@ function buildSrcdoc(html: string): string {
     "<!doctype html><meta charset=utf-8>" +
     "<style>html,body{margin:0;padding:14px;font-family:system-ui,-apple-system,sans-serif;" +
     "background:#15110d;color:#f0e6d8}a{color:#e8b572}</style>" +
+    // Pre-materialized desktop theme vars — iframes can't resolve the
+    // parent's custom properties, so bake the live values in.
+    themeStyleTag() +
     shim +
     html
   )

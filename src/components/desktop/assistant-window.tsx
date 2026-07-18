@@ -12,7 +12,7 @@
  * (applyAssistantCommands), the brain in rvbbit.desktop_assistant_turn.
  */
 
-import { useCallback, useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react"
 import type {
   DesktopParamValue,
   DesktopWindowState,
@@ -26,6 +26,7 @@ import {
   fetchLiveToolCount,
   fetchThreadRemote,
   fetchTurnToolEvents,
+  imageAttachmentFromBlob,
   loadPersona,
   loadThreadLocal,
   mergeAssistantThreads,
@@ -65,6 +66,8 @@ interface AssistantWindowProps {
   getExecutionObservations: () => Record<string, AssistantBlockExecutionObservation>
   queuedAttachments: AssistantImageAttachment[]
   onConsumeQueuedAttachments: (ids: string[]) => void
+  /** Enqueue an attachment (pasted screenshots ride the same gallery). */
+  onQueueAttachment?: (attachment: AssistantImageAttachment) => void
   applyCommands: (
     commands: AssistantCommand[],
     options?: AssistantApplyOptions,
@@ -326,6 +329,52 @@ export function AssistantDock({
   )
 }
 
+/** Karaoke text — while a message's audio plays, a soft background sweep
+ *  lights the words at the clip's pace. Deliberately approximate: linear
+ *  word pacing against clip length reads as "she's saying this" without
+ *  pretending to be a subtitle track. */
+function KaraokeText({ text }: { text: string }) {
+  // Keep whitespace tokens so layout is byte-identical to the plain render.
+  const tokens = useMemo(() => text.split(/(\s+)/), [text])
+  const wordCount = useMemo(
+    () => tokens.filter((t) => t.length > 0 && !/^\s+$/.test(t)).length,
+    [tokens],
+  )
+  const [lit, setLit] = useState(0)
+  useEffect(() => {
+    const player = getVoicePlayer()
+    let raf = 0
+    const loop = () => {
+      const p = player.getProgress()
+      if (p != null) {
+        const n = Math.min(wordCount, Math.floor(p * wordCount) + 1)
+        setLit((cur) => (cur === n ? cur : n))
+      }
+      raf = requestAnimationFrame(loop)
+    }
+    raf = requestAnimationFrame(loop)
+    return () => cancelAnimationFrame(raf)
+  }, [wordCount])
+  let seen = 0
+  return (
+    <>
+      {tokens.map((t, i) => {
+        if (t.length === 0 || /^\s+$/.test(t)) return t
+        const on = seen++ < lit
+        return (
+          <span
+            key={i}
+            className="rounded-[3px] transition-colors duration-500"
+            style={on ? { background: "color-mix(in oklch, var(--main) 14%, transparent)" } : undefined}
+          >
+            {t}
+          </span>
+        )
+      })}
+    </>
+  )
+}
+
 export function AssistantWindow({
   activeConnectionId,
   schema,
@@ -334,6 +383,7 @@ export function AssistantWindow({
   getExecutionObservations,
   queuedAttachments,
   onConsumeQueuedAttachments,
+  onQueueAttachment,
   applyCommands,
 }: AssistantWindowProps) {
   // Chips dim when their block leaves the canvas — the transcript visibly
@@ -813,9 +863,16 @@ export function AssistantWindow({
                     {m.attachments?.length ? (
                       <AssistantAttachmentGallery attachments={m.attachments} />
                     ) : null}
-                    {voiceScripts[m.id]
-                      ? stripAudioTags(voiceScripts[m.id])
-                      : assistantReplyForDisplay(m.text)}
+                    {(() => {
+                      const display = voiceScripts[m.id]
+                        ? stripAudioTags(voiceScripts[m.id])
+                        : assistantReplyForDisplay(m.text)
+                      return speaking && speakingId === m.id ? (
+                        <KaraokeText text={display} />
+                      ) : (
+                        display
+                      )
+                    })()}
                   </div>
                   {voiceScripts[m.id] ? (
                     <span className="relative mt-[3px] shrink-0 self-start">
@@ -1067,6 +1124,22 @@ export function AssistantWindow({
                 if (e.key === "Enter" && !e.shiftKey) {
                   e.preventDefault()
                   void send()
+                }
+              }}
+              onPaste={(e) => {
+                if (!onQueueAttachment) return
+                const images = Array.from(e.clipboardData?.items ?? []).filter(
+                  (it) => it.kind === "file" && it.type.startsWith("image/"),
+                )
+                if (images.length === 0) return
+                e.preventDefault()
+                for (const item of images) {
+                  const file = item.getAsFile()
+                  if (file) {
+                    void imageAttachmentFromBlob(file)
+                      .then(onQueueAttachment)
+                      .catch(() => {})
+                  }
                 }
               }}
               rows={2}

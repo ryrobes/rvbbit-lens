@@ -13,6 +13,7 @@ import {
   type HtmlBlockSpec,
 } from "@/lib/desktop/app-block"
 import { attachDragGhost } from "@/lib/desktop/drag-ghost"
+import { themeStyleTag } from "@/lib/desktop/assistant"
 import { setActiveColumnDragSource, writeColumnDragPayload } from "@/lib/desktop/column-drag"
 import { cn } from "@/lib/utils"
 import type { QueryResult } from "@/lib/db/types"
@@ -228,13 +229,17 @@ function buildSrcdoc(spec: HtmlBlockSpec, entries: HtmlBlockQueryResult[]): stri
     });
   });
 })();</script>`
+  // Pre-materialized desktop theme: the iframe's document can't resolve the
+  // parent's CSS custom properties, so bake the live values in — apps that
+  // style with var(--main) etc. match whatever theme the desktop wears.
+  const inject = `${themeStyleTag()}${shim}`
   const html = spec.html.trim()
   if (/<!doctype\b|<html[\s>]/i.test(html)) {
-    if (/<body[^>]*>/i.test(html)) return html.replace(/<body([^>]*)>/i, `<body$1>${shim}`)
-    if (/<\/head>/i.test(html)) return html.replace(/<\/head>/i, `${shim}</head>`)
-    return html.replace(/<html([^>]*)>/i, `<html$1>${shim}`)
+    if (/<body[^>]*>/i.test(html)) return html.replace(/<body([^>]*)>/i, `<body$1>${inject}`)
+    if (/<\/head>/i.test(html)) return html.replace(/<\/head>/i, `${inject}</head>`)
+    return html.replace(/<html([^>]*)>/i, `<html$1>${inject}`)
   }
-  return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head><body>${shim}${html}</body></html>`
+  return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head><body>${inject}${html}</body></html>`
 }
 
 function columnsFor(entry: HtmlBlockQueryResult): DesktopColumnRef[] {

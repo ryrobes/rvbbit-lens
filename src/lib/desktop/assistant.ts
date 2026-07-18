@@ -218,9 +218,18 @@ export function buildAssistantDesktopContext(
     ? "Replies may be read aloud by text-to-speech: prefer speakable prose, and avoid gratuitous tables or long code dumps in the reply text (put those on the desktop instead)."
     : ""
   const personaOut = [persona, speakable].filter(Boolean).join("\n\n")
+  const themeTokens = readThemeTokens()
   return {
     schema_version: "rvbbit.desktop_context.v1",
     ...(personaOut ? { persona: personaOut } : {}),
+    ...(themeTokens
+      ? {
+          theme: {
+            note: "The desktop's live theme. These CSS custom properties are pre-materialized inside app iframes — style apps with var(--main), var(--background), var(--foreground) etc. (or the literal values here) so they match the desktop instead of inventing a palette.",
+            tokens: themeTokens,
+          },
+        }
+      : {}),
     spend_threshold_usd: loadSpendThreshold(),
     blocks,
     params: params.map((p) => ({
@@ -261,6 +270,80 @@ function looksLikeIncompleteCommandEnvelope(value: unknown): boolean {
 export function assistantReplyForDisplay(text: string): string {
   if (!looksLikeIncompleteCommandEnvelope(text)) return text
   return text.trim().endsWith("}") ? INVALID_COMMAND_REPLY : INCOMPLETE_COMMAND_REPLY
+}
+
+// ── Pasted images → attachments ─────────────────────────────────────────
+
+/** Turn a clipboard image blob into a chat attachment: downscaled to a
+ *  vision-friendly size and re-encoded webp so a 4K screenshot doesn't ride
+ *  the turn at full weight. */
+export async function imageAttachmentFromBlob(
+  blob: Blob,
+  name = "pasted image",
+): Promise<AssistantImageAttachment> {
+  const bitmap = await createImageBitmap(blob)
+  const maxSide = 1600
+  const scale = Math.min(1, maxSide / Math.max(bitmap.width, bitmap.height))
+  const width = Math.max(1, Math.round(bitmap.width * scale))
+  const height = Math.max(1, Math.round(bitmap.height * scale))
+  const canvas = document.createElement("canvas")
+  canvas.width = width
+  canvas.height = height
+  const ctx = canvas.getContext("2d")
+  if (!ctx) throw new Error("canvas unavailable")
+  ctx.drawImage(bitmap, 0, 0, width, height)
+  bitmap.close()
+  return {
+    id: randomUUID(),
+    kind: "image",
+    dataUrl: canvas.toDataURL("image/webp", 0.85),
+    mimeType: "image/webp",
+    width,
+    height,
+    name,
+  }
+}
+
+// ── Desktop theme tokens ────────────────────────────────────────────────
+//
+// App iframes have their own document, so the desktop's CSS custom
+// properties don't resolve inside them. Two halves of one fix: the app
+// renderer injects a PRE-MATERIALIZED :root{} block (app-block-view), and
+// the agent's desktop context carries the same resolved values so generated
+// HTML styles itself with the live theme instead of invented colors.
+
+const THEME_TOKENS = [
+  "main",
+  "background",
+  "foreground",
+  "secondary-background",
+  "chrome-border",
+  "chrome-text",
+  "block-bg",
+  "success",
+  "warning",
+  "destructive",
+] as const
+
+export function readThemeTokens(): Record<string, string> | null {
+  if (typeof document === "undefined") return null
+  const cs = getComputedStyle(document.documentElement)
+  const out: Record<string, string> = {}
+  for (const t of THEME_TOKENS) {
+    const v = cs.getPropertyValue(`--${t}`).trim()
+    if (v) out[`--${t}`] = v
+  }
+  return Object.keys(out).length > 0 ? out : null
+}
+
+/** A <style> tag materializing the live theme for an app iframe's document. */
+export function themeStyleTag(): string {
+  const tokens = readThemeTokens()
+  if (!tokens) return ""
+  const vars = Object.entries(tokens)
+    .map(([k, v]) => `${k}: ${v};`)
+    .join(" ")
+  return `<style id="__rvbbit-theme">:root { ${vars} }</style>`
 }
 
 // ── In-turn tool activity (the thinking dots) ───────────────────────────

@@ -243,6 +243,8 @@ export class VoicePlayer {
   private source: AudioBufferSourceNode | null = null
   private listeners = new Set<PlayerListener>()
   private token = 0
+  private startedAt = 0
+  private duration = 0
   speaking = false
 
   /** Must be called from a user gesture the first time (autoplay policy). */
@@ -265,6 +267,14 @@ export class VoicePlayer {
     return this.analyser
   }
 
+  /** Playback progress 0..1 for the current clip, or null when idle — drives
+   *  the karaoke text highlight. Linear pacing is enough: the effect is a
+   *  vibe, not a subtitle track. */
+  getProgress(): number | null {
+    if (!this.speaking || !this.ctx || this.duration <= 0) return null
+    return Math.min(1, (this.ctx.currentTime - this.startedAt) / this.duration)
+  }
+
   onChange(fn: PlayerListener): () => void {
     this.listeners.add(fn)
     return () => this.listeners.delete(fn)
@@ -285,6 +295,8 @@ export class VoicePlayer {
     src.buffer = buf
     src.connect(this.analyser!)
     this.source = src
+    this.duration = buf.duration
+    this.startedAt = ctx.currentTime
     this.emit(true)
     await new Promise<void>((resolve) => {
       src.onended = () => {

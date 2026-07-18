@@ -5309,6 +5309,7 @@ export function DesktopShell() {
         getExecutionObservations={getAssistantExecutionObservations}
         queuedAttachments={assistantAttachments}
         onConsumeQueuedAttachments={consumeAssistantAttachments}
+        onQueueAttachment={queueAssistantAttachment}
         applyCommands={applyAssistantCommands}
       />
       {wallpaperUrl ? (
