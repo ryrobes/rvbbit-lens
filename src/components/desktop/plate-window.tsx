@@ -415,7 +415,11 @@ export function PlateWindow({
         return
       }
       const args: Record<string, unknown> = {}
-      new FormData(form).forEach((v, k) => {
+      // Include the clicked submit button so per-row buttons can carry an
+      // arg (name/value on the submitter is excluded from plain FormData).
+      const submitter = (e.nativeEvent as SubmitEvent).submitter
+      const fd = submitter && submitter.getAttribute("name") ? new FormData(form, submitter) : new FormData(form)
+      fd.forEach((v, k) => {
         args[k] = typeof v === "string" ? v : ""
       })
       if (meta.confirm && !window.confirm(meta.description || `Run ${actionName}?`)) return

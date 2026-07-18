@@ -145,7 +145,10 @@ const SANITIZE_OPTS: sanitizeHtml.IOptions = {
     select: ["class", "title", "name", "required", "rv-emit", "query", "value", "label", "placeholder"],
     option: ["value", "selected"],
     textarea: ["class", "title", "name", "placeholder", "required", "rows"],
-    button: ["class", "title", "type", "rv-open-sql", "rv-open-sql-title", "rv-emit", "rv-value"],
+    // name: a submit button may carry an action arg per row (the native
+    // per-row-action idiom); the client passes the submitter to FormData
+    // so the clicked button's name/value pair rides along.
+    button: ["class", "title", "type", "name", "value", "rv-open-sql", "rv-open-sql-title", "rv-emit", "rv-value"],
     form: ["class", "rv-action"],
   },
   disallowedTagsMode: "discard",
