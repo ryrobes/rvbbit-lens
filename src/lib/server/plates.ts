@@ -112,8 +112,8 @@ const SANITIZE_OPTS: sanitizeHtml.IOptions = {
       "rv-open-sql", "rv-open-sql-title", "rv-confirm",
       "query", "spec", "value", "label", "x", "y", "mark", "unit",
     ],
-    input: ["class", "title", "name", "value", "type", "placeholder", "required", "min", "max", "step", "checked"],
-    select: ["class", "title", "name", "required"],
+    input: ["class", "title", "name", "value", "type", "placeholder", "required", "min", "max", "step", "checked", "rv-emit", "rv-value"],
+    select: ["class", "title", "name", "required", "rv-emit", "query", "value", "label", "placeholder"],
     option: ["value", "selected"],
     textarea: ["class", "title", "name", "placeholder", "required", "rows"],
     button: ["class", "title", "type", "rv-open-sql", "rv-open-sql-title", "rv-emit", "rv-value"],
@@ -274,6 +274,62 @@ export async function renderPlate(
       rendered.push(frag.html() ?? "")
     }
     $el.replaceWith(rendered.join(""))
+  })
+
+  // 2b. Param controls: any <select rv-emit> is server-controlled. With a
+  // `query` attribute its options come from that query's rows (value/label
+  // name the columns; `placeholder` adds a leading empty option); with
+  // authored options they are used as-is. Either way the option matching
+  // the CURRENT param value is marked selected — selection state comes
+  // from SQL-resolved params, never from client state.
+  $("select[rv-emit]").each((_, el) => {
+    const $el = $(el)
+    const field = String($el.attr("rv-emit") ?? "")
+    const current = params[field] == null ? "" : String(params[field])
+    const qname = $el.attr("query")
+    if (qname != null) {
+      const result = results.get(String(qname))
+      if (!result || result.error) {
+        $el.replaceWith(
+          `<div class="plate-error">select query “${escapeHtml(qname)}” ${result?.error ? `failed: ${escapeHtml(result.error)}` : "is unknown"}</div>`,
+        )
+        return
+      }
+      const valueCol = String($el.attr("value") ?? result.columns[0]?.name ?? "")
+      const labelCol = String($el.attr("label") ?? valueCol)
+      const opts: string[] = []
+      const placeholder = $el.attr("placeholder")
+      if (placeholder != null) {
+        opts.push(`<option value=""${current === "" ? " selected" : ""}>${escapeHtml(placeholder)}</option>`)
+      }
+      for (const row of result.rows.slice(0, EACH_ROW_CAP)) {
+        const v = row[valueCol] == null ? "" : String(row[valueCol])
+        const l = row[labelCol] == null ? v : String(row[labelCol])
+        opts.push(`<option value="${escapeHtml(v)}"${v === current ? " selected" : ""}>${escapeHtml(l)}</option>`)
+      }
+      $el.removeAttr("query").removeAttr("value").removeAttr("label").removeAttr("placeholder")
+      $el.html(opts.join(""))
+    } else {
+      $el.find("option").each((__, opt) => {
+        const $o = $(opt)
+        const v = $o.attr("value") ?? $o.text()
+        if (String(v) === current) $o.attr("selected", "selected")
+        else $o.removeAttr("selected")
+      })
+    }
+  })
+
+  // Checkboxes with rv-emit: checked when the param holds their rv-value
+  // (or anything truthy when no rv-value is declared) — same principle as
+  // selected options: control state comes from resolved params.
+  $('input[type="checkbox"][rv-emit]').each((_, el) => {
+    const $el = $(el)
+    const field = String($el.attr("rv-emit") ?? "")
+    const current = params[field] == null ? "" : String(params[field])
+    const want = $el.attr("rv-value")
+    const on = want != null ? current === String(want) : current !== ""
+    if (on) $el.attr("checked", "checked")
+    else $el.removeAttr("checked")
   })
 
   // 3. Any rv-if left outside rv-each has no row scope — drop it honestly.

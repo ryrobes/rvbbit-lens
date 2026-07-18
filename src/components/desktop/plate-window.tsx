@@ -153,6 +153,7 @@ export function PlateWindow({
   const [localParams, setLocalParams] = useState<Record<string, unknown>>({})
   const containerRef = useRef<HTMLDivElement | null>(null)
   const stageRefs = useRef<Record<string, HTMLDivElement | null>>({})
+  const emitRef = useRef<((field: string, value: unknown) => void) | null>(null)
 
   // Bus subscription: values for this plate's from_bus params, from ANY
   // window's cascading eq emits. Serialized so refresh only re-fires when
@@ -221,11 +222,32 @@ export function PlateWindow({
   // focuses, second click works". The applied string is tracked ON the
   // element so remounts (error → recovery) re-apply correctly.
   useLayoutEffect(() => {
-    const el = containerRef.current as (HTMLDivElement & { __rvHtml?: string }) | null
+    const el = containerRef.current as
+      | (HTMLDivElement & { __rvHtml?: string; __rvChangeBound?: boolean })
+      | null
     if (!el || !plate) return
     if (el.__rvHtml !== plate.html) {
       el.__rvHtml = plate.html
       el.innerHTML = plate.html
+    }
+    // Param controls (select / slider / datepicker / search / checkbox with
+    // rv-emit) speak through the native change event — bound once here since
+    // these children live outside React. Values are coerced by control type.
+    if (!el.__rvChangeBound) {
+      el.__rvChangeBound = true
+      el.addEventListener("change", (ev) => {
+        const t = ev.target as HTMLElement | null
+        const field = t?.getAttribute?.("rv-emit")
+        if (!t || !field) return
+        let value: unknown
+        if (t instanceof HTMLSelectElement) value = t.value
+        else if (t instanceof HTMLInputElement) {
+          if (t.type === "checkbox") value = t.checked ? (t.getAttribute("rv-value") ?? "true") : ""
+          else if (t.type === "range" || t.type === "number") value = t.value === "" ? "" : Number(t.value)
+          else value = t.value
+        } else return
+        emitRef.current?.(field, value)
+      })
     }
     // Islands render as React-owned nodes in a staging area, then relocate
     // into their placeholder hosts before paint. (Portals targeting nodes
@@ -261,6 +283,10 @@ export function PlateWindow({
     [plate, onEmitParam],
   )
 
+  useEffect(() => {
+    emitRef.current = handleEmit
+  }, [handleEmit])
+
   // Event delegation for the vocabulary.
   const onClick = useCallback(
     (e: React.MouseEvent) => {
@@ -274,6 +300,10 @@ export function PlateWindow({
       }
       const emit = target.getAttribute("rv-emit")
       if (emit) {
+        // Form controls emit on change, not click — a click on a select must
+        // open its dropdown, not fire the param.
+        const tag = target.tagName
+        if (tag === "SELECT" || tag === "INPUT" || tag === "TEXTAREA") return
         e.preventDefault()
         handleEmit(emit, target.getAttribute("rv-value") ?? "")
       }

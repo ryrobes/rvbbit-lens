@@ -680,3 +680,13 @@ html.dark .av-code-preview .shiki span {
 .plate-banner { display: flex; align-items: baseline; gap: 10px; border: 1px solid var(--chrome-border); border-radius: 8px; padding: 10px 14px; margin-bottom: 14px; background: color-mix(in oklch, var(--main) 8%, transparent); }
 .plate-banner .plate-banner-big { font-size: 22px; font-weight: 700; color: var(--main); }
 .plate-banner .plate-banner-note { font-size: 11px; color: color-mix(in oklch, var(--foreground) 60%, transparent); }
+.plate-field { display: flex; flex-direction: column; gap: 3px; font-size: 10px; text-transform: uppercase; letter-spacing: .07em; color: color-mix(in oklch, var(--foreground) 50%, transparent); }
+.plate-field select, .plate-field input { text-transform: none; letter-spacing: normal; }
+.plate-body select, .plate-body input[type="search"], .plate-body input[type="text"], .plate-body input[type="date"], .plate-body input[type="number"] {
+  border: 1px solid var(--chrome-border); border-radius: 6px; padding: 4px 8px; font-size: 11.5px;
+  background: color-mix(in oklch, var(--chrome-bg) 55%, transparent); color: var(--foreground); min-width: 120px;
+}
+.plate-body select:focus, .plate-body input:focus { border-color: color-mix(in oklch, var(--main) 50%, transparent); outline: none; }
+.plate-body input[type="range"] { accent-color: var(--main); min-width: 140px; }
+.plate-body input[type="checkbox"] { accent-color: var(--main); width: 14px; height: 14px; }
+.plate-field-inline { display: flex; align-items: center; gap: 6px; flex-direction: row; }
