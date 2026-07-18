@@ -263,6 +263,79 @@ export function assistantReplyForDisplay(text: string): string {
   return text.trim().endsWith("}") ? INVALID_COMMAND_REPLY : INCOMPLETE_COMMAND_REPLY
 }
 
+// ── In-turn tool activity (the thinking dots) ───────────────────────────
+//
+// The agent loop writes one rvbbit.agent_messages row per COMPLETED tool
+// call (role='tool': tool_name + call arguments + result). While a turn is
+// in flight the window polls the newest run and renders a dot per call —
+// the enhanced-thinking effect. Read-only, best-effort, and scoped to rows
+// newer than the turn start (15s skew buffer) so an old run never bleeds in.
+
+export interface TurnToolEvent {
+  idx: number
+  tool: string
+  /** The call's arguments (e.g. the SQL text), clipped server-side. */
+  args: string
+  /** First bytes of the tool result, clipped server-side. */
+  result: string
+}
+
+/** Cross-connection live tally of the in-flight turn's tool calls — the
+ *  agent loop bumps shared memory per call (engines ≥ 4.0.11), because the
+ *  audit rows themselves are invisible until the turn's transaction commits.
+ *  Returns 0 on older engines (no tick → no rows), which just means the
+ *  thinking pill shows no dots until the reply lands. */
+export async function fetchLiveToolCount(connectionId: string): Promise<number> {
+  try {
+    const res = await fetch("/api/db/query", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        connectionId,
+        sql: "SELECT coalesce(sum(calls), 0)::int AS n FROM rvbbit.live_call_counts() WHERE operator = 'assistant:tool'",
+        readOnly: true,
+        rowLimit: 1,
+      }),
+    })
+    const body = (await res.json()) as { rows?: Array<Record<string, unknown>>; error?: string }
+    if (!res.ok || body.error) return 0
+    return Number(body.rows?.[0]?.n ?? 0)
+  } catch {
+    return 0
+  }
+}
+
+export async function fetchTurnToolEvents(
+  connectionId: string,
+  runId: string,
+): Promise<TurnToolEvent[]> {
+  const sql = `
+    SELECT turn_idx AS idx,
+           coalesce(nullif(tool_name, ''), 'tool') AS tool,
+           left(coalesce(tool_calls::text, ''), 500) AS args,
+           left(coalesce(content, ''), 240) AS result
+    FROM rvbbit.agent_messages
+    WHERE run_id = ${sqlLiteral(runId)} AND role = 'tool'
+    ORDER BY turn_idx`
+  try {
+    const res = await fetch("/api/db/query", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ connectionId, sql, readOnly: true, rowLimit: 64 }),
+    })
+    const body = (await res.json()) as { rows?: Array<Record<string, unknown>>; error?: string }
+    if (!res.ok || body.error) return []
+    return (body.rows ?? []).map((r) => ({
+      idx: Number(r.idx ?? 0),
+      tool: String(r.tool ?? "tool"),
+      args: String(r.args ?? ""),
+      result: String(r.result ?? ""),
+    }))
+  } catch {
+    return []
+  }
+}
+
 export async function runAssistantTurn(
   connectionId: string,
   message: string,

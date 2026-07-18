@@ -23,7 +23,9 @@ import {
   assistantReplyForDisplay,
   assistantBlockName,
   buildAssistantDesktopContext,
+  fetchLiveToolCount,
   fetchThreadRemote,
+  fetchTurnToolEvents,
   loadPersona,
   loadThreadLocal,
   mergeAssistantThreads,
@@ -35,6 +37,7 @@ import {
   type AssistantCommand,
   type AssistantImageAttachment,
   type AssistantMessage,
+  type TurnToolEvent,
 } from "@/lib/desktop/assistant"
 import { useAssistantIdentity } from "@/lib/desktop/assistant-identity"
 import type { AssistantBlockExecutionObservation } from "@/lib/desktop/assistant-execution"
@@ -340,6 +343,13 @@ export function AssistantWindow({
   const [messages, setMessages] = useState<AssistantMessage[]>([])
   const [draft, setDraft] = useState("")
   const [busy, setBusy] = useState(false)
+  // The enhanced thinking effect, in two layers: a LIVE dot count from
+  // shared memory while the turn runs (audit rows are MVCC-invisible until
+  // commit), then the full tool strip — args + result tooltips — attached
+  // to the finished reply from rvbbit.agent_messages by run_id.
+  const [liveToolCount, setLiveToolCount] = useState(0)
+  const [toolStrips, setToolStrips] = useState<Record<string, TurnToolEvent[]>>({})
+  const [hoveredTool, setHoveredTool] = useState<string | null>(null)
   const [hydrated, setHydrated] = useState(false)
 
   // ── Voice ──────────────────────────────────────────────────────────
@@ -368,6 +378,24 @@ export function AssistantWindow({
   }, [])
 
   useEffect(() => player.onChange(setSpeaking), [player])
+
+  // Poll the live tool-call tally while a turn is in flight — dots accumulate
+  // as the agent works. Best-effort: older engines report 0 and the pill just
+  // says "working…" until the reply lands.
+  useEffect(() => {
+    if (!busy || !activeConnectionId) return
+    let cancelled = false
+    const tick = async () => {
+      const n = await fetchLiveToolCount(activeConnectionId)
+      if (!cancelled && n > 0) setLiveToolCount(n)
+    }
+    void tick()
+    const handle = window.setInterval(() => void tick(), 1200)
+    return () => {
+      cancelled = true
+      window.clearInterval(handle)
+    }
+  }, [busy, activeConnectionId])
 
   const speakMessage = useCallback(
     async (id: string, text: string) => {
@@ -574,6 +602,8 @@ export function AssistantWindow({
     if (!activeConnectionId) return
     setDraft("")
     onConsumeQueuedAttachments(pendingAttachments.map((attachment) => attachment.id))
+    setLiveToolCount(0)
+    setHoveredTool(null)
     setBusy(true)
     const userMsg = newAssistantMessage("user", text, {
       attachments: pendingAttachments.length > 0 ? pendingAttachments : undefined,
@@ -615,6 +645,15 @@ export function AssistantWindow({
         return next
       })
       appendThreadRemote([assistantMsg])
+      // The turn is committed now — fetch its tool receipts and hang the
+      // dot strip (with args/result tooltips) off the finished reply.
+      if (turn.agentRunId) {
+        void fetchTurnToolEvents(activeConnectionId, turn.agentRunId).then((events) => {
+          if (events.length > 0) {
+            setToolStrips((prev) => ({ ...prev, [assistantMsg.id]: events }))
+          }
+        })
+      }
     } catch (err) {
       const failMsg = newAssistantMessage(
         "assistant",
@@ -780,6 +819,53 @@ export function AssistantWindow({
                     </button>
                   ) : null}
                 </div>
+                {toolStrips[m.id]?.length ? (
+                  <div className="relative ml-6 flex items-center gap-1">
+                    {toolStrips[m.id].map((ev) => {
+                      const key = `${m.id}:${ev.idx}`
+                      return (
+                        <button
+                          key={key}
+                          type="button"
+                          onMouseEnter={() => setHoveredTool(key)}
+                          onMouseLeave={() => setHoveredTool(null)}
+                          className={cn(
+                            "h-2 w-2 rounded-full transition-transform",
+                            hoveredTool === key ? "scale-150 bg-main" : "bg-main/50",
+                          )}
+                          aria-label={`tool call: ${ev.tool}`}
+                        />
+                      )
+                    })}
+                    <span className="ml-1 text-[9px] text-chrome-text/40">
+                      {toolStrips[m.id].length} tool call{toolStrips[m.id].length === 1 ? "" : "s"}
+                    </span>
+                    {hoveredTool?.startsWith(`${m.id}:`)
+                      ? (() => {
+                          const idx = Number(hoveredTool.slice(m.id.length + 1))
+                          const ev = toolStrips[m.id].find((e) => e.idx === idx)
+                          if (!ev) return null
+                          return (
+                            <div className="pointer-events-none absolute bottom-full left-0 z-50 mb-1.5 w-[min(26rem,80vw)] overflow-hidden rounded-md border border-chrome-border bg-chrome-bg/95 p-2 shadow-xl backdrop-blur">
+                              <div className="mb-1 text-[10px] font-medium uppercase tracking-wider text-main/80">
+                                {ev.tool}
+                              </div>
+                              {ev.args ? (
+                                <pre className="max-h-28 overflow-hidden whitespace-pre-wrap break-all font-mono text-[10px] leading-snug text-chrome-text/80">
+                                  {ev.args}
+                                </pre>
+                              ) : null}
+                              {ev.result ? (
+                                <div className="mt-1 truncate border-t border-chrome-border/40 pt-1 font-mono text-[9.5px] text-chrome-text/50">
+                                  → {ev.result}
+                                </div>
+                              ) : null}
+                            </div>
+                          )
+                        })()
+                      : null}
+                  </div>
+                ) : null}
                 {m.commands?.length ? (
                   <div className="ml-6 flex flex-wrap gap-1.5">
                     {m.commands.map((cmd, i) => {
@@ -868,7 +954,7 @@ export function AssistantWindow({
           )}
           {busy ? (
             <div
-              className="flex w-fit items-center gap-2.5 rounded-full px-3 py-1.5"
+              className="relative flex w-fit items-center gap-2.5 rounded-full px-3 py-1.5"
               style={plate()}
             >
               <AssistantIdentityMark
@@ -884,6 +970,19 @@ export function AssistantWindow({
               >
                 working…
               </span>
+              {/* live shared-memory tally: one dot per tool call so far;
+                  trailing ping = whatever is in flight right now */}
+              {liveToolCount > 0 ? (
+                <span
+                  className="flex items-center gap-1"
+                  title={`${liveToolCount} tool call${liveToolCount === 1 ? "" : "s"} so far`}
+                >
+                  {Array.from({ length: Math.min(liveToolCount, 24) }, (_, i) => (
+                    <span key={i} className="h-2 w-2 rounded-full bg-main/60" />
+                  ))}
+                  <span className="h-2 w-2 animate-ping rounded-full bg-main/40" />
+                </span>
+              ) : null}
             </div>
           ) : null}
         </div>
