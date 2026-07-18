@@ -55,6 +55,7 @@ export function FittingRoomWindow({
   const [preview, setPreview] = useState<Array<Record<string, unknown>>>([])
   const [busy, setBusy] = useState<string | null>(null)
   const [note, setNote] = useState<string | null>(null)
+  const [draftedBy, setDraftedBy] = useState<string | null>(null)
 
   const api = useCallback(
     async (op: string, extra: Record<string, unknown> = {}) => {
@@ -121,9 +122,10 @@ export function FittingRoomWindow({
         const body = await api("draft", { kit: sel.kit, target: sel.target, schemaName, relName })
         if (body.ok) {
           setDraft(String(body.draft ?? ""))
+          setDraftedBy(typeof body.draftedBy === "string" ? body.draftedBy : null)
           setChecks([])
           setPreview([])
-          setNote(null)
+          setNote(typeof body.note === "string" ? body.note : null)
         } else setNote(body.error ?? "draft failed")
       } finally {
         setBusy(null)
@@ -291,8 +293,18 @@ export function FittingRoomWindow({
                 </select>
               </div>
 
-              <div className="mb-1 text-[10px] uppercase tracking-wide text-chrome-text/45">
-                mapping SELECT (edit freely &mdash; the checks are the judge)
+              <div className="mb-1 flex items-baseline gap-2 text-[10px] uppercase tracking-wide text-chrome-text/45">
+                <span>mapping SELECT (edit freely &mdash; the checks are the judge)</span>
+                {draftedBy ? (
+                  <span
+                    className={cn(
+                      "rounded-full border px-1.5 text-[9px] normal-case tracking-normal",
+                      draftedBy === "clover_llm" ? "border-main/40 text-main/80" : "border-chrome-border text-chrome-text/50",
+                    )}
+                  >
+                    drafted by {draftedBy}
+                  </span>
+                ) : null}
               </div>
               <textarea
                 value={draft}

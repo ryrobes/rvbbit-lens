@@ -62,10 +62,25 @@ export async function POST(req: Request) {
         return NextResponse.json({ ok: true, tables: res.rows ?? [] })
       }
       case "draft": {
-        // Naive draft: exact-name matches map through; missing target columns
-        // become NULL::type placeholders the human fills in. The engine's
-        // fitting_check is the judge either way.
         if (!body.kit || !body.target || !body.schemaName || !body.relName) throw new Error("kit, target, schemaName, relName required")
+        // Engine-side drafting first: clover_llm maps semantically (renames,
+        // casts) with a deterministic fallback built in. Pre-0172 targets
+        // lack fitting_draft — fall through to the local name-match below.
+        try {
+          const dres = await executeQuery(
+            cid,
+            `SELECT draft, drafted_by, note FROM rvbbit.fitting_draft(
+               ${sqlLit(body.kit)}, ${sqlLit(body.target)},
+               ${sqlLit(body.schemaName)}, ${sqlLit(body.relName)})`,
+            { rowLimit: 1 },
+          )
+          const drow = dres.rows?.[0] as { draft?: string; drafted_by?: string; note?: string } | undefined
+          if (drow?.draft) {
+            return NextResponse.json({ ok: true, draft: drow.draft, draftedBy: drow.drafted_by, note: drow.note })
+          }
+        } catch {
+          // fitting_draft absent on this target database — use the local draft
+        }
         const res = await executeQuery(
           cid,
           `WITH tcols AS (
@@ -91,7 +106,7 @@ export async function POST(req: Request) {
         )
         const cols = (res.rows?.[0] as { cols?: string } | undefined)?.cols ?? "*"
         const draft = `SELECT ${cols}\nFROM ${body.schemaName}.${body.relName}`
-        return NextResponse.json({ ok: true, draft })
+        return NextResponse.json({ ok: true, draft, draftedBy: "name-match", note: "deterministic draft" })
       }
       case "check": {
         if (!body.kit || !body.target || !body.selectSql) throw new Error("kit, target, selectSql required")
