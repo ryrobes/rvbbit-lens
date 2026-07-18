@@ -232,12 +232,21 @@ export function PlateWindow({
     if (el.__rvHtml !== plate.html) {
       // Preserve the active control across the swap (live search would
       // otherwise lose focus + in-flight keystrokes on every refetch).
+      // TEXT-ENTRY controls only: restoring .value onto a radio/checkbox
+      // rewrites its IDENTITY (querySelector finds the first radio of the
+      // field — the "All" one — and stamps the previous selection's value
+      // onto it, so clicking All then emits the old value forever).
+      const PRESERVE_TYPES = new Set(["search", "text", "number", "date", "time", "datetime-local", "range"])
       const active = document.activeElement as HTMLInputElement | null
       const activeField =
-        active && el.contains(active) && active.getAttribute?.("rv-emit")
+        active &&
+        el.contains(active) &&
+        active instanceof HTMLInputElement &&
+        PRESERVE_TYPES.has(active.type) &&
+        active.getAttribute("rv-emit")
           ? active.getAttribute("rv-emit")
           : null
-      const activeValue = activeField && active instanceof HTMLInputElement ? active.value : null
+      const activeValue = activeField ? active!.value : null
       const caret = activeField && active instanceof HTMLInputElement && (active.type === "search" || active.type === "text")
         ? active.selectionStart
         : null

@@ -350,9 +350,13 @@ export async function renderPlate(
   })
 
   // Radios with rv-emit: the one whose value matches the param is checked.
+  // Radios sharing a field are auto-grouped by name — without it the
+  // browser never unchecks siblings and you get two dots lit until the
+  // refetch swap catches up.
   $('input[type="radio"][rv-emit]').each((_, el) => {
     const $el = $(el)
     const field = String($el.attr("rv-emit") ?? "")
+    if (!$el.attr("name")) $el.attr("name", `rv-radio-${field}`)
     const current = params[field] == null ? "" : String(params[field])
     if (String(rawAttr(el, "value") ?? "") === current) $el.attr("checked", "checked")
     else $el.removeAttr("checked")
