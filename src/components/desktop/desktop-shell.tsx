@@ -4972,6 +4972,17 @@ export function DesktopShell() {
 
   // Open a folder window for a launcher group.
   const openFolder = useCallback((folderId: string) => {
+    // One window per folder: re-activating an open folder focuses it
+    // (restoring it if minimized) instead of stacking duplicates.
+    const existing = liveWindows().find(
+      (w) => w.kind === "folder" && (w.payload as FolderPayload | undefined)?.folderId === folderId,
+    )
+    if (existing) {
+      if (existing.minimized) {
+        setWindows((ws) => ws.map((w) => (w.id === existing.id ? { ...w, minimized: false } : w)))
+      }
+      return focus(existing.id)
+    }
     const folder = FOLDERS.find((f) => f.id === folderId)
     openWindow({
       id: randomUUID(),
@@ -4983,7 +4994,7 @@ export function DesktopShell() {
       height: 420,
       payload: { kind: "folder", folderId } satisfies FolderPayload,
     })
-  }, [openWindow])
+  }, [openWindow, liveWindows, focus, setWindows])
 
   // Flat launcher registry — the data behind BOTH the desktop icons and the
   // folder windows. `folder` routes an item into a folder window (undefined =
