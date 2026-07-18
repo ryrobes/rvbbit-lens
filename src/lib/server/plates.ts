@@ -410,10 +410,14 @@ export async function renderPlate(
   // authored options they are used as-is. Either way the option matching
   // the CURRENT param value is marked selected — selection state comes
   // from SQL-resolved params, never from client state.
-  $("select[rv-emit]").each((_, el) => {
+  // Form selects (no rv-emit) may ALSO be query-driven: selection comes
+  // from a truthy `selected` COLUMN — never from an interpolated selected
+  // attribute (sanitize-html turns selected="" into a BARE selected, which
+  // the browser treats as on; boolean attrs cannot be templated).
+  $("select[rv-emit], select[query]").each((_, el) => {
     const $el = $(el)
-    const field = String($el.attr("rv-emit") ?? "")
-    const current = params[field] == null ? "" : String(params[field])
+    const field = $el.attr("rv-emit")
+    const current = field == null || params[field] == null ? "" : String(params[field])
     const qname = $el.attr("query")
     if (qname != null) {
       const result = results.get(String(qname))
@@ -433,11 +437,12 @@ export async function renderPlate(
       for (const row of result.rows.slice(0, EACH_ROW_CAP)) {
         const v = row[valueCol] == null ? "" : String(row[valueCol])
         const l = row[labelCol] == null ? v : String(row[labelCol])
-        opts.push(`<option value="${v === "" ? BLANK : escapeHtml(v)}"${v === current ? " selected" : ""}>${escapeHtml(l)}</option>`)
+        const on = field != null ? v === current : truthy(row.selected)
+        opts.push(`<option value="${v === "" ? BLANK : escapeHtml(v)}"${on ? " selected" : ""}>${escapeHtml(l)}</option>`)
       }
       $el.removeAttr("query").removeAttr("value").removeAttr("label").removeAttr("placeholder")
       $el.html(opts.join(""))
-    } else {
+    } else if (field != null) {
       $el.find("option").each((__, opt) => {
         const $o = $(opt)
         const v = rawAttr(opt, "value") ?? $o.text()

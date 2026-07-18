@@ -70,15 +70,23 @@ interface PlateDataDetail {
 function BoardIsland({
   island,
   runAction,
+  onEmit,
+  onOpenPlate,
 }: {
   island: PlateIsland
   runAction: (action: string, args: Record<string, unknown>) => Promise<boolean>
+  onEmit?: (field: string, value: unknown, opts?: { toggle?: boolean }) => void
+  onOpenPlate?: (plateId: string, title?: string) => void
 }) {
   const p = island.props
   const groupBy = p["group-by"] ?? island.columns[0]?.name ?? ""
   const labelCol = p["group-label"] ?? groupBy
   const idCol = p.id ?? "id"
   const action = p.action ?? ""
+  // Double-click on a card: rv-emit publishes the card's id (an edit plate
+  // subscribes via a from_bus param), rv-open="plate:<id>" then opens it.
+  const emitField = p["rv-emit"] ?? ""
+  const openTarget = p["rv-open"] ?? ""
   const [dropKey, setDropKey] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
 
@@ -138,6 +146,10 @@ function BoardIsland({
                 onDragStart={(e) => {
                   e.dataTransfer.setData("text/plain", JSON.stringify({ id, from: g.key }))
                   e.dataTransfer.effectAllowed = "move"
+                }}
+                onDoubleClick={() => {
+                  if (emitField && onEmit) onEmit(emitField, id)
+                  if (openTarget.startsWith("plate:") && onOpenPlate) onOpenPlate(openTarget.slice(6))
                 }}
               >
                 {p.title ? <div className="plate-card-title">{cell(row, p.title)}</div> : null}
@@ -586,7 +598,7 @@ export function PlateWindow({
                 ) : island.kind === "chart" ? (
                   <ChartIsland island={island} onEmit={handleEmit} />
                 ) : island.kind === "board" ? (
-                  <BoardIsland island={island} runAction={runAction} />
+                  <BoardIsland island={island} runAction={runAction} onEmit={handleEmit} onOpenPlate={onOpenPlate} />
                 ) : (
                   <MetricIsland island={island} />
                 ),
