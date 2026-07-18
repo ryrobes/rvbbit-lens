@@ -41,8 +41,13 @@ import {
 } from "@/lib/desktop/assistant-voice"
 import { Loader2 } from "@/lib/icons"
 import { AssistantIdentityMark } from "./assistant-identity-mark"
+import { ModelField } from "./operator-inspector"
 
 const OPERATOR = "desktop_assistant_turn"
+
+/** Sentinel row in the speech-writer picker: stored as "" so the renderer
+ *  resolves the assistant's model server-side and follows later changes. */
+const SAME_AS_ASSISTANT = "same as assistant"
 
 async function dbQuery(
   connectionId: string,
@@ -84,6 +89,19 @@ export function AssistantSettingsWindow({
   const [voiceList, setVoiceList] = useState<VoiceOption[]>([])
   const [voicesLoading, setVoicesLoading] = useState(false)
   const [voicesNote, setVoicesNote] = useState<string | null>(null)
+
+  const speechModelOptions = useMemo<LlmModel[]>(
+    () => [
+      {
+        provider: "default",
+        model: SAME_AS_ASSISTANT,
+        displayName: "follows the assistant's model, even when it changes",
+        selfHosted: false,
+      },
+      ...models,
+    ],
+    [models],
+  )
 
   const updateVoice = useCallback((patch: Partial<VoiceSettings>) => {
     setVoice((prev) => {
@@ -350,20 +368,19 @@ export function AssistantSettingsWindow({
       <section>
         {sectionTitle("Mind")}
         <div className="flex items-center gap-2">
-          <select
-            value={currentModel ?? ""}
-            disabled={!activeConnectionId}
-            onChange={(e) => void applyModel(e.target.value)}
-            className="min-w-0 flex-1 rounded-md border border-chrome-border bg-background px-2 py-1.5 text-[12px] text-foreground outline-none focus:border-main/60"
-          >
-            {currentModel === null ? <option value="">loading…</option> : null}
-            {modelOptions.map((m) => (
-              <option key={m.model} value={m.model}>
-                {m.displayName ?? m.model}
-                {m.selfHosted ? " · self-hosted" : ""}
-              </option>
-            ))}
-          </select>
+          <div className="min-w-0 flex-1">
+            {activeConnectionId ? (
+              <ModelField
+                value={currentModel ?? ""}
+                models={modelOptions}
+                onChange={(v) => void applyModel(v)}
+              />
+            ) : (
+              <div className="rounded-md border border-chrome-border/60 bg-chrome-bg/20 px-2.5 py-1.5 text-[12px] text-chrome-text/45">
+                connect to choose a model
+              </div>
+            )}
+          </div>
           {modelStatus ? (
             <span className="shrink-0 text-[11px] text-chrome-text/60">{modelStatus}</span>
           ) : null}
@@ -533,18 +550,13 @@ export function AssistantSettingsWindow({
           {voice.ttsEnabled && voice.expressive ? (
             <div className="rounded-md border border-chrome-border/40 bg-chrome-bg/20 px-2.5 py-1.5">
               <div className="mb-1 text-[11px] text-chrome-text/70">Speech-writer model</div>
-              <select
-                value={voice.speechModel}
-                onChange={(e) => updateVoice({ speechModel: e.target.value })}
-                className="w-full rounded-md border border-chrome-border/60 bg-chrome-bg/30 px-2.5 py-1.5 text-[12px] outline-none focus:border-main/50"
-              >
-                <option value="">Same as assistant model</option>
-                {models.map((m) => (
-                  <option key={`${m.provider}:${m.model}`} value={m.model}>
-                    {m.displayName || m.model}
-                  </option>
-                ))}
-              </select>
+              <ModelField
+                value={voice.speechModel === "" ? SAME_AS_ASSISTANT : voice.speechModel}
+                models={speechModelOptions}
+                onChange={(v) =>
+                  updateVoice({ speechModel: v === SAME_AS_ASSISTANT ? "" : v })
+                }
+              />
               <p className="mt-1 text-[10.5px] leading-snug text-chrome-text/55">
                 Models write differently — a warmer model here personalizes the voice
                 even when the assistant model is a dry, task-focused one.
