@@ -660,11 +660,16 @@ export interface AvailableKit {
   title: string | null
   description: string | null
   version: string | null
+  /** Preflight verdict, evaluated UPFRONT: a kit whose capability isn't
+   *  installed yet shows what it's blocked on instead of a setup button —
+   *  the mental model is install-the-capability, then set up its kit. */
+  ready: boolean
+  blockers: string[]
 }
 
-/** Catalog kits (kind='kit') not currently installed — the shelf's
- *  "available" section. Uninstalled = present in the catalog, absent from
- *  rvbbit.kits (uninstall returns a kit to available). */
+/** Catalog kits (kind='kit') not currently set up — the shelf's shipped-kits
+ *  section. Present in the catalog, absent from rvbbit.kits (removing a kit
+ *  returns it here). */
 export async function listAvailableKits(
   connectionId: string,
   installed: Record<string, unknown>,
@@ -672,11 +677,42 @@ export async function listAvailableKits(
   try {
     const res = await executeQuery(
       connectionId,
-      `SELECT id AS catalog_id, name, title, description, manifest->>'version' AS version
+      `SELECT id AS catalog_id, name, title, description,
+              manifest->>'version' AS version,
+              coalesce(manifest->'requires', '{}'::jsonb) AS requires
        FROM rvbbit.capability_catalog WHERE kind = 'kit' AND active ORDER BY name`,
       { readOnly: true, rowLimit: 200 },
     )
-    return ((res.rows ?? []) as unknown as AvailableKit[]).filter((k) => !(k.name in installed))
+    const rows = ((res.rows ?? []) as unknown as Array<AvailableKit & { requires: unknown }>).filter(
+      (k) => !(k.name in installed),
+    )
+    const out: AvailableKit[] = []
+    for (const k of rows) {
+      let ready = true
+      let blockers: string[] = []
+      try {
+        const pf = await executeQuery(
+          connectionId,
+          `SELECT requirement, detail FROM rvbbit.kit_preflight(${sqlLit(JSON.stringify(k.requires ?? {}))}::jsonb) WHERE NOT ok`,
+          { readOnly: true, rowLimit: 20 },
+        )
+        const fails = (pf.rows ?? []) as Array<{ requirement: string; detail: string }>
+        ready = fails.length === 0
+        blockers = fails.map((f) => f.requirement)
+      } catch {
+        // pre-0168 target: no preflight — leave ready, click-time errors apply
+      }
+      out.push({
+        catalog_id: k.catalog_id,
+        name: k.name,
+        title: k.title,
+        description: k.description,
+        version: k.version,
+        ready,
+        blockers,
+      })
+    }
+    return out
   } catch {
     return []
   }

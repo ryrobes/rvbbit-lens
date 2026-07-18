@@ -504,6 +504,8 @@ interface ShelfAvailableKit {
   title: string | null
   description: string | null
   version: string | null
+  ready: boolean
+  blockers: string[]
 }
 
 export function PlatesWindow({
@@ -579,9 +581,9 @@ export function PlatesWindow({
           setInstallNote(body.error ?? "install failed")
         } else if ((body.selftestFailures?.length ?? 0) > 0) {
           const f = body.selftestFailures![0]
-          setInstallNote(`installed, but self-test flagged ${body.selftestFailures!.length} item(s): ${f.item} — ${f.detail}`)
+          setInstallNote(`set up, but self-test flagged ${body.selftestFailures!.length} item(s): ${f.item} — ${f.detail}`)
         } else {
-          setInstallNote(`installed ${body.kit} — self-test clean`)
+          setInstallNote(`${body.kit} is set up — self-test clean`)
         }
         setReloadTick((t) => t + 1)
       } catch (e) {
@@ -716,7 +718,7 @@ export function PlatesWindow({
               <section>
                 <div className="mb-1.5 flex items-baseline gap-2 px-1">
                   <span className="text-[10px] font-semibold uppercase tracking-wider text-chrome-text/45">
-                    available to install
+                    shipped kits — run setup to activate
                   </span>
                   <span className="text-[9px] text-chrome-text/35">from the capability catalog</span>
                   <div className="h-px flex-1 self-center bg-chrome-border/40" />
@@ -739,14 +741,23 @@ export function PlatesWindow({
                           <div className="mt-0.5 line-clamp-2 text-[11px] leading-snug text-chrome-text/50">{k.description}</div>
                         ) : null}
                       </div>
-                      <button
-                        type="button"
-                        disabled={installing != null}
-                        onClick={() => void installKit(k.catalog_id)}
-                        className="shrink-0 rounded-md border border-main/40 px-2.5 py-1 text-[11px] text-main hover:bg-main/10 disabled:opacity-50"
-                      >
-                        {installing === k.catalog_id ? "installing…" : "Install"}
-                      </button>
+                      {k.ready ? (
+                        <button
+                          type="button"
+                          disabled={installing != null}
+                          onClick={() => void installKit(k.catalog_id)}
+                          className="shrink-0 rounded-md border border-main/40 px-2.5 py-1 text-[11px] text-main hover:bg-main/10 disabled:opacity-50"
+                        >
+                          {installing === k.catalog_id ? "setting up…" : "Set up"}
+                        </button>
+                      ) : (
+                        <span
+                          className="shrink-0 rounded-md border border-warning/40 px-2.5 py-1 text-[11px] text-warning/90"
+                          title={`Set up unlocks once its capability is installed. Missing: ${k.blockers.join(", ")}`}
+                        >
+                          needs {k.blockers[0] ?? "requirements"}
+                        </span>
+                      )}
                     </div>
                   ))}
                 </div>
