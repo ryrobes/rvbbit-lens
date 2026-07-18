@@ -27,6 +27,8 @@ export type DesktopWindowKind =
   | "appearance"
   | "pg-monitor"
   | "system-health"
+  | "plate"
+  | "plates"
   | "scenes"
   | "pg-query-explorer"
   | "pg-query-inspector"
@@ -129,6 +131,8 @@ export type WindowPayload =
   | PalettePayload
   | AppearancePayload
   | PgMonitorPayload
+  | PlatePayload
+  | PlatesPayload
   | SystemHealthPayload
   | ScenesPayload
   | PgQueryExplorerPayload
@@ -967,6 +971,16 @@ export interface AppearancePayload {
 
 export interface PgMonitorPayload {
   kind?: "pg-monitor"
+}
+
+export interface PlatePayload {
+  kind?: "plate"
+  /** rvbbit.plates row to render. */
+  plateId: string
+}
+
+export interface PlatesPayload {
+  kind?: "plates"
 }
 
 export interface SystemHealthPayload {

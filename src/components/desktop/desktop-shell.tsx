@@ -81,6 +81,7 @@ import { AppearanceWindow } from "./appearance-window"
 import { CommandPalette, type PaletteGroup, type PaletteItem } from "./command-palette"
 import { PgMonitorWindow } from "./pg-monitor-window"
 import { SystemHealthWindow } from "./system-health-window"
+import { PlateWindow, PlatesWindow } from "./plate-window"
 import { ScenesWindow } from "./scenes-window"
 import { PgQueryExplorerWindow } from "./pg-query-explorer-window"
 import { PgQueryInspectorWindow } from "./pg-query-inspector-window"
@@ -239,6 +240,8 @@ import type {
   PalettePayload,
   PgMonitorPayload,
   ScenesPayload,
+  PlatePayload,
+  PlatesPayload,
   SystemHealthPayload,
   PgQueryExplorerPayload,
   PgQueryInspectorPayload,
@@ -2359,6 +2362,35 @@ export function DesktopShell() {
       title: "System Health",
       x: 140, y: 90, width: 880, height: 700,
       payload: { kind: "system-health" } satisfies SystemHealthPayload,
+    })
+  }, [focus, openWindow, liveWindows])
+
+  const openPlate = useCallback(
+    (plateId: string, title?: string) => {
+      const existing = liveWindows().find(
+        (w) => w.kind === "plate" && (w.payload as PlatePayload | undefined)?.plateId === plateId,
+      )
+      if (existing) return focus(existing.id)
+      openWindow({
+        id: randomUUID(),
+        kind: "plate",
+        title: title ?? plateId,
+        x: 160 + Math.random() * 60, y: 90 + Math.random() * 50, width: 860, height: 640,
+        payload: { kind: "plate", plateId } satisfies PlatePayload,
+      })
+    },
+    [focus, openWindow, liveWindows],
+  )
+
+  const openPlatesBrowser = useCallback(() => {
+    const existing = liveWindows().find((w) => w.kind === "plates")
+    if (existing) return focus(existing.id)
+    openWindow({
+      id: randomUUID(),
+      kind: "plates",
+      title: "Plates",
+      x: 180, y: 110, width: 720, height: 480,
+      payload: { kind: "plates" } satisfies PlatesPayload,
     })
   }, [focus, openWindow, liveWindows])
 
@@ -4911,6 +4943,7 @@ export function DesktopShell() {
     { id: "extensions", label: "Extensions", icon: Settings2, color: "var(--brand-extensions)", description: "Installed Postgres extensions", activate: openExtensions, folder: "system" },
     { id: "monitor", label: "Monitor", icon: Activity, color: "var(--brand-pg-monitor)", description: "Live server activity & stats", activate: openPgMonitor, folder: "system" },
     { id: "system-health", label: "Health", icon: Wrench, color: "var(--rvbbit-accent)", description: "rvbbit metadata weight & maintenance", activate: openSystemHealth, folder: "system", rvbbit: true },
+    { id: "plates", label: "Plates", icon: Layers, color: "var(--brand-view-apps)", description: "Surfaces shipped as rows — kit plates & switchboards", activate: openPlatesBrowser, folder: "system", rvbbit: true },
     { id: "query-explorer", label: "Query Explorer", icon: LineChart, color: "var(--brand-pg-monitor)", description: "Historical normalized queries, runtime & notable evidence", activate: openPgQueryExplorer, folder: "system" },
     { id: "lock-explorer", label: "Lock Explorer", icon: Lock, color: "var(--brand-lock-explorer)", description: "Live blocker chains, resources & replay", activate: openLockExplorer, folder: "system" },
     { id: "mvcc-explorer", label: "MVCC Explorer", icon: Layers, color: "var(--brand-mvcc-explorer)", description: "Vacuum horizons, pressure & workers", activate: () => openMvccExplorer(), folder: "system" },
@@ -5223,6 +5256,7 @@ export function DesktopShell() {
       onRemoveWatched: removeWatchedChannel,
       onClearNotifications: clearNotifications,
       openOperatorFlow,
+      openPlate,
       openSpecialistDetail,
       openBrain,
       openMcpServers,
@@ -5270,7 +5304,7 @@ export function DesktopShell() {
       wallpaperUrl, onPickWallpaper, onClearWallpaper, onApplyLibraryWallpaper, applyUploadedWallpaper,
       onReExtractPalette, onReExtractWithRvbbit, setPaletteOverrides,
       notifications, watchedChannels, windowChannels, notifyStatus, addWatchedChannel,
-      removeWatchedChannel, clearNotifications, openOperatorFlow, openSpecialistDetail,
+      removeWatchedChannel, clearNotifications, openOperatorFlow, openPlate, openSpecialistDetail,
       openBrain, openMcpServers, openMcpServerDetail, openRouting, openQueryLens, openKgBrowser, openKgEntity,
       openSourceRow, openKgForSource, openKgExtractionRuns, openKgMergeReview, openKgExplorer, openHindsightMemory,
       openDataSearch, openDrift, openModelSettings, openModelStudio, openMetricCatalog, openMetricCreator,
@@ -5797,6 +5831,7 @@ interface WindowContext {
   openCache: () => void
   openConnections: () => void
   openOperatorFlow: (operatorName: string | null, receiptId?: string | null) => void
+  openPlate: (plateId: string, title?: string) => void
   openSpecialistDetail: (specialistName: string) => void
   openBrain: () => void
   openMcpServers: () => void
@@ -6155,6 +6190,32 @@ function renderWindowContent(
         <SystemHealthWindow
           activeConnectionId={ctx.activeConnectionId}
           onOpenSql={ctx.openSqlInWindow}
+        />
+      )
+    case "plate":
+      return (
+        <PlateWindow
+          plateId={(w.payload as PlatePayload).plateId}
+          activeConnectionId={ctx.activeConnectionId}
+          onOpenSql={ctx.openSqlInWindow}
+          onEmitParam={(field, value) =>
+            ctx.emitParam({
+              sourceWindowId: w.id,
+              sourceBlockName: `plate:${(w.payload as PlatePayload).plateId}`,
+              sourceTitle: w.title ?? "plate",
+              field,
+              value,
+              operator: "eq",
+              cascade: true,
+            })
+          }
+        />
+      )
+    case "plates":
+      return (
+        <PlatesWindow
+          activeConnectionId={ctx.activeConnectionId}
+          onOpenPlate={ctx.openPlate}
         />
       )
     case "pg-monitor":
@@ -6801,6 +6862,8 @@ function iconForKind(kind: DesktopWindowState["kind"]) {
       return PaletteIcon
     case "scenes": return Layers
     case "system-health": return Wrench
+    case "plate": return Layers
+    case "plates": return Layers
     case "pg-monitor": return Activity
     case "pg-query-explorer": return LineChart
     case "lock-explorer": return Lock
