@@ -22,6 +22,13 @@ export interface VoiceSettings {
   /** speak every assistant reply automatically vs. click-to-play per message. */
   autoSpeak: boolean
   sttEnabled: boolean
+  /** Re-voice replies through a speech-render LLM pass before TTS: strips
+   *  markdown for the ear, adds sparing ElevenLabs v3 audio tags, and lets
+   *  the persona color delivery — without touching the main agent loop or
+   *  the visible transcript. */
+  expressive: boolean
+  /** Model for the speech-render pass; "" = same model as the assistant. */
+  speechModel: string
 }
 
 const VOICE_KEY = "rvbbit-lens.assistant.voice.v1"
@@ -32,6 +39,8 @@ export const DEFAULT_VOICE_SETTINGS: VoiceSettings = {
   ttsEnabled: false,
   autoSpeak: true,
   sttEnabled: false,
+  expressive: false,
+  speechModel: "",
 }
 
 export function loadVoiceSettings(): VoiceSettings {
@@ -77,6 +86,103 @@ export async function synthesizeSpeech(text: string, v: VoiceSettings): Promise<
     throw new Error(msg || `TTS failed (${res.status})`)
   }
   return res.blob()
+}
+
+// ── Speech render (expressive re-voicing) ───────────────────────────────
+//
+// Delivery is a view-layer concern: the agent loop and the visible transcript
+// never see audio tags or persona flavor. When `expressive` is on, replies
+// pass through a small lens-managed operator (desktop_speech_render) that
+// rewrites them as a spoken script — markdown stripped for the ear, code and
+// tables compressed to a phrase, 0–2 ElevenLabs v3 audio tags, persona voice
+// allowed — right before synthesis. Any failure falls back to the plain text:
+// voice is icing, and so is its polish.
+
+const SPEECH_OPERATOR = "desktop_speech_render"
+const ASSISTANT_OPERATOR = "desktop_assistant_turn"
+
+const SPEECH_SYSTEM = [
+  "You turn a chat reply from a data assistant into a SPOKEN script for expressive text-to-speech.",
+  "Rules:",
+  "- Stay faithful: every fact, number, and name exactly as written. Never invent content.",
+  "- Strip all markdown. Compress code blocks, tables, or long lists into one natural spoken phrase (e.g. 'I've put the query on screen').",
+  "- You may add AT MOST two ElevenLabs v3 audio tags in square brackets where delivery genuinely benefits, chosen from tags like [warmly], [chuckles], [thoughtful], [sighs], [whispers], [excited], [pause].",
+  "- If a PERSONA is given, let it color word choice and delivery — lightly, never at the expense of the information.",
+  "- Keep it the same length or shorter than the original. Plain text only.",
+  "- Return ONLY the script. No preamble, no quotes, no notes.",
+].join("\n")
+
+const SPEECH_USER = "PERSONA (may be empty):\n{{persona}}\n\nREPLY TO SPEAK:\n{{message}}\n\nReturn only the spoken script."
+
+function sqlLit(v: string): string {
+  return `'${v.replace(/'/g, "''")}'`
+}
+
+/** Last model the operator was ensured with, per connection — re-upserts only
+ *  when the settings model actually changes. */
+const ensuredModel = new Map<string, string>()
+/** Rendered scripts, keyed by content+model — replaying a message is free. */
+const scriptCache = new Map<string, string>()
+
+async function dbQuery(
+  connectionId: string,
+  sql: string,
+): Promise<Array<Record<string, unknown>>> {
+  const res = await fetch("/api/db/query", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ connectionId, sql, readOnly: false, rowLimit: 1 }),
+  })
+  const body = (await res.json()) as { rows?: Array<Record<string, unknown>>; error?: string }
+  if (!res.ok || body.error) throw new Error(body.error ?? `query failed (${res.status})`)
+  return body.rows ?? []
+}
+
+async function ensureSpeechOperator(connectionId: string, model: string): Promise<void> {
+  if (ensuredModel.get(connectionId) === model) return
+  // "" = follow the assistant's model; resolved server-side so the two stay
+  // in step even when the assistant model changes later.
+  const modelExpr = model
+    ? sqlLit(model)
+    : `coalesce((SELECT o.model FROM rvbbit.operators o WHERE o.name = ${sqlLit(ASSISTANT_OPERATOR)}), 'openai/gpt-5.4-mini')`
+  await dbQuery(
+    connectionId,
+    `SELECT rvbbit.create_operator(${sqlLit(SPEECH_OPERATOR)}, ARRAY['message','persona'], 'text',
+       op_model := ${modelExpr},
+       op_temperature := 0.7,
+       op_max_tokens := 900,
+       op_description := 'Lens-managed: rewrites assistant replies as spoken scripts for expressive TTS (v3 audio tags + persona flavor). Managed by the Assistant Settings window.',
+       op_system := ${sqlLit(SPEECH_SYSTEM)},
+       op_user := ${sqlLit(SPEECH_USER)})`,
+  )
+  ensuredModel.set(connectionId, model)
+}
+
+/** Render the spoken script for a reply, or null when anything at all goes
+ *  wrong (caller speaks the plain text). Cached per content+model. */
+export async function renderSpeechScript(args: {
+  connectionId: string
+  text: string
+  persona: string
+  model: string
+}): Promise<string | null> {
+  const cacheKey = `${args.model}${args.text}`
+  const hit = scriptCache.get(cacheKey)
+  if (hit) return hit
+  try {
+    await ensureSpeechOperator(args.connectionId, args.model)
+    const rows = await dbQuery(
+      args.connectionId,
+      `SELECT rvbbit.${SPEECH_OPERATOR}(${sqlLit(args.text)}, ${sqlLit(args.persona)}) AS script`,
+    )
+    const script = String(rows[0]?.script ?? "").trim()
+    if (!script) return null
+    if (scriptCache.size > 200) scriptCache.clear()
+    scriptCache.set(cacheKey, script)
+    return script
+  } catch {
+    return null
+  }
 }
 
 export interface VoiceOption {

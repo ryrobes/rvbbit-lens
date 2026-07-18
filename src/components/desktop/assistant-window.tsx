@@ -24,6 +24,7 @@ import {
   assistantBlockName,
   buildAssistantDesktopContext,
   fetchThreadRemote,
+  loadPersona,
   loadThreadLocal,
   mergeAssistantThreads,
   newAssistantMessage,
@@ -41,6 +42,7 @@ import { AssistantIdentityMark } from "./assistant-identity-mark"
 import { VoiceOrb } from "./voice-orb"
 import {
   loadVoiceSettings,
+  renderSpeechScript,
   synthesizeSpeech,
   transcribeSpeech,
   ttsReady,
@@ -375,7 +377,20 @@ export function AssistantWindow({
       if (!ttsReady(settings)) return
       try {
         setSpeakingId(id)
-        const blob = await synthesizeSpeech(clean, settings)
+        // Expressive pass: re-voice the reply for the ear (markdown stripped,
+        // sparing v3 audio tags, persona flavor) — display text untouched,
+        // null falls back to speaking the plain reply.
+        let script = clean
+        if (settings.expressive && activeConnectionId) {
+          script =
+            (await renderSpeechScript({
+              connectionId: activeConnectionId,
+              text: clean,
+              persona: loadPersona(),
+              model: settings.speechModel,
+            })) ?? clean
+        }
+        const blob = await synthesizeSpeech(script, settings)
         await player.play(blob)
       } catch {
         // voice is icing — a TTS failure never disrupts the transcript
@@ -383,7 +398,7 @@ export function AssistantWindow({
         setSpeakingId((cur) => (cur === id ? null : cur))
       }
     },
-    [player],
+    [player, activeConnectionId],
   )
 
   const toggleSpeak = useCallback(

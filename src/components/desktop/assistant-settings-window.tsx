@@ -516,6 +516,41 @@ export function AssistantSettingsWindow({
               />
             </label>
           ) : null}
+          {voice.ttsEnabled ? (
+            <label
+              className="flex cursor-pointer items-center justify-between rounded-md border border-chrome-border/40 bg-chrome-bg/20 px-2.5 py-1.5 text-chrome-text/80"
+              title="A small LLM pass rewrites each reply as a spoken script before synthesis — markdown stripped for the ear, sparing ElevenLabs v3 audio tags, persona flavor. The on-screen reply and the agent loop are untouched."
+            >
+              <span className="text-[11.5px]">Expressive speech (re-voice replies for TTS)</span>
+              <input
+                type="checkbox"
+                checked={voice.expressive}
+                onChange={(e) => updateVoice({ expressive: e.target.checked })}
+                className="accent-main"
+              />
+            </label>
+          ) : null}
+          {voice.ttsEnabled && voice.expressive ? (
+            <div className="rounded-md border border-chrome-border/40 bg-chrome-bg/20 px-2.5 py-1.5">
+              <div className="mb-1 text-[11px] text-chrome-text/70">Speech-writer model</div>
+              <select
+                value={voice.speechModel}
+                onChange={(e) => updateVoice({ speechModel: e.target.value })}
+                className="w-full rounded-md border border-chrome-border/60 bg-chrome-bg/30 px-2.5 py-1.5 text-[12px] outline-none focus:border-main/50"
+              >
+                <option value="">Same as assistant model</option>
+                {models.map((m) => (
+                  <option key={`${m.provider}:${m.model}`} value={m.model}>
+                    {m.displayName || m.model}
+                  </option>
+                ))}
+              </select>
+              <p className="mt-1 text-[10.5px] leading-snug text-chrome-text/55">
+                Models write differently — a warmer model here personalizes the voice
+                even when the assistant model is a dry, task-focused one.
+              </p>
+            </div>
+          ) : null}
           <label className="flex cursor-pointer items-center justify-between rounded-md border border-chrome-border/60 bg-chrome-bg/30 px-2.5 py-1.5">
             <span className="text-[12px]">Voice input (STT · Scribe)</span>
             <input

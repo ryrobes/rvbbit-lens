@@ -30,6 +30,7 @@ import {
   sourceSqlForPayload,
 } from "./reactive-sql"
 import { getHomeId } from "./server-sync"
+import { loadVoiceSettings } from "./assistant-voice"
 import type { AssistantBlockExecutionObservation } from "./assistant-execution"
 
 // ── Command contract (rvbbit.desktop_commands.v1) ──────────────────────
@@ -211,9 +212,15 @@ export function buildAssistantDesktopContext(
   })
 
   const persona = loadPersona()
+  // Content-shape nudge only — delivery (audio tags, flavor) lives in the
+  // speech-render pass, never in the agent loop.
+  const speakable = loadVoiceSettings().ttsEnabled
+    ? "Replies may be read aloud by text-to-speech: prefer speakable prose, and avoid gratuitous tables or long code dumps in the reply text (put those on the desktop instead)."
+    : ""
+  const personaOut = [persona, speakable].filter(Boolean).join("\n\n")
   return {
     schema_version: "rvbbit.desktop_context.v1",
-    ...(persona ? { persona } : {}),
+    ...(personaOut ? { persona: personaOut } : {}),
     spend_threshold_usd: loadSpendThreshold(),
     blocks,
     params: params.map((p) => ({
