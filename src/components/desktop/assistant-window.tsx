@@ -55,7 +55,8 @@ import {
   getVoicePlayer,
   type VoiceSettings,
 } from "@/lib/desktop/assistant-voice"
-import { Mic, Quote, Volume2, VolumeX, Loader2 } from "@/lib/icons"
+import { Mic, Pencil, Quote, Volume2, VolumeX, Loader2 } from "@/lib/icons"
+import { MarkupEditor } from "./markup-editor"
 import { cn } from "@/lib/utils"
 
 interface AssistantWindowProps {
@@ -68,6 +69,8 @@ interface AssistantWindowProps {
   onConsumeQueuedAttachments: (ids: string[]) => void
   /** Enqueue an attachment (pasted screenshots ride the same gallery). */
   onQueueAttachment?: (attachment: AssistantImageAttachment) => void
+  /** Replace a queued attachment in place (the markup editor's Apply). */
+  onUpdateQueuedAttachment?: (attachment: AssistantImageAttachment) => void
   applyCommands: (
     commands: AssistantCommand[],
     options?: AssistantApplyOptions,
@@ -408,6 +411,7 @@ export function AssistantWindow({
   queuedAttachments,
   onConsumeQueuedAttachments,
   onQueueAttachment,
+  onUpdateQueuedAttachment,
   applyCommands,
 }: AssistantWindowProps) {
   // Chips dim when their block leaves the canvas — the transcript visibly
@@ -417,6 +421,7 @@ export function AssistantWindow({
   )
   const [messages, setMessages] = useState<AssistantMessage[]>([])
   const [draft, setDraft] = useState("")
+  const [markupTarget, setMarkupTarget] = useState<AssistantImageAttachment | null>(null)
   const [busy, setBusy] = useState(false)
   // The enhanced thinking effect, in two layers: a LIVE dot count from
   // shared memory while the turn runs (audit rows are MVCC-invisible until
@@ -1131,12 +1136,32 @@ export function AssistantWindow({
                   >
                     ×
                   </button>
+                  {onUpdateQueuedAttachment ? (
+                    <button
+                      type="button"
+                      onClick={() => setMarkupTarget(attachment)}
+                      className="absolute left-1 top-1 grid h-5 w-5 place-items-center rounded-full bg-background/80 text-foreground opacity-0 backdrop-blur transition-opacity group-hover:opacity-100"
+                      title="Mark up before sending"
+                    >
+                      <Pencil className="h-3 w-3" />
+                    </button>
+                  ) : null}
                   <div className="absolute inset-x-0 bottom-0 truncate bg-background/75 px-1.5 py-0.5 text-[9px] text-foreground backdrop-blur">
                     {attachment.name}
                   </div>
                 </div>
               ))}
             </div>
+          ) : null}
+          {markupTarget ? (
+            <MarkupEditor
+              attachment={markupTarget}
+              onApply={(updated) => {
+                onUpdateQueuedAttachment?.(updated)
+                setMarkupTarget(null)
+              }}
+              onCancel={() => setMarkupTarget(null)}
+            />
           ) : null}
           <div className="flex items-end gap-1.5">
             <textarea

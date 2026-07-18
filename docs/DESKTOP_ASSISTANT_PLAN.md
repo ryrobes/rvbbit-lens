@@ -365,3 +365,17 @@ Three tiers:
   data+artifact only (lean: data+artifact first).
 - Rolling-summary trigger for very long spines (defer until someone hits it).
 - Naming her. (The rabbit already has the domain.)
+
+## Markup mode (2026-07-18)
+
+Any queued image attachment (pasted screenshot, app-block capture)
+grows a pencil affordance: a full-screen markup editor — pen / arrow /
+box, five high-contrast colors, three stroke weights, vector undo —
+that flattens the drawing into the image on Apply and replaces the
+attachment in place, renamed "· annotated" so the model knows the
+marks are the user's intent, not UI. Strokes are drawn in NATURAL
+image pixels (pointer coords mapped through the display rect) so the
+flatten stays crisp. Zero engine/operator changes — the annotated
+image rides the existing attachment path. Companion feature banked:
+assistant self-screenshot via a headless /plate/<id> capture tool
+(deferred — loop-cost discipline needed first).

@@ -2807,6 +2807,13 @@ export function DesktopShell() {
     setAssistantAttachments((current) => current.filter((item) => !consumed.has(item.id)))
   }, [])
 
+  // Markup editor writes the annotated image back over the queued original.
+  const updateAssistantAttachment = useCallback((attachment: AssistantImageAttachment) => {
+    setAssistantAttachments((current) =>
+      current.map((item) => (item.id === attachment.id ? attachment : item)),
+    )
+  }, [])
+
   const toggleAssistant = useCallback(() => {
     setAssistantOpen((o) => !o)
   }, [])
@@ -5466,6 +5473,7 @@ export function DesktopShell() {
         queuedAttachments={assistantAttachments}
         onConsumeQueuedAttachments={consumeAssistantAttachments}
         onQueueAttachment={queueAssistantAttachment}
+        onUpdateQueuedAttachment={updateAssistantAttachment}
         applyCommands={applyAssistantCommands}
       />
       {wallpaperUrl ? (
