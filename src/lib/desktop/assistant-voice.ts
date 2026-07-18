@@ -102,15 +102,25 @@ const SPEECH_OPERATOR = "desktop_speech_render"
 const ASSISTANT_OPERATOR = "desktop_assistant_turn"
 
 const SPEECH_SYSTEM = [
-  "You turn a chat reply from a data assistant into a SPOKEN script for expressive text-to-speech.",
+  "You rewrite a data assistant's chat reply as a SPOKEN script for expressive text-to-speech, in the assistant's persona voice.",
   "Rules:",
-  "- Stay faithful: every fact, number, and name exactly as written. Never invent content.",
+  "- Preserve ALL information: every fact, number, name, and conclusion must survive the rewrite. Never add claims, never drop anything the user needs.",
+  "- Beyond that, rephrase FREELY in the persona's voice — word choice, rhythm, attitude. The persona is the point. No persona given = natural conversational tone.",
   "- Strip all markdown. Compress code blocks, tables, or long lists into one natural spoken phrase (e.g. 'I've put the query on screen').",
   "- You may add AT MOST two ElevenLabs v3 audio tags in square brackets where delivery genuinely benefits, chosen from tags like [warmly], [chuckles], [thoughtful], [sighs], [whispers], [excited], [pause].",
-  "- If a PERSONA is given, let it color word choice and delivery — lightly, never at the expense of the information.",
-  "- Keep it the same length or shorter than the original. Plain text only.",
+  "- Similar length or shorter than the original — never pad. Plain text only.",
   "- Return ONLY the script. No preamble, no quotes, no notes.",
 ].join("\n")
+
+/** Remove ElevenLabs audio tags for DISPLAY — the script is plain text (the
+ *  renderer strips markdown), so any short bracketed token is a tag. */
+export function stripAudioTags(script: string): string {
+  return script
+    .replace(/\[[a-z][a-z' -]{0,28}\]/gi, "")
+    .replace(/[ \t]{2,}/g, " ")
+    .replace(/^[ \t]+/gm, "")
+    .trim()
+}
 
 const SPEECH_USER = "PERSONA (may be empty):\n{{persona}}\n\nREPLY TO SPEAK:\n{{message}}\n\nReturn only the spoken script."
 

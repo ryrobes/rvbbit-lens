@@ -46,6 +46,7 @@ import { VoiceOrb } from "./voice-orb"
 import {
   loadVoiceSettings,
   renderSpeechScript,
+  stripAudioTags,
   synthesizeSpeech,
   transcribeSpeech,
   ttsReady,
@@ -53,7 +54,7 @@ import {
   getVoicePlayer,
   type VoiceSettings,
 } from "@/lib/desktop/assistant-voice"
-import { Mic, Volume2, VolumeX, Loader2 } from "@/lib/icons"
+import { Mic, Quote, Volume2, VolumeX, Loader2 } from "@/lib/icons"
 import { cn } from "@/lib/utils"
 
 interface AssistantWindowProps {
@@ -350,6 +351,12 @@ export function AssistantWindow({
   const [liveToolCount, setLiveToolCount] = useState(0)
   const [toolStrips, setToolStrips] = useState<Record<string, TurnToolEvent[]>>({})
   const [hoveredTool, setHoveredTool] = useState<string | null>(null)
+  // Expressive re-voicing: once a message has been rendered for speech, the
+  // persona-voiced script (tags stripped) becomes its DISPLAY text too —
+  // otherwise what you hear and what you read diverge confusingly. The thread,
+  // the agent loop, and homebase all keep the ORIGINAL; this is session-local.
+  const [voiceScripts, setVoiceScripts] = useState<Record<string, string>>({})
+  const [hoveredOriginal, setHoveredOriginal] = useState<string | null>(null)
   const [hydrated, setHydrated] = useState(false)
 
   // ── Voice ──────────────────────────────────────────────────────────
@@ -410,13 +417,17 @@ export function AssistantWindow({
         // null falls back to speaking the plain reply.
         let script = clean
         if (settings.expressive && activeConnectionId) {
-          script =
-            (await renderSpeechScript({
-              connectionId: activeConnectionId,
-              text: clean,
-              persona: loadPersona(),
-              model: settings.speechModel,
-            })) ?? clean
+          const rendered = await renderSpeechScript({
+            connectionId: activeConnectionId,
+            text: clean,
+            persona: loadPersona(),
+            model: settings.speechModel,
+          })
+          if (rendered) {
+            script = rendered
+            // The re-voiced script becomes the display text for this message.
+            setVoiceScripts((prev) => (prev[id] === rendered ? prev : { ...prev, [id]: rendered }))
+          }
         }
         const blob = await synthesizeSpeech(script, settings)
         await player.play(blob)
@@ -802,8 +813,33 @@ export function AssistantWindow({
                     {m.attachments?.length ? (
                       <AssistantAttachmentGallery attachments={m.attachments} />
                     ) : null}
-                    {assistantReplyForDisplay(m.text)}
+                    {voiceScripts[m.id]
+                      ? stripAudioTags(voiceScripts[m.id])
+                      : assistantReplyForDisplay(m.text)}
                   </div>
+                  {voiceScripts[m.id] ? (
+                    <span className="relative mt-[3px] shrink-0 self-start">
+                      <button
+                        type="button"
+                        onMouseEnter={() => setHoveredOriginal(m.id)}
+                        onMouseLeave={() => setHoveredOriginal(null)}
+                        className="text-chrome-text/30 transition-colors hover:text-chrome-text/70"
+                        aria-label="show the original reply"
+                      >
+                        <Quote className="h-3 w-3" />
+                      </button>
+                      {hoveredOriginal === m.id ? (
+                        <div className="pointer-events-none absolute right-0 top-full z-50 mt-1.5 w-[min(24rem,75vw)] rounded-md border border-chrome-border bg-chrome-bg/95 p-2 shadow-xl backdrop-blur">
+                          <div className="mb-1 text-[9px] uppercase tracking-wider text-chrome-text/45">
+                            original reply — re-voiced for speech
+                          </div>
+                          <div className="max-h-40 overflow-hidden whitespace-pre-wrap text-[11px] leading-snug text-chrome-text/80">
+                            {assistantReplyForDisplay(m.text)}
+                          </div>
+                        </div>
+                      ) : null}
+                    </span>
+                  ) : null}
                   {ttsReady(voice) && !m.error ? (
                     <button
                       type="button"
