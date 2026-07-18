@@ -9,6 +9,7 @@
  */
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react"
+import { createPortal } from "react-dom"
 import { VegaEmbed } from "react-vega"
 import { vegaConfigFromTheme } from "@/lib/desktop/chart-theme"
 import { Layers, Loader2, RefreshCw } from "@/lib/icons"
@@ -83,7 +84,7 @@ function ChartIsland({
   onEmit,
 }: {
   island: PlateIsland
-  onEmit?: (field: string, value: unknown) => void
+  onEmit?: (field: string, value: unknown, opts?: { toggle?: boolean }) => void
 }) {
   const emitField = island.props["rv-emit"]
   const spec = useMemo(() => {
@@ -120,7 +121,7 @@ function ChartIsland({
             : null
         if (!datum || typeof datum !== "object" || Array.isArray(datum)) return
         const value = (datum as Record<string, unknown>)[emitField]
-        if (value !== undefined) onEmit(emitField, value)
+        if (value !== undefined) onEmit(emitField, value, { toggle: true })
       })
     },
     [emitField, onEmit],
@@ -137,12 +138,14 @@ export function PlateWindow({
   plateId,
   activeConnectionId,
   onOpenSql,
+  onOpenPlate,
   onEmitParam,
   busParams,
 }: {
   plateId: string
   activeConnectionId: string | null
   onOpenSql: (title: string, sql: string, run: boolean) => void
+  onOpenPlate?: (plateId: string, title?: string) => void
   onEmitParam?: (field: string, value: unknown) => void
   busParams?: DesktopParamValue[]
 }) {
@@ -152,8 +155,8 @@ export function PlateWindow({
   const [actionNote, setActionNote] = useState<string | null>(null)
   const [localParams, setLocalParams] = useState<Record<string, unknown>>({})
   const containerRef = useRef<HTMLDivElement | null>(null)
-  const stageRefs = useRef<Record<string, HTMLDivElement | null>>({})
-  const emitRef = useRef<((field: string, value: unknown) => void) | null>(null)
+  const [islandHosts, setIslandHosts] = useState<Record<string, HTMLElement>>({})
+  const emitRef = useRef<((field: string, value: unknown, opts?: { toggle?: boolean }) => void) | null>(null)
 
   // Bus subscription: values for this plate's from_bus params, from ANY
   // window's cascading eq emits. Serialized so refresh only re-fires when
@@ -227,18 +230,52 @@ export function PlateWindow({
       | null
     if (!el || !plate) return
     if (el.__rvHtml !== plate.html) {
+      // Preserve the active control across the swap (live search would
+      // otherwise lose focus + in-flight keystrokes on every refetch).
+      const active = document.activeElement as HTMLInputElement | null
+      const activeField =
+        active && el.contains(active) && active.getAttribute?.("rv-emit")
+          ? active.getAttribute("rv-emit")
+          : null
+      const activeValue = activeField && active instanceof HTMLInputElement ? active.value : null
+      const caret = activeField && active instanceof HTMLInputElement && (active.type === "search" || active.type === "text")
+        ? active.selectionStart
+        : null
       el.__rvHtml = plate.html
       el.innerHTML = plate.html
+      if (activeField) {
+        const again = el.querySelector<HTMLInputElement>(`input[rv-emit="${CSS.escape(activeField)}"]`)
+        if (again) {
+          if (activeValue != null) again.value = activeValue
+          again.focus()
+          if (caret != null) { try { again.setSelectionRange(caret, caret) } catch { /* type doesn't support selection */ } }
+        }
+      }
     }
     // Param controls (select / slider / datepicker / search / checkbox with
     // rv-emit) speak through the native change event — bound once here since
     // these children live outside React. Values are coerced by control type.
     if (!el.__rvChangeBound) {
       el.__rvChangeBound = true
+      // rv-live inputs emit while typing, debounced — the value is read at
+      // fire time from the node the events landed on (still correct even if
+      // a refetch replaced it in the DOM meanwhile).
+      el.addEventListener("input", (ev) => {
+        const t = ev.target as (HTMLInputElement & { __rvTimer?: number }) | null
+        if (!t || !(t instanceof HTMLInputElement) || t.getAttribute("rv-live") == null) return
+        if (!t.isConnected) return
+        const field = t.getAttribute("rv-emit")
+        if (!field) return
+        window.clearTimeout(t.__rvTimer)
+        t.__rvTimer = window.setTimeout(() => emitRef.current?.(field, t.value), 400)
+      })
       el.addEventListener("change", (ev) => {
         const t = ev.target as HTMLElement | null
         const field = t?.getAttribute?.("rv-emit")
         if (!t || !field) return
+        // A refetch can swap the DOM under a focused control; the detached
+        // node then fires a stray change on blur — ignore it.
+        if (!t.isConnected) return
         let value: unknown
         if (t instanceof HTMLSelectElement) value = t.value
         else if (t instanceof HTMLInputElement) {
@@ -249,28 +286,42 @@ export function PlateWindow({
         emitRef.current?.(field, value)
       })
     }
-    // Islands render as React-owned nodes in a staging area, then relocate
-    // into their placeholder hosts before paint. (Portals targeting nodes
-    // inside an innerHTML subtree proved unreliable; physically moving the
-    // React-owned element is robust — React keeps updating the node
-    // wherever it lives, and re-renders re-adopt it idempotently.)
+    // Islands mount via PORTALS into the placeholder hosts (measure-then-
+    // render: hosts exist only after innerHTML is applied, so they're
+    // collected here and the portals render on the follow-up pass). The
+    // earlier relocation pattern moved React-owned nodes into the hosts,
+    // but React unmounts a node via its TRACKED parent — when tabs removed
+    // an island, removeChild threw on the foreign parent and took the whole
+    // tree down. Portals unmount cleanly from their own containers, and
+    // since the HTML is imperatively owned, nothing rewrites the hosts
+    // behind React's back (the failure that ruled portals out originally).
+    const next: Record<string, HTMLElement> = {}
     for (const island of plate.islands) {
       const host = el.querySelector(`[data-rv-island="${island.id}"]`)
-      const stage = stageRefs.current[island.id]
-      if (host && stage && stage.parentElement !== host) host.appendChild(stage)
+      if (host) next[island.id] = host as HTMLElement
     }
-  })
+    setIslandHosts((prev) => {
+      const prevKeys = Object.keys(prev)
+      const nextKeys = Object.keys(next)
+      const same = prevKeys.length === nextKeys.length && nextKeys.every((k) => prev[k] === next[k])
+      return same ? prev : next
+    })
+  }, [plate])
 
   // The one emit path — rv-emit buttons and chart-mark clicks both land
   // here. from_bus fields ride the bus round-trip (its eq toggle gives
   // click-again-to-unselect for free); local declared params get the same
   // toggle semantics here before re-render.
   const handleEmit = useCallback(
-    (field: string, value: unknown) => {
+    (field: string, value: unknown, opts?: { toggle?: boolean }) => {
       const fromBus = plate?.busFields?.includes(field)
       if (!fromBus && plate?.params && Object.prototype.hasOwnProperty.call(plate.params, field)) {
         setLocalParams((prev) => {
-          if (field in prev && String(prev[field]) === String(value)) {
+          // Click-again-to-unselect is a CLICK gesture (chips, chart marks).
+          // Change-driven controls just set — a re-emitted identical value
+          // (e.g. the spurious change fired when a refetch swaps out the
+          // focused input) must not undo the filter.
+          if (opts?.toggle && field in prev && String(prev[field]) === String(value)) {
             const next = { ...prev }
             delete next[field]
             return next
@@ -290,12 +341,22 @@ export function PlateWindow({
   // Event delegation for the vocabulary.
   const onClick = useCallback(
     (e: React.MouseEvent) => {
-      const target = (e.target as HTMLElement).closest<HTMLElement>("[rv-open-sql],[rv-emit]")
+      const target = (e.target as HTMLElement).closest<HTMLElement>("[rv-open-sql],[rv-open],[rv-emit]")
       if (!target) return
       const sql = target.getAttribute("rv-open-sql")
       if (sql) {
         e.preventDefault()
         onOpenSql(target.getAttribute("rv-open-sql-title") ?? `${plate?.title ?? "plate"} — SQL`, sql, false)
+        return
+      }
+      const open = target.getAttribute("rv-open")
+      if (open) {
+        e.preventDefault()
+        // Desktop verbs — plate: is the only scheme v1. Navigation between
+        // plates (switchboard → module, drill-through) rides this.
+        if (open.startsWith("plate:") && onOpenPlate) {
+          onOpenPlate(open.slice(6), target.getAttribute("rv-open-title") ?? undefined)
+        }
         return
       }
       const emit = target.getAttribute("rv-emit")
@@ -305,10 +366,12 @@ export function PlateWindow({
         const tag = target.tagName
         if (tag === "SELECT" || tag === "INPUT" || tag === "TEXTAREA") return
         e.preventDefault()
-        handleEmit(emit, target.getAttribute("rv-value") ?? "")
+        const confirmText = target.getAttribute("rv-confirm")
+        if (confirmText && !window.confirm(confirmText)) return
+        handleEmit(emit, target.getAttribute("rv-value") ?? "", { toggle: true })
       }
     },
-    [onOpenSql, handleEmit, plate],
+    [onOpenSql, onOpenPlate, handleEmit, plate],
   )
 
   const onSubmit = useCallback(
@@ -378,15 +441,11 @@ export function PlateWindow({
             {/* Children applied imperatively in the layout effect above —
                 server-side sanitized (allowlist, double pass, values escaped). */}
             <div ref={containerRef} className="plate-body" onClick={onClick} onSubmit={onSubmit} />
-            {plate.islands.map((island) => (
-              <div
-                key={island.id}
-                ref={(el) => {
-                  stageRefs.current[island.id] = el
-                }}
-                style={{ display: "contents" }}
-              >
-                {island.kind === "grid" ? (
+            {plate.islands.map((island) => {
+              const host = islandHosts[island.id]
+              if (!host || !host.isConnected) return null
+              return createPortal(
+                island.kind === "grid" ? (
                   <div className="plate-grid-island">
                     <ResultGrid columns={island.columns} rows={island.rows} />
                   </div>
@@ -394,9 +453,11 @@ export function PlateWindow({
                   <ChartIsland island={island} onEmit={handleEmit} />
                 ) : (
                   <MetricIsland island={island} />
-                )}
-              </div>
-            ))}
+                ),
+                host,
+                island.id,
+              )
+            })}
           </>
         ) : (
           <div className="grid h-full place-items-center">

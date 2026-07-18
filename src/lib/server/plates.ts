@@ -72,6 +72,19 @@ function sqlLit(v: string): string {
   return `'${v.replace(/'/g, "''")}'`
 }
 
+/** sanitize-html DROPS empty attribute values (value="" becomes nothing),
+ *  and cheerio then emulates DOM defaults (a value-less radio reports "on").
+ *  Empty values are real in our vocabulary ("All" options/radios emit '' to
+ *  clear a param), so they ride through both sanitize passes as a marker
+ *  that's restored to value="" at the very end. */
+const BLANK = "__rv_blank__"
+
+/** Raw attribute read — bypasses cheerio's form-value emulation. */
+function rawAttr(el: unknown, name: string): string | undefined {
+  const v = (el as { attribs?: Record<string, string> }).attribs?.[name]
+  return v === BLANK ? "" : v
+}
+
 function escapeHtml(v: unknown): string {
   if (v == null) return ""
   return String(v)
@@ -109,7 +122,8 @@ const SANITIZE_OPTS: sanitizeHtml.IOptions = {
       "class", "title", "colspan", "rowspan",
       // the vocabulary — everything else is stripped
       "rv-each", "rv-if", "rv-action", "rv-emit", "rv-value",
-      "rv-open-sql", "rv-open-sql-title", "rv-confirm",
+      "rv-open-sql", "rv-open-sql-title", "rv-open", "rv-open-title",
+      "rv-confirm", "rv-live",
       "query", "spec", "value", "label", "x", "y", "mark", "unit",
     ],
     input: ["class", "title", "name", "value", "type", "placeholder", "required", "min", "max", "step", "checked", "rv-emit", "rv-value"],
@@ -201,9 +215,17 @@ export async function renderPlate(
   }
 
   // Declared params only; defaults from the row, overrides from the caller.
+  // A declared type coerces the incoming value (emits arrive as strings from
+  // rv-value attributes) so SQL like OFFSET {{ params.page }} * 15 is sound.
   const params: Record<string, unknown> = {}
   for (const p of plate.params ?? []) {
-    params[p.name] = callerParams[p.name] ?? p.default ?? null
+    let v = callerParams[p.name] ?? p.default ?? null
+    if (v != null && p.type === "number") {
+      const n = Number(v)
+      v = Number.isFinite(n) ? n : (typeof p.default === "number" ? p.default : null)
+    }
+    if (v != null && p.type === "boolean") v = truthy(v)
+    params[p.name] = v
   }
 
   // Run every declared query (read-only, bound to declared params). A
@@ -233,8 +255,16 @@ export async function renderPlate(
     }
   }
 
-  // 1. Sanitize the raw template BEFORE any data enters it.
-  const cleaned = sanitizeHtml(plate.template, SANITIZE_OPTS)
+  // 1. Sanitize the raw template BEFORE any data enters it (empty value=""
+  //    attrs become the BLANK marker first so they survive sanitation).
+  const cleaned = sanitizeHtml(
+    plate.template
+      .replace(/value\s*=\s*""/g, `value="${BLANK}"`)
+      // bare boolean-ish vocabulary attrs would be dropped as empty — give
+      // them a value so authors can write plain `rv-live`.
+      .replace(/\brv-live(?!\s*=)/g, 'rv-live="live"'),
+    SANITIZE_OPTS,
+  )
   const $ = cheerio.load(cleaned, {}, false)
 
   // 2. rv-each expansion (outermost first; islands not allowed inside).
@@ -300,23 +330,32 @@ export async function renderPlate(
       const opts: string[] = []
       const placeholder = $el.attr("placeholder")
       if (placeholder != null) {
-        opts.push(`<option value=""${current === "" ? " selected" : ""}>${escapeHtml(placeholder)}</option>`)
+        opts.push(`<option value="${BLANK}"${current === "" ? " selected" : ""}>${escapeHtml(placeholder)}</option>`)
       }
       for (const row of result.rows.slice(0, EACH_ROW_CAP)) {
         const v = row[valueCol] == null ? "" : String(row[valueCol])
         const l = row[labelCol] == null ? v : String(row[labelCol])
-        opts.push(`<option value="${escapeHtml(v)}"${v === current ? " selected" : ""}>${escapeHtml(l)}</option>`)
+        opts.push(`<option value="${v === "" ? BLANK : escapeHtml(v)}"${v === current ? " selected" : ""}>${escapeHtml(l)}</option>`)
       }
       $el.removeAttr("query").removeAttr("value").removeAttr("label").removeAttr("placeholder")
       $el.html(opts.join(""))
     } else {
       $el.find("option").each((__, opt) => {
         const $o = $(opt)
-        const v = $o.attr("value") ?? $o.text()
+        const v = rawAttr(opt, "value") ?? $o.text()
         if (String(v) === current) $o.attr("selected", "selected")
         else $o.removeAttr("selected")
       })
     }
+  })
+
+  // Radios with rv-emit: the one whose value matches the param is checked.
+  $('input[type="radio"][rv-emit]').each((_, el) => {
+    const $el = $(el)
+    const field = String($el.attr("rv-emit") ?? "")
+    const current = params[field] == null ? "" : String(params[field])
+    if (String(rawAttr(el, "value") ?? "") === current) $el.attr("checked", "checked")
+    else $el.removeAttr("checked")
   })
 
   // Checkboxes with rv-emit: checked when the param holds their rv-value
@@ -332,9 +371,34 @@ export async function renderPlate(
     else $el.removeAttr("checked")
   })
 
-  // 3. Any rv-if left outside rv-each has no row scope — drop it honestly.
+  // 3. rv-if outside rv-each: query-qualified single-field truthiness —
+  // `rv-if="tabs.show_browse"` keeps the element while column show_browse of
+  // query tabs' FIRST row is truthy. Still no expression language: the SQL
+  // computes the boolean because the SQL received the params (this is how
+  // tabs work — a tab is a param, its sections are query-driven rv-ifs).
+  // Bare row.* here has no row scope — dropped honestly.
   $("[rv-if]").each((_, el) => {
-    $(el).replaceWith(`<div class="plate-error">rv-if is only valid inside rv-each</div>`)
+    const $el = $(el)
+    const expr = String($el.attr("rv-if") ?? "").trim()
+    const negate = expr.startsWith("!")
+    const path = (negate ? expr.slice(1) : expr).trim()
+    const dot = path.indexOf(".")
+    const qname = dot > 0 ? path.slice(0, dot) : ""
+    if (qname === "row" || dot <= 0) {
+      $el.replaceWith(`<div class="plate-error">rv-if “${escapeHtml(expr)}” needs a row scope (inside rv-each) or a query.column path</div>`)
+      return
+    }
+    const result = results.get(qname)
+    if (!result || result.error) {
+      $el.replaceWith(
+        `<div class="plate-error">rv-if query “${escapeHtml(qname)}” ${result?.error ? `failed: ${escapeHtml(result.error)}` : "is unknown"}</div>`,
+      )
+      return
+    }
+    const v = result.rows[0]?.[path.slice(dot + 1)]
+    const keep = negate ? !truthy(v) : truthy(v)
+    $el.removeAttr("rv-if")
+    if (!keep) $el.remove()
   })
 
   // 4. Islands → placeholders + manifest (query results ride along).
@@ -377,6 +441,9 @@ export async function renderPlate(
       div: ["class", "title", "data-rv-island"],
     },
   })
+
+  // Restore blank markers to real empty values now that sanitation is done.
+  html = html.split(BLANK).join("")
 
   const actions: Record<string, PlateActionMeta> = {}
   for (const [name, a] of Object.entries(plate.actions ?? {})) {

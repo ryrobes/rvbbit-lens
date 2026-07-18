@@ -6199,6 +6199,7 @@ function renderWindowContent(
           activeConnectionId={ctx.activeConnectionId}
           busParams={ctx.params}
           onOpenSql={ctx.openSqlInWindow}
+          onOpenPlate={ctx.openPlate}
           onEmitParam={(field, value) =>
             ctx.emitParam({
               sourceWindowId: w.id,
