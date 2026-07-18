@@ -33,6 +33,10 @@ export interface PlateActionMeta {
   confirm: boolean
   description: string
   args: Array<{ name: string; type: string; required: boolean }>
+  requires_role?: string
+  /** pg_has_role(current_user, requires_role) — affordance only; the GRANT
+   *  wall is the real enforcement. Missing role counts as not allowed. */
+  allowed: boolean
 }
 
 export interface RenderedPlate {
@@ -63,7 +67,13 @@ interface PlateRow {
   queries: Record<string, { sql: string; cache_ttl_ms?: number; database?: string }>
   actions: Record<
     string,
-    { sql: string; args?: Array<{ name: string; type?: string; required?: boolean }>; confirm?: boolean; description?: string }
+    {
+      sql: string
+      args?: Array<{ name: string; type?: string; required?: boolean }>
+      confirm?: boolean
+      description?: string
+      requires_role?: string
+    }
   >
   params: Array<{ name: string; type?: string; default?: unknown; from_bus?: boolean }>
 }
@@ -173,6 +183,21 @@ async function moduleGate(
     open: red === 0,
     violations: Number(row.violations ?? 0),
     detail: String(row.detail ?? ""),
+  }
+}
+
+/** Affordance check for requires_role actions. A role that does not exist
+ *  reads as NOT allowed (pg_has_role errors on unknown roles). */
+async function roleAllowed(connectionId: string, role: string): Promise<boolean> {
+  try {
+    const res = await executeQuery(
+      connectionId,
+      `SELECT pg_has_role(current_user, ${sqlLit(role)}, 'member') AS ok`,
+      { readOnly: true, rowLimit: 1 },
+    )
+    return Boolean((res.rows?.[0] as { ok?: boolean } | undefined)?.ok)
+  } catch {
+    return false
   }
 }
 
@@ -451,6 +476,7 @@ export async function renderPlate(
 
   const actions: Record<string, PlateActionMeta> = {}
   for (const [name, a] of Object.entries(plate.actions ?? {})) {
+    const requiresRole = a.requires_role?.trim() || undefined
     actions[name] = {
       confirm: a.confirm === true,
       description: a.description ?? "",
@@ -459,7 +485,23 @@ export async function renderPlate(
         type: g.type ?? "text",
         required: g.required !== false,
       })),
+      requires_role: requiresRole,
+      allowed: requiresRole ? await roleAllowed(connectionId, requiresRole) : true,
     }
+  }
+
+  // Affordance gating: forms for actions the viewer's role can't run are
+  // replaced with a quiet note. The GRANT wall (SQL runs as the connection
+  // user) remains the real enforcement either way.
+  const forbidden = Object.entries(actions).filter(([, m]) => !m.allowed)
+  if (forbidden.length > 0) {
+    const $$ = cheerio.load(html, {}, false)
+    for (const [name, meta] of forbidden) {
+      $$(`form[rv-action="${name}"]`).replaceWith(
+        `<p class="plate-row-flag">action “${escapeHtml(name)}” requires role ${escapeHtml(meta.requires_role ?? "")}</p>`,
+      )
+    }
+    html = $$.html() ?? html
   }
 
   return {
@@ -488,6 +530,10 @@ export async function runPlateAction(
   if (!plate) return { ok: false, error: `plate ${plateId} not found` }
   const action = (plate.actions ?? {})[actionName]
   if (!action) return { ok: false, error: `action ${actionName} is not declared on this plate` }
+  const requiresRole = action.requires_role?.trim()
+  if (requiresRole && !(await roleAllowed(connectionId, requiresRole))) {
+    return { ok: false, error: `action ${actionName} requires role ${requiresRole}` }
+  }
 
   const declared = new Map((action.args ?? []).map((a) => [a.name, a]))
   for (const key of Object.keys(args)) {
@@ -605,6 +651,34 @@ export async function listKits(connectionId: string): Promise<Record<string, Kit
     return out
   } catch {
     return {}
+  }
+}
+
+export interface AvailableKit {
+  catalog_id: string
+  name: string
+  title: string | null
+  description: string | null
+  version: string | null
+}
+
+/** Catalog kits (kind='kit') not currently installed — the shelf's
+ *  "available" section. Uninstalled = present in the catalog, absent from
+ *  rvbbit.kits (uninstall returns a kit to available). */
+export async function listAvailableKits(
+  connectionId: string,
+  installed: Record<string, unknown>,
+): Promise<AvailableKit[]> {
+  try {
+    const res = await executeQuery(
+      connectionId,
+      `SELECT id AS catalog_id, name, title, description, manifest->>'version' AS version
+       FROM rvbbit.capability_catalog WHERE kind = 'kit' AND active ORDER BY name`,
+      { readOnly: true, rowLimit: 200 },
+    )
+    return ((res.rows ?? []) as unknown as AvailableKit[]).filter((k) => !(k.name in installed))
+  } catch {
+    return []
   }
 }
 

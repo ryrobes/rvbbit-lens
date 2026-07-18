@@ -498,6 +498,14 @@ interface ShelfKitMeta {
   description: string | null
 }
 
+interface ShelfAvailableKit {
+  catalog_id: string
+  name: string
+  title: string | null
+  description: string | null
+  version: string | null
+}
+
 export function PlatesWindow({
   activeConnectionId,
   onOpenPlate,
@@ -507,6 +515,9 @@ export function PlatesWindow({
 }) {
   const [plates, setPlates] = useState<ShelfPlate[]>([])
   const [kits, setKits] = useState<Record<string, ShelfKitMeta>>({})
+  const [available, setAvailable] = useState<ShelfAvailableKit[]>([])
+  const [installing, setInstalling] = useState<string | null>(null)
+  const [installNote, setInstallNote] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [reloadTick, setReloadTick] = useState(0)
@@ -525,6 +536,7 @@ export function PlatesWindow({
           ok: boolean
           plates?: ShelfPlate[]
           kits?: Record<string, ShelfKitMeta>
+          available?: ShelfAvailableKit[]
           error?: string
         }
         if (cancelled) return
@@ -532,6 +544,7 @@ export function PlatesWindow({
         else {
           setPlates(body.plates ?? [])
           setKits(body.kits ?? {})
+          setAvailable(body.available ?? [])
         }
       } catch (e) {
         if (!cancelled) setError(e instanceof Error ? e.message : String(e))
@@ -544,6 +557,41 @@ export function PlatesWindow({
       cancelled = true
     }
   }, [activeConnectionId, reloadTick])
+
+  const installKit = useCallback(
+    async (catalogId: string) => {
+      if (!activeConnectionId || installing) return
+      setInstalling(catalogId)
+      setInstallNote(null)
+      try {
+        const res = await fetch("/api/kit/install", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ connectionId: activeConnectionId, catalogId }),
+        })
+        const body = (await res.json()) as {
+          ok: boolean
+          kit?: string
+          selftestFailures?: Array<{ item: string; detail: string }>
+          error?: string
+        }
+        if (!body.ok) {
+          setInstallNote(body.error ?? "install failed")
+        } else if ((body.selftestFailures?.length ?? 0) > 0) {
+          const f = body.selftestFailures![0]
+          setInstallNote(`installed, but self-test flagged ${body.selftestFailures!.length} item(s): ${f.item} — ${f.detail}`)
+        } else {
+          setInstallNote(`installed ${body.kit} — self-test clean`)
+        }
+        setReloadTick((t) => t + 1)
+      } catch (e) {
+        setInstallNote(e instanceof Error ? e.message : String(e))
+      } finally {
+        setInstalling(null)
+      }
+    },
+    [activeConnectionId, installing],
+  )
 
   // Shelf order: named kits alphabetically, then the kit-less standalones.
   const groups = useMemo(() => {
@@ -580,6 +628,8 @@ export function PlatesWindow({
         <Layers className="h-3.5 w-3.5 text-main" />
         <span className="font-medium text-foreground">Plates</span>
         <span className="text-chrome-text/45">surfaces shipped as rows — they travel with the database</span>
+        <div className="flex-1" />
+        {installNote ? <span className="max-w-[46%] truncate text-[11px] text-main/80" title={installNote}>{installNote}</span> : null}
       </div>
       <div className="min-h-0 flex-1 overflow-y-auto p-2">
         {loading ? (
@@ -662,6 +712,46 @@ export function PlatesWindow({
                 </div>
               </section>
             ))}
+            {available.length > 0 ? (
+              <section>
+                <div className="mb-1.5 flex items-baseline gap-2 px-1">
+                  <span className="text-[10px] font-semibold uppercase tracking-wider text-chrome-text/45">
+                    available to install
+                  </span>
+                  <span className="text-[9px] text-chrome-text/35">from the capability catalog</span>
+                  <div className="h-px flex-1 self-center bg-chrome-border/40" />
+                </div>
+                <div className="flex flex-col gap-1">
+                  {available.map((k) => (
+                    <div
+                      key={k.catalog_id}
+                      className="flex items-center gap-2 rounded-md border border-dashed border-chrome-border/60 bg-chrome-bg/15 px-2.5 py-1.5"
+                    >
+                      <div className="min-w-0 flex-1">
+                        <div className="flex min-w-0 items-center gap-2">
+                          <span className="truncate font-medium text-foreground/90">{k.title ?? k.name}</span>
+                          {k.version ? (
+                            <span className="shrink-0 font-mono text-[9px] text-chrome-text/40">v{k.version}</span>
+                          ) : null}
+                          <span className="ml-auto shrink-0 font-mono text-[9.5px] text-chrome-text/35">{k.catalog_id}</span>
+                        </div>
+                        {k.description ? (
+                          <div className="mt-0.5 line-clamp-2 text-[11px] leading-snug text-chrome-text/50">{k.description}</div>
+                        ) : null}
+                      </div>
+                      <button
+                        type="button"
+                        disabled={installing != null}
+                        onClick={() => void installKit(k.catalog_id)}
+                        className="shrink-0 rounded-md border border-main/40 px-2.5 py-1 text-[11px] text-main hover:bg-main/10 disabled:opacity-50"
+                      >
+                        {installing === k.catalog_id ? "installing…" : "Install"}
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </section>
+            ) : null}
           </div>
         )}
       </div>
