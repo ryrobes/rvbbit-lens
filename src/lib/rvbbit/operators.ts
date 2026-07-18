@@ -365,7 +365,9 @@ export async function fetchOperators(
 ): Promise<{ operators: RvbbitOperator[]; error?: string }> {
   const res = await runQuery(
     connectionId,
-    `SELECT ${OPERATOR_COLUMNS} FROM rvbbit.operators ORDER BY name`,
+    // Kit-private operators are discovery-hidden (they still run; plates and
+    // kit SQL call them by name). to_jsonb tolerates pre-visibility schemas.
+    `SELECT ${OPERATOR_COLUMNS} FROM rvbbit.operators o WHERE coalesce(to_jsonb(o)->>'visibility', 'public') <> 'kit' ORDER BY name`,
   )
   if (!res.ok) return { operators: [], error: res.error }
   return { operators: res.rows.map(coerceOperator) }

@@ -28,9 +28,12 @@ const OPERATOR_CATALOG_SQL =
   "SELECT name, shape, arg_names, arg_types, return_type, model, " +
   "system_prompt, user_prompt, parser, max_tokens, temperature, " +
   "steps, retry, wards, takes, description " +
-  "FROM rvbbit.operators ORDER BY name"
+  // to_jsonb keeps this parseable on databases that predate the visibility
+  // column (missing key → NULL → public); kit-private operators stay out of
+  // pickers and autocomplete.
+  "FROM rvbbit.operators o WHERE coalesce(to_jsonb(o)->>'visibility', 'public') <> 'kit' ORDER BY name"
 const BASIC_OPERATOR_CATALOG_SQL =
-  "SELECT name, shape, arg_names, arg_types, return_type, description FROM rvbbit.operators ORDER BY name"
+  "SELECT name, shape, arg_names, arg_types, return_type, description FROM rvbbit.operators o WHERE coalesce(to_jsonb(o)->>'visibility', 'public') <> 'kit' ORDER BY name"
 
 interface OperatorRow {
   name: string

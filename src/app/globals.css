@@ -695,3 +695,7 @@ html.dark .av-code-preview .shiki span {
 .plate-tabs button:hover { color: var(--foreground); }
 .plate-tabs button.active { color: var(--main); border-bottom-color: var(--main); }
 .plate-pager { display: flex; align-items: center; gap: 10px; margin-top: 10px; font-size: 11px; color: color-mix(in oklch, var(--foreground) 55%, transparent); }
+.plate-chip { display: inline-block; border: 1px solid var(--chrome-border); border-radius: 999px; padding: 1px 8px; font-size: 10px; line-height: 1.5; color: color-mix(in oklch, var(--foreground) 70%, transparent); }
+.plate-chip.ok { border-color: color-mix(in oklch, var(--success, #7de3b6) 45%, transparent); color: var(--success, #7de3b6); }
+.plate-chip.warn { border-color: color-mix(in oklch, var(--warning, #e8b572) 55%, transparent); color: var(--warning, #e8b572); }
+.plate-chip.bad { border-color: color-mix(in oklch, var(--destructive, #b5524a) 55%, transparent); color: var(--destructive, #b5524a); }
