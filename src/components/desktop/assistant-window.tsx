@@ -355,17 +355,35 @@ function KaraokeText({ text }: { text: string }) {
     raf = requestAnimationFrame(loop)
     return () => cancelAnimationFrame(raf)
   }, [wordCount])
+  // Paint-only styling (background / box-shadow / text-shadow) so the text
+  // metrics never change — the layout must not breathe as words light up.
+  // The word being said right now gets a glowing leading edge; already-said
+  // words keep a solid wash behind them.
+  const spokenBg = "color-mix(in oklch, var(--main) 24%, transparent)"
+  const currentBg = "color-mix(in oklch, var(--main) 42%, transparent)"
   let seen = 0
   return (
     <>
       {tokens.map((t, i) => {
         if (t.length === 0 || /^\s+$/.test(t)) return t
-        const on = seen++ < lit
+        const idx = seen++
+        const state = idx < lit - 1 ? "spoken" : idx === lit - 1 ? "current" : "unspoken"
         return (
           <span
             key={i}
-            className="rounded-[3px] transition-colors duration-500"
-            style={on ? { background: "color-mix(in oklch, var(--main) 14%, transparent)" } : undefined}
+            className="rounded-[3px]"
+            style={{
+              transition: "background-color 300ms, box-shadow 300ms, text-shadow 300ms",
+              ...(state === "spoken"
+                ? { background: spokenBg, boxShadow: `0 0 0 2px ${spokenBg}` }
+                : state === "current"
+                  ? {
+                      background: currentBg,
+                      boxShadow: `0 0 0 3px ${currentBg}, 0 0 14px color-mix(in oklch, var(--main) 35%, transparent)`,
+                      textShadow: "0 0 10px color-mix(in oklch, var(--main) 60%, transparent)",
+                    }
+                  : {}),
+            }}
           >
             {t}
           </span>
