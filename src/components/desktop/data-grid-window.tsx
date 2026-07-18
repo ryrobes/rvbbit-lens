@@ -46,7 +46,7 @@ import { ContextMenu, type ContextMenuState } from "./context-menu"
 import { listQueryHistory, pushQueryHistory } from "@/lib/desktop/query-history"
 import { SingleCellCallout } from "./single-cell-callout"
 import { SqlEditor } from "./sql-editor"
-import { fetchLlmModels, type LlmModel } from "@/lib/rvbbit/operators"
+import { fetchLlmModels, traceSemanticReceipts, type LlmModel } from "@/lib/rvbbit/operators"
 import { TimeTravelStrip } from "./time-travel-strip"
 import { ExplainGraph, parseExplainResult, type ExplainRoot } from "./explain-graph"
 import { Button } from "@/components/ui/button"
@@ -195,6 +195,9 @@ interface DataGridWindowProps {
    * reverse bridge.
    */
   onOpenKgForSource?: (ctx: import("@/lib/desktop/types").KgSourceContext) => void
+  /** Deep-link to the operator workflow with a specific receipt trace —
+   *  the destination for semantic-cell lineage. */
+  onOpenOperatorFlow?: (operatorName: string | null, receiptId?: string | null) => void
 }
 
 type RunState =
@@ -961,6 +964,7 @@ export function DataGridWindow({
   onRepivot,
   onProbeValues,
   onOpenKgForSource,
+  onOpenOperatorFlow,
 }: DataGridWindowProps) {
   const view = payload.view ?? {}
   const rootRef = useRef<HTMLDivElement | null>(null)
@@ -2347,6 +2351,62 @@ export function DataGridWindow({
   }, [draftSql])
 
   const result = runState.kind === "done" ? runState.result : null
+
+  // ── Semantic cell lineage ──────────────────────────────────────────
+  // Which operators did the executed SQL actually call? Those cells can be
+  // traced: right-click → find the receipt whose output matches the cell
+  // (ranked by how much of the row's other content appears in the receipt's
+  // inputs) → deep-link the operator workflow to that exact run.
+  const semanticOpsInSql = useMemo(() => {
+    if (runState.kind !== "done") return []
+    const sqlText = (lastExecutedSqlRef.current || payload.sql || "").toLowerCase()
+    return semanticOps
+      .map((op) => op.name)
+      .filter((name) => {
+        const esc = name.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+        return new RegExp(`\\brvbbit\\s*\\.\\s*${esc}\\s*\\(`).test(sqlText)
+      })
+  }, [runState, semanticOps, payload.sql])
+
+  const traceSemanticCell = useCallback(
+    async (input: { row: Record<string, unknown>; column: { name: string }; value: unknown }) => {
+      if (!onOpenOperatorFlow || semanticOpsInSql.length === 0) return
+      const conn = payload.connectionId ?? activeConnectionId
+      if (!conn) return
+      const valueText =
+        input.value == null
+          ? ""
+          : typeof input.value === "object"
+            ? JSON.stringify(input.value)
+            : String(input.value)
+      const hits = await traceSemanticReceipts(conn, semanticOpsInSql, valueText)
+      if (hits.length === 0) {
+        // No receipt matched (cache-served value, pruned history) — still
+        // land on the operator's workflow, just without a pinned run.
+        onOpenOperatorFlow(semanticOpsInSql[0])
+        return
+      }
+      const context = Object.entries(input.row)
+        .filter(([k]) => k !== input.column.name)
+        .map(([, v]) =>
+          v == null ? "" : typeof v === "object" ? JSON.stringify(v) : String(v),
+        )
+        .filter((s) => s.length > 2)
+        .map((s) => s.toLowerCase().slice(0, 120))
+      let best = hits[0]
+      let bestScore = -1
+      for (const h of hits) {
+        const inputsLower = h.inputs.toLowerCase()
+        const score = context.reduce((n, s) => n + (inputsLower.includes(s) ? 1 : 0), 0)
+        if (score > bestScore) {
+          best = h
+          bestScore = score
+        }
+      }
+      onOpenOperatorFlow(best.operator, best.receipt_id)
+    },
+    [onOpenOperatorFlow, semanticOpsInSql, payload.connectionId, activeConnectionId],
+  )
   const error = runState.kind === "error" ? runState : null
   const isRunning = runState.kind === "running"
   // The RAW (pre-filter) statement texts, by index, so the transcript/arrange key
@@ -3299,6 +3359,19 @@ export function DataGridWindow({
                 onTransposedChange={setRowsTransposed}
                 columnDragSource={columnDragSource}
                 activeParams={blockParams}
+                extraCellMenuItems={
+                  semanticOpsInSql.length > 0 && onOpenOperatorFlow
+                    ? ({ row, column }) => [
+                        {
+                          id: "semantic-lineage",
+                          label: "Semantic lineage",
+                          icon: TreeStructure,
+                          onSelect: () =>
+                            void traceSemanticCell({ row, column, value: row?.[column.name] }),
+                        },
+                      ]
+                    : undefined
+                }
                 onOpenRow={({ row, rowIndex, column }) => {
                   onOpenRow({
                     kind: "row-inspector",

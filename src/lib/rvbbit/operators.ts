@@ -808,6 +808,56 @@ export async function runOperator(
   return { output: val == null ? null : String(val) }
 }
 
+// ── Semantic cell lineage ────────────────────────────────────────────
+//
+// Right-clicking a semantic value in a results grid deep-links to the exact
+// receipt that produced it. The receipt IS the lineage record (inputs,
+// takes, sub-calls, validations), so tracing a cell is a search: receipts
+// for the query's operators whose output matches the cell text, ranked by
+// how much of the ROW's other content appears in the receipt's inputs.
+
+export interface SemanticTraceHit {
+  receipt_id: string
+  operator: string
+  inputs: string
+  output: string
+  take_index: number | null
+  invocation_at: string
+}
+
+export async function traceSemanticReceipts(
+  connectionId: string,
+  operators: string[],
+  valueText: string,
+  limit = 25,
+): Promise<SemanticTraceHit[]> {
+  if (operators.length === 0 || !valueText.trim()) return []
+  const ops = `ARRAY[${operators.map(sqlStr).join(",")}]::text[]`
+  const v = sqlStr(valueText.trim())
+  const res = await runQuery(
+    connectionId,
+    `SELECT receipt_id::text AS receipt_id, operator,
+            left(inputs::text, 2000) AS inputs,
+            left(coalesce(output, ''), 400) AS output,
+            take_index, invocation_at::text AS invocation_at
+     FROM rvbbit.receipts
+     WHERE operator = ANY(${ops})
+       AND (lower(btrim(coalesce(output, ''))) = lower(btrim(${v}))
+            OR lower(btrim(coalesce(parsed #>> '{}', ''))) = lower(btrim(${v})))
+     ORDER BY invocation_at DESC
+     LIMIT ${Math.max(1, Math.min(100, limit))}`,
+  )
+  if (!res.ok) return []
+  return (res.rows ?? []).map((r) => ({
+    receipt_id: String(r.receipt_id ?? ""),
+    operator: String(r.operator ?? ""),
+    inputs: String(r.inputs ?? ""),
+    output: String(r.output ?? ""),
+    take_index: r.take_index == null ? null : Number(r.take_index),
+    invocation_at: String(r.invocation_at ?? ""),
+  }))
+}
+
 // ── SQL generation ──────────────────────────────────────────────────
 
 function sqlStr(s: string): string {

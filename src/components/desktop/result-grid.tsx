@@ -52,6 +52,19 @@ interface ResultGridProps {
     rowIndex: number
     column: QueryResultColumn
   }) => void
+  /** Extra entries appended to the cell context menu (e.g. semantic lineage). */
+  extraCellMenuItems?: (input: {
+    row: Record<string, unknown>
+    rowIndex: number
+    column: QueryResultColumn
+    value: unknown
+  }) => Array<{
+    id: string
+    label: string
+    icon: React.ComponentType<{ className?: string }>
+    disabled?: boolean
+    onSelect: () => void
+  }>
   /** Cross-filter: a plain cell click hands back the whole COLUMN (with its
    *  source-table provenance) + value, so a multi-statement dashboard can filter
    *  sibling tiles by the real table. Takes precedence over onEmitCellParam. */
@@ -79,6 +92,7 @@ export function ResultGrid({
   onOpenRow,
   onCellFilter,
   highlightFilters,
+  extraCellMenuItems,
 }: ResultGridProps) {
   const parentRef = useRef<HTMLDivElement>(null)
   const [colWidths, setColWidths] = useState<Record<string, number>>({})
@@ -327,6 +341,7 @@ export function ResultGrid({
           icon: Table2,
           onSelect: () => void copyToClipboard(stringifyJson(row)),
         },
+        ...(extraCellMenuItems?.({ row, rowIndex, column, value }) ?? []),
       ],
     })
   }

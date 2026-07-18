@@ -6070,6 +6070,7 @@ function renderWindowContent(
           onRepivot={(grain) => ctx.repivotWindow(w.id, grain)}
           onProbeValues={(column, search) => ctx.probeColumnValues(w.id, column, search)}
           onOpenKgForSource={ctx.openKgForSource}
+          onOpenOperatorFlow={ctx.openOperatorFlow}
         />
       )
     }
