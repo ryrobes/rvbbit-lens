@@ -22,23 +22,36 @@ export async function POST(req: Request) {
   // Cap length defensively — a runaway reply shouldn't bill a novel.
   const clipped = text.length > 5000 ? text.slice(0, 5000) : text
 
-  try {
-    const upstream = await fetch(
-      `https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(voiceId)}`,
-      {
-        method: "POST",
-        headers: {
-          "xi-api-key": key,
-          "Content-Type": "application/json",
-          Accept: "audio/mpeg",
-        },
-        body: JSON.stringify({
-          text: clipped,
-          model_id: "eleven_turbo_v2_5",
-          voice_settings: { stability: 0.4, similarity_boost: 0.75 },
-        }),
+  const call = (modelId: string, voiceSettings: Record<string, number>) =>
+    fetch(`https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(voiceId)}`, {
+      method: "POST",
+      headers: {
+        "xi-api-key": key,
+        "Content-Type": "application/json",
+        Accept: "audio/mpeg",
       },
-    )
+      body: JSON.stringify({
+        text: clipped,
+        model_id: modelId,
+        voice_settings: voiceSettings,
+      }),
+    })
+
+  try {
+    // eleven_v3 first (markedly more expressive). Its voice_settings contract
+    // differs: stability is the only dial (0 creative / 0.5 natural / 1 robust)
+    // — similarity_boost belongs to the v2 family. Accounts or voices without
+    // v3 access get a model-related 4xx, so fall back to turbo rather than
+    // breaking anyone's voice.
+    let upstream = await call("eleven_v3", { stability: 0.5 })
+    if (!upstream.ok && upstream.status !== 401) {
+      const firstErr = await upstream.text().catch(() => "")
+      if (/model/i.test(firstErr) || upstream.status === 404 || upstream.status === 400) {
+        upstream = await call("eleven_turbo_v2_5", { stability: 0.4, similarity_boost: 0.75 })
+      } else {
+        return new NextResponse(firstErr || `ElevenLabs error ${upstream.status}`, { status: 502 })
+      }
+    }
     if (!upstream.ok) {
       const detail = await upstream.text().catch(() => "")
       // Surface ElevenLabs' own error (bad key, unknown voice, quota) verbatim.
