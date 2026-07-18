@@ -48,11 +48,12 @@ export interface RenderedPlate {
 interface PlateRow {
   plate_id: string
   kit: string | null
+  module: string | null
   title: string
   description: string | null
   template_version: number
   template: string
-  queries: Record<string, { sql: string; cache_ttl_ms?: number }>
+  queries: Record<string, { sql: string; cache_ttl_ms?: number; database?: string }>
   actions: Record<
     string,
     { sql: string; args?: Array<{ name: string; type?: string; required?: boolean }>; confirm?: boolean; description?: string }
@@ -118,13 +119,40 @@ const SANITIZE_OPTS: sanitizeHtml.IOptions = {
 async function loadPlate(connectionId: string, plateId: string): Promise<PlateRow | null> {
   const res = await executeQuery(
     connectionId,
-    `SELECT plate_id, kit, title, description, template_version, template,
+    `SELECT plate_id, kit, module, title, description, template_version, template,
             queries, actions, params
      FROM rvbbit.plates WHERE plate_id = ${sqlLit(plateId)}`,
     { readOnly: true, rowLimit: 1 },
   )
   const row = res.rows?.[0] as unknown as PlateRow | undefined
   return row ?? null
+}
+
+/** Contract gate: a plate with a module renders only while every contract
+ *  on (kit, module) is green. Enforced HERE — the shelf UI is a courtesy;
+ *  the render refusal is the wall. Broken contracts fail closed. */
+async function moduleGate(
+  connectionId: string,
+  kit: string | null,
+  module: string | null,
+): Promise<{ open: boolean; violations: number; detail: string }> {
+  if (!kit || !module) return { open: true, violations: 0, detail: "" }
+  const res = await executeQuery(
+    connectionId,
+    `SELECT count(*) FILTER (WHERE NOT ok)::int AS red,
+            coalesce(sum(violations) FILTER (WHERE NOT ok), 0)::int AS violations,
+            coalesce(min(sample) FILTER (WHERE NOT ok), '') AS detail
+     FROM rvbbit.kit_contract_status(${sqlLit(kit)}) s
+     WHERE s.module = ${sqlLit(module)}`,
+    { readOnly: true, rowLimit: 1 },
+  )
+  const row = res.rows?.[0] ?? {}
+  const red = Number(row.red ?? 0)
+  return {
+    open: red === 0,
+    violations: Number(row.violations ?? 0),
+    detail: String(row.detail ?? ""),
+  }
 }
 
 function truthy(v: unknown): boolean {
@@ -151,6 +179,14 @@ export async function renderPlate(
 ): Promise<RenderedPlate> {
   const plate = await loadPlate(connectionId, plateId)
   if (!plate) throw new Error(`plate ${plateId} not found`)
+  const gate = await moduleGate(connectionId, plate.kit, plate.module)
+  if (!gate.open) {
+    throw new Error(
+      `module “${plate.module}” is gated: ${gate.violations} contract violation(s)` +
+        (gate.detail ? ` — ${gate.detail}` : "") +
+        `. Open the kit's switchboard to resolve them.`,
+    )
+  }
   if (Number(plate.template_version) !== TEMPLATE_VERSION) {
     throw new Error(
       `plate ${plateId} has template_version ${plate.template_version}; this renderer speaks v${TEMPLATE_VERSION}`,
@@ -163,17 +199,31 @@ export async function renderPlate(
     params[p.name] = callerParams[p.name] ?? p.default ?? null
   }
 
-  // Run every declared query (read-only, bound to declared params).
-  const results = new Map<string, { columns: QueryResultColumn[]; rows: Array<Record<string, unknown>> }>()
+  // Run every declared query (read-only, bound to declared params). A
+  // failing query degrades to an inline error where it is CONSUMED — one
+  // broken probe must never take down the whole surface.
+  const results = new Map<
+    string,
+    { columns: QueryResultColumn[]; rows: Array<Record<string, unknown>>; error?: string }
+  >()
   for (const [name, q] of Object.entries(plate.queries ?? {})) {
-    const res = await executeQuery(connectionId, bindQueryParams(q.sql, params), {
-      readOnly: true,
-      rowLimit: EACH_ROW_CAP,
-    })
-    results.set(name, {
-      columns: (res.columns ?? []) as QueryResultColumn[],
-      rows: (res.rows ?? []) as Array<Record<string, unknown>>,
-    })
+    try {
+      const res = await executeQuery(connectionId, bindQueryParams(q.sql, params), {
+        readOnly: true,
+        rowLimit: EACH_ROW_CAP,
+        database: q.database,
+      })
+      results.set(name, {
+        columns: (res.columns ?? []) as QueryResultColumn[],
+        rows: (res.rows ?? []) as Array<Record<string, unknown>>,
+      })
+    } catch (e) {
+      results.set(name, {
+        columns: [],
+        rows: [],
+        error: e instanceof Error ? e.message : String(e),
+      })
+    }
   }
 
   // 1. Sanitize the raw template BEFORE any data enters it.
@@ -188,6 +238,12 @@ export async function renderPlate(
     $el.removeAttr("rv-each")
     if (!result) {
       $el.replaceWith(`<div class="plate-error">unknown query “${escapeHtml(qname)}”</div>`)
+      return
+    }
+    if (result.error) {
+      $el.replaceWith(
+        `<div class="plate-error">query “${escapeHtml(qname)}” failed: ${escapeHtml(result.error)}</div>`,
+      )
       return
     }
     if ($el.find("rv-grid,rv-chart,rv-metric").length > 0) {
@@ -226,8 +282,10 @@ export async function renderPlate(
     const kind = tag.replace("rv-", "") as PlateIsland["kind"]
     const qname = String($el.attr("query") ?? "")
     const result = results.get(qname)
-    if (!result) {
-      $el.replaceWith(`<div class="plate-error">island references unknown query “${escapeHtml(qname)}”</div>`)
+    if (!result || result.error) {
+      $el.replaceWith(
+        `<div class="plate-error">island query “${escapeHtml(qname)}” ${result?.error ? `failed: ${escapeHtml(result.error)}` : "is unknown"}</div>`,
+      )
       return
     }
     const id = `island-${i}`
@@ -339,19 +397,40 @@ export async function runPlateAction(
   }
 }
 
-/** List plates for the browser window. */
-export async function listPlates(connectionId: string): Promise<
-  Array<{ plate_id: string; kit: string | null; title: string; description: string | null }>
-> {
+export interface PlateListEntry {
+  plate_id: string
+  kit: string | null
+  module: string | null
+  title: string
+  description: string | null
+  gated: boolean
+  violations: number
+  gate_detail: string
+}
+
+/** List plates with their module-gate state for the shelf. */
+export async function listPlates(connectionId: string): Promise<PlateListEntry[]> {
   const res = await executeQuery(
     connectionId,
-    `SELECT plate_id, kit, title, description FROM rvbbit.plates ORDER BY kit NULLS FIRST, plate_id`,
+    `SELECT plate_id, kit, module, title, description
+     FROM rvbbit.plates ORDER BY kit NULLS FIRST, module NULLS FIRST, plate_id`,
     { readOnly: true, rowLimit: 200 },
   )
-  return (res.rows ?? []) as Array<{
-    plate_id: string
-    kit: string | null
-    title: string
-    description: string | null
-  }>
+  const rows = (res.rows ?? []) as Array<Omit<PlateListEntry, "gated" | "violations" | "gate_detail">>
+  const gates = new Map<string, { open: boolean; violations: number; detail: string }>()
+  const out: PlateListEntry[] = []
+  for (const r of rows) {
+    let gate = { open: true, violations: 0, detail: "" }
+    if (r.kit && r.module) {
+      const key = `${r.kit} ${r.module}`
+      const hit = gates.get(key)
+      if (hit) gate = hit
+      else {
+        gate = await moduleGate(connectionId, r.kit, r.module)
+        gates.set(key, gate)
+      }
+    }
+    out.push({ ...r, gated: !gate.open, violations: gate.violations, gate_detail: gate.detail })
+  }
+  return out
 }

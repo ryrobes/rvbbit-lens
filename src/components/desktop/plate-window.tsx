@@ -108,9 +108,6 @@ export function PlateWindow({
 
   const refresh = useCallback(async () => {
     if (!activeConnectionId) return
-    // Defer one microtask so the mount-effect invocation never sets state
-    // synchronously inside the effect frame (react-hooks/set-state-in-effect).
-    await Promise.resolve()
     setLoading(true)
     setError(null)
     try {
@@ -129,7 +126,10 @@ export function PlateWindow({
     }
   }, [activeConnectionId, plateId])
 
-  useEffect(() => void refresh(), [refresh])
+  useEffect(() => {
+    const timer = window.setTimeout(() => void refresh(), 0)
+    return () => window.clearTimeout(timer)
+  }, [refresh])
 
   // Islands render as React-owned nodes in a staging area, then relocate
   // into their placeholder hosts before paint. (Portals targeting nodes
@@ -274,7 +274,16 @@ export function PlatesWindow({
   onOpenPlate: (plateId: string, title: string) => void
 }) {
   const [plates, setPlates] = useState<
-    Array<{ plate_id: string; kit: string | null; title: string; description: string | null }>
+    Array<{
+      plate_id: string
+      kit: string | null
+      module: string | null
+      title: string
+      description: string | null
+      gated: boolean
+      violations: number
+      gate_detail: string
+    }>
   >([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -328,10 +337,20 @@ export function PlatesWindow({
               <button
                 key={p.plate_id}
                 type="button"
+                disabled={p.gated}
                 onClick={() => onOpenPlate(p.plate_id, p.title)}
+                title={
+                  p.gated
+                    ? `module “${p.module}” gated: ${p.violations} contract violation(s)` +
+                      (p.gate_detail ? ` — ${p.gate_detail}` : "") +
+                      " — open the kit's switchboard"
+                    : undefined
+                }
                 className={cn(
                   "flex items-baseline gap-2 rounded-md border border-chrome-border/50 bg-chrome-bg/25 px-2.5 py-1.5 text-left",
-                  "hover:border-main/40 hover:bg-chrome-bg/40",
+                  p.gated
+                    ? "cursor-not-allowed opacity-45"
+                    : "hover:border-main/40 hover:bg-chrome-bg/40",
                 )}
               >
                 <span className="font-medium text-foreground">{p.title}</span>
@@ -339,6 +358,11 @@ export function PlatesWindow({
                 {p.kit ? (
                   <span className="rounded-full border border-main/30 px-1.5 text-[9px] uppercase tracking-wide text-main/70">
                     {p.kit}
+                  </span>
+                ) : null}
+                {p.gated ? (
+                  <span className="rounded-full border border-warning/40 px-1.5 text-[9px] uppercase tracking-wide text-warning">
+                    gated · {p.violations}
                   </span>
                 ) : null}
                 <span className="ml-auto truncate text-[11px] text-chrome-text/50">{p.description}</span>
