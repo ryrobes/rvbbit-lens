@@ -746,3 +746,20 @@ html.dark .av-code-preview .shiki span {
 .plate-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: color-mix(in oklch, var(--foreground) 35%, transparent); }
 .plate-dot.ok { background: var(--success, #7de3b6); } .plate-dot.warn { background: var(--warning, #e8b572); } .plate-dot.bad { background: var(--destructive, #b5524a); }
 .plate-empty { padding: 16px; text-align: center; font-size: 11px; color: color-mix(in oklch, var(--foreground) 40%, transparent); border: 1px dashed var(--chrome-border); border-radius: 8px; }
+
+/* ── rv-board island: kanban whose columns come from rows ─────────────
+   Drag a chip to another column → the plate's named action ({id, to}).
+   .drop highlights the hovered target; data-busy dims during the write. */
+.plate-board { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(170px, 1fr); gap: 10px; align-items: start; overflow-x: auto; padding-bottom: 4px; margin-bottom: 14px; }
+.plate-board[data-busy] { opacity: .6; pointer-events: none; }
+.plate-board-col { border: 1px solid var(--chrome-border); border-radius: 8px; padding: 8px; min-height: 90px; background: color-mix(in oklch, var(--chrome-bg) 30%, transparent); transition: border-color .12s, background-color .12s; }
+.plate-board-col.drop { border-color: var(--main); background: color-mix(in oklch, var(--main) 10%, transparent); }
+.plate-board-col > h4 { display: flex; align-items: center; justify-content: space-between; margin: 0 0 8px; font-size: 10.5px; text-transform: uppercase; letter-spacing: .06em; color: color-mix(in oklch, var(--foreground) 70%, transparent); }
+.plate-board-col > h4 > span { font-size: 10px; border: 1px solid var(--chrome-border); border-radius: 999px; padding: 0 6px; color: color-mix(in oklch, var(--foreground) 45%, transparent); }
+.plate-board-chip { margin-bottom: 8px; padding: 7px 9px; }
+.plate-board-chip[draggable="true"] { cursor: grab; }
+.plate-board-chip[draggable="true"]:active { cursor: grabbing; }
+.plate-board-chip .plate-card-title { font-size: 10px; }
+.plate-board-chip .plate-card-value { font-size: 12px; font-weight: 600; }
+.plate-board-chip .plate-card-note { font-size: 10px; }
+.plate-board-col .plate-empty { padding: 10px; font-size: 10px; }

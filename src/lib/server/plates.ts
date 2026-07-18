@@ -22,7 +22,7 @@ const EACH_ROW_CAP = 500
 
 export interface PlateIsland {
   id: string
-  kind: "grid" | "chart" | "metric"
+  kind: "grid" | "chart" | "metric" | "board"
   query: string
   props: Record<string, string>
   columns: QueryResultColumn[]
@@ -130,7 +130,7 @@ const SANITIZE_OPTS: sanitizeHtml.IOptions = {
     "caption", "form", "label", "input", "select", "option", "textarea",
     "button", "fieldset", "legend",
     // islands (replaced before serialization, but must survive sanitation)
-    "rv-grid", "rv-chart", "rv-metric",
+    "rv-grid", "rv-chart", "rv-metric", "rv-board",
   ],
   allowedAttributes: {
     "*": [
@@ -150,6 +150,8 @@ const SANITIZE_OPTS: sanitizeHtml.IOptions = {
     // so the clicked button's name/value pair rides along.
     button: ["class", "title", "type", "name", "value", "rv-open-sql", "rv-open-sql-title", "rv-emit", "rv-value"],
     form: ["class", "rv-action"],
+    // board island: columns from rows; a drop fires the named action {id, to}
+    "rv-board": ["query", "group-by", "group-label", "id", "title", "value", "note", "tone", "action"],
   },
   disallowedTagsMode: "discard",
   allowedSchemes: [], // no URLs anywhere in v1
@@ -337,7 +339,7 @@ export async function renderPlate(
       $el.replaceWith(`<div class="plate-error">rv-group may not nest</div>`)
       return
     }
-    if ($el.find("rv-grid,rv-chart,rv-metric").length > 0) {
+    if ($el.find("rv-grid,rv-chart,rv-metric,rv-board").length > 0) {
       $el.replaceWith(`<div class="plate-error">islands may not appear inside rv-group</div>`)
       return
     }
@@ -379,7 +381,7 @@ export async function renderPlate(
       )
       return
     }
-    if ($el.find("rv-grid,rv-chart,rv-metric").length > 0) {
+    if ($el.find("rv-grid,rv-chart,rv-metric,rv-board").length > 0) {
       $el.replaceWith(`<div class="plate-error">islands may not appear inside rv-each</div>`)
       return
     }
@@ -503,7 +505,7 @@ export async function renderPlate(
 
   // 4. Islands → placeholders + manifest (query results ride along).
   const islands: PlateIsland[] = []
-  $("rv-grid,rv-chart,rv-metric").each((i, el) => {
+  $("rv-grid,rv-chart,rv-metric,rv-board").each((i, el) => {
     const $el = $(el)
     const tag = (el as unknown as { tagName: string }).tagName.toLowerCase()
     const kind = tag.replace("rv-", "") as PlateIsland["kind"]

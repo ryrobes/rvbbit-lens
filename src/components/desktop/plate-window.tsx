@@ -20,7 +20,7 @@ import type { DesktopParamValue } from "@/lib/desktop/types"
 
 interface PlateIsland {
   id: string
-  kind: "grid" | "chart" | "metric"
+  kind: "grid" | "chart" | "metric" | "board"
   query: string
   props: Record<string, string>
   columns: QueryResultColumn[]
@@ -60,6 +60,97 @@ const PLATE_DATA_EVENT = "rvbbit:plate-data-changed"
 interface PlateDataDetail {
   plateId: string
   kit: string | null
+}
+
+/** Kanban board island: one column per distinct group-by value (SQL
+ *  ORDER BY = column order; a row with a NULL/empty id is an empty-column
+ *  placeholder from a LEFT JOIN). Dragging a card to another column fires
+ *  the named plate action with args {id, to} — the ONLY write path, same
+ *  wall as forms. No action attr = read-only board. */
+function BoardIsland({
+  island,
+  runAction,
+}: {
+  island: PlateIsland
+  runAction: (action: string, args: Record<string, unknown>) => Promise<boolean>
+}) {
+  const p = island.props
+  const groupBy = p["group-by"] ?? island.columns[0]?.name ?? ""
+  const labelCol = p["group-label"] ?? groupBy
+  const idCol = p.id ?? "id"
+  const action = p.action ?? ""
+  const [dropKey, setDropKey] = useState<string | null>(null)
+  const [busy, setBusy] = useState(false)
+
+  const groups: Array<{ key: string; label: string; cards: Array<Record<string, unknown>> }> = []
+  const byKey = new Map<string, (typeof groups)[number]>()
+  for (const row of island.rows) {
+    const key = row[groupBy] == null ? "" : String(row[groupBy])
+    let g = byKey.get(key)
+    if (!g) {
+      g = { key, label: row[labelCol] == null ? key : String(row[labelCol]), cards: [] }
+      byKey.set(key, g)
+      groups.push(g)
+    }
+    if (row[idCol] != null && String(row[idCol]) !== "") g.cards.push(row)
+  }
+
+  const cell = (row: Record<string, unknown>, col?: string) =>
+    col && row[col] != null ? String(row[col]) : ""
+
+  return (
+    <div className="plate-board" data-busy={busy || undefined}>
+      {groups.map((g) => (
+        <div
+          key={g.key}
+          className={`plate-board-col${dropKey === g.key ? " drop" : ""}`}
+          onDragOver={(e) => {
+            if (!action) return
+            e.preventDefault()
+            e.dataTransfer.dropEffect = "move"
+            setDropKey(g.key)
+          }}
+          onDragLeave={() => setDropKey((cur) => (cur === g.key ? null : cur))}
+          onDrop={(e) => {
+            e.preventDefault()
+            setDropKey(null)
+            if (!action || busy) return
+            try {
+              const { id, from } = JSON.parse(e.dataTransfer.getData("text/plain")) as { id: string; from: string }
+              if (!id || from === g.key) return
+              setBusy(true)
+              void runAction(action, { id, to: g.key }).finally(() => setBusy(false))
+            } catch {
+              // foreign drag payload — ignore
+            }
+          }}
+        >
+          <h4>
+            {g.label} <span>{g.cards.length}</span>
+          </h4>
+          {g.cards.map((row) => {
+            const id = String(row[idCol])
+            return (
+              <div
+                key={id}
+                className={`plate-card plate-board-chip ${cell(row, p.tone)}`}
+                draggable={!!action && !busy}
+                onDragStart={(e) => {
+                  e.dataTransfer.setData("text/plain", JSON.stringify({ id, from: g.key }))
+                  e.dataTransfer.effectAllowed = "move"
+                }}
+              >
+                {p.title ? <div className="plate-card-title">{cell(row, p.title)}</div> : null}
+                {p.value ? <div className="plate-card-value">{cell(row, p.value)}</div> : null}
+                {p.note ? <div className="plate-card-note">{cell(row, p.note)}</div> : null}
+              </div>
+            )
+          })}
+          {g.cards.length === 0 ? <div className="plate-empty">—</div> : null}
+        </div>
+      ))}
+    </div>
+  )
 }
 
 function MetricIsland({ island }: { island: PlateIsland }) {
@@ -403,26 +494,17 @@ export function PlateWindow({
     [onOpenSql, onOpenPlate, onOpenApp, handleEmit, plate],
   )
 
-  const onSubmit = useCallback(
-    async (e: React.FormEvent) => {
-      const form = (e.target as HTMLElement).closest("form[rv-action]") as HTMLFormElement | null
-      if (!form || !activeConnectionId || !plate) return
-      e.preventDefault()
-      const actionName = form.getAttribute("rv-action") ?? ""
+  /** Shared write path: forms and interactive islands both land here.
+   *  Returns true on success so callers can reset local state. */
+  const runAction = useCallback(
+    async (actionName: string, args: Record<string, unknown>): Promise<boolean> => {
+      if (!activeConnectionId || !plate) return false
       const meta = plate.actions[actionName]
       if (!meta) {
         setActionNote(`action ${actionName} is not declared`)
-        return
+        return false
       }
-      const args: Record<string, unknown> = {}
-      // Include the clicked submit button so per-row buttons can carry an
-      // arg (name/value on the submitter is excluded from plain FormData).
-      const submitter = (e.nativeEvent as SubmitEvent).submitter
-      const fd = submitter && submitter.getAttribute("name") ? new FormData(form, submitter) : new FormData(form)
-      fd.forEach((v, k) => {
-        args[k] = typeof v === "string" ? v : ""
-      })
-      if (meta.confirm && !window.confirm(meta.description || `Run ${actionName}?`)) return
+      if (meta.confirm && !window.confirm(meta.description || `Run ${actionName}?`)) return false
       setActionNote(null)
       const res = await fetch("/api/plate/action", {
         method: "POST",
@@ -432,17 +514,36 @@ export function PlateWindow({
       const body = (await res.json()) as { ok: boolean; error?: string }
       if (!body.ok) {
         setActionNote(body.error ?? "action failed")
-        return
+        return false
       }
-      form.reset()
       window.dispatchEvent(
         new CustomEvent<PlateDataDetail>(PLATE_DATA_EVENT, {
           detail: { plateId, kit: plate.kit ?? null },
         }),
       )
       void refresh()
+      return true
     },
     [activeConnectionId, plate, plateId, refresh],
+  )
+
+  const onSubmit = useCallback(
+    async (e: React.FormEvent) => {
+      const form = (e.target as HTMLElement).closest("form[rv-action]") as HTMLFormElement | null
+      if (!form || !activeConnectionId || !plate) return
+      e.preventDefault()
+      const actionName = form.getAttribute("rv-action") ?? ""
+      const args: Record<string, unknown> = {}
+      // Include the clicked submit button so per-row buttons can carry an
+      // arg (name/value on the submitter is excluded from plain FormData).
+      const submitter = (e.nativeEvent as SubmitEvent).submitter
+      const fd = submitter && submitter.getAttribute("name") ? new FormData(form, submitter) : new FormData(form)
+      fd.forEach((v, k) => {
+        args[k] = typeof v === "string" ? v : ""
+      })
+      if (await runAction(actionName, args)) form.reset()
+    },
+    [activeConnectionId, plate, runAction],
   )
 
   if (!activeConnectionId) {
@@ -484,6 +585,8 @@ export function PlateWindow({
                   </div>
                 ) : island.kind === "chart" ? (
                   <ChartIsland island={island} onEmit={handleEmit} />
+                ) : island.kind === "board" ? (
+                  <BoardIsland island={island} runAction={runAction} />
                 ) : (
                   <MetricIsland island={island} />
                 ),
