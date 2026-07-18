@@ -584,6 +584,30 @@ export interface PlateListEntry {
   gate_detail: string
 }
 
+export interface KitMeta {
+  kit: string
+  version: string | null
+  title: string | null
+  description: string | null
+}
+
+/** Kit registry metadata for shelf grouping. Tolerates targets that predate
+ *  the rvbbit.kits table (pre-0162) by degrading to an empty map. */
+export async function listKits(connectionId: string): Promise<Record<string, KitMeta>> {
+  try {
+    const res = await executeQuery(
+      connectionId,
+      `SELECT kit, version, title, description FROM rvbbit.kits`,
+      { readOnly: true, rowLimit: 200 },
+    )
+    const out: Record<string, KitMeta> = {}
+    for (const r of (res.rows ?? []) as unknown as KitMeta[]) out[r.kit] = r
+    return out
+  } catch {
+    return {}
+  }
+}
+
 /** List plates with their module-gate state for the shelf. */
 export async function listPlates(connectionId: string): Promise<PlateListEntry[]> {
   const res = await executeQuery(

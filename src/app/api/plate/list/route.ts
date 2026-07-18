@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server"
-import { listPlates } from "@/lib/server/plates"
+import { listKits, listPlates } from "@/lib/server/plates"
 
 export const runtime = "nodejs"
 
@@ -9,7 +9,11 @@ export async function POST(req: Request) {
     return NextResponse.json({ ok: false, error: "connectionId required" }, { status: 400 })
   }
   try {
-    return NextResponse.json({ ok: true, plates: await listPlates(body.connectionId) })
+    const [plates, kits] = await Promise.all([
+      listPlates(body.connectionId),
+      listKits(body.connectionId),
+    ])
+    return NextResponse.json({ ok: true, plates, kits })
   } catch (e) {
     return NextResponse.json({ ok: false, error: e instanceof Error ? e.message : String(e) })
   }

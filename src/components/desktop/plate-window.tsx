@@ -480,6 +480,24 @@ export function PlateWindow({
 
 // ── Plates browser (the shelf) ──────────────────────────────────────────
 
+interface ShelfPlate {
+  plate_id: string
+  kit: string | null
+  module: string | null
+  title: string
+  description: string | null
+  gated: boolean
+  violations: number
+  gate_detail: string
+}
+
+interface ShelfKitMeta {
+  kit: string
+  version: string | null
+  title: string | null
+  description: string | null
+}
+
 export function PlatesWindow({
   activeConnectionId,
   onOpenPlate,
@@ -487,18 +505,8 @@ export function PlatesWindow({
   activeConnectionId: string | null
   onOpenPlate: (plateId: string, title: string) => void
 }) {
-  const [plates, setPlates] = useState<
-    Array<{
-      plate_id: string
-      kit: string | null
-      module: string | null
-      title: string
-      description: string | null
-      gated: boolean
-      violations: number
-      gate_detail: string
-    }>
-  >([])
+  const [plates, setPlates] = useState<ShelfPlate[]>([])
+  const [kits, setKits] = useState<Record<string, ShelfKitMeta>>({})
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [reloadTick, setReloadTick] = useState(0)
@@ -513,10 +521,18 @@ export function PlatesWindow({
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ connectionId: activeConnectionId }),
         })
-        const body = (await res.json()) as { ok: boolean; plates?: typeof plates; error?: string }
+        const body = (await res.json()) as {
+          ok: boolean
+          plates?: ShelfPlate[]
+          kits?: Record<string, ShelfKitMeta>
+          error?: string
+        }
         if (cancelled) return
         if (!body.ok) setError(body.error ?? "failed to list plates")
-        else setPlates(body.plates ?? [])
+        else {
+          setPlates(body.plates ?? [])
+          setKits(body.kits ?? {})
+        }
       } catch (e) {
         if (!cancelled) setError(e instanceof Error ? e.message : String(e))
       } finally {
@@ -528,6 +544,27 @@ export function PlatesWindow({
       cancelled = true
     }
   }, [activeConnectionId, reloadTick])
+
+  // Shelf order: named kits alphabetically, then the kit-less standalones.
+  const groups = useMemo(() => {
+    const byKit = new Map<string, ShelfPlate[]>()
+    for (const p of plates) {
+      const key = p.kit ?? ""
+      const list = byKit.get(key) ?? []
+      list.push(p)
+      byKit.set(key, list)
+    }
+    const keys = [...byKit.keys()].sort((a, b) => {
+      if (a === "") return 1
+      if (b === "") return -1
+      return a.localeCompare(b)
+    })
+    return keys.map((key) => ({
+      key,
+      meta: key ? kits[key] : undefined,
+      plates: (byKit.get(key) ?? []).slice().sort((a, b) => a.plate_id.localeCompare(b.plate_id)),
+    }))
+  }, [plates, kits])
 
   // Gates flip when plate actions change the data — re-list on the same
   // event the plate windows use to refresh themselves.
@@ -555,41 +592,75 @@ export function PlatesWindow({
             <code className="text-main/80">SELECT rvbbit.upsert_plate(…)</code>
           </div>
         ) : (
-          <div className="flex flex-col gap-1">
-            {plates.map((p) => (
-              <button
-                key={p.plate_id}
-                type="button"
-                disabled={p.gated}
-                onClick={() => onOpenPlate(p.plate_id, p.title)}
-                title={
-                  p.gated
-                    ? `module “${p.module}” gated: ${p.violations} contract violation(s)` +
-                      (p.gate_detail ? ` — ${p.gate_detail}` : "") +
-                      " — open the kit's switchboard"
-                    : undefined
-                }
-                className={cn(
-                  "flex items-baseline gap-2 rounded-md border border-chrome-border/50 bg-chrome-bg/25 px-2.5 py-1.5 text-left",
-                  p.gated
-                    ? "cursor-not-allowed opacity-45"
-                    : "hover:border-main/40 hover:bg-chrome-bg/40",
-                )}
-              >
-                <span className="font-medium text-foreground">{p.title}</span>
-                <span className="font-mono text-[10px] text-chrome-text/40">{p.plate_id}</span>
-                {p.kit ? (
-                  <span className="rounded-full border border-main/30 px-1.5 text-[9px] uppercase tracking-wide text-main/70">
-                    {p.kit}
+          <div className="flex flex-col gap-4">
+            {groups.map((g) => (
+              <section key={g.key || "·standalone"}>
+                <div className="mb-1.5 flex items-baseline gap-2 px-1">
+                  <span
+                    className={cn(
+                      "text-[10px] font-semibold uppercase tracking-wider",
+                      g.key ? "text-main/75" : "text-chrome-text/45",
+                    )}
+                  >
+                    {g.key ? (g.meta?.title ?? g.key) : "standalone"}
                   </span>
-                ) : null}
-                {p.gated ? (
-                  <span className="rounded-full border border-warning/40 px-1.5 text-[9px] uppercase tracking-wide text-warning">
-                    gated · {p.violations}
+                  {g.meta?.version ? (
+                    <span className="font-mono text-[9px] text-chrome-text/40">v{g.meta.version}</span>
+                  ) : null}
+                  <span className="text-[9px] text-chrome-text/35">
+                    {g.plates.length} {g.plates.length === 1 ? "plate" : "plates"}
                   </span>
+                  <div className="h-px flex-1 self-center bg-chrome-border/40" />
+                </div>
+                {g.meta?.description ? (
+                  <div className="mb-1.5 truncate px-1 text-[10.5px] text-chrome-text/40">{g.meta.description}</div>
                 ) : null}
-                <span className="ml-auto truncate text-[11px] text-chrome-text/50">{p.description}</span>
-              </button>
+                <div className="flex flex-col gap-1">
+                  {g.plates.map((p) => (
+                    <button
+                      key={p.plate_id}
+                      type="button"
+                      disabled={p.gated}
+                      onClick={() => onOpenPlate(p.plate_id, p.title)}
+                      title={
+                        p.gated
+                          ? `module “${p.module}” gated: ${p.violations} contract violation(s)` +
+                            (p.gate_detail ? ` — ${p.gate_detail}` : "") +
+                            " — open the kit's switchboard"
+                          : undefined
+                      }
+                      className={cn(
+                        "rounded-md border border-chrome-border/50 bg-chrome-bg/25 px-2.5 py-1.5 text-left",
+                        p.gated
+                          ? "cursor-not-allowed opacity-45"
+                          : "hover:border-main/40 hover:bg-chrome-bg/40",
+                      )}
+                    >
+                      <div className="flex min-w-0 items-center gap-2">
+                        <span className="truncate font-medium text-foreground">{p.title}</span>
+                        {p.module ? (
+                          <span className="shrink-0 rounded-full border border-chrome-border px-1.5 text-[9px] uppercase tracking-wide text-chrome-text/55">
+                            {p.module}
+                          </span>
+                        ) : null}
+                        {p.gated ? (
+                          <span className="shrink-0 rounded-full border border-warning/40 px-1.5 text-[9px] uppercase tracking-wide text-warning">
+                            gated · {p.violations}
+                          </span>
+                        ) : null}
+                        <span className="ml-auto shrink-0 font-mono text-[9.5px] text-chrome-text/35">
+                          {p.plate_id}
+                        </span>
+                      </div>
+                      {p.description ? (
+                        <div className="mt-0.5 line-clamp-2 text-[11px] leading-snug text-chrome-text/50">
+                          {p.description}
+                        </div>
+                      ) : null}
+                    </button>
+                  ))}
+                </div>
+              </section>
             ))}
           </div>
         )}
