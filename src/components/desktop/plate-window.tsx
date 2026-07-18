@@ -78,29 +78,57 @@ function MetricIsland({ island }: { island: PlateIsland }) {
   )
 }
 
-function ChartIsland({ island }: { island: PlateIsland }) {
+function ChartIsland({
+  island,
+  onEmit,
+}: {
+  island: PlateIsland
+  onEmit?: (field: string, value: unknown) => void
+}) {
+  const emitField = island.props["rv-emit"]
   const spec = useMemo(() => {
     const x = island.props.x ?? island.columns[0]?.name ?? "x"
     const y = island.props.y ?? island.columns[1]?.name ?? "y"
     const mark = (island.props.mark ?? "bar") as "bar" | "line" | "area"
+    // Selection-as-a-column, chart edition: when the query ships a `sel`
+    // column and something is active, dim the rest.
+    const hasActive = island.rows.some((r) => r.sel === "active")
     return {
       $schema: "https://vega.github.io/schema/vega-lite/v6.json",
       width: "container" as const,
       height: 220,
       background: "transparent",
       data: { values: island.rows },
-      mark: { type: mark, tooltip: true },
+      mark: { type: mark, tooltip: true, ...(emitField ? { cursor: "pointer" } : {}) },
       encoding: {
         x: { field: x, type: "nominal" as const, sort: null, axis: { title: null } },
         y: { field: y, type: "quantitative" as const, axis: { title: null } },
+        ...(hasActive
+          ? { opacity: { condition: { test: "datum.sel === 'active'", value: 1 }, value: 0.35 } }
+          : {}),
       },
       config: vegaConfigFromTheme(),
     }
-  }, [island])
+  }, [island, emitField])
+  const handleEmbed = useCallback(
+    (res: { view: { addEventListener: (type: string, h: (e: unknown, item: unknown) => void) => void } }) => {
+      if (!emitField || !onEmit) return
+      res.view.addEventListener("click", (_event: unknown, item: unknown) => {
+        const datum =
+          item && typeof item === "object" && "datum" in item
+            ? (item as { datum?: unknown }).datum
+            : null
+        if (!datum || typeof datum !== "object" || Array.isArray(datum)) return
+        const value = (datum as Record<string, unknown>)[emitField]
+        if (value !== undefined) onEmit(emitField, value)
+      })
+    },
+    [emitField, onEmit],
+  )
   return (
     <div className="plate-chart">
       {/* eslint-disable-next-line @typescript-eslint/no-explicit-any */}
-      <VegaEmbed spec={spec as any} options={{ actions: false, renderer: "canvas" }} style={{ width: "100%" }} />
+      <VegaEmbed spec={spec as any} options={{ actions: false, renderer: "canvas" }} style={{ width: "100%" }} onEmbed={handleEmbed} />
     </div>
   )
 }
@@ -198,6 +226,28 @@ export function PlateWindow({
     }
   })
 
+  // The one emit path — rv-emit buttons and chart-mark clicks both land
+  // here. from_bus fields ride the bus round-trip (its eq toggle gives
+  // click-again-to-unselect for free); local declared params get the same
+  // toggle semantics here before re-render.
+  const handleEmit = useCallback(
+    (field: string, value: unknown) => {
+      const fromBus = plate?.busFields?.includes(field)
+      if (!fromBus && plate?.params && Object.prototype.hasOwnProperty.call(plate.params, field)) {
+        setLocalParams((prev) => {
+          if (field in prev && String(prev[field]) === String(value)) {
+            const next = { ...prev }
+            delete next[field]
+            return next
+          }
+          return { ...prev, [field]: value }
+        })
+      }
+      onEmitParam?.(field, value)
+    },
+    [plate, onEmitParam],
+  )
+
   // Event delegation for the vocabulary.
   const onClick = useCallback(
     (e: React.MouseEvent) => {
@@ -212,19 +262,10 @@ export function PlateWindow({
       const emit = target.getAttribute("rv-emit")
       if (emit) {
         e.preventDefault()
-        const value = target.getAttribute("rv-value") ?? ""
-        // Param loop-back: if this plate declares the field, re-render with
-        // it (master-detail within one plate). from_bus fields skip the
-        // local copy — the bus round-trip drives them (single source of
-        // truth, and toggle-off behaves like every other desktop param).
-        const fromBus = plate?.busFields?.includes(emit)
-        if (!fromBus && plate?.params && Object.prototype.hasOwnProperty.call(plate.params, emit)) {
-          setLocalParams((prev) => ({ ...prev, [emit]: value }))
-        }
-        onEmitParam?.(emit, value)
+        handleEmit(emit, target.getAttribute("rv-value") ?? "")
       }
     },
-    [onOpenSql, onEmitParam, plate],
+    [onOpenSql, handleEmit, plate],
   )
 
   const onSubmit = useCallback(
@@ -271,12 +312,10 @@ export function PlateWindow({
 
   return (
     <div className="flex h-full flex-col">
+      {/* Title + icon live in the window title bar right above — the strip
+          carries only what the bar doesn't: description, notes, re-render. */}
       <div className="flex shrink-0 items-center gap-2 border-b border-chrome-border bg-chrome-bg/40 px-3 py-1.5 text-[12px]">
-        <Layers className="h-3.5 w-3.5 text-main" />
-        <span className="font-medium text-foreground">{plate?.title ?? plateId}</span>
-        {plate?.description ? (
-          <span className="truncate text-chrome-text/50">{plate.description}</span>
-        ) : null}
+        <span className="truncate text-chrome-text/50">{plate?.description ?? plateId}</span>
         <div className="flex-1" />
         {actionNote ? <span className="truncate text-[11px] text-warning">{actionNote}</span> : null}
         <button
@@ -314,7 +353,7 @@ export function PlateWindow({
                     <ResultGrid columns={island.columns} rows={island.rows} />
                   </div>
                 ) : island.kind === "chart" ? (
-                  <ChartIsland island={island} />
+                  <ChartIsland island={island} onEmit={handleEmit} />
                 ) : (
                   <MetricIsland island={island} />
                 )}
