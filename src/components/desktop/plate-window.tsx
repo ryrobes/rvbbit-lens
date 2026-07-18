@@ -212,15 +212,28 @@ export function PlateWindow({
     return () => window.removeEventListener(PLATE_DATA_EVENT, onData)
   }, [plateId, plate?.kit, refresh])
 
-  // Islands render as React-owned nodes in a staging area, then relocate
-  // into their placeholder hosts before paint. (Portals targeting nodes
-  // inside a dangerouslySetInnerHTML subtree proved unreliable; physically
-  // moving the React-owned element is robust — React keeps updating the
-  // node wherever it lives, and re-renders re-adopt it idempotently.)
+  // The plate HTML is applied IMPERATIVELY, never via dangerouslySetInnerHTML.
+  // React must not own these children: our island relocation mutates the
+  // subtree, so React's innerHTML revalidation re-applied the whole body on
+  // unrelated commits (e.g. the focus bump when you mousedown an unfocused
+  // window) — replacing the mousedown target mid-click makes the browser
+  // suppress the click entirely, which surfaced as "first click only
+  // focuses, second click works". The applied string is tracked ON the
+  // element so remounts (error → recovery) re-apply correctly.
   useLayoutEffect(() => {
-    if (!plate || !containerRef.current) return
+    const el = containerRef.current as (HTMLDivElement & { __rvHtml?: string }) | null
+    if (!el || !plate) return
+    if (el.__rvHtml !== plate.html) {
+      el.__rvHtml = plate.html
+      el.innerHTML = plate.html
+    }
+    // Islands render as React-owned nodes in a staging area, then relocate
+    // into their placeholder hosts before paint. (Portals targeting nodes
+    // inside an innerHTML subtree proved unreliable; physically moving the
+    // React-owned element is robust — React keeps updating the node
+    // wherever it lives, and re-renders re-adopt it idempotently.)
     for (const island of plate.islands) {
-      const host = containerRef.current.querySelector(`[data-rv-island="${island.id}"]`)
+      const host = el.querySelector(`[data-rv-island="${island.id}"]`)
       const stage = stageRefs.current[island.id]
       if (host && stage && stage.parentElement !== host) host.appendChild(stage)
     }
@@ -332,14 +345,9 @@ export function PlateWindow({
           <div className="p-4 text-[12px] text-destructive">{error}</div>
         ) : plate ? (
           <>
-            <div
-              ref={containerRef}
-              className="plate-body"
-              onClick={onClick}
-              onSubmit={onSubmit}
-              // Server-side sanitized (allowlist, double pass, values escaped).
-              dangerouslySetInnerHTML={{ __html: plate.html }}
-            />
+            {/* Children applied imperatively in the layout effect above —
+                server-side sanitized (allowlist, double pass, values escaped). */}
+            <div ref={containerRef} className="plate-body" onClick={onClick} onSubmit={onSubmit} />
             {plate.islands.map((island) => (
               <div
                 key={island.id}
