@@ -76,6 +76,7 @@ interface PlateRow {
     }
   >
   params: Array<{ name: string; type?: string; default?: unknown; from_bus?: boolean }>
+  requires_role?: string | null
 }
 
 function sqlLit(v: string): string {
@@ -151,8 +152,9 @@ async function loadPlate(connectionId: string, plateId: string): Promise<PlateRo
   const res = await executeQuery(
     connectionId,
     `SELECT plate_id, kit, module, title, description, template_version, template,
-            queries, actions, params
-     FROM rvbbit.plates WHERE plate_id = ${sqlLit(plateId)}`,
+            queries, actions, params,
+            to_jsonb(p)->>'requires_role' AS requires_role
+     FROM rvbbit.plates p WHERE plate_id = ${sqlLit(plateId)}`,
     { readOnly: true, rowLimit: 1 },
   )
   const row = res.rows?.[0] as unknown as PlateRow | undefined
@@ -225,6 +227,9 @@ export async function renderPlate(
 ): Promise<RenderedPlate> {
   const plate = await loadPlate(connectionId, plateId)
   if (!plate) throw new Error(`plate ${plateId} not found`)
+  if (plate.requires_role && !(await roleAllowed(connectionId, plate.requires_role))) {
+    throw new Error(`plate ${plateId} requires role ${plate.requires_role}`)
+  }
   const gate = await moduleGate(connectionId, plate.kit, plate.module)
   if (!gate.open) {
     throw new Error(
@@ -528,6 +533,9 @@ export async function runPlateAction(
 ): Promise<{ ok: boolean; error?: string }> {
   const plate = await loadPlate(connectionId, plateId)
   if (!plate) return { ok: false, error: `plate ${plateId} not found` }
+  if (plate.requires_role && !(await roleAllowed(connectionId, plate.requires_role))) {
+    return { ok: false, error: `plate ${plateId} requires role ${plate.requires_role}` }
+  }
   const action = (plate.actions ?? {})[actionName]
   if (!action) return { ok: false, error: `action ${actionName} is not declared on this plate` }
   const requiresRole = action.requires_role?.trim()
@@ -628,6 +636,9 @@ export interface PlateListEntry {
   gated: boolean
   violations: number
   gate_detail: string
+  requires_role: string | null
+  /** Viewer lacks requires_role — shelf shows a lock, render refuses. */
+  locked: boolean
 }
 
 export interface KitMeta {
@@ -722,17 +733,19 @@ export async function listAvailableKits(
 export async function listPlates(connectionId: string): Promise<PlateListEntry[]> {
   const res = await executeQuery(
     connectionId,
-    `SELECT plate_id, kit, module, title, description
-     FROM rvbbit.plates ORDER BY kit NULLS FIRST, module NULLS FIRST, plate_id`,
+    `SELECT plate_id, kit, module, title, description,
+            to_jsonb(p)->>'requires_role' AS requires_role
+     FROM rvbbit.plates p ORDER BY kit NULLS FIRST, module NULLS FIRST, plate_id`,
     { readOnly: true, rowLimit: 200 },
   )
-  const rows = (res.rows ?? []) as Array<Omit<PlateListEntry, "gated" | "violations" | "gate_detail">>
+  const rows = (res.rows ?? []) as Array<Omit<PlateListEntry, "gated" | "violations" | "gate_detail" | "locked">>
   const gates = new Map<string, { open: boolean; violations: number; detail: string }>()
+  const roles = new Map<string, boolean>()
   const out: PlateListEntry[] = []
   for (const r of rows) {
     let gate = { open: true, violations: 0, detail: "" }
     if (r.kit && r.module) {
-      const key = `${r.kit} ${r.module}`
+      const key = `${r.kit} ${r.module}`
       const hit = gates.get(key)
       if (hit) gate = hit
       else {
@@ -740,7 +753,14 @@ export async function listPlates(connectionId: string): Promise<PlateListEntry[]
         gates.set(key, gate)
       }
     }
-    out.push({ ...r, gated: !gate.open, violations: gate.violations, gate_detail: gate.detail })
+    let locked = false
+    if (r.requires_role) {
+      const cached = roles.get(r.requires_role)
+      const allowed = cached ?? (await roleAllowed(connectionId, r.requires_role))
+      roles.set(r.requires_role, allowed)
+      locked = !allowed
+    }
+    out.push({ ...r, gated: !gate.open, violations: gate.violations, gate_detail: gate.detail, locked })
   }
   return out
 }

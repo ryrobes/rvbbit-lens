@@ -489,6 +489,8 @@ interface ShelfPlate {
   gated: boolean
   violations: number
   gate_detail: string
+  requires_role: string | null
+  locked: boolean
 }
 
 interface ShelfKitMeta {
@@ -672,18 +674,20 @@ export function PlatesWindow({
                     <button
                       key={p.plate_id}
                       type="button"
-                      disabled={p.gated}
+                      disabled={p.gated || p.locked}
                       onClick={() => onOpenPlate(p.plate_id, p.title)}
                       title={
-                        p.gated
-                          ? `module “${p.module}” gated: ${p.violations} contract violation(s)` +
-                            (p.gate_detail ? ` — ${p.gate_detail}` : "") +
-                            " — open the kit's switchboard"
-                          : undefined
+                        p.locked
+                          ? `requires role ${p.requires_role} — ask your admin (rvbbit.grant_kit / GRANT ${p.requires_role})`
+                          : p.gated
+                            ? `module “${p.module}” gated: ${p.violations} contract violation(s)` +
+                              (p.gate_detail ? ` — ${p.gate_detail}` : "") +
+                              " — open the kit's switchboard"
+                            : undefined
                       }
                       className={cn(
                         "rounded-md border border-chrome-border/50 bg-chrome-bg/25 px-2.5 py-1.5 text-left",
-                        p.gated
+                        p.gated || p.locked
                           ? "cursor-not-allowed opacity-45"
                           : "hover:border-main/40 hover:bg-chrome-bg/40",
                       )}
@@ -698,6 +702,11 @@ export function PlatesWindow({
                         {p.gated ? (
                           <span className="shrink-0 rounded-full border border-warning/40 px-1.5 text-[9px] uppercase tracking-wide text-warning">
                             gated · {p.violations}
+                          </span>
+                        ) : null}
+                        {p.locked ? (
+                          <span className="shrink-0 rounded-full border border-chrome-border px-1.5 text-[9px] uppercase tracking-wide text-chrome-text/55">
+                            🔒 {p.requires_role}
                           </span>
                         ) : null}
                         <span className="ml-auto shrink-0 font-mono text-[9.5px] text-chrome-text/35">
