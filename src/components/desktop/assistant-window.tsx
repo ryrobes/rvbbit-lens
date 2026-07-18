@@ -91,6 +91,8 @@ function commandChipLabel(cmd: AssistantCommand, report?: AssistantApplyResult):
       return `${skipped ? "couldn't install" : "installed"} plate ${cmd.plate_id}`
     case "open_plate":
       return `opened ${cmd.plate_id}`
+    case "register_kit":
+      return `${skipped ? "couldn't register" : "registered"} kit ${cmd.kit}`
     default:
       return (cmd as { op: string }).op
   }

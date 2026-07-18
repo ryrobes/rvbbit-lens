@@ -100,6 +100,16 @@ export type AssistantCommand =
       description?: string
     }
   | { op: "open_plate"; plate_id: string; title?: string }
+  | {
+      /** Register/re-register a kit's metadata (title/version/description).
+       *  Downgrades refused engine-side; the error lands in apply_report. */
+      op: "register_kit"
+      kit: string
+      title: string
+      description?: string
+      version?: string
+      requires?: Record<string, unknown>
+    }
 
 /** Per-command outcome, reported back to the agent in the NEXT turn's
  *  desktop_context.apply_report — the agent never assumes an apply succeeded. */

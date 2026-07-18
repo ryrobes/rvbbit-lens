@@ -3145,6 +3145,38 @@ export function DesktopShell() {
               })
               return
             }
+            case "register_kit": {
+              const idx = report.length
+              report.push({ op: cmd.op, target: cmd.kit, status: "skipped", detail: "pending" })
+              const kitCmd = cmd
+              pendingAsync.push(async () => {
+                if (!activeConnectionId) {
+                  report[idx] = { op: kitCmd.op, target: kitCmd.kit, status: "skipped", detail: "no active connection" }
+                  return
+                }
+                try {
+                  const res = await fetch("/api/kit/register", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                      connectionId: activeConnectionId,
+                      kit: kitCmd.kit,
+                      title: kitCmd.title,
+                      description: kitCmd.description,
+                      version: kitCmd.version,
+                      requires: kitCmd.requires,
+                    }),
+                  })
+                  const body = (await res.json()) as { ok: boolean; error?: string }
+                  report[idx] = body.ok
+                    ? { op: kitCmd.op, target: kitCmd.kit, status: "applied" }
+                    : { op: kitCmd.op, target: kitCmd.kit, status: "skipped", detail: body.error ?? "register failed" }
+                } catch (e) {
+                  report[idx] = { op: kitCmd.op, target: kitCmd.kit, status: "skipped", detail: e instanceof Error ? e.message : String(e) }
+                }
+              })
+              return
+            }
             case "open_plate": {
               const idx = report.length
               report.push({ op: cmd.op, target: cmd.plate_id, status: "skipped", detail: "pending" })
