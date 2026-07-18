@@ -136,7 +136,7 @@ const SANITIZE_OPTS: sanitizeHtml.IOptions = {
     "*": [
       "class", "title", "colspan", "rowspan",
       // the vocabulary — everything else is stripped
-      "rv-each", "rv-if", "rv-action", "rv-emit", "rv-value",
+      "rv-each", "rv-group", "rv-if", "rv-action", "rv-emit", "rv-value",
       "rv-open-sql", "rv-open-sql-title", "rv-open", "rv-open-title",
       "rv-confirm", "rv-live",
       "query", "spec", "value", "label", "x", "y", "mark", "unit",
@@ -304,6 +304,64 @@ export async function renderPlate(
     SANITIZE_OPTS,
   )
   const $ = cheerio.load(cleaned, {}, false)
+
+  // 2-pre. rv-group expansion: rv-group="query:column" repeats the element
+  // once per distinct value of column (first-appearance order — the SQL's
+  // ORDER BY is the layout order). Inside the clone, {{ group.key }} and
+  // {{ group.count }} interpolate, and rv-each="group" iterates that
+  // group's rows via a synthetic per-group result. Composes with
+  // plate-columns / plate-cal so boards get their columns from ROWS —
+  // never from names hardcoded into the template.
+  let groupSeq = 0
+  $("[rv-group]").each((_, el) => {
+    const $el = $(el)
+    const spec = String($el.attr("rv-group") ?? "")
+    $el.removeAttr("rv-group")
+    const [gq, gcol] = spec.split(":").map((s) => s.trim())
+    if (!gq || !gcol) {
+      $el.replaceWith(`<div class="plate-error">rv-group needs “query:column”</div>`)
+      return
+    }
+    const result = results.get(gq)
+    if (!result) {
+      $el.replaceWith(`<div class="plate-error">unknown query “${escapeHtml(gq)}”</div>`)
+      return
+    }
+    if (result.error) {
+      $el.replaceWith(
+        `<div class="plate-error">query “${escapeHtml(gq)}” failed: ${escapeHtml(result.error)}</div>`,
+      )
+      return
+    }
+    if ($el.find("[rv-group]").length > 0) {
+      $el.replaceWith(`<div class="plate-error">rv-group may not nest</div>`)
+      return
+    }
+    if ($el.find("rv-grid,rv-chart,rv-metric").length > 0) {
+      $el.replaceWith(`<div class="plate-error">islands may not appear inside rv-group</div>`)
+      return
+    }
+    const groups = new Map<string, Array<Record<string, unknown>>>()
+    for (const row of result.rows.slice(0, EACH_ROW_CAP)) {
+      const key = row[gcol] == null ? "" : String(row[gcol])
+      const bucket = groups.get(key)
+      if (bucket) bucket.push(row)
+      else groups.set(key, [row])
+    }
+    const templateHtml = $.html($el)
+    const rendered: string[] = []
+    for (const [key, rows] of groups) {
+      const syntheticName = `__group_${groupSeq++}`
+      results.set(syntheticName, { columns: result.columns, rows })
+      const frag = cheerio.load(templateHtml, {}, false)
+      frag('[rv-each="group"]').attr("rv-each", syntheticName)
+      const html = (frag.html() ?? "")
+        .replace(/\{\{\s*group\.key\s*\}\}/g, escapeHtml(key))
+        .replace(/\{\{\s*group\.count\s*\}\}/g, String(rows.length))
+      rendered.push(html)
+    }
+    $el.replaceWith(rendered.join(""))
+  })
 
   // 2. rv-each expansion (outermost first; islands not allowed inside).
   $("[rv-each]").each((_, el) => {

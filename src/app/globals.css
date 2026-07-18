@@ -699,3 +699,50 @@ html.dark .av-code-preview .shiki span {
 .plate-chip.ok { border-color: color-mix(in oklch, var(--success, #7de3b6) 45%, transparent); color: var(--success, #7de3b6); }
 .plate-chip.warn { border-color: color-mix(in oklch, var(--warning, #e8b572) 55%, transparent); color: var(--warning, #e8b572); }
 .plate-chip.bad { border-color: color-mix(in oklch, var(--destructive, #b5524a) 55%, transparent); color: var(--destructive, #b5524a); }
+
+/* ── Plate palette tier 1: placement-as-data (2026-07-18) ─────────────
+   Layout comes from CLASSES computed by SQL — the tones-as-data idiom
+   generalized. plate-cal is a 7-column grid: SQL emits c1..c7 per chip
+   (r1..r8 for month grids); dense flow stacks chips under their day. */
+.plate-cal { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); grid-auto-flow: row dense; gap: 6px; margin-bottom: 14px; }
+.plate-cal .c1 { grid-column: 1; } .plate-cal .c2 { grid-column: 2; } .plate-cal .c3 { grid-column: 3; }
+.plate-cal .c4 { grid-column: 4; } .plate-cal .c5 { grid-column: 5; } .plate-cal .c6 { grid-column: 6; }
+.plate-cal .c7 { grid-column: 7; }
+.plate-cal .r1 { grid-row: 1; } .plate-cal .r2 { grid-row: 2; } .plate-cal .r3 { grid-row: 3; }
+.plate-cal .r4 { grid-row: 4; } .plate-cal .r5 { grid-row: 5; } .plate-cal .r6 { grid-row: 6; }
+.plate-cal .r7 { grid-row: 7; } .plate-cal .r8 { grid-row: 8; }
+.plate-cal-head { grid-row: 1; padding: 6px 8px; border-bottom: 2px solid var(--chrome-border); font-size: 10.5px; }
+.plate-cal-head b { display: block; text-transform: uppercase; letter-spacing: .06em; font-size: 10px; color: color-mix(in oklch, var(--foreground) 75%, transparent); }
+.plate-cal-head span { font-size: 10px; color: color-mix(in oklch, var(--foreground) 45%, transparent); }
+.plate-cal-chip { padding: 6px 8px; margin: 0; }
+.plate-cal-chip .plate-card-title { font-size: 10px; display: flex; align-items: center; justify-content: space-between; gap: 4px; }
+.plate-cal-chip .plate-card-value { font-size: 11.5px; font-weight: 600; }
+.plate-cal-chip .plate-card-note { font-size: 10px; }
+
+/* Capacity bar: SQL rounds a percentage to a w0..w100 class (5% steps). */
+.plate-bar { height: 6px; border-radius: 999px; background: color-mix(in oklch, var(--foreground) 12%, transparent); overflow: hidden; margin: 5px 0 3px; }
+.plate-bar > div { height: 100%; border-radius: inherit; background: var(--main); }
+.plate-bar > .ok { background: var(--success, #7de3b6); } .plate-bar > .warn { background: var(--warning, #e8b572); } .plate-bar > .bad { background: var(--destructive, #b5524a); }
+.plate-bar > .w0 { width: 0; } .plate-bar > .w5 { width: 5%; } .plate-bar > .w10 { width: 10%; } .plate-bar > .w15 { width: 15%; }
+.plate-bar > .w20 { width: 20%; } .plate-bar > .w25 { width: 25%; } .plate-bar > .w30 { width: 30%; } .plate-bar > .w35 { width: 35%; }
+.plate-bar > .w40 { width: 40%; } .plate-bar > .w45 { width: 45%; } .plate-bar > .w50 { width: 50%; } .plate-bar > .w55 { width: 55%; }
+.plate-bar > .w60 { width: 60%; } .plate-bar > .w65 { width: 65%; } .plate-bar > .w70 { width: 70%; } .plate-bar > .w75 { width: 75%; }
+.plate-bar > .w80 { width: 80%; } .plate-bar > .w85 { width: 85%; } .plate-bar > .w90 { width: 90%; } .plate-bar > .w95 { width: 95%; }
+.plate-bar > .w100 { width: 100%; }
+
+/* Hue ramp: stable category accents (job types, channels…) — SQL maps a
+   category to hue-1..hue-8; cards get an accent edge, chips/dots tint. */
+.hue-1 { --plate-hue: oklch(72% 0.13 20); } .hue-2 { --plate-hue: oklch(74% 0.13 65); }
+.hue-3 { --plate-hue: oklch(74% 0.13 110); } .hue-4 { --plate-hue: oklch(74% 0.12 155); }
+.hue-5 { --plate-hue: oklch(74% 0.11 200); } .hue-6 { --plate-hue: oklch(72% 0.12 245); }
+.hue-7 { --plate-hue: oklch(70% 0.13 290); } .hue-8 { --plate-hue: oklch(71% 0.14 335); }
+.plate-card[class*="hue-"] { border-left: 3px solid var(--plate-hue); }
+.plate-chip[class*="hue-"] { border-color: color-mix(in oklch, var(--plate-hue) 55%, transparent); color: var(--plate-hue); }
+.plate-dot[class*="hue-"] { background: var(--plate-hue); }
+
+/* Small marks: avatar initials (SQL computes them), status dots, and an
+   honest empty state (pair with an rv-if flag column). */
+.plate-avatar { display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px; border-radius: 50%; background: color-mix(in oklch, var(--main) 22%, transparent); color: var(--main); font-size: 9px; font-weight: 700; letter-spacing: .02em; flex: none; }
+.plate-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: color-mix(in oklch, var(--foreground) 35%, transparent); }
+.plate-dot.ok { background: var(--success, #7de3b6); } .plate-dot.warn { background: var(--warning, #e8b572); } .plate-dot.bad { background: var(--destructive, #b5524a); }
+.plate-empty { padding: 16px; text-align: center; font-size: 11px; color: color-mix(in oklch, var(--foreground) 40%, transparent); border: 1px dashed var(--chrome-border); border-radius: 8px; }
