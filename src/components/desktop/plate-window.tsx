@@ -202,7 +202,12 @@ function SourceMenu({
 }) {
   const [open, setOpen] = useState(false)
   const [info, setInfo] = useState<PlateSourceInfo | null>(null)
-  const rootRef = useRef<HTMLDivElement | null>(null)
+  // Screen-coordinate anchor: the menu portals to document.body (a strip-
+  // local absolute menu paints UNDER plate islands — same stacking-context
+  // lesson as the markup editor), so it positions off the button's rect.
+  const [anchor, setAnchor] = useState<{ top: number; right: number } | null>(null)
+  const btnRef = useRef<HTMLButtonElement | null>(null)
+  const menuRef = useRef<HTMLDivElement | null>(null)
 
   useEffect(() => {
     if (!open) return
@@ -220,7 +225,9 @@ function SourceMenu({
         if (!cancelled) setInfo({ ok: false, error: String(e), upsertSql: "", queries: [], revisions: [] })
       })
     const onDown = (e: MouseEvent) => {
-      if (rootRef.current && !rootRef.current.contains(e.target as Node)) setOpen(false)
+      const t = e.target as Node
+      if (btnRef.current?.contains(t) || menuRef.current?.contains(t)) return
+      setOpen(false)
     }
     window.addEventListener("mousedown", onDown)
     return () => {
@@ -234,17 +241,27 @@ function SourceMenu({
   const heading = "px-2 pb-0.5 pt-1.5 text-[9px] uppercase tracking-wider text-chrome-text/40"
 
   return (
-    <div ref={rootRef} className="relative">
+    <>
       <button
+        ref={btnRef}
         type="button"
-        onClick={() => setOpen((o) => !o)}
+        onClick={() => {
+          const rect = btnRef.current?.getBoundingClientRect()
+          if (rect) setAnchor({ top: rect.bottom + 6, right: Math.max(8, window.innerWidth - rect.right) })
+          setOpen((o) => !o)
+        }}
         title="Source & history (opens SQL — never runs it)"
         className={open ? "text-foreground" : "text-chrome-text/50 hover:text-foreground"}
       >
         <FileCode2 className="h-3.5 w-3.5" />
       </button>
-      {open ? (
-        <div className="absolute right-0 top-5 z-50 max-h-72 w-60 overflow-y-auto rounded-md border border-chrome-border bg-popover p-1 shadow-lg">
+      {open && anchor ? (
+        createPortal(
+        <div
+          ref={menuRef}
+          style={{ top: anchor.top, right: anchor.right }}
+          className="fixed z-[1000] max-h-72 w-60 overflow-y-auto rounded-md border border-chrome-border bg-chrome-bg/95 p-1 shadow-xl backdrop-blur-md"
+        >
           {!info ? (
             <div className="grid place-items-center py-3">
               <Loader2 className="h-3.5 w-3.5 animate-spin text-chrome-text/40" />
@@ -303,9 +320,11 @@ function SourceMenu({
               )}
             </>
           )}
-        </div>
+        </div>,
+        document.body,
+        )
       ) : null}
-    </div>
+    </>
   )
 }
 
