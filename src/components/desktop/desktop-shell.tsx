@@ -3144,6 +3144,17 @@ export function DesktopShell() {
                   report[idx] = body.ok
                     ? { op: plateCmd.op, target: plateCmd.plate_id, status: "applied" }
                     : { op: plateCmd.op, target: plateCmd.plate_id, status: "skipped", detail: body.error ?? "install failed" }
+                  if (body.ok) {
+                    // Live-update: open windows re-render the NEW template
+                    // immediately (renders always re-read the plate row —
+                    // the missing piece was this broadcast, which previously
+                    // fired only after plate ACTIONS).
+                    window.dispatchEvent(
+                      new CustomEvent("rvbbit:plate-data-changed", {
+                        detail: { plateId: plateCmd.plate_id, kit: plateCmd.kit ?? null },
+                      }),
+                    )
+                  }
                 } catch (e) {
                   report[idx] = {
                     op: plateCmd.op,
@@ -3242,7 +3253,34 @@ export function DesktopShell() {
                     return
                   }
                   focus(win.id)
-                  // Let render + focus commit settle before rasterizing.
+                  if (win.kind === "plate") {
+                    // Force a fresh render (the batch may have just upserted
+                    // this very plate) and wait for the window to report the
+                    // render applied — screenshotting a stale template would
+                    // make the self-check judge the WRONG version.
+                    const targetPlateId = (win.payload as PlatePayload | undefined)?.plateId
+                    const rendered = new Promise<void>((resolve) => {
+                      const t = window.setTimeout(() => {
+                        window.removeEventListener("rvbbit:plate-rendered", onDone)
+                        resolve()
+                      }, 6000)
+                      const onDone = (e: Event) => {
+                        const d = (e as CustomEvent).detail as { plateId?: string } | undefined
+                        if (d?.plateId !== targetPlateId) return
+                        window.clearTimeout(t)
+                        window.removeEventListener("rvbbit:plate-rendered", onDone)
+                        resolve()
+                      }
+                      window.addEventListener("rvbbit:plate-rendered", onDone)
+                    })
+                    window.dispatchEvent(
+                      new CustomEvent("rvbbit:plate-data-changed", {
+                        detail: { plateId: targetPlateId, kit: (win.payload as PlatePayload & { kit?: string } | undefined)?.kit ?? null },
+                      }),
+                    )
+                    await rendered
+                  }
+                  // Let paint + focus commit settle before rasterizing.
                   await new Promise((r) => setTimeout(r, 500))
                   const isApp = win.kind === "data" && !!(win.payload as DataPayload | undefined)?.htmlBlock
                   let attachment: AssistantImageAttachment

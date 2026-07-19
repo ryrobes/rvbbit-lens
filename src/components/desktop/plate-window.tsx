@@ -317,7 +317,15 @@ export function PlateWindow({
   useEffect(() => {
     const onData = (e: Event) => {
       const detail = (e as CustomEvent<PlateDataDetail>).detail
-      if (!detail || detail.plateId === plateId) return
+      if (!detail) return
+      if (detail.plateId === plateId) {
+        // An event naming THIS plate always refreshes it when broadcast by
+        // someone else (assistant upserts, capture pre-render). Our own
+        // post-action broadcast is the one case to skip — the action path
+        // already called refresh().
+        if (!(e as CustomEvent<PlateDataDetail & { self?: boolean }>).detail.self) void refresh()
+        return
+      }
       const sameKit = (detail.kit ?? null) === (plate?.kit ?? null)
       const listening = detail.kit != null && (plate?.listens ?? []).includes(detail.kit)
       if (!sameKit && !listening) return
@@ -372,6 +380,13 @@ export function PlateWindow({
         }
       }
     }
+    // Render-pass-complete signal (fires whether or not the DOM changed) —
+    // the visual self-check capture awaits this so it screenshots the
+    // CURRENT template, and a no-change render resolves instantly instead
+    // of timing out.
+    window.dispatchEvent(
+      new CustomEvent("rvbbit:plate-rendered", { detail: { plateId } }),
+    )
     // Param controls (select / slider / datepicker / search / checkbox with
     // rv-emit) speak through the native change event — bound once here since
     // these children live outside React. Values are coerced by control type.
@@ -529,8 +544,8 @@ export function PlateWindow({
         return false
       }
       window.dispatchEvent(
-        new CustomEvent<PlateDataDetail>(PLATE_DATA_EVENT, {
-          detail: { plateId, kit: plate.kit ?? null },
+        new CustomEvent<PlateDataDetail & { self: boolean }>(PLATE_DATA_EVENT, {
+          detail: { plateId, kit: plate.kit ?? null, self: true },
         }),
       )
       void refresh()
