@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect, useRef, useState } from "react"
+import { useEffect, useId, useRef, useState } from "react"
 import { AppWindow, Layers, Maximize2, Plus } from "@/lib/icons"
 import { cn } from "@/lib/utils"
 import { ContextMenu, type ContextMenuState } from "./context-menu"
@@ -30,6 +30,117 @@ interface TrayKitMeta {
   title: string | null
 }
 
+/**
+ * Save-arrangement form, shared by the OS-bar tray and the shelf window.
+ * The id field is a combobox over EXISTING layouts (pick one = Save As /
+ * overwrite — geometry updates, slot flags/params/titles survive via the
+ * shell's per-plate merge, and revisions keep the old version); free text
+ * makes a new one. The kit field is a combobox over installed kits.
+ */
+export function SaveArrangementForm({
+  layouts,
+  kits,
+  onSave,
+  onDone,
+}: {
+  layouts: ShelfLayout[]
+  kits: Record<string, { title: string | null }>
+  onSave: (input: { layout_id: string; title: string; kit: string | null }) => Promise<{ ok: boolean; error?: string; count?: number }>
+  onDone: (note: string, ok: boolean) => void
+}) {
+  const uid = useId()
+  const [id, setId] = useState("")
+  const [title, setTitle] = useState("")
+  const [kit, setKit] = useState("")
+  const existing = layouts.find((l) => l.layout_id === id.trim())
+  const kitKeys = [...new Set([...Object.keys(kits), ...layouts.map((l) => l.kit ?? "")])].filter(Boolean).sort()
+
+  return (
+    <div className="space-y-1 px-1 py-0.5">
+      <div className="flex gap-1">
+        <input
+          value={id}
+          onChange={(e) => {
+            const next = e.target.value
+            setId(next)
+            // Picking an existing layout = Save As over it: pull its
+            // title/kit so the overwrite keeps identity unless edited.
+            const hit = layouts.find((l) => l.layout_id === next.trim())
+            if (hit) {
+              setTitle(hit.title)
+              setKit(hit.kit ?? "")
+            }
+          }}
+          list={`${uid}-layouts`}
+          placeholder="kit/home — pick existing to overwrite"
+          spellCheck={false}
+          className="w-0 flex-1 rounded border border-chrome-border bg-transparent px-1.5 py-0.5 text-[11px] outline-none placeholder:text-chrome-text/30"
+        />
+        <datalist id={`${uid}-layouts`}>
+          {layouts.map((l) => (
+            <option key={l.layout_id} value={l.layout_id}>{l.title}</option>
+          ))}
+        </datalist>
+        <input
+          value={kit}
+          onChange={(e) => setKit(e.target.value)}
+          list={`${uid}-kits`}
+          placeholder="kit"
+          spellCheck={false}
+          className="w-20 rounded border border-chrome-border bg-transparent px-1.5 py-0.5 text-[11px] outline-none placeholder:text-chrome-text/30"
+        />
+        <datalist id={`${uid}-kits`}>
+          {kitKeys.map((k) => (
+            <option key={k} value={k}>{kits[k]?.title ?? k}</option>
+          ))}
+        </datalist>
+      </div>
+      <div className="flex gap-1">
+        <input
+          value={title}
+          onChange={(e) => setTitle(e.target.value)}
+          placeholder="Title"
+          className="w-0 flex-1 rounded border border-chrome-border bg-transparent px-1.5 py-0.5 text-[11px] outline-none placeholder:text-chrome-text/30"
+        />
+        <button
+          type="button"
+          disabled={!id.trim()}
+          onClick={() => {
+            void onSave({
+              layout_id: id.trim(),
+              title: title.trim() || id.trim(),
+              kit: kit.trim() || null,
+            }).then((r) => {
+              onDone(
+                r.ok
+                  ? `${existing ? "overwrote" : "saved"} ${id.trim()} (${r.count} panes)`
+                  : (r.error ?? "save failed"),
+                r.ok,
+              )
+              if (r.ok) {
+                setId("")
+                setTitle("")
+                setKit("")
+              }
+            })
+          }}
+          className={cn(
+            "rounded border px-2 py-0.5 text-[11px] disabled:opacity-40",
+            existing ? "border-warning/50 text-warning" : "border-main/40 text-main",
+          )}
+        >
+          {existing ? "overwrite" : "save"}
+        </button>
+      </div>
+      {existing ? (
+        <div className="px-0.5 text-[10px] text-chrome-text/45">
+          replaces “{existing.title}” — geometry from these windows; slots/params kept; revisions hold the old version
+        </div>
+      ) : null}
+    </div>
+  )
+}
+
 export function PlatesTray({
   activeConnectionId,
   onOpenPlate,
@@ -56,9 +167,6 @@ export function PlatesTray({
   const [kits, setKits] = useState<Record<string, TrayKitMeta>>({})
   const [note, setNote] = useState<string | null>(null)
   const [saveOpen, setSaveOpen] = useState(false)
-  const [saveId, setSaveId] = useState("")
-  const [saveTitle, setSaveTitle] = useState("")
-  const [saveKit, setSaveKit] = useState("")
   const [ctx, setCtx] = useState<ContextMenuState | null>(null)
   const wrapRef = useRef<HTMLDivElement>(null)
 
@@ -180,55 +288,18 @@ export function PlatesTray({
           </div>
           <div className="border-t border-chrome-border/60 p-1.5">
             {saveOpen ? (
-              <div className="space-y-1 px-1 py-0.5">
-                <div className="flex gap-1">
-                  <input
-                    value={saveId}
-                    onChange={(e) => setSaveId(e.target.value)}
-                    placeholder="kit/home"
-                    spellCheck={false}
-                    className="w-0 flex-1 rounded border border-chrome-border bg-transparent px-1.5 py-0.5 text-[11px] outline-none placeholder:text-chrome-text/30"
-                  />
-                  <input
-                    value={saveKit}
-                    onChange={(e) => setSaveKit(e.target.value)}
-                    placeholder="kit"
-                    spellCheck={false}
-                    className="w-16 rounded border border-chrome-border bg-transparent px-1.5 py-0.5 text-[11px] outline-none placeholder:text-chrome-text/30"
-                  />
-                </div>
-                <div className="flex gap-1">
-                  <input
-                    value={saveTitle}
-                    onChange={(e) => setSaveTitle(e.target.value)}
-                    placeholder="Title"
-                    className="w-0 flex-1 rounded border border-chrome-border bg-transparent px-1.5 py-0.5 text-[11px] outline-none placeholder:text-chrome-text/30"
-                  />
-                  <button
-                    type="button"
-                    disabled={!saveId.trim()}
-                    onClick={() => {
-                      void onSaveArrangement({
-                        layout_id: saveId.trim(),
-                        title: saveTitle.trim() || saveId.trim(),
-                        kit: saveKit.trim() || null,
-                      }).then((r) => {
-                        setNote(r.ok ? `saved ${saveId.trim()} (${r.count} panes)` : (r.error ?? "save failed"))
-                        if (r.ok) {
-                          setSaveOpen(false)
-                          setSaveId("")
-                          setSaveTitle("")
-                          setSaveKit("")
-                          setLayouts([]) // refetch on next open
-                        }
-                      })
-                    }}
-                    className="rounded border border-main/40 px-2 py-0.5 text-[11px] text-main disabled:opacity-40"
-                  >
-                    save
-                  </button>
-                </div>
-              </div>
+              <SaveArrangementForm
+                layouts={layouts}
+                kits={kits}
+                onSave={onSaveArrangement}
+                onDone={(msg, ok) => {
+                  setNote(msg)
+                  if (ok) {
+                    setSaveOpen(false)
+                    setLayouts([]) // refetch on next open
+                  }
+                }}
+              />
             ) : (
               <button
                 type="button"

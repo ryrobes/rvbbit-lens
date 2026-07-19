@@ -15,6 +15,7 @@ import { vegaConfigFromTheme } from "@/lib/desktop/chart-theme"
 import { AppWindow, FileCode2, Layers, Loader2, Maximize2, RefreshCw } from "@/lib/icons"
 import { cn } from "@/lib/utils"
 import { ResultGrid } from "./result-grid"
+import { SaveArrangementForm } from "./plates-tray"
 import type { QueryResultColumn } from "@/lib/db/types"
 import type { DesktopParamValue } from "@/lib/desktop/types"
 
@@ -1026,9 +1027,6 @@ export function PlatesWindow({
   const [error, setError] = useState<string | null>(null)
   const [reloadTick, setReloadTick] = useState(0)
   const [saveOpen, setSaveOpen] = useState(false)
-  const [saveId, setSaveId] = useState("")
-  const [saveTitle, setSaveTitle] = useState("")
-  const [saveKit, setSaveKit] = useState("")
 
   useEffect(() => {
     let cancelled = false
@@ -1162,53 +1160,19 @@ export function PlatesWindow({
         ) : null}
       </div>
       {saveOpen && onSaveArrangement ? (
-        <div className="flex items-center gap-1.5 border-b border-chrome-border bg-chrome-bg/25 px-3 py-1.5 text-[11px]">
-          <span className="text-chrome-text/50">save arrangement:</span>
-          <input
-            value={saveId}
-            onChange={(e) => setSaveId(e.target.value)}
-            placeholder="kit/home"
-            spellCheck={false}
-            className="w-32 rounded border border-chrome-border bg-transparent px-1.5 py-0.5 outline-none placeholder:text-chrome-text/30"
-          />
-          <input
-            value={saveTitle}
-            onChange={(e) => setSaveTitle(e.target.value)}
-            placeholder="Title"
-            className="w-32 rounded border border-chrome-border bg-transparent px-1.5 py-0.5 outline-none placeholder:text-chrome-text/30"
-          />
-          <input
-            value={saveKit}
-            onChange={(e) => setSaveKit(e.target.value)}
-            placeholder="kit (optional)"
-            spellCheck={false}
-            className="w-24 rounded border border-chrome-border bg-transparent px-1.5 py-0.5 outline-none placeholder:text-chrome-text/30"
-          />
-          <button
-            type="button"
-            disabled={!saveId.trim()}
-            onClick={() => {
-              void onSaveArrangement({
-                layout_id: saveId.trim(),
-                title: saveTitle.trim() || saveId.trim(),
-                kit: saveKit.trim() || null,
-              }).then((r) => {
-                setInstallNote(
-                  r.ok ? `saved ${saveId.trim()} (${r.count ?? 0} panes)` : (r.error ?? "save failed"),
-                )
-                if (r.ok) {
-                  setSaveOpen(false)
-                  setSaveId("")
-                  setSaveTitle("")
-                  setSaveKit("")
-                  setReloadTick((t) => t + 1)
-                }
-              })
+        <div className="border-b border-chrome-border bg-chrome-bg/25 px-2 py-1 text-[11px]">
+          <SaveArrangementForm
+            layouts={layouts}
+            kits={kits}
+            onSave={onSaveArrangement}
+            onDone={(msg, ok) => {
+              setInstallNote(msg)
+              if (ok) {
+                setSaveOpen(false)
+                setReloadTick((t) => t + 1)
+              }
             }}
-            className="rounded border border-main/40 px-2 py-0.5 text-main disabled:opacity-40"
-          >
-            save
-          </button>
+          />
         </div>
       ) : null}
       <div className="min-h-0 flex-1 overflow-y-auto p-2">

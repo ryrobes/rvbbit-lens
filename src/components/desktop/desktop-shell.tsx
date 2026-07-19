@@ -2477,9 +2477,30 @@ export function DesktopShell() {
 
   /** The editor round trip: the desktop IS the layout editor. Current
    *  workspace's plate windows → fraction rects against the visible world
-   *  → a layout row. */
+   *  → a layout row. Overwriting an existing layout MERGES per plate id:
+   *  geometry comes from the windows, but slot flags, pinned params, pane
+   *  titles, ids, and z survive — a stamped slot pane must not lose its
+   *  slot-ness on the way back. */
   const saveArrangementAsLayout = useCallback(
     async (input: { layout_id: string; title: string; kit: string | null }) => {
+      if (!activeConnectionId) return { ok: false, error: "no active connection" }
+      // Prior pane extras, keyed by plate id (first pane wins per plate).
+      const priorByPlate = new Map<string, { id: string; z?: number; slot?: boolean; params?: Record<string, unknown>; title?: string }>()
+      try {
+        const res = await fetch("/api/layout/get", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ connectionId: activeConnectionId, layoutId: input.layout_id }),
+        })
+        const body = (await res.json()) as { ok: boolean; layout?: ShelfLayout }
+        for (const p of body.layout?.panes ?? []) {
+          if (p.plate && !priorByPlate.has(p.plate)) {
+            priorByPlate.set(p.plate, { id: p.id, z: p.z, slot: p.slot, params: p.params, title: p.title })
+          }
+        }
+      } catch {
+        // new layout — nothing to merge
+      }
       const vis = visibleWorldRect()
       const panes = liveWindows()
         .filter((w) => w.kind === "plate" && !w.minimized)
@@ -2488,21 +2509,24 @@ export function DesktopShell() {
           const clamp01 = (v: number) => Math.min(1, Math.max(0, v))
           const x = clamp01((w.x - vis.x) / vis.width)
           const y = clamp01((w.y - vis.y) / vis.height)
+          const prior = priorByPlate.get(plateId)
           return {
-            id: plateId.replace(/[^a-zA-Z0-9_-]+/g, "_") || `pane_${i}`,
+            id: prior?.id ?? (plateId.replace(/[^a-zA-Z0-9_-]+/g, "_") || `pane_${i}`),
             plate: plateId,
             x,
             y,
             w: Math.min(1 - x, clamp01(w.width / vis.width)),
             h: Math.min(1 - y, clamp01(w.height / vis.height)),
-            z: i,
+            z: prior?.z ?? i,
+            ...(prior?.slot ? { slot: true } : {}),
+            ...(prior?.params ? { params: prior.params } : {}),
+            ...(prior?.title ? { title: prior.title } : {}),
           }
         })
         .filter((p) => p.plate && p.w > 0.01 && p.h > 0.01)
       if (panes.length === 0) {
         return { ok: false, error: "no plate windows on this workspace to save" }
       }
-      if (!activeConnectionId) return { ok: false, error: "no active connection" }
       try {
         const res = await fetch("/api/layout/upsert", {
           method: "POST",
