@@ -183,7 +183,7 @@ export function MarkupEditor({
   // the containing block for position:fixed and trap the overlay in the
   // dock's corner instead of centering it over the whole desktop.
   return createPortal(
-    <div className="fixed inset-0 z-[1000] flex flex-col items-center justify-center gap-3 bg-black/75 backdrop-blur-sm">
+    <div data-rvbbit-capture-exclude className="fixed inset-0 z-[1000] flex flex-col items-center justify-center gap-3 bg-black/75 backdrop-blur-sm">
       <div
         className="flex items-center gap-3 rounded-xl border border-chrome-border bg-chrome-bg/90 px-3 py-1.5 shadow-lg"
         onPointerDown={(e) => e.stopPropagation()}

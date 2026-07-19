@@ -102,11 +102,14 @@ import { AssistantSettingsWindow } from "./assistant-settings-window"
 import {
   ASSISTANT_COMMAND_CAP,
   assistantBlockName,
+  imageAttachmentFromBlob,
+  loadVisualSelfCheck,
   type AssistantApplyResult,
   type AssistantApplyOptions,
   type AssistantCommand,
   type AssistantImageAttachment,
 } from "@/lib/desktop/assistant"
+import { captureAppBlockWindow, captureWindowById } from "@/lib/desktop/capture"
 import { useAssistantIdentity } from "@/lib/desktop/assistant-identity"
 import type { AssistantBlockExecutionObservation } from "@/lib/desktop/assistant-execution"
 import {
@@ -3204,6 +3207,62 @@ export function DesktopShell() {
               report.push({ op: cmd.op, target: assistantBlockName(target), status: "applied" })
               return
             }
+            case "capture": {
+              // Visual self-check: screenshot a plate or block; the image
+              // rides the report and the assistant window delivers it on an
+              // auto-continuation turn (budget enforced there).
+              const idx = report.length
+              report.push({ op: cmd.op, target: cmd.target, status: "skipped", detail: "pending" })
+              const capCmd = cmd
+              pendingAsync.push(async () => {
+                if (!loadVisualSelfCheck()) {
+                  report[idx] = { op: capCmd.op, target: capCmd.target, status: "skipped", detail: "visual self-check is disabled in assistant settings" }
+                  return
+                }
+                try {
+                  const raw = capCmd.target.trim()
+                  let win: DesktopWindowState | undefined
+                  if (raw.toLowerCase().startsWith("plate:")) {
+                    const plateId = raw.slice(6)
+                    win = allKnown().find(
+                      (w) => w.kind === "plate" && (w.payload as PlatePayload | undefined)?.plateId === plateId,
+                    )
+                    if (!win) {
+                      openPlate(plateId)
+                      await new Promise((r) => setTimeout(r, 900))
+                      win = liveWindows().find(
+                        (w) => w.kind === "plate" && (w.payload as PlatePayload | undefined)?.plateId === plateId,
+                      )
+                    }
+                  } else {
+                    win = findTarget(raw.toLowerCase().startsWith("block:") ? raw.slice(6) : raw)
+                  }
+                  if (!win) {
+                    report[idx] = { op: capCmd.op, target: capCmd.target, status: "skipped", detail: "no such plate or block on the desktop" }
+                    return
+                  }
+                  focus(win.id)
+                  // Let render + focus commit settle before rasterizing.
+                  await new Promise((r) => setTimeout(r, 500))
+                  const isApp = win.kind === "data" && !!(win.payload as DataPayload | undefined)?.htmlBlock
+                  let attachment: AssistantImageAttachment
+                  if (isApp) {
+                    attachment = await captureAppBlockWindow(win.id, capCmd.target)
+                  } else {
+                    const shot = await captureWindowById(win.id)
+                    attachment = await imageAttachmentFromBlob(shot.blob, `${capCmd.target} · self-check`)
+                  }
+                  report[idx] = {
+                    op: capCmd.op, target: capCmd.target, status: "applied",
+                    detail: `captured ${attachment.width}x${attachment.height}`,
+                    attachment,
+                  }
+                } catch (e) {
+                  report[idx] = { op: capCmd.op, target: capCmd.target, status: "skipped", detail: e instanceof Error ? e.message : String(e) }
+                }
+              })
+              return
+            }
             default:
               report.push({
                 op: (cmd as { op?: string }).op ?? "unknown",
@@ -3224,7 +3283,7 @@ export function DesktopShell() {
       }
       return report
     },
-    [commitSnapshotNow, liveWindows, openWindow, updatePayload, emitParam, calloutWindow, close, setWindows, setRunSignals, activeConnectionId, openPlate],
+    [commitSnapshotNow, liveWindows, openWindow, updatePayload, emitParam, calloutWindow, close, setWindows, setRunSignals, activeConnectionId, openPlate, focus],
   )
 
   const openSyncMirror = useCallback(() => {

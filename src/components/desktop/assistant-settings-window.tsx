@@ -27,6 +27,8 @@ import {
   savePersona,
   loadSpendThreshold,
   saveSpendThreshold,
+  loadVisualSelfCheck,
+  saveVisualSelfCheck,
   PERSONA_MAX_CHARS,
 } from "@/lib/desktop/assistant"
 import {
@@ -82,6 +84,7 @@ export function AssistantSettingsWindow({
   const [persona, setPersona] = useState(() => loadPersona())
   const [personaSaved, setPersonaSaved] = useState(false)
   const [spend, setSpend] = useState(() => loadSpendThreshold().toFixed(2))
+  const [selfCheck, setSelfCheck] = useState(() => loadVisualSelfCheck())
   const [spendSaved, setSpendSaved] = useState(false)
   const [voice, setVoice] = useState<VoiceSettings>(() => loadVoiceSettings())
   const [voiceTest, setVoiceTest] = useState<string | null>(null)
@@ -437,6 +440,21 @@ export function AssistantSettingsWindow({
           (she&apos;ll still mention the price). Anything over, she quotes the
           estimate and waits for your go-ahead. $0.00 = always ask first.
         </p>
+        <label
+          className="mt-3 flex cursor-pointer items-center justify-between rounded-md border border-chrome-border/60 bg-chrome-bg/30 px-2.5 py-1.5"
+          title="After visual work she may screenshot the plate or block she just changed and review it in an automatic follow-up turn. Capped at 2 captures per request; every capture appears in the transcript so you see exactly what she saw."
+        >
+          <span className="text-[12px]">Visual self-check (she reviews her own work)</span>
+          <input
+            type="checkbox"
+            checked={selfCheck}
+            onChange={(e) => {
+              setSelfCheck(e.target.checked)
+              saveVisualSelfCheck(e.target.checked)
+            }}
+            className="accent-main"
+          />
+        </label>
       </section>
 
       <section>

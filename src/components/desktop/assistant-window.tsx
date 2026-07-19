@@ -274,6 +274,7 @@ export function AssistantDock({
   // character. The drag pill and resize corner remain the only controls.
   return (
     <div
+      data-rvbbit-capture-exclude
       className="fixed flex flex-col rounded-[18px]"
       style={{
         left: rect.x,
@@ -698,51 +699,90 @@ export function AssistantWindow({
     const userMsg = newAssistantMessage("user", text, {
       attachments: pendingAttachments.length > 0 ? pendingAttachments : undefined,
     })
-    const thread = [...messagesRef.current, userMsg]
+    let thread = [...messagesRef.current, userMsg]
     setMessages(thread)
     saveThreadLocal(thread)
     appendThreadRemote([userMsg])
     try {
-      const context = buildAssistantDesktopContext(
-        windowsRef.current,
-        paramsRef.current,
-        schemaRef.current,
-        lastReportRef.current,
-        getExecutionObservations(),
-      )
-      const turn = await runAssistantTurn(
-        activeConnectionId,
-        text,
-        thread,
-        context,
-        pendingAttachments,
-      )
-      let report: AssistantApplyResult[] = []
-      if (turn.commands.length > 0) {
-        report = await applyCommands(turn.commands)
-      }
-      lastReportRef.current = report.length > 0 ? report : null
-      const assistantMsg = newAssistantMessage("assistant", turn.reply, {
-        agentRunId: turn.agentRunId,
-        attachments: turn.attachments.length > 0 ? turn.attachments : undefined,
-        commands: turn.commands.length > 0 ? turn.commands : undefined,
-        report: report.length > 0 ? report : undefined,
-        error: !!turn.error || turn.status === "provider_error" || turn.status === "memory_error",
-      })
-      setMessages((prev) => {
-        const next = [...prev, assistantMsg]
-        saveThreadLocal(next)
-        return next
-      })
-      appendThreadRemote([assistantMsg])
-      // The turn is committed now — fetch its tool receipts and hang the
-      // dot strip (with args/result tooltips) off the finished reply.
-      if (turn.agentRunId) {
-        void fetchTurnToolEvents(activeConnectionId, turn.agentRunId).then((events) => {
-          if (events.length > 0) {
-            setToolStrips((prev) => ({ ...prev, [assistantMsg.id]: events }))
+      // Visual self-check loop: a turn ending in capture commands earns an
+      // automatic follow-up carrying the screenshots. The budget lives HERE,
+      // outside the model — at most 2 auto-continuations per user request;
+      // further captures are refused structurally via the apply report.
+      const CAPTURE_BUDGET = 2
+      let turnText = text
+      let turnAttachments = pendingAttachments
+      for (let hop = 0; ; hop++) {
+        setLiveToolCount(0)
+        const context = buildAssistantDesktopContext(
+          windowsRef.current,
+          paramsRef.current,
+          schemaRef.current,
+          lastReportRef.current,
+          getExecutionObservations(),
+        )
+        const turn = await runAssistantTurn(
+          activeConnectionId,
+          turnText,
+          thread,
+          context,
+          turnAttachments,
+        )
+        let report: AssistantApplyResult[] = []
+        if (turn.commands.length > 0) {
+          report = await applyCommands(turn.commands)
+        }
+        const captures = report
+          .filter((r) => r.op === "capture" && r.status === "applied" && r.attachment)
+          .map((r) => r.attachment!)
+        if (hop >= CAPTURE_BUDGET && captures.length > 0) {
+          for (const r of report) {
+            if (r.op === "capture" && r.attachment) {
+              r.status = "skipped"
+              r.detail = `visual self-check budget (${CAPTURE_BUDGET}) exhausted — ask the user before looking again`
+              delete r.attachment
+            }
           }
+          captures.length = 0
+        }
+        lastReportRef.current = report.length > 0 ? report : null
+        const assistantMsg = newAssistantMessage("assistant", turn.reply, {
+          agentRunId: turn.agentRunId,
+          attachments: turn.attachments.length > 0 ? turn.attachments : undefined,
+          commands: turn.commands.length > 0 ? turn.commands : undefined,
+          report: report.length > 0 ? report : undefined,
+          error: !!turn.error || turn.status === "provider_error" || turn.status === "memory_error",
         })
+        thread = [...thread, assistantMsg]
+        setMessages((prev) => {
+          const next = [...prev, assistantMsg]
+          saveThreadLocal(next)
+          return next
+        })
+        appendThreadRemote([assistantMsg])
+        // The turn is committed now — fetch its tool receipts and hang the
+        // dot strip (with args/result tooltips) off the finished reply.
+        if (turn.agentRunId) {
+          const doneMsgId = assistantMsg.id
+          void fetchTurnToolEvents(activeConnectionId, turn.agentRunId).then((events) => {
+            if (events.length > 0) {
+              setToolStrips((prev) => ({ ...prev, [doneMsgId]: events }))
+            }
+          })
+        }
+        if (captures.length === 0) break
+        // Deliver the screenshots as a visible synthetic turn — the user
+        // sees exactly what she saw, right in the transcript.
+        const followText = `[visual self-check ${hop + 1}/${CAPTURE_BUDGET}] Requested capture attached.`
+        const followMsg = newAssistantMessage("user", followText, { attachments: captures })
+        thread = [...thread, followMsg]
+        setMessages((prev) => {
+          const next = [...prev, followMsg]
+          saveThreadLocal(next)
+          return next
+        })
+        appendThreadRemote([followMsg])
+        turnText = followText
+        turnAttachments = captures
       }
     } catch (err) {
       const failMsg = newAssistantMessage(

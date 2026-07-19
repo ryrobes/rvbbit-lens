@@ -86,6 +86,13 @@ export type AssistantCommand =
   | { op: "focus_block"; target: string }
   | { op: "close_block"; target: string }
   | {
+      /** Visual self-check: screenshot a surface and see it in an automatic
+       *  follow-up turn. target = "plate:<id>" or "block:<name>". Opt-in via
+       *  assistant settings; the client enforces the per-request budget. */
+      op: "capture"
+      target: string
+    }
+  | {
       /** Install (or replace) a plate — a durable server-rendered SQL surface
        *  stored as a rvbbit.plates row. The applier round-trips the install
        *  so apply_report carries the installer's real verdict. */
@@ -118,6 +125,9 @@ export interface AssistantApplyResult {
   target?: string
   status: "applied" | "skipped"
   detail?: string
+  /** capture only: the screenshot, delivered on the auto-continuation turn.
+   *  Stripped before the report is serialized into desktop_context. */
+  attachment?: AssistantImageAttachment
 }
 
 export interface AssistantApplyOptions {
@@ -237,12 +247,15 @@ export function buildAssistantDesktopContext(
   })
 
   const persona = loadPersona()
+  const selfCheck = loadVisualSelfCheck()
+    ? 'VISUAL SELF-CHECK is enabled: after creating or restyling a visual surface you may add {"op":"capture","target":"plate:<id>"} or {"op":"capture","target":"block:<name>"} as the LAST command — the desktop screenshots it and sends the image back in an automatic follow-up turn. Budget: 2 captures per user request, client-enforced. The loop is build, capture, one fix pass, capture, done — never iterate further without asking. Captures render with fallback fonts and no wallpaper; judge layout, hierarchy, and spacing, not font faces.'
+    : ""
   // Content-shape nudge only — delivery (audio tags, flavor) lives in the
   // speech-render pass, never in the agent loop.
   const speakable = loadVoiceSettings().ttsEnabled
     ? "Replies may be read aloud by text-to-speech: prefer speakable prose, and avoid gratuitous tables or long code dumps in the reply text (put those on the desktop instead)."
     : ""
-  const personaOut = [persona, speakable].filter(Boolean).join("\n\n")
+  const personaOut = [persona, speakable, selfCheck].filter(Boolean).join("\n\n")
   const themeTokens = readThemeTokens()
   return {
     schema_version: "rvbbit.desktop_context.v1",
@@ -264,7 +277,8 @@ export function buildAssistantDesktopContext(
       operator: p.operator ?? "eq",
       value: p.value,
     })),
-    apply_report: applyReport,
+    apply_report:
+      applyReport?.map(({ attachment: _drop, ...rest }) => rest) ?? applyReport,
   }
 }
 
@@ -709,6 +723,28 @@ export function savePersona(value: string): void {
   if (typeof window === "undefined") return
   try {
     window.localStorage.setItem(PERSONA_KEY, value.slice(0, PERSONA_MAX_CHARS))
+  } catch {
+    // best-effort
+  }
+}
+
+// ── Visual self-check (opt-in) ──────────────────────────────────────────
+
+const SELF_CHECK_KEY = "rvbbit-lens.assistant.selfcheck.v1"
+
+export function loadVisualSelfCheck(): boolean {
+  if (typeof window === "undefined") return false
+  try {
+    return window.localStorage.getItem(SELF_CHECK_KEY) === "on"
+  } catch {
+    return false
+  }
+}
+
+export function saveVisualSelfCheck(on: boolean): void {
+  if (typeof window === "undefined") return
+  try {
+    window.localStorage.setItem(SELF_CHECK_KEY, on ? "on" : "off")
   } catch {
     // best-effort
   }

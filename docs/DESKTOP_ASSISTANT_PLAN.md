@@ -379,3 +379,36 @@ flatten stays crisp. Zero engine/operator changes — the annotated
 image rides the existing attachment path. Companion feature banked:
 assistant self-screenshot via a headless /plate/<id> capture tool
 (deferred — loop-cost discipline needed first).
+
+## Visual self-check (2026-07-18)
+
+Opt-in (assistant settings toggle) image self-feedback, client-side by
+design — the client is already in the loop, so no headless infra:
+
+- `{op:"capture", target:"plate:<id>"|"block:<name>"}` — one command,
+  the rv-open target grammar. Applier resolves/opens/focuses the
+  window, settles, captures.
+- Two capture paths: plates/charts/grids rasterize via whole-document
+  clone -> SVG foreignObject -> crop to the window rect (ALL same-origin
+  stylesheets inlined — dev serves Tailwind via <link>, which cannot
+  load inside a data-URL image; without inlining the capture is
+  unstyled soup). App blocks answer through their own in-iframe capture
+  via a broadcast event; AppBlockView self-identifies through DOM
+  ancestry (data-rvbbit-window-id), no prop threading.
+- The re-loop is the apply_report pattern with eyes: captures ride the
+  report (attachment field, stripped before context serialization) and
+  the assistant window delivers them as a visible synthetic turn
+  ("[visual self-check n/2] Requested capture attached.") — the user
+  sees exactly what she saw.
+- Budget enforced OUTSIDE the model: max 2 auto-continuations per user
+  request; overflow captures are converted to structural refusals in
+  the report. Prompt teaching (appended to persona when the toggle is
+  on, TTS-nudge pattern — no migration) sets the norm: build, capture,
+  one fix pass, capture, done.
+- Overlays opt out of captures via data-rvbbit-capture-exclude
+  (assistant dock, markup editor).
+
+First live run: she captured sales/reports and correctly diagnosed the
+plate-split rail cramping the revenue trend column — a real flaw,
+found by her own eyes, with the look-only instruction honored and the
+budget untouched.

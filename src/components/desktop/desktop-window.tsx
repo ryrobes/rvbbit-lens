@@ -695,6 +695,7 @@ export function DesktopWindow({
   return (
     <section
       data-rvbbit-window
+      data-rvbbit-window-id={w.id}
       data-focused={focused ? "true" : "false"}
       data-column-drop={columnDragCompatible ? (columnDragHover ? "hover" : "ready") : undefined}
       className={cn(

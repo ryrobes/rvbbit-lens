@@ -270,6 +270,7 @@ export function AppBlockView({
 }: AppBlockViewProps) {
   const assistantIdentity = useAssistantIdentity()
   const iframeRef = useRef<HTMLIFrameElement>(null)
+  const rootRef = useRef<HTMLDivElement>(null)
   const captureRequestRef = useRef<{ id: string; timeout: number } | null>(null)
   const [captureBusy, setCaptureBusy] = useState(false)
   const [captureError, setCaptureError] = useState<string | null>(null)
@@ -396,6 +397,51 @@ export function AppBlockView({
     if (captureRequestRef.current) window.clearTimeout(captureRequestRef.current.timeout)
   }, [])
 
+  // Assistant visual self-check: the shell broadcasts a capture request with
+  // a window id; this view self-identifies through DOM ancestry (its own
+  // window section carries data-rvbbit-window-id), runs the same in-iframe
+  // capture as the camera button, and answers on a result event.
+  useEffect(() => {
+    const onAssistantCapture = (e: Event) => {
+      const detail = (e as CustomEvent).detail as { windowId?: string; token?: string } | undefined
+      if (!detail?.token) return
+      const host = rootRef.current?.closest("[data-rvbbit-window-id]")
+      if (!host || host.getAttribute("data-rvbbit-window-id") !== detail.windowId) return
+      const token = detail.token
+      const respond = (payload: Record<string, unknown>) =>
+        window.dispatchEvent(new CustomEvent("rvbbit:assistant-capture-result", { detail: { token, ...payload } }))
+      const frame = iframeRef.current
+      if (!frame?.contentWindow) {
+        respond({ error: "app frame not ready" })
+        return
+      }
+      const id = crypto.randomUUID()
+      const onMsg = (ev: MessageEvent) => {
+        const d = (ev.data ?? {}) as {
+          __rvbbitAppCaptureResponse?: string
+          dataUrl?: string
+          mimeType?: string
+          width?: number
+          height?: number
+          error?: string
+        }
+        if (d.__rvbbitAppCaptureResponse !== id) return
+        window.removeEventListener("message", onMsg)
+        window.clearTimeout(t)
+        if (d.error || typeof d.dataUrl !== "string") respond({ error: d.error ?? "app capture failed" })
+        else respond({ dataUrl: d.dataUrl, mimeType: d.mimeType, width: d.width, height: d.height })
+      }
+      const t = window.setTimeout(() => {
+        window.removeEventListener("message", onMsg)
+        respond({ error: "app capture timed out" })
+      }, 12_000)
+      window.addEventListener("message", onMsg)
+      frame.contentWindow.postMessage({ __rvbbitAppCaptureRequest: id }, "*")
+    }
+    window.addEventListener("rvbbit:assistant-capture", onAssistantCapture)
+    return () => window.removeEventListener("rvbbit:assistant-capture", onAssistantCapture)
+  }, [])
+
   const captureForAssistant = () => {
     const frame = iframeRef.current
     if (!frame?.contentWindow || captureBusy || !onCapture) return
@@ -423,7 +469,7 @@ export function AppBlockView({
   }
 
   return (
-    <div className="flex h-full min-w-0 bg-doc-bg">
+    <div ref={rootRef} className="flex h-full min-w-0 bg-doc-bg">
       <div className="min-w-0 flex-1">
         <iframe
           ref={iframeRef}
