@@ -3065,8 +3065,30 @@ export function DesktopShell() {
             if (!overlaps(x, y, width, height)) return { x: clampWorld(x), y: clampWorld(y) }
           }
         }
-        const cascade = created.length
-        return clampVisible(vis.x + 96 + cascade * 44, vis.y + 48 + cascade * 40, width, height)
+        // No margined free spot — overlap MINIMALLY instead of piling at a
+        // fixed cascade origin (which also reset per turn, so every 4th+
+        // block across turns landed on the exact same spot). Scan the same
+        // grid scoring total overlap area vs every known window; the pile
+        // itself scores high, so successive blocks spread away from it.
+        let best: { x: number; y: number; cost: number } | null = null
+        for (let y = vis.y; y + height <= vis.y + vis.height + stepY; y += stepY) {
+          for (let x = vis.x; x + width <= vis.x + vis.width + stepX; x += stepX) {
+            const cx = Math.min(x, Math.max(vis.x, vis.x + vis.width - width))
+            const cy = Math.min(y, Math.max(vis.y, vis.y + vis.height - height))
+            let cost = 0
+            for (const w of allKnown()) {
+              if (w.minimized) continue
+              const ox = Math.max(0, Math.min(cx + width, w.x + w.width) - Math.max(cx, w.x))
+              const oy = Math.max(0, Math.min(cy + height, w.y + w.height) - Math.max(cy, w.y))
+              cost += ox * oy
+            }
+            if (!best || cost < best.cost) best = { x: cx, y: cy, cost }
+            if (cost === 0) break
+          }
+          if (best && best.cost === 0) break
+        }
+        if (best) return { x: clampWorld(best.x), y: clampWorld(best.y) }
+        return clampVisible(vis.x + 96, vis.y + 48, width, height)
       }
 
       commands.forEach((cmd, index) => {
@@ -3094,7 +3116,13 @@ export function DesktopShell() {
               const requested = cmd.name ?? cmd.title ?? "block"
               const name = uniqueBlockName(requested, allKnown())
               const id = randomUUID()
-              const size = appSpec ? { width: 880, height: 580 } : { width: 720, height: 460 }
+              const defaults = appSpec ? { width: 880, height: 580 } : { width: 720, height: 460 }
+              const clampSize = (v: number | undefined, lo: number, hi: number, dflt: number) =>
+                typeof v === "number" && Number.isFinite(v) ? Math.min(hi, Math.max(lo, Math.round(v))) : dflt
+              const size = {
+                width: clampSize(cmd.size?.width, 360, 1400, defaults.width),
+                height: clampSize(cmd.size?.height, 260, 900, defaults.height),
+              }
               const { x, y } = placeAt(cmd.place, size.width, size.height)
               const win: DesktopWindowState = {
                 id,
@@ -3211,6 +3239,13 @@ export function DesktopShell() {
               if (patch.title) {
                 const title = patch.title
                 setWindows((ws) => ws.map((w) => (w.id === target.id ? { ...w, title } : w)))
+              }
+              if (patch.size) {
+                const clampSize = (v: number | undefined, lo: number, hi: number, dflt: number) =>
+                  typeof v === "number" && Number.isFinite(v) ? Math.min(hi, Math.max(lo, Math.round(v))) : dflt
+                const width = clampSize(patch.size.width, 360, 1400, target.width)
+                const height = clampSize(patch.size.height, 260, 900, target.height)
+                setWindows((ws) => ws.map((w) => (w.id === target.id ? { ...w, width, height } : w)))
               }
               if (patch.sql || patchAppSql) {
                 // Next tick, not same batch: the data window's draft syncs from

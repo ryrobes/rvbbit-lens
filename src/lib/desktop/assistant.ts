@@ -63,6 +63,9 @@ export type AssistantCommand =
       /** Full HTML app; when present, sql is derived from the app's queries. */
       app?: AssistantAppArtifact
       place?: "auto" | { near: string }
+      /** Pixel size, clamped 360–1400 × 260–900. Size to content — a lone
+       *  metric doesn't need the 720×460 default. */
+      size?: { width?: number; height?: number }
     }
   | {
       op: "update_block"
@@ -74,6 +77,8 @@ export type AssistantCommand =
         chart?: Record<string, unknown> | null
         /** Replace the block's HTML app artifact. */
         app?: AssistantAppArtifact
+        /** Resize the window (same clamps as create). */
+        size?: { width?: number; height?: number }
       }
     }
   | {
