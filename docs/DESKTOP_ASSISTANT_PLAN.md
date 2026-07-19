@@ -412,3 +412,14 @@ First live run: she captured sales/reports and correctly diagnosed the
 plate-split rail cramping the revenue trend column — a real flaw,
 found by her own eyes, with the look-only instruction honored and the
 budget untouched.
+
+### Live plate updates (2026-07-19)
+upsert_plate now broadcasts plate-data-changed on success and plate
+windows refresh whenever an event names their plateId (kit match no
+longer required for self) — assistant edits appear in open windows
+with no reload. The capture command forces a render of its target and
+awaits the new `rvbbit:plate-rendered` signal (emitted at the end of
+every render pass, DOM-changed or not) before rasterizing, so
+upsert→capture in one batch screenshots the current template. E2E:
+"retitle + capture" turn updated the open switchboard live and her
+screenshot confirmed the new title.
