@@ -106,6 +106,21 @@ export type AssistantCommand =
       kit?: string | null
       description?: string
     }
+  | {
+      /** Partially update an EXISTING plate. Fields present replace; queries/
+       *  actions merge per key (null removes a key); params replaces whole.
+       *  The escape hatch for large plates (skeleton via upsert_plate, then
+       *  patches) and the right-sized op for routine single-query edits. */
+      op: "patch_plate"
+      plate_id: string
+      title?: string
+      description?: string
+      kit?: string | null
+      template?: string
+      queries?: Record<string, { sql: string; database?: string } | null>
+      actions?: Record<string, unknown | null>
+      params?: Array<Record<string, unknown>>
+    }
   | { op: "open_plate"; plate_id: string; title?: string }
   | {
       /** Register/re-register a kit's metadata (title/version/description).
@@ -173,6 +188,10 @@ export interface AssistantTurnResult {
   agentRunId: string | null
   status: string
   error: string | null
+  /** The raw unparseable envelope when status is output_truncated /
+   *  invalid_structured_output — fuel for the auto-repair turn's diagnosis.
+   *  Never rendered; never persisted. */
+  rawEnvelope: string | null
 }
 
 // ── Desktop context snapshot (the "eyes") ──────────────────────────────
@@ -610,6 +629,27 @@ export async function runAssistantTurn(
     agentRunId: typeof inner.agent_run_id === "string" ? inner.agent_run_id : null,
     status: normalizedStatus,
     error: rawError,
+    rawEnvelope: incompleteOutput ? rawReply : null,
+  }
+}
+
+/** One-line diagnosis of a malformed command envelope for the auto-repair
+ *  turn: the JSON parse error plus a snippet around the failure position so
+ *  the model can SEE its own escaping mistake instead of guessing. */
+export function diagnoseEnvelope(raw: string): string {
+  try {
+    JSON.parse(raw)
+    return "the envelope parsed as JSON but did not match the command schema"
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    const at = /position (\d+)/.exec(msg)
+    if (at) {
+      const pos = Number(at[1])
+      const from = Math.max(0, pos - 90)
+      const snippet = raw.slice(from, Math.min(raw.length, pos + 90)).replace(/\s+/g, " ")
+      return `${msg}; context: …${snippet}…`
+    }
+    return msg
   }
 }
 

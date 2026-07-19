@@ -825,6 +825,83 @@ export async function installPlate(
   }
 }
 
+export interface PlatePatchInput {
+  plate_id: string
+  title?: string
+  description?: string
+  kit?: string | null
+  template?: string
+  /** Merged per key onto the existing queries; a null value REMOVES a key. */
+  queries?: Record<string, { sql: string; database?: string } | null>
+  /** Merged per key onto the existing actions; a null value REMOVES a key. */
+  actions?: Record<string, unknown | null>
+  /** Whole-array replacement when present (params are small; no merge). */
+  params?: Array<Record<string, unknown>>
+}
+
+/** Partially update an EXISTING plate. This is how large plates get built —
+ *  a working skeleton via upsert_plate, then queries/actions added in later
+ *  commands or turns — and how routine edits stay small (one query changes,
+ *  one query rides the wire). The merged row goes back through
+ *  rvbbit.upsert_plate, so every install-time tripwire still applies, and
+ *  the 0182 revision trigger ledgers each patch. */
+export async function patchPlate(
+  connectionId: string,
+  patch: PlatePatchInput,
+): Promise<{ ok: boolean; plateId?: string; kit?: string | null; error?: string; detail?: string }> {
+  if (!patch?.plate_id) return { ok: false, error: "plate_id is required" }
+  const current = await loadPlate(connectionId, patch.plate_id)
+  if (!current) {
+    return { ok: false, error: `plate ${patch.plate_id} not found — use upsert_plate to create it` }
+  }
+  const queries: Record<string, unknown> = { ...(current.queries ?? {}) }
+  let addedQ = 0
+  let removedQ = 0
+  for (const [k, v] of Object.entries(patch.queries ?? {})) {
+    if (v === null) {
+      if (k in queries) removedQ++
+      delete queries[k]
+    } else {
+      addedQ++
+      queries[k] = v
+    }
+  }
+  const actions: Record<string, unknown> = { ...(current.actions ?? {}) }
+  let addedA = 0
+  let removedA = 0
+  for (const [k, v] of Object.entries(patch.actions ?? {})) {
+    if (v === null) {
+      if (k in actions) removedA++
+      delete actions[k]
+    } else {
+      addedA++
+      actions[k] = v
+    }
+  }
+  const kit = patch.kit !== undefined ? patch.kit : current.kit
+  const result = await installPlate(connectionId, {
+    plate_id: patch.plate_id,
+    title: patch.title ?? current.title,
+    template: patch.template ?? current.template,
+    queries: queries as PlateInstallInput["queries"],
+    actions,
+    params: patch.params ?? (current.params as Array<Record<string, unknown>>) ?? [],
+    kit,
+    description: patch.description ?? current.description ?? undefined,
+  })
+  if (!result.ok) return result
+  const bits = [
+    patch.template != null ? "template" : null,
+    addedQ ? `${addedQ} quer${addedQ === 1 ? "y" : "ies"}` : null,
+    removedQ ? `${removedQ} removed` : null,
+    addedA ? `${addedA} action${addedA === 1 ? "" : "s"}` : null,
+    removedA ? `${removedA} action${removedA === 1 ? "" : "s"} removed` : null,
+    patch.params ? "params" : null,
+    patch.title != null ? "title" : null,
+  ].filter(Boolean)
+  return { ok: true, plateId: patch.plate_id, kit, detail: `patched: ${bits.join(", ") || "no-op"}` }
+}
+
 export interface PlateListEntry {
   plate_id: string
   kit: string | null

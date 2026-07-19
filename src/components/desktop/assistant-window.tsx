@@ -31,6 +31,7 @@ import {
   loadThreadLocal,
   mergeAssistantThreads,
   newAssistantMessage,
+  diagnoseEnvelope,
   runAssistantTurn,
   saveThreadLocal,
   type AssistantApplyResult,
@@ -714,6 +715,13 @@ export function AssistantWindow({
       // outside the model — at most 2 auto-continuations per user request;
       // further captures are refused structurally via the apply report.
       const CAPTURE_BUDGET = 2
+      // Auto-repair loop: a turn whose command envelope truncated or failed
+      // to parse (the giant-single-plate failure mode) earns a follow-up
+      // carrying the parse diagnosis + the incremental recovery protocol
+      // (skeleton via upsert_plate, remainder via patch_plate). Bounded so
+      // a persistently confused model can't burn turns.
+      const REPAIR_BUDGET = 2
+      let repairs = 0
       let turnText = text
       let turnAttachments = pendingAttachments
       for (let hop = 0; ; hop++) {
@@ -774,6 +782,33 @@ export function AssistantWindow({
               setToolStrips((prev) => ({ ...prev, [doneMsgId]: events }))
             }
           })
+        }
+        if (
+          (turn.status === "output_truncated" || turn.status === "invalid_structured_output") &&
+          repairs < REPAIR_BUDGET
+        ) {
+          repairs++
+          const diagnosis =
+            turn.status === "output_truncated"
+              ? "Your last reply overflowed the output limit mid-envelope and was discarded — nothing was applied."
+              : `Your last reply looked like a command envelope but failed to parse, so nothing was applied. Parse diagnosis: ${diagnoseEnvelope(turn.rawEnvelope ?? "")}`
+          const followText =
+            `[auto-repair ${repairs}/${REPAIR_BUDGET}] ${diagnosis} ` +
+            `Recover INCREMENTALLY — do not re-emit the whole thing as one giant command. ` +
+            `For a large plate: first upsert_plate a WORKING SKELETON (template plus only the queries it references), ` +
+            `then add the remaining queries/actions with patch_plate commands (queries/actions merge per key; more patch_plate turns are fine). ` +
+            `Keep every command comfortably small.`
+          const followMsg = newAssistantMessage("user", followText)
+          thread = [...thread, followMsg]
+          setMessages((prev) => {
+            const next = [...prev, followMsg]
+            saveThreadLocal(next)
+            return next
+          })
+          appendThreadRemote([followMsg])
+          turnText = followText
+          turnAttachments = []
+          continue
         }
         if (captures.length === 0) break
         // Deliver the screenshots as a visible synthetic turn — the user

@@ -3203,6 +3203,55 @@ export function DesktopShell() {
               })
               return
             }
+            case "patch_plate": {
+              const idx = report.length
+              report.push({ op: cmd.op, target: cmd.plate_id, status: "skipped", detail: "pending" })
+              const patchCmd = cmd
+              pendingAsync.push(async () => {
+                if (!activeConnectionId) {
+                  report[idx] = { op: patchCmd.op, target: patchCmd.plate_id, status: "skipped", detail: "no active connection" }
+                  return
+                }
+                try {
+                  const res = await fetch("/api/plate/patch", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                      connectionId: activeConnectionId,
+                      patch: {
+                        plate_id: patchCmd.plate_id,
+                        title: patchCmd.title,
+                        description: patchCmd.description,
+                        kit: patchCmd.kit,
+                        template: patchCmd.template,
+                        queries: patchCmd.queries,
+                        actions: patchCmd.actions,
+                        params: patchCmd.params,
+                      },
+                    }),
+                  })
+                  const body = (await res.json()) as { ok: boolean; kit?: string | null; error?: string; detail?: string }
+                  report[idx] = body.ok
+                    ? { op: patchCmd.op, target: patchCmd.plate_id, status: "applied", detail: body.detail }
+                    : { op: patchCmd.op, target: patchCmd.plate_id, status: "skipped", detail: body.error ?? "patch failed" }
+                  if (body.ok) {
+                    window.dispatchEvent(
+                      new CustomEvent("rvbbit:plate-data-changed", {
+                        detail: { plateId: patchCmd.plate_id, kit: body.kit ?? null },
+                      }),
+                    )
+                  }
+                } catch (e) {
+                  report[idx] = {
+                    op: patchCmd.op,
+                    target: patchCmd.plate_id,
+                    status: "skipped",
+                    detail: e instanceof Error ? e.message : String(e),
+                  }
+                }
+              })
+              return
+            }
             case "register_kit": {
               const idx = report.length
               report.push({ op: cmd.op, target: cmd.kit, status: "skipped", detail: "pending" })
