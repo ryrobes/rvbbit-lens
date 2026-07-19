@@ -154,6 +154,15 @@ export type AssistantCommand =
     }
   | { op: "open_layout"; layout_id: string }
   | {
+      /** Open a DataRabbit panel by its registry id (rvbbit.desktop_panels,
+       *  synced from the running lens). hint deep-links where the panel's
+       *  hints list includes it; otherwise the panel opens on its default
+       *  view and the report says so. */
+      op: "open_panel"
+      panel: string
+      hint?: string
+    }
+  | {
       /** Register/re-register a kit's metadata (title/version/description).
        *  Downgrades refused engine-side; the error lands in apply_report. */
       op: "register_kit"

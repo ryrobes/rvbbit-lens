@@ -84,6 +84,7 @@ import { PgMonitorWindow } from "./pg-monitor-window"
 import { SystemHealthWindow } from "./system-health-window"
 import { PlateWindow, PlatesWindow, type ShelfLayout } from "./plate-window"
 import { LayoutWall } from "./layout-wall"
+import { PANEL_EXTRAS } from "@/lib/desktop/panel-extras"
 import { FittingRoomWindow } from "./fitting-room-window"
 import { ScenesWindow } from "./scenes-window"
 import { PgQueryExplorerWindow } from "./pg-query-explorer-window"
@@ -3002,6 +3003,10 @@ export function DesktopShell() {
     })
   }, [assistantIdentity.name, focus, openWindow, liveWindows])
 
+  // The launcher registry is declared AFTER the assistant applier (it closes
+  // over dozens of openers), but open_panel needs it — read through a ref.
+  const launchersRef = useRef<LauncherItem[]>([])
+
   // Migration: earlier builds materialized the assistant as a canvas window
   // (kind "assistant"). Purge any that hydrate out of saved desktop state.
   useEffect(() => {
@@ -3488,6 +3493,33 @@ export function DesktopShell() {
             case "open_layout": {
               setActiveWallId(cmd.layout_id)
               report.push({ op: cmd.op, target: cmd.layout_id, status: "applied" })
+              return
+            }
+            case "open_panel": {
+              // The launcher registry IS the help index (synced to
+              // rvbbit.desktop_panels); activate() is pure UI — worst case
+              // is a window the user closes.
+              const launcher = launchersRef.current.find((l) => l.id === cmd.panel)
+              if (!launcher || launcher.visible === false || (launcher.rvbbit && !hasRvbbit)) {
+                report.push({ op: cmd.op, target: cmd.panel, status: "skipped", detail: `unknown panel "${cmd.panel}" — check rvbbit.desktop_panels for valid ids` })
+                return
+              }
+              const hint = cmd.hint?.trim().toLowerCase()
+              const supported = hint ? (PANEL_EXTRAS[cmd.panel]?.hints ?? []).includes(hint) : false
+              if (hint && supported && cmd.panel === "system-objects") {
+                openSystemObjects(hint as SystemObjectsPayload["initialCategory"])
+                report.push({ op: cmd.op, target: cmd.panel, status: "applied", detail: `→ ${hint}` })
+                return
+              }
+              launcher.activate()
+              report.push({
+                op: cmd.op,
+                target: cmd.panel,
+                status: "applied",
+                detail: hint
+                  ? `hint "${hint}" not supported — opened the default view; tell the user where to look`
+                  : undefined,
+              })
               return
             }
             case "register_kit": {
@@ -5548,6 +5580,31 @@ export function DesktopShell() {
     openCubeCatalog, openCubeCreator, openCubeInspector, openCubeProposals,
     openKgBrowser, openKgExplorer, openHindsightMemory, hindsightDetected, openQueryLens, openDrift,
   ])
+  launchersRef.current = launchers
+
+  // Sync the panel registry (0190) so the assistant can answer
+  // "where do I see X in DataRabbit?" by querying rvbbit.desktop_panels —
+  // id/label/description/folder from the launchers, hints/notes from the
+  // curated PANEL_EXTRAS map. Best-effort; pre-0190 servers just skip.
+  useEffect(() => {
+    if (!activeConnectionId || !hasRvbbit) return
+    const panels = launchersRef.current
+      .filter((l) => l.visible !== false)
+      .map((l) => ({
+        id: l.id,
+        label: l.label,
+        description: l.description ?? l.sublabel ?? null,
+        folder: l.folder ?? null,
+        hints: PANEL_EXTRAS[l.id]?.hints ?? [],
+        notes: PANEL_EXTRAS[l.id]?.notes ?? null,
+      }))
+    if (panels.length === 0) return
+    void fetch("/api/panels/sync", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ connectionId: activeConnectionId, panels }),
+    }).catch(() => {})
+  }, [activeConnectionId, hasRvbbit])
 
   const upsertDesktopShortcut = useCallback((shortcut: DesktopShortcut) => {
     setDesktopShortcuts((prev) => {

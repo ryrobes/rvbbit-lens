@@ -107,6 +107,8 @@ function commandChipLabel(cmd: AssistantCommand, report?: AssistantApplyResult):
       return `${skipped ? "couldn't patch" : "patched"} layout ${cmd.layout_id}`
     case "open_layout":
       return `opened layout ${cmd.layout_id}`
+    case "open_panel":
+      return `${skipped ? "couldn't open" : "opened"} ${cmd.panel}${cmd.hint ? ` → ${cmd.hint}` : ""}`
     case "register_kit":
       return `${skipped ? "couldn't register" : "registered"} kit ${cmd.kit}`
     default:
