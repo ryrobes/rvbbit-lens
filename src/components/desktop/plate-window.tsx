@@ -12,7 +12,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import { createPortal } from "react-dom"
 import { VegaEmbed } from "react-vega"
 import { vegaConfigFromTheme } from "@/lib/desktop/chart-theme"
-import { FileCode2, Layers, Loader2, RefreshCw } from "@/lib/icons"
+import { AppWindow, FileCode2, Layers, Loader2, Maximize2, RefreshCw } from "@/lib/icons"
 import { cn } from "@/lib/utils"
 import { ResultGrid } from "./result-grid"
 import type { QueryResultColumn } from "@/lib/db/types"
@@ -508,6 +508,8 @@ export function PlateWindow({
   onOpenApp,
   onEmitParam,
   busParams,
+  chromeless,
+  pinnedParams,
 }: {
   plateId: string
   activeConnectionId: string | null
@@ -517,6 +519,12 @@ export function PlateWindow({
   onOpenApp?: (appId: string, params: Record<string, string>) => void
   onEmitParam?: (field: string, value: unknown) => void
   busParams?: DesktopParamValue[]
+  /** Layout panes: render the plate body only — no strip, no utilities.
+   *  The wall's hover pill carries the escape hatches instead. */
+  chromeless?: boolean
+  /** Layout panes: params pinned by the layout row, merged UNDER live
+   *  local/bus values (a pin is a default, never a lock). */
+  pinnedParams?: Record<string, unknown>
 }) {
   const [plate, setPlate] = useState<RenderedPlate | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -553,7 +561,7 @@ export function PlateWindow({
         body: JSON.stringify({
           connectionId: activeConnectionId,
           plateId,
-          params: { ...busValues, ...localParams },
+          params: { ...(pinnedParams ?? {}), ...busValues, ...localParams },
         }),
       })
       const body = (await res.json()) as RenderedPlate
@@ -564,7 +572,7 @@ export function PlateWindow({
     } finally {
       setLoading(false)
     }
-  }, [activeConnectionId, plateId, localParams, busKey])
+  }, [activeConnectionId, plateId, localParams, busKey, pinnedParams])
 
   useEffect(() => {
     const timer = window.setTimeout(() => void refresh(), 0)
@@ -841,7 +849,9 @@ export function PlateWindow({
   return (
     <div className="flex h-full flex-col">
       {/* Title + icon live in the window title bar right above — the strip
-          carries only what the bar doesn't: description, notes, re-render. */}
+          carries only what the bar doesn't: description, notes, re-render.
+          Layout panes drop it entirely (chromeless): body only, seamless. */}
+      {chromeless ? null : (
       <div className="flex shrink-0 items-center gap-2 border-b border-chrome-border bg-chrome-bg/40 px-3 py-1.5 text-[12px]">
         <span className="truncate text-chrome-text/50">{plate?.description ?? plateId}</span>
         <div className="flex-1" />
@@ -870,6 +880,7 @@ export function PlateWindow({
           {loading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
         </button>
       </div>
+      )}
       <div className="min-h-0 flex-1 overflow-y-auto">
         {error ? (
           <div className="p-4 text-[12px] text-destructive">{error}</div>
@@ -938,6 +949,27 @@ export function PlateWindow({
 
 // ── Plates browser (the shelf) ──────────────────────────────────────────
 
+/** A compose-layer row (rvbbit.plate_layouts) as the shelf shows it. */
+export interface ShelfLayout {
+  layout_id: string
+  kit: string | null
+  title: string
+  description: string | null
+  design: { width: number; height: number; min_width?: number }
+  panes: Array<{
+    id: string
+    plate?: string
+    x: number
+    y: number
+    w: number
+    h: number
+    z?: number
+    params?: Record<string, unknown>
+    slot?: boolean
+    title?: string
+  }>
+}
+
 interface ShelfPlate {
   plate_id: string
   kit: string | null
@@ -971,18 +1003,32 @@ interface ShelfAvailableKit {
 export function PlatesWindow({
   activeConnectionId,
   onOpenPlate,
+  onOpenWall,
+  onStampLayout,
+  onSaveArrangement,
 }: {
   activeConnectionId: string | null
   onOpenPlate: (plateId: string, title: string) => void
+  /** Open a layout full-screen (wall mode). */
+  onOpenWall?: (layoutId: string) => void
+  /** Materialize a layout's panes as desktop windows (stamp mode). */
+  onStampLayout?: (layout: ShelfLayout) => void
+  /** Save the current workspace's plate windows as a new layout row. */
+  onSaveArrangement?: (input: { layout_id: string; title: string; kit: string | null }) => Promise<{ ok: boolean; error?: string; count?: number }>
 }) {
   const [plates, setPlates] = useState<ShelfPlate[]>([])
   const [kits, setKits] = useState<Record<string, ShelfKitMeta>>({})
   const [available, setAvailable] = useState<ShelfAvailableKit[]>([])
+  const [layouts, setLayouts] = useState<ShelfLayout[]>([])
   const [installing, setInstalling] = useState<string | null>(null)
   const [installNote, setInstallNote] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [reloadTick, setReloadTick] = useState(0)
+  const [saveOpen, setSaveOpen] = useState(false)
+  const [saveId, setSaveId] = useState("")
+  const [saveTitle, setSaveTitle] = useState("")
+  const [saveKit, setSaveKit] = useState("")
 
   useEffect(() => {
     let cancelled = false
@@ -999,6 +1045,7 @@ export function PlatesWindow({
           plates?: ShelfPlate[]
           kits?: Record<string, ShelfKitMeta>
           available?: ShelfAvailableKit[]
+          layouts?: ShelfLayout[]
           error?: string
         }
         if (cancelled) return
@@ -1007,6 +1054,7 @@ export function PlatesWindow({
           setPlates(body.plates ?? [])
           setKits(body.kits ?? {})
           setAvailable(body.available ?? [])
+          setLayouts(body.layouts ?? [])
         }
       } catch (e) {
         if (!cancelled) setError(e instanceof Error ? e.message : String(e))
@@ -1056,6 +1104,7 @@ export function PlatesWindow({
   )
 
   // Shelf order: named kits alphabetically, then the kit-less standalones.
+  // Layouts (the kit's front doors) list FIRST inside each group.
   const groups = useMemo(() => {
     const byKit = new Map<string, ShelfPlate[]>()
     for (const p of plates) {
@@ -1063,6 +1112,14 @@ export function PlatesWindow({
       const list = byKit.get(key) ?? []
       list.push(p)
       byKit.set(key, list)
+    }
+    const layoutsByKit = new Map<string, ShelfLayout[]>()
+    for (const l of layouts) {
+      const key = l.kit ?? ""
+      const list = layoutsByKit.get(key) ?? []
+      list.push(l)
+      layoutsByKit.set(key, list)
+      if (!byKit.has(key)) byKit.set(key, [])
     }
     const keys = [...byKit.keys()].sort((a, b) => {
       if (a === "") return 1
@@ -1073,8 +1130,9 @@ export function PlatesWindow({
       key,
       meta: key ? kits[key] : undefined,
       plates: (byKit.get(key) ?? []).slice().sort((a, b) => a.plate_id.localeCompare(b.plate_id)),
+      layouts: (layoutsByKit.get(key) ?? []).slice().sort((a, b) => a.layout_id.localeCompare(b.layout_id)),
     }))
-  }, [plates, kits])
+  }, [plates, kits, layouts])
 
   // Gates flip when plate actions change the data — re-list on the same
   // event the plate windows use to refresh themselves.
@@ -1092,13 +1150,73 @@ export function PlatesWindow({
         <span className="text-chrome-text/45">surfaces shipped as rows — they travel with the database</span>
         <div className="flex-1" />
         {installNote ? <span className="max-w-[46%] truncate text-[11px] text-main/80" title={installNote}>{installNote}</span> : null}
+        {onSaveArrangement ? (
+          <button
+            type="button"
+            onClick={() => setSaveOpen((o) => !o)}
+            title="Save this workspace's plate windows as a layout (their positions become the composition)"
+            className={saveOpen ? "text-main" : "text-chrome-text/50 hover:text-foreground"}
+          >
+            <Maximize2 className="h-3.5 w-3.5" />
+          </button>
+        ) : null}
       </div>
+      {saveOpen && onSaveArrangement ? (
+        <div className="flex items-center gap-1.5 border-b border-chrome-border bg-chrome-bg/25 px-3 py-1.5 text-[11px]">
+          <span className="text-chrome-text/50">save arrangement:</span>
+          <input
+            value={saveId}
+            onChange={(e) => setSaveId(e.target.value)}
+            placeholder="kit/home"
+            spellCheck={false}
+            className="w-32 rounded border border-chrome-border bg-transparent px-1.5 py-0.5 outline-none placeholder:text-chrome-text/30"
+          />
+          <input
+            value={saveTitle}
+            onChange={(e) => setSaveTitle(e.target.value)}
+            placeholder="Title"
+            className="w-32 rounded border border-chrome-border bg-transparent px-1.5 py-0.5 outline-none placeholder:text-chrome-text/30"
+          />
+          <input
+            value={saveKit}
+            onChange={(e) => setSaveKit(e.target.value)}
+            placeholder="kit (optional)"
+            spellCheck={false}
+            className="w-24 rounded border border-chrome-border bg-transparent px-1.5 py-0.5 outline-none placeholder:text-chrome-text/30"
+          />
+          <button
+            type="button"
+            disabled={!saveId.trim()}
+            onClick={() => {
+              void onSaveArrangement({
+                layout_id: saveId.trim(),
+                title: saveTitle.trim() || saveId.trim(),
+                kit: saveKit.trim() || null,
+              }).then((r) => {
+                setInstallNote(
+                  r.ok ? `saved ${saveId.trim()} (${r.count ?? 0} panes)` : (r.error ?? "save failed"),
+                )
+                if (r.ok) {
+                  setSaveOpen(false)
+                  setSaveId("")
+                  setSaveTitle("")
+                  setSaveKit("")
+                  setReloadTick((t) => t + 1)
+                }
+              })
+            }}
+            className="rounded border border-main/40 px-2 py-0.5 text-main disabled:opacity-40"
+          >
+            save
+          </button>
+        </div>
+      ) : null}
       <div className="min-h-0 flex-1 overflow-y-auto p-2">
         {loading ? (
           <div className="p-4 text-chrome-text/50">loading…</div>
         ) : error ? (
           <div className="p-4 text-destructive">{error}</div>
-        ) : plates.length === 0 ? (
+        ) : plates.length === 0 && layouts.length === 0 ? (
           <div className="p-4 leading-relaxed text-chrome-text/55">
             No plates installed. Kits ship them; so can you:{" "}
             <code className="text-main/80">SELECT rvbbit.upsert_plate(…)</code>
@@ -1126,6 +1244,39 @@ export function PlatesWindow({
                 </div>
                 {g.meta?.description ? (
                   <div className="mb-1.5 truncate px-1 text-[10.5px] text-chrome-text/40">{g.meta.description}</div>
+                ) : null}
+                {g.layouts.length > 0 ? (
+                  <div className="mb-1.5 flex flex-col gap-1">
+                    {g.layouts.map((l) => (
+                      <div
+                        key={l.layout_id}
+                        className="flex items-center gap-2 rounded-md border border-main/25 bg-main/[0.05] px-2 py-1.5"
+                      >
+                        <Maximize2 className="h-3.5 w-3.5 shrink-0 text-main/70" />
+                        <button
+                          type="button"
+                          onClick={() => onOpenWall?.(l.layout_id)}
+                          className="min-w-0 flex-1 truncate text-left hover:text-foreground"
+                          title={l.description ?? `Open ${l.layout_id} full-screen`}
+                        >
+                          <span className="text-foreground">{l.title}</span>
+                          <span className="ml-2 text-[10px] text-chrome-text/45">
+                            {l.layout_id} · {l.panes.length} {l.panes.length === 1 ? "pane" : "panes"}
+                          </span>
+                        </button>
+                        {onStampLayout ? (
+                          <button
+                            type="button"
+                            onClick={() => onStampLayout(l)}
+                            title="Stamp onto the desktop as windows"
+                            className="shrink-0 text-chrome-text/45 hover:text-foreground"
+                          >
+                            <AppWindow className="h-3.5 w-3.5" />
+                          </button>
+                        ) : null}
+                      </div>
+                    ))}
+                  </div>
                 ) : null}
                 <div className="flex flex-col gap-1">
                   {g.plates.map((p) => (

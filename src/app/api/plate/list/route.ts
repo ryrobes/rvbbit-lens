@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server"
 import { listAvailableKits, listKits, listPlates } from "@/lib/server/plates"
+import { listLayouts } from "@/lib/server/layouts"
 
 export const runtime = "nodejs"
 
@@ -9,12 +10,13 @@ export async function POST(req: Request) {
     return NextResponse.json({ ok: false, error: "connectionId required" }, { status: 400 })
   }
   try {
-    const [plates, kits] = await Promise.all([
+    const [plates, kits, layouts] = await Promise.all([
       listPlates(body.connectionId),
       listKits(body.connectionId),
+      listLayouts(body.connectionId),
     ])
     const available = await listAvailableKits(body.connectionId, kits)
-    return NextResponse.json({ ok: true, plates, kits, available })
+    return NextResponse.json({ ok: true, plates, kits, available, layouts })
   } catch (e) {
     return NextResponse.json({ ok: false, error: e instanceof Error ? e.message : String(e) })
   }

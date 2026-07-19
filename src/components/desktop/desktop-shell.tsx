@@ -81,7 +81,8 @@ import { AppearanceWindow } from "./appearance-window"
 import { CommandPalette, type PaletteGroup, type PaletteItem } from "./command-palette"
 import { PgMonitorWindow } from "./pg-monitor-window"
 import { SystemHealthWindow } from "./system-health-window"
-import { PlateWindow, PlatesWindow } from "./plate-window"
+import { PlateWindow, PlatesWindow, type ShelfLayout } from "./plate-window"
+import { LayoutWall } from "./layout-wall"
 import { FittingRoomWindow } from "./fitting-room-window"
 import { ScenesWindow } from "./scenes-window"
 import { PgQueryExplorerWindow } from "./pg-query-explorer-window"
@@ -2408,7 +2409,11 @@ export function DesktopShell() {
   }, [focus, openWindow, liveWindows])
 
   const openPlate = useCallback(
-    (plateId: string, title?: string) => {
+    (plateIdRaw: string, title?: string) => {
+      // rv-open="plate:x@pane" targets a layout pane; on the desktop the
+      // suffix is meaningless — strip it and open the plate normally.
+      const at = plateIdRaw.lastIndexOf("@")
+      const plateId = at > 0 ? plateIdRaw.slice(0, at) : plateIdRaw
       const existing = liveWindows().find(
         (w) => w.kind === "plate" && (w.payload as PlatePayload | undefined)?.plateId === plateId,
       )
@@ -2422,6 +2427,103 @@ export function DesktopShell() {
       })
     },
     [focus, openWindow, liveWindows],
+  )
+
+  // ── Layouts (the compose layer — docs/PLATE_COMPOSE_PLAN.md) ────────
+  const [activeWallId, setActiveWallId] = useState<string | null>(null)
+
+  /** The world-coordinate rect currently visible — the canvas both stamp
+   *  and save-arrangement normalize against. */
+  const visibleWorldRect = useCallback(() => {
+    const vp = viewportRef.current
+    const innerW = typeof window !== "undefined" ? window.innerWidth : 1600
+    const innerH = typeof window !== "undefined" ? window.innerHeight : 900
+    return {
+      x: (0 - vp.x) / vp.scale + 16,
+      y: (0 - vp.y) / vp.scale + 72,
+      width: innerW / vp.scale - 32,
+      height: innerH / vp.scale - 96,
+    }
+  }, [])
+
+  /** Stamp mode: materialize a layout's panes as ordinary desktop windows
+   *  arranged per the geometry. Empty slots are skipped — a slot is an
+   *  invocation target, not a window. */
+  const stampLayout = useCallback(
+    (layout: ShelfLayout) => {
+      const vis = visibleWorldRect()
+      for (const pane of layout.panes) {
+        const plateId = pane.plate
+        if (!plateId) continue
+        const existing = liveWindows().find(
+          (w) => w.kind === "plate" && (w.payload as PlatePayload | undefined)?.plateId === plateId,
+        )
+        if (existing) continue
+        openWindow({
+          id: randomUUID(),
+          kind: "plate",
+          title: pane.title ?? plateId,
+          x: vis.x + pane.x * vis.width,
+          y: vis.y + pane.y * vis.height,
+          width: Math.max(240, pane.w * vis.width),
+          height: Math.max(180, pane.h * vis.height),
+          payload: { kind: "plate", plateId } satisfies PlatePayload,
+        })
+      }
+    },
+    [visibleWorldRect, liveWindows, openWindow],
+  )
+
+  /** The editor round trip: the desktop IS the layout editor. Current
+   *  workspace's plate windows → fraction rects against the visible world
+   *  → a layout row. */
+  const saveArrangementAsLayout = useCallback(
+    async (input: { layout_id: string; title: string; kit: string | null }) => {
+      const vis = visibleWorldRect()
+      const panes = liveWindows()
+        .filter((w) => w.kind === "plate" && !w.minimized)
+        .map((w, i) => {
+          const plateId = (w.payload as PlatePayload | undefined)?.plateId ?? ""
+          const clamp01 = (v: number) => Math.min(1, Math.max(0, v))
+          const x = clamp01((w.x - vis.x) / vis.width)
+          const y = clamp01((w.y - vis.y) / vis.height)
+          return {
+            id: plateId.replace(/[^a-zA-Z0-9_-]+/g, "_") || `pane_${i}`,
+            plate: plateId,
+            x,
+            y,
+            w: Math.min(1 - x, clamp01(w.width / vis.width)),
+            h: Math.min(1 - y, clamp01(w.height / vis.height)),
+            z: i,
+          }
+        })
+        .filter((p) => p.plate && p.w > 0.01 && p.h > 0.01)
+      if (panes.length === 0) {
+        return { ok: false, error: "no plate windows on this workspace to save" }
+      }
+      if (!activeConnectionId) return { ok: false, error: "no active connection" }
+      try {
+        const res = await fetch("/api/layout/upsert", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            connectionId: activeConnectionId,
+            layout: {
+              layout_id: input.layout_id,
+              title: input.title,
+              kit: input.kit,
+              design: { width: Math.round(vis.width), height: Math.round(vis.height) },
+              panes,
+            },
+          }),
+        })
+        const body = (await res.json()) as { ok: boolean; error?: string }
+        return body.ok ? { ok: true, count: panes.length } : { ok: false, error: body.error ?? "save failed" }
+      } catch (e) {
+        return { ok: false, error: e instanceof Error ? e.message : String(e) }
+      }
+    },
+    [visibleWorldRect, liveWindows, activeConnectionId],
   )
 
   const openFittingRoom = useCallback((kit?: string) => {
@@ -3250,6 +3352,82 @@ export function DesktopShell() {
                   }
                 }
               })
+              return
+            }
+            case "upsert_layout": {
+              const idx = report.length
+              report.push({ op: cmd.op, target: cmd.layout_id, status: "skipped", detail: "pending" })
+              const layoutCmd = cmd
+              pendingAsync.push(async () => {
+                if (!activeConnectionId) {
+                  report[idx] = { op: layoutCmd.op, target: layoutCmd.layout_id, status: "skipped", detail: "no active connection" }
+                  return
+                }
+                try {
+                  const res = await fetch("/api/layout/upsert", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                      connectionId: activeConnectionId,
+                      layout: {
+                        layout_id: layoutCmd.layout_id,
+                        title: layoutCmd.title,
+                        design: layoutCmd.design,
+                        panes: layoutCmd.panes,
+                        kit: layoutCmd.kit,
+                        description: layoutCmd.description,
+                        default: layoutCmd.default,
+                      },
+                    }),
+                  })
+                  const body = (await res.json()) as { ok: boolean; error?: string }
+                  report[idx] = body.ok
+                    ? { op: layoutCmd.op, target: layoutCmd.layout_id, status: "applied" }
+                    : { op: layoutCmd.op, target: layoutCmd.layout_id, status: "skipped", detail: body.error ?? "install failed" }
+                } catch (e) {
+                  report[idx] = { op: layoutCmd.op, target: layoutCmd.layout_id, status: "skipped", detail: e instanceof Error ? e.message : String(e) }
+                }
+              })
+              return
+            }
+            case "patch_layout": {
+              const idx = report.length
+              report.push({ op: cmd.op, target: cmd.layout_id, status: "skipped", detail: "pending" })
+              const layoutCmd = cmd
+              pendingAsync.push(async () => {
+                if (!activeConnectionId) {
+                  report[idx] = { op: layoutCmd.op, target: layoutCmd.layout_id, status: "skipped", detail: "no active connection" }
+                  return
+                }
+                try {
+                  const res = await fetch("/api/layout/patch", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                      connectionId: activeConnectionId,
+                      patch: {
+                        layout_id: layoutCmd.layout_id,
+                        title: layoutCmd.title,
+                        description: layoutCmd.description,
+                        kit: layoutCmd.kit,
+                        design: layoutCmd.design,
+                        panes: layoutCmd.panes,
+                      },
+                    }),
+                  })
+                  const body = (await res.json()) as { ok: boolean; error?: string; detail?: string }
+                  report[idx] = body.ok
+                    ? { op: layoutCmd.op, target: layoutCmd.layout_id, status: "applied", detail: body.detail }
+                    : { op: layoutCmd.op, target: layoutCmd.layout_id, status: "skipped", detail: body.error ?? "patch failed" }
+                } catch (e) {
+                  report[idx] = { op: layoutCmd.op, target: layoutCmd.layout_id, status: "skipped", detail: e instanceof Error ? e.message : String(e) }
+                }
+              })
+              return
+            }
+            case "open_layout": {
+              setActiveWallId(cmd.layout_id)
+              report.push({ op: cmd.op, target: cmd.layout_id, status: "applied" })
               return
             }
             case "register_kit": {
@@ -5568,6 +5746,9 @@ export function DesktopShell() {
       onClearNotifications: clearNotifications,
       openOperatorFlow,
       openPlate,
+      openLayoutWall: setActiveWallId,
+      stampLayout,
+      saveArrangementAsLayout,
       openFittingRoom,
       openSpecialistDetail,
       openBrain,
@@ -5616,7 +5797,7 @@ export function DesktopShell() {
       wallpaperUrl, onPickWallpaper, onClearWallpaper, onApplyLibraryWallpaper, applyUploadedWallpaper,
       onReExtractPalette, onReExtractWithRvbbit, setPaletteOverrides,
       notifications, watchedChannels, windowChannels, notifyStatus, addWatchedChannel,
-      removeWatchedChannel, clearNotifications, openOperatorFlow, openPlate, openFittingRoom, openSpecialistDetail,
+      removeWatchedChannel, clearNotifications, openOperatorFlow, openPlate, stampLayout, saveArrangementAsLayout, openFittingRoom, openSpecialistDetail,
       openBrain, openMcpServers, openMcpServerDetail, openRouting, openQueryLens, openKgBrowser, openKgEntity,
       openSourceRow, openKgForSource, openKgExtractionRuns, openKgMergeReview, openKgExplorer, openHindsightMemory,
       openDataSearch, openDrift, openModelSettings, openModelStudio, openMetricCatalog, openMetricCreator,
@@ -5645,6 +5826,30 @@ export function DesktopShell() {
       onMouseDown={handleDesktopMouseDown}
       onContextMenu={handleDesktopContextMenu}
     >
+      {activeWallId ? (
+        <LayoutWall
+          layoutId={activeWallId}
+          activeConnectionId={activeConnectionId}
+          onClose={() => setActiveWallId(null)}
+          onOpenSql={openSqlInWindow}
+          onOpenApp={(appId, params) => {
+            if (appId === "fitting") openFittingRoom(params.kit)
+          }}
+          onEmitParam={(paneId, field, value) =>
+            emitParam({
+              sourceWindowId: `wall:${activeWallId}:${paneId}`,
+              sourceBlockName: `wall:${paneId}`,
+              sourceTitle: paneId,
+              field,
+              value,
+              operator: "eq",
+              cascade: true,
+            })
+          }
+          onPopOut={(plateId) => openPlate(plateId)}
+          busParams={desktopParams}
+        />
+      ) : null}
       <AssistantDock
         open={assistantOpen && hasRvbbit}
         onClose={() => setAssistantOpen(false)}
@@ -6146,6 +6351,9 @@ interface WindowContext {
   openConnections: () => void
   openOperatorFlow: (operatorName: string | null, receiptId?: string | null) => void
   openPlate: (plateId: string, title?: string) => void
+  openLayoutWall: (layoutId: string) => void
+  stampLayout: (layout: ShelfLayout) => void
+  saveArrangementAsLayout: (input: { layout_id: string; title: string; kit: string | null }) => Promise<{ ok: boolean; error?: string; count?: number }>
   openFittingRoom: (kit?: string) => void
   openSpecialistDetail: (specialistName: string) => void
   openBrain: () => void
@@ -6536,6 +6744,9 @@ function renderWindowContent(
         <PlatesWindow
           activeConnectionId={ctx.activeConnectionId}
           onOpenPlate={ctx.openPlate}
+          onOpenWall={ctx.openLayoutWall}
+          onStampLayout={ctx.stampLayout}
+          onSaveArrangement={ctx.saveArrangementAsLayout}
         />
       )
     case "fitting":

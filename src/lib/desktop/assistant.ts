@@ -123,6 +123,32 @@ export type AssistantCommand =
     }
   | { op: "open_plate"; plate_id: string; title?: string }
   | {
+      /** Install (or replace) a layout — a kit-shipped free-floating
+       *  composition of plates (fraction rects + z on a design size).
+       *  Layouts own arrangement, never behavior. `default: true` also
+       *  points the kit's front door (kits.default_layout) at it. */
+      op: "upsert_layout"
+      layout_id: string
+      title?: string
+      design?: { width: number; height: number; min_width?: number }
+      panes?: Array<Record<string, unknown>>
+      kit?: string | null
+      description?: string
+      default?: boolean
+    }
+  | {
+      /** Partially update an EXISTING layout: fields replace when present;
+       *  panes merge PER ID (null removes a pane). */
+      op: "patch_layout"
+      layout_id: string
+      title?: string
+      description?: string
+      kit?: string | null
+      design?: { width: number; height: number; min_width?: number }
+      panes?: Record<string, Record<string, unknown> | null>
+    }
+  | { op: "open_layout"; layout_id: string }
+  | {
       /** Register/re-register a kit's metadata (title/version/description).
        *  Downgrades refused engine-side; the error lands in apply_report. */
       op: "register_kit"

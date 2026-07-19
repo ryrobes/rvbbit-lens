@@ -97,8 +97,16 @@ function commandChipLabel(cmd: AssistantCommand, report?: AssistantApplyResult):
       return `closed ${cmd.target}`
     case "upsert_plate":
       return `${skipped ? "couldn't install" : "installed"} plate ${cmd.plate_id}`
+    case "patch_plate":
+      return `${skipped ? "couldn't patch" : "patched"} plate ${cmd.plate_id}`
     case "open_plate":
       return `opened ${cmd.plate_id}`
+    case "upsert_layout":
+      return `${skipped ? "couldn't install" : "installed"} layout ${cmd.layout_id}`
+    case "patch_layout":
+      return `${skipped ? "couldn't patch" : "patched"} layout ${cmd.layout_id}`
+    case "open_layout":
+      return `opened layout ${cmd.layout_id}`
     case "register_kit":
       return `${skipped ? "couldn't register" : "registered"} kit ${cmd.kit}`
     default:

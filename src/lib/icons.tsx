@@ -57,6 +57,7 @@ export {
   Clock,
   Coffee,
   Compass,
+  CornersIn as Minimize2,
   CornersOut as Maximize2,
   Cpu,
   Check,
