@@ -127,6 +127,38 @@ function bindQueryParams(sql: string, params: Record<string, unknown>): string {
   })
 }
 
+// Inline-style allowlist: visual properties only. Missing from this set BY
+// DESIGN: position/inset/z-index (escape the plate box), transform family,
+// pointer-events, cursor, content, visibility, will-change, backdrop-filter
+// (containing-block trap), transition/animation (no keyframes anyway).
+const STYLE_PROPS = new Set([
+  "color", "background", "background-color", "background-image", "background-size",
+  "background-position", "background-repeat", "background-clip",
+  "border", "border-top", "border-right", "border-bottom", "border-left",
+  "border-width", "border-style", "border-color", "border-radius",
+  "border-top-left-radius", "border-top-right-radius",
+  "border-bottom-left-radius", "border-bottom-right-radius",
+  "border-collapse", "border-spacing", "outline", "outline-offset",
+  "box-shadow", "text-shadow", "opacity", "filter", "mix-blend-mode",
+  "font", "font-size", "font-weight", "font-style", "font-family", "font-variant-numeric",
+  "letter-spacing", "line-height", "text-align", "text-transform",
+  "text-decoration", "text-overflow", "text-wrap", "white-space", "word-break", "vertical-align",
+  "padding", "padding-top", "padding-right", "padding-bottom", "padding-left",
+  "margin", "margin-top", "margin-right", "margin-bottom", "margin-left",
+  "width", "height", "min-width", "min-height", "max-width", "max-height",
+  "aspect-ratio", "object-fit", "overflow", "overflow-x", "overflow-y",
+  "display", "gap", "row-gap", "column-gap",
+  "flex", "flex-direction", "flex-wrap", "flex-grow", "flex-shrink", "flex-basis",
+  "align-items", "align-content", "align-self",
+  "justify-content", "justify-items", "justify-self",
+  "grid-template-columns", "grid-template-rows", "grid-template-areas",
+  "grid-column", "grid-row", "grid-area", "grid-auto-flow", "grid-auto-rows", "grid-auto-columns",
+  "place-items", "place-content", "place-self", "columns", "column-count",
+])
+// Value-level deny: no network fetches, no legacy script vectors. Applied
+// after interpolation, so DATA that tries to smuggle url() dies here too.
+const STYLE_VALUE_DENY = /url\s*\(|expression\s*\(|javascript:|@import|-moz-binding/i
+
 const SANITIZE_OPTS: sanitizeHtml.IOptions = {
   allowedTags: [
     "div", "section", "article", "header", "footer", "main", "aside",
@@ -140,7 +172,10 @@ const SANITIZE_OPTS: sanitizeHtml.IOptions = {
   ],
   allowedAttributes: {
     "*": [
-      "class", "title", "colspan", "rowspan",
+      // style passes the sanitizer intact (template tokens may live inside
+      // it) — the FINAL render pass enforces STYLE_PROPS/STYLE_VALUE_DENY
+      // on real, post-interpolation values.
+      "class", "style", "title", "colspan", "rowspan",
       // the vocabulary — everything else is stripped
       "rv-each", "rv-group", "rv-if", "rv-action", "rv-emit", "rv-value",
       "rv-open-sql", "rv-open-sql-title", "rv-open", "rv-open-title",
@@ -169,6 +204,11 @@ const SANITIZE_OPTS: sanitizeHtml.IOptions = {
   },
   disallowedTagsMode: "discard",
   allowedSchemes: [], // no URLs anywhere in v1
+  // Never postcss-parse style attrs: template tokens ({{ row.x }}) live
+  // inside them pre-expansion and break the parser, which silently drops
+  // the attribute. The final render pass (STYLE_PROPS/STYLE_VALUE_DENY)
+  // is the sole style enforcer, and it sees real values.
+  parseStyleAttributes: false,
 }
 
 // ── Plate source (view SQL / history) ───────────────────────────────────
@@ -649,7 +689,7 @@ export async function renderPlate(
     ...SANITIZE_OPTS,
     allowedAttributes: {
       ...baseAttrs,
-      div: ["class", "title", "data-rv-island"],
+      div: ["class", "style", "title", "data-rv-island"],
     },
   })
 
@@ -671,6 +711,32 @@ export async function renderPlate(
       if (kept.length !== cls.split(/\s+/).filter(Boolean).length) {
         $$(el).attr("class", kept.join(" "))
       }
+    })
+    // Style scrub: inline style is ALLOWED, property-allowlisted. The
+    // guardrail was never "no styles" — it's containment: nothing may
+    // escape the plate box (position/z/transform/pointer-events) and
+    // nothing may phone home (url()). Everything visual — arbitrary
+    // colors, gradients, exact grid templates, shadows, typography,
+    // data-driven widths from SQL — is decoration and passes. Runs on
+    // the FINAL document, so interpolated values are inspected as real
+    // values, not template tokens.
+    $$("[style]").each((_, el) => {
+      const raw = String($$(el).attr("style") ?? "")
+      const kept = raw
+        .split(";")
+        .map((decl) => {
+          const idx = decl.indexOf(":")
+          if (idx < 1) return null
+          const prop = decl.slice(0, idx).trim().toLowerCase()
+          const value = decl.slice(idx + 1).trim()
+          if (!prop || !value) return null
+          if (!STYLE_PROPS.has(prop)) return null
+          if (STYLE_VALUE_DENY.test(value)) return null
+          return `${prop}: ${value}`
+        })
+        .filter(Boolean)
+      if (kept.length > 0) $$(el).attr("style", kept.join("; "))
+      else $$(el).removeAttr("style")
     })
     html = $$.html() ?? html
   }
