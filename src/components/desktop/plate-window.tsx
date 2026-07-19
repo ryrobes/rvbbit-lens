@@ -192,6 +192,33 @@ function ChartIsland({
   onEmit?: (field: string, value: unknown, opts?: { toggle?: boolean }) => void
 }) {
   const emitField = island.props["rv-emit"]
+  // Responsive width, owned HERE. Vega's width:"container" measures the
+  // parent once at embed time — a portal-mounted island isn't laid out yet
+  // (=> 0px), and desktop-window drags never fire the window resize event
+  // Vega listens for. So: observe the content box, hand Vega an explicit
+  // pixel width with autosize:fit, and re-embed on real changes only
+  // (8px hysteresis keeps drag-resize from thrashing).
+  const measureRef = useRef<HTMLDivElement | null>(null)
+  const [chartWidth, setChartWidth] = useState<number | null>(null)
+  useEffect(() => {
+    const el = measureRef.current
+    if (!el) return
+    let raf = 0
+    const measure = () => {
+      const w = Math.floor(el.clientWidth)
+      if (w > 0) setChartWidth((prev) => (prev != null && Math.abs(prev - w) < 8 ? prev : w))
+    }
+    measure()
+    const ro = new ResizeObserver(() => {
+      cancelAnimationFrame(raf)
+      raf = requestAnimationFrame(measure)
+    })
+    ro.observe(el)
+    return () => {
+      cancelAnimationFrame(raf)
+      ro.disconnect()
+    }
+  }, [])
   const spec = useMemo(() => {
     const x = island.props.x ?? island.columns[0]?.name ?? "x"
     const y = island.props.y ?? island.columns[1]?.name ?? "y"
@@ -201,7 +228,8 @@ function ChartIsland({
     const hasActive = island.rows.some((r) => r.sel === "active")
     return {
       $schema: "https://vega.github.io/schema/vega-lite/v6.json",
-      width: "container" as const,
+      width: chartWidth ?? 400,
+      autosize: { type: "fit" as const, contains: "padding" as const },
       height: 220,
       background: "transparent",
       data: { values: island.rows },
@@ -215,7 +243,7 @@ function ChartIsland({
       },
       config: vegaConfigFromTheme(),
     }
-  }, [island, emitField])
+  }, [island, emitField, chartWidth])
   const handleEmbed = useCallback(
     (res: { view: { addEventListener: (type: string, h: (e: unknown, item: unknown) => void) => void } }) => {
       if (!emitField || !onEmit) return
@@ -233,8 +261,13 @@ function ChartIsland({
   )
   return (
     <div className="plate-chart">
-      {/* eslint-disable-next-line @typescript-eslint/no-explicit-any */}
-      <VegaEmbed spec={spec as any} options={{ actions: false, renderer: "canvas" }} style={{ width: "100%" }} onEmbed={handleEmbed} />
+      {/* Unpadded measuring wrapper: clientWidth here IS the drawable width. */}
+      <div ref={measureRef} style={{ width: "100%" }}>
+        {chartWidth != null ? (
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          <VegaEmbed spec={spec as any} options={{ actions: false, renderer: "canvas" }} style={{ width: "100%" }} onEmbed={handleEmbed} />
+        ) : null}
+      </div>
     </div>
   )
 }
