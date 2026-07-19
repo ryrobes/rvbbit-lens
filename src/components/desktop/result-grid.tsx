@@ -73,6 +73,22 @@ interface ResultGridProps {
    *  value is selected (the tile isn't filtered by its own filter, so this is the
    *  visible "you clicked this" indicator, mirroring single-block param highlighting). */
   highlightFilters?: CrossFilter[]
+  /** Opt-in spreadsheet editing (normal mode only; transposed stays read-only):
+   *  double-click an editable cell to edit in place — Enter commits, Esc/blur
+   *  cancels. The grid stays pure: the write path is whatever the host wires
+   *  (a plate action, a table UPDATE, a built-not-run statement). */
+  editable?: {
+    /** Column names that accept edits. */
+    columns: string[]
+    /** Commit handler; resolve true to keep the value, false to revert. */
+    onEdit: (input: {
+      row: Record<string, unknown>
+      rowIndex: number
+      column: QueryResultColumn
+      value: string
+      previous: unknown
+    }) => Promise<boolean> | boolean
+  }
 }
 
 const ROW_HEIGHT = 24
@@ -93,11 +109,48 @@ export function ResultGrid({
   onCellFilter,
   highlightFilters,
   extraCellMenuItems,
+  editable,
 }: ResultGridProps) {
   const parentRef = useRef<HTMLDivElement>(null)
   const [colWidths, setColWidths] = useState<Record<string, number>>({})
   const [selectedHeaders, setSelectedHeaders] = useState<Set<string>>(new Set())
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null)
+  // ── Inline editing (spreadsheet feel) ────────────────────────────────
+  // Keyed by SOURCE row index + column name, so filter/sort reshuffles
+  // can't misdirect a commit. Overrides show the committed value until the
+  // host refreshes `rows` (identity change clears them).
+  const [editing, setEditing] = useState<{ rowIdx: number; col: string; draft: string } | null>(null)
+  const [pendingCells, setPendingCells] = useState<Set<string>>(new Set())
+  const [overrides, setOverrides] = useState<Map<string, unknown>>(new Map())
+  useEffect(() => {
+    setOverrides(new Map())
+    setEditing(null)
+  }, [rows])
+  const editableCols = useMemo(
+    () => new Set((editable?.columns ?? []).map((c) => c.toLowerCase())),
+    [editable],
+  )
+  const canEdit = (name: string) => !!editable && !present && editableCols.has(name.toLowerCase())
+  const commitEdit = async (row: Record<string, unknown>, rowIdx: number, column: QueryResultColumn, draft: string) => {
+    const key = `${rowIdx}:${column.name}`
+    const previous = row?.[column.name]
+    setEditing(null)
+    // No-op edits never hit the write path.
+    if (draft === String(previous ?? "")) return
+    setPendingCells((s) => new Set(s).add(key))
+    let ok = false
+    try {
+      ok = await editable!.onEdit({ row, rowIndex: rowIdx, column, value: draft, previous })
+    } catch {
+      ok = false
+    }
+    setPendingCells((s) => {
+      const next = new Set(s)
+      next.delete(key)
+      return next
+    })
+    if (ok) setOverrides((m) => new Map(m).set(key, draft))
+  }
   // Client-side sort + filter over the already-fetched rows (no re-query).
   const [filter, setFilter] = useState("")
   const [sort, setSort] = useState<{ col: string; dir: "asc" | "desc" } | null>(null)
@@ -603,14 +656,54 @@ export function ResultGrid({
               style={{ transform: `translateY(${vrow.start}px)`, height: ROW_HEIGHT, minWidth: totalWidth }}
             >
               {columns.map((c, ci) => {
-                const value = row?.[c.name]
+                const sourceIdx = rows.indexOf(row)
+                const cellKey = `${sourceIdx}:${c.name}`
+                const value = overrides.has(cellKey) ? overrides.get(cellKey) : row?.[c.name]
                 const isNumeric = isNumericType(c)
                 const hl = paramHighlights.get(c.name)
                 const picked = hl ? hl.values.has(String(value)) : false
                 const crossPicked = crossHighlights.get(c.name)?.has(String(value)) ?? false
+                const cellEditable = canEdit(c.name)
+                const isEditing = editing != null && editing.rowIdx === sourceIdx && editing.col === c.name
+                const isPending = pendingCells.has(cellKey)
+                if (isEditing) {
+                  return (
+                    <div
+                      key={c.name}
+                      className="border-r border-chrome-border/30 bg-main/10 px-0.5 py-0"
+                      style={{ width: columnWidths[ci] }}
+                    >
+                      <input
+                        autoFocus
+                        value={editing.draft}
+                        onChange={(e) => setEditing((ed) => (ed ? { ...ed, draft: e.target.value } : ed))}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") {
+                            e.preventDefault()
+                            void commitEdit(row, sourceIdx, c, editing.draft)
+                          } else if (e.key === "Escape") {
+                            e.preventDefault()
+                            setEditing(null)
+                          }
+                        }}
+                        onBlur={() => setEditing(null)}
+                        className={cn(
+                          "h-full w-full bg-transparent text-[12px] text-foreground outline-none ring-1 ring-inset ring-main/60",
+                          isNumeric ? "text-right tabular-nums" : "text-left",
+                        )}
+                      />
+                    </div>
+                  )
+                }
                 return (
                   <div
                     key={c.name}
+                    onDoubleClick={(e) => {
+                      if (!cellEditable || isPending) return
+                      e.preventDefault()
+                      e.stopPropagation()
+                      setEditing({ rowIdx: sourceIdx, col: c.name, draft: value == null ? "" : String(value) })
+                    }}
                     onClick={(e) => {
                       // Cross-filter (multi-statement dashboard): a click filters
                       // sibling tiles by this column's real source table.
@@ -641,6 +734,8 @@ export function ResultGrid({
                       isNumeric ? "text-right tabular-nums" : "text-left",
                       value == null ? "text-chrome-text/40 italic" : "text-foreground",
                       (onEmitCellParam || onCellFilter) && "cursor-pointer hover:bg-main/10",
+                      cellEditable && "hover:ring-1 hover:ring-inset hover:ring-main/35",
+                      isPending && "animate-pulse text-chrome-text/50",
                       picked &&
                         (hl!.cascade
                           ? "bg-main/25 text-foreground"
@@ -649,11 +744,13 @@ export function ResultGrid({
                     )}
                     style={{ width: columnWidths[ci] }}
                     title={
-                      onCellFilter
-                        ? `${value == null ? "null" : String(formatCellValue(value))} — click to filter the dashboard`
-                        : onEmitCellParam
-                          ? `${value == null ? "null" : String(formatCellValue(value))} — click to select · ⌘ filter`
-                          : value == null ? "null" : String(formatCellValue(value))
+                      cellEditable
+                        ? `${value == null ? "null" : String(formatCellValue(value))} — double-click to edit · Enter saves · Esc cancels`
+                        : onCellFilter
+                          ? `${value == null ? "null" : String(formatCellValue(value))} — click to filter the dashboard`
+                          : onEmitCellParam
+                            ? `${value == null ? "null" : String(formatCellValue(value))} — click to select · ⌘ filter`
+                            : value == null ? "null" : String(formatCellValue(value))
                     }
                   >
                     {value == null ? "∅" : formatCellValue(value)}

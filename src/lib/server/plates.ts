@@ -57,6 +57,12 @@ export interface RenderedPlate {
   /** Extra kits whose data events also refresh this plate (foundation-kit
    *  overlays: an hvac plate listening to scheduling's actions). */
   listens: string[]
+  /** Render instrumentation — the plate window's strip shows totalMs and
+   *  the source menu shows per-query ms · rows. Make the invisible visible. */
+  debug: {
+    totalMs: number
+    queries: Array<{ name: string; ms: number; rows: number; error?: string }>
+  }
 }
 
 interface PlateRow {
@@ -156,6 +162,10 @@ const SANITIZE_OPTS: sanitizeHtml.IOptions = {
     // full Vega-Lite fragment via spec — the island force-injects data,
     // width, autosize, and theme, so spec is mark+encoding vocabulary only.
     "rv-chart": ["query", "spec", "x", "y", "mark", "color", "stack", "x-format", "y-format", "height", "rv-emit"],
+    // grid island: spreadsheet editing rides the action wall — a cell
+    // commit fires edit-action with {id, column, value}; the action's SQL
+    // (CASE per column) decides what actually persists.
+    "rv-grid": ["query", "edit-action", "edit", "id"],
   },
   disallowedTagsMode: "discard",
   allowedSchemes: [], // no URLs anywhere in v1
@@ -327,6 +337,7 @@ export async function renderPlate(
   plateId: string,
   callerParams: Record<string, unknown> = {},
 ): Promise<RenderedPlate> {
+  const renderStart = Date.now()
   const plate = await loadPlate(connectionId, plateId)
   if (!plate) throw new Error(`plate ${plateId} not found`)
   if (plate.requires_role && !(await roleAllowed(connectionId, plate.requires_role))) {
@@ -367,7 +378,9 @@ export async function renderPlate(
     string,
     { columns: QueryResultColumn[]; rows: Array<Record<string, unknown>>; error?: string }
   >()
+  const queryTimings: RenderedPlate["debug"]["queries"] = []
   for (const [name, q] of Object.entries(plate.queries ?? {})) {
+    const qStart = Date.now()
     try {
       const res = await executeQuery(connectionId, bindQueryParams(q.sql, params), {
         readOnly: true,
@@ -378,12 +391,11 @@ export async function renderPlate(
         columns: (res.columns ?? []) as QueryResultColumn[],
         rows: (res.rows ?? []) as Array<Record<string, unknown>>,
       })
+      queryTimings.push({ name, ms: Date.now() - qStart, rows: res.rows?.length ?? 0 })
     } catch (e) {
-      results.set(name, {
-        columns: [],
-        rows: [],
-        error: e instanceof Error ? e.message : String(e),
-      })
+      const error = e instanceof Error ? e.message : String(e)
+      results.set(name, { columns: [], rows: [], error })
+      queryTimings.push({ name, ms: Date.now() - qStart, rows: 0, error })
     }
   }
 
@@ -704,6 +716,7 @@ export async function renderPlate(
     params,
     busFields: (plate.params ?? []).filter((p) => p.from_bus === true).map((p) => p.name),
     listens: Array.isArray(plate.listens) ? plate.listens : [],
+    debug: { totalMs: Date.now() - renderStart, queries: queryTimings },
   }
 }
 

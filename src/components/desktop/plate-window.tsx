@@ -50,6 +50,11 @@ interface RenderedPlate {
   busFields?: string[]
   /** Extra kits whose data events also refresh this plate. */
   listens?: string[]
+  /** Render instrumentation: strip shows totalMs, source menu the rest. */
+  debug?: {
+    totalMs: number
+    queries: Array<{ name: string; ms: number; rows: number; error?: string }>
+  }
 }
 
 /** Fired after any plate action mutates data. Plates in the same kit
@@ -194,11 +199,14 @@ function SourceMenu({
   plateTitle,
   activeConnectionId,
   onOpenSql,
+  debug,
 }: {
   plateId: string
   plateTitle: string
   activeConnectionId: string
   onOpenSql: (title: string, sql: string, run: boolean) => void
+  /** Live render timings from the LAST render — merged onto the query list. */
+  debug?: RenderedPlate["debug"]
 }) {
   const [open, setOpen] = useState(false)
   const [info, setInfo] = useState<PlateSourceInfo | null>(null)
@@ -281,19 +289,27 @@ function SourceMenu({
                 Plate SQL (upsert — built, not run)
               </button>
               {info.queries.length > 0 ? <div className={heading}>queries</div> : null}
-              {info.queries.map((q) => (
-                <button
-                  key={q.name}
-                  type="button"
-                  className={item}
-                  onClick={() => {
-                    onOpenSql(`${plateTitle} — query: ${q.name}`, q.sql, false)
-                    setOpen(false)
-                  }}
-                >
-                  {q.name}
-                </button>
-              ))}
+              {info.queries.map((q) => {
+                const t = debug?.queries.find((d) => d.name === q.name)
+                return (
+                  <button
+                    key={q.name}
+                    type="button"
+                    className={`${item} flex items-center gap-2`}
+                    onClick={() => {
+                      onOpenSql(`${plateTitle} — query: ${q.name}`, q.sql, false)
+                      setOpen(false)
+                    }}
+                  >
+                    <span className="min-w-0 flex-1 truncate">{q.name}</span>
+                    {t ? (
+                      <span className={`shrink-0 text-[10px] tabular-nums ${t.error ? "text-destructive" : "text-chrome-text/40"}`}>
+                        {t.error ? "error" : `${t.ms}ms · ${t.rows}r`}
+                      </span>
+                    ) : null}
+                  </button>
+                )
+              })}
               <div className={heading}>history</div>
               {info.revisions.length === 0 ? (
                 <div className="px-2 py-1 text-[11px] text-chrome-text/40">no revisions yet</div>
@@ -830,11 +846,20 @@ export function PlateWindow({
         <span className="truncate text-chrome-text/50">{plate?.description ?? plateId}</span>
         <div className="flex-1" />
         {actionNote ? <span className="truncate text-[11px] text-warning">{actionNote}</span> : null}
+        {plate?.debug ? (
+          <span
+            className="shrink-0 text-[10px] tabular-nums text-chrome-text/35"
+            title={plate.debug.queries.map((q) => `${q.name}: ${q.error ? "error" : `${q.ms}ms · ${q.rows} rows`}`).join("\n") || "no queries"}
+          >
+            {plate.debug.totalMs}ms
+          </span>
+        ) : null}
         <SourceMenu
           plateId={plateId}
           plateTitle={plate?.title ?? plateId}
           activeConnectionId={activeConnectionId}
           onOpenSql={onOpenSql}
+          debug={plate?.debug}
         />
         <button
           type="button"
@@ -859,7 +884,35 @@ export function PlateWindow({
               return createPortal(
                 island.kind === "grid" ? (
                   <div className="plate-grid-island">
-                    <ResultGrid columns={island.columns} rows={island.rows} />
+                    <ResultGrid
+                      columns={island.columns}
+                      rows={island.rows}
+                      editable={
+                        island.props["edit-action"]
+                          ? {
+                              // edit="a,b" restricts; absent = every column
+                              // except the id column. What actually persists
+                              // is the ACTION's CASE — the grid is just the
+                              // gesture; the write wall is unchanged.
+                              columns: (island.props.edit
+                                ? island.props.edit.split(",").map((s) => s.trim()).filter(Boolean)
+                                : island.columns
+                                    .map((c) => c.name)
+                                    .filter((n) => n !== (island.props.id ?? island.columns[0]?.name))),
+                              onEdit: async ({ row, column, value }) => {
+                                const idCol = island.props.id ?? island.columns[0]?.name
+                                const id = idCol ? row[idCol] : undefined
+                                if (id == null) return false
+                                return runAction(island.props["edit-action"]!, {
+                                  id: String(id),
+                                  column: column.name,
+                                  value,
+                                })
+                              },
+                            }
+                          : undefined
+                      }
+                    />
                   </div>
                 ) : island.kind === "chart" ? (
                   <ChartIsland island={island} onEmit={handleEmit} />
