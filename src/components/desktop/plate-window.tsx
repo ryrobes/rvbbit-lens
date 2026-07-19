@@ -12,7 +12,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import { createPortal } from "react-dom"
 import { VegaEmbed } from "react-vega"
 import { vegaConfigFromTheme } from "@/lib/desktop/chart-theme"
-import { Layers, Loader2, RefreshCw } from "@/lib/icons"
+import { FileCode2, Layers, Loader2, RefreshCw } from "@/lib/icons"
 import { cn } from "@/lib/utils"
 import { ResultGrid } from "./result-grid"
 import type { QueryResultColumn } from "@/lib/db/types"
@@ -165,6 +165,150 @@ function BoardIsland({
   )
 }
 
+// ── Source menu ─────────────────────────────────────────────────────────
+// The strip's compact rail dropdown: the plate as a single upsert_plate
+// statement (built, NOT run — the bench→seed round trip), each named query,
+// and the 0182 revision ledger with restore statements. Everything opens as
+// a SQL window; nothing here executes anything.
+
+interface PlateSourceInfo {
+  ok: boolean
+  error?: string
+  upsertSql: string
+  queries: Array<{ name: string; sql: string }>
+  revisions: Array<{ rev: number; reason: string; captured_at: string; title: string }>
+}
+
+function relativeTime(iso: string): string {
+  const t = Date.parse(iso.replace(" ", "T"))
+  if (!Number.isFinite(t)) return iso
+  const mins = Math.round((Date.now() - t) / 60000)
+  if (mins < 1) return "just now"
+  if (mins < 60) return `${mins}m ago`
+  if (mins < 60 * 24) return `${Math.round(mins / 60)}h ago`
+  return `${Math.round(mins / (60 * 24))}d ago`
+}
+
+function SourceMenu({
+  plateId,
+  plateTitle,
+  activeConnectionId,
+  onOpenSql,
+}: {
+  plateId: string
+  plateTitle: string
+  activeConnectionId: string
+  onOpenSql: (title: string, sql: string, run: boolean) => void
+}) {
+  const [open, setOpen] = useState(false)
+  const [info, setInfo] = useState<PlateSourceInfo | null>(null)
+  const rootRef = useRef<HTMLDivElement | null>(null)
+
+  useEffect(() => {
+    if (!open) return
+    let cancelled = false
+    void fetch("/api/plate/source", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ connectionId: activeConnectionId, plateId }),
+    })
+      .then((r) => r.json())
+      .then((body: PlateSourceInfo) => {
+        if (!cancelled) setInfo(body)
+      })
+      .catch((e) => {
+        if (!cancelled) setInfo({ ok: false, error: String(e), upsertSql: "", queries: [], revisions: [] })
+      })
+    const onDown = (e: MouseEvent) => {
+      if (rootRef.current && !rootRef.current.contains(e.target as Node)) setOpen(false)
+    }
+    window.addEventListener("mousedown", onDown)
+    return () => {
+      cancelled = true
+      window.removeEventListener("mousedown", onDown)
+    }
+  }, [open, activeConnectionId, plateId])
+
+  const item =
+    "block w-full truncate rounded px-2 py-1 text-left text-[11px] text-chrome-text/80 hover:bg-chrome-bg hover:text-foreground"
+  const heading = "px-2 pb-0.5 pt-1.5 text-[9px] uppercase tracking-wider text-chrome-text/40"
+
+  return (
+    <div ref={rootRef} className="relative">
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        title="Source & history (opens SQL — never runs it)"
+        className={open ? "text-foreground" : "text-chrome-text/50 hover:text-foreground"}
+      >
+        <FileCode2 className="h-3.5 w-3.5" />
+      </button>
+      {open ? (
+        <div className="absolute right-0 top-5 z-50 max-h-72 w-60 overflow-y-auto rounded-md border border-chrome-border bg-popover p-1 shadow-lg">
+          {!info ? (
+            <div className="grid place-items-center py-3">
+              <Loader2 className="h-3.5 w-3.5 animate-spin text-chrome-text/40" />
+            </div>
+          ) : !info.ok ? (
+            <div className="px-2 py-1.5 text-[11px] text-destructive">{info.error}</div>
+          ) : (
+            <>
+              <button
+                type="button"
+                className={item}
+                onClick={() => {
+                  onOpenSql(`${plateTitle} — plate SQL`, info.upsertSql, false)
+                  setOpen(false)
+                }}
+              >
+                Plate SQL (upsert — built, not run)
+              </button>
+              {info.queries.length > 0 ? <div className={heading}>queries</div> : null}
+              {info.queries.map((q) => (
+                <button
+                  key={q.name}
+                  type="button"
+                  className={item}
+                  onClick={() => {
+                    onOpenSql(`${plateTitle} — query: ${q.name}`, q.sql, false)
+                    setOpen(false)
+                  }}
+                >
+                  {q.name}
+                </button>
+              ))}
+              <div className={heading}>history</div>
+              {info.revisions.length === 0 ? (
+                <div className="px-2 py-1 text-[11px] text-chrome-text/40">no revisions yet</div>
+              ) : (
+                info.revisions.map((r) => (
+                  <button
+                    key={r.rev}
+                    type="button"
+                    className={item}
+                    title={r.title}
+                    onClick={() => {
+                      onOpenSql(
+                        `Restore ${plateId} @ rev ${r.rev}`,
+                        `-- ${r.reason} captured ${r.captured_at} (${r.title})\n` +
+                          `SELECT rvbbit.restore_plate(${`'${plateId.replace(/'/g, "''")}'`}, ${r.rev});`,
+                        false,
+                      )
+                      setOpen(false)
+                    }}
+                  >
+                    rev {r.rev} · {r.reason} · {relativeTime(r.captured_at)}
+                  </button>
+                ))
+              )}
+            </>
+          )}
+        </div>
+      ) : null}
+    </div>
+  )
+}
+
 function MetricIsland({ island }: { island: PlateIsland }) {
   const row = island.rows[0] ?? {}
   const valueCol = island.props.value ?? island.columns[0]?.name ?? ""
@@ -219,29 +363,75 @@ function ChartIsland({
       ro.disconnect()
     }
   }, [])
-  const spec = useMemo(() => {
+  const { spec, specError } = useMemo(() => {
+    const heightAttr = Number(island.props.height)
+    const height = Number.isFinite(heightAttr) && heightAttr > 0 ? Math.min(Math.max(heightAttr, 80), 800) : 220
+    // The island owns the plumbing regardless of authoring path: data,
+    // width, autosize, background, and theme are force-injected so a spec
+    // can never detach a chart from its query or its container.
+    const forced = {
+      $schema: "https://vega.github.io/schema/vega-lite/v6.json",
+      width: chartWidth ?? 400,
+      autosize: { type: "fit" as const, contains: "padding" as const },
+      background: "transparent",
+      data: { values: island.rows },
+      config: vegaConfigFromTheme(),
+    }
+    // Full-latitude path: spec='{"mark":...,"encoding":...}' passes the rest
+    // of Vega-Lite through (layers, series, transforms, temporal axes).
+    if (island.props.spec) {
+      try {
+        const custom = JSON.parse(island.props.spec) as Record<string, unknown>
+        if (!custom || typeof custom !== "object" || Array.isArray(custom)) throw new Error("spec must be a JSON object")
+        const customHeight = Number(custom.height)
+        return {
+          spec: {
+            ...custom,
+            ...forced,
+            height: Number.isFinite(customHeight) && customHeight > 0
+              ? Math.min(Math.max(customHeight, 80), 800)
+              : height,
+          },
+          specError: null,
+        }
+      } catch (e) {
+        return { spec: null, specError: e instanceof Error ? e.message : String(e) }
+      }
+    }
     const x = island.props.x ?? island.columns[0]?.name ?? "x"
     const y = island.props.y ?? island.columns[1]?.name ?? "y"
     const mark = (island.props.mark ?? "bar") as "bar" | "line" | "area"
+    const stack = island.props.stack === "normalize" ? "normalize" : island.props.stack != null ? true : undefined
     // Selection-as-a-column, chart edition: when the query ships a `sel`
     // column and something is active, dim the rest.
     const hasActive = island.rows.some((r) => r.sel === "active")
     return {
-      $schema: "https://vega.github.io/schema/vega-lite/v6.json",
-      width: chartWidth ?? 400,
-      autosize: { type: "fit" as const, contains: "padding" as const },
-      height: 220,
-      background: "transparent",
-      data: { values: island.rows },
-      mark: { type: mark, tooltip: true, ...(emitField ? { cursor: "pointer" } : {}) },
-      encoding: {
-        x: { field: x, type: "nominal" as const, sort: null, axis: { title: null } },
-        y: { field: y, type: "quantitative" as const, axis: { title: null } },
-        ...(hasActive
-          ? { opacity: { condition: { test: "datum.sel === 'active'", value: 1 }, value: 0.35 } }
-          : {}),
+      spec: {
+        ...forced,
+        height,
+        mark: { type: mark, tooltip: true, ...(emitField ? { cursor: "pointer" } : {}) },
+        encoding: {
+          x: {
+            field: x,
+            type: "nominal" as const,
+            sort: null,
+            axis: { title: null, ...(island.props["x-format"] ? { format: island.props["x-format"] } : {}) },
+          },
+          y: {
+            field: y,
+            type: "quantitative" as const,
+            axis: { title: null, ...(island.props["y-format"] ? { format: island.props["y-format"] } : {}) },
+            ...(stack !== undefined ? { stack } : {}),
+          },
+          ...(island.props.color
+            ? { color: { field: island.props.color, type: "nominal" as const } }
+            : {}),
+          ...(hasActive
+            ? { opacity: { condition: { test: "datum.sel === 'active'", value: 1 }, value: 0.35 } }
+            : {}),
+        },
       },
-      config: vegaConfigFromTheme(),
+      specError: null,
     }
   }, [island, emitField, chartWidth])
   const handleEmbed = useCallback(
@@ -259,6 +449,9 @@ function ChartIsland({
     },
     [emitField, onEmit],
   )
+  if (specError) {
+    return <div className="plate-error">rv-chart spec is not valid JSON: {specError}</div>
+  }
   return (
     <div className="plate-chart">
       {/* Unpadded measuring wrapper: clientWidth here IS the drawable width. */}
@@ -618,6 +811,12 @@ export function PlateWindow({
         <span className="truncate text-chrome-text/50">{plate?.description ?? plateId}</span>
         <div className="flex-1" />
         {actionNote ? <span className="truncate text-[11px] text-warning">{actionNote}</span> : null}
+        <SourceMenu
+          plateId={plateId}
+          plateTitle={plate?.title ?? plateId}
+          activeConnectionId={activeConnectionId}
+          onOpenSql={onOpenSql}
+        />
         <button
           type="button"
           onClick={() => void refresh()}

@@ -1746,10 +1746,47 @@ export function DesktopShell() {
       // leave the canvas unchanged rather than duplicating it.
       if (c.windows.some((w) => w.id === win.id)) return c
       const nextZ = c.windows.reduce((m, w) => Math.max(m, w.zIndex), 0) + 1
+      // Cascade off stacked spawns. Nearly every opener passes a fixed
+      // (x,y), so the second folder/plate/settings window landed EXACTLY on
+      // the first. When the requested corner is already claimed, step
+      // down-right until it isn't, staying inside the visible world rect.
+      let { x, y } = win
+      const corners = c.windows.filter((w) => !w.minimized)
+      const claimed = (px: number, py: number) =>
+        corners.some((w) => Math.abs(w.x - px) < 24 && Math.abs(w.y - py) < 24)
+      if (claimed(x, y)) {
+        const vp = viewportRef.current
+        const innerW = typeof window !== "undefined" ? window.innerWidth : 1600
+        const innerH = typeof window !== "undefined" ? window.innerHeight : 900
+        const vis = {
+          x: (0 - vp.x) / vp.scale + 16,
+          y: (0 - vp.y) / vp.scale + 72,
+          width: innerW / vp.scale - 32,
+          height: innerH / vp.scale - 96,
+        }
+        const maxX = Math.max(vis.x, vis.x + vis.width - win.width)
+        const maxY = Math.max(vis.y, vis.y + vis.height - win.height)
+        for (let step = 1; step <= 24; step++) {
+          let nx = win.x + step * 32
+          let ny = win.y + step * 28
+          // Off the visible edge: wrap into a fresh lane instead of piling
+          // windows in the bottom-right corner.
+          if (nx > maxX || ny > maxY) {
+            const lane = Math.ceil(step / 8)
+            nx = Math.min(win.x + lane * 56, maxX)
+            ny = Math.min(vis.y + ((step * 28) % Math.max(112, maxY - vis.y)), maxY)
+          }
+          if (!claimed(nx, ny)) {
+            x = nx
+            y = ny
+            break
+          }
+        }
+      }
       return {
         ...c,
         zSeed: Math.max(c.zSeed, nextZ),
-        windows: [...c.windows, { ...win, zIndex: nextZ, minimized: false }],
+        windows: [...c.windows, { ...win, x, y, zIndex: nextZ, minimized: false }],
         focusedWindowId: win.id,
       }
     })
@@ -5565,6 +5602,7 @@ export function DesktopShell() {
         activeConnectionId={activeConnectionId}
         schema={schema}
         allWindows={windows}
+        focusedWindowId={focusedWindowId}
         params={desktopParams}
         getExecutionObservations={getAssistantExecutionObservations}
         queuedAttachments={assistantAttachments}

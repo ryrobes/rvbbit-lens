@@ -152,9 +152,101 @@ const SANITIZE_OPTS: sanitizeHtml.IOptions = {
     form: ["class", "rv-action"],
     // board island: columns from rows; a drop fires the named action {id, to}
     "rv-board": ["query", "group-by", "group-label", "id", "title", "value", "note", "tone", "action"],
+    // chart island: quick attrs (series/stack/axis formats/height) plus a
+    // full Vega-Lite fragment via spec — the island force-injects data,
+    // width, autosize, and theme, so spec is mark+encoding vocabulary only.
+    "rv-chart": ["query", "spec", "x", "y", "mark", "color", "stack", "x-format", "y-format", "height", "rv-emit"],
   },
   disallowedTagsMode: "discard",
   allowedSchemes: [], // no URLs anywhere in v1
+}
+
+// ── Plate source (view SQL / history) ───────────────────────────────────
+// Everything the strip's source menu shows: the full upsert_plate statement
+// (built, not run — the bench→seed round trip), each named query, and the
+// revision ledger (0182). SQL is generated HERE so dollar-quoting is done
+// once, correctly.
+
+export interface PlateSourceInfo {
+  plateId: string
+  title: string
+  kit: string | null
+  upsertSql: string
+  queries: Array<{ name: string; sql: string }>
+  revisions: Array<{ rev: number; reason: string; captured_at: string; title: string }>
+}
+
+function dollarQuote(text: string): string {
+  let tag = "plate"
+  let n = 0
+  while (text.includes(`$${tag}$`)) tag = `plate${++n}`
+  return `$${tag}$${text}$${tag}$`
+}
+
+export async function loadPlateSource(
+  connectionId: string,
+  plateId: string,
+): Promise<PlateSourceInfo | null> {
+  const res = await executeQuery(
+    connectionId,
+    `SELECT to_jsonb(p) AS plate FROM rvbbit.plates p WHERE plate_id = ${sqlLit(plateId)}`,
+    { readOnly: true, rowLimit: 1 },
+  )
+  const raw = res.rows?.[0]?.plate
+  const row = (typeof raw === "string" ? JSON.parse(raw) : raw) as Record<string, unknown> | undefined
+  if (!row) return null
+
+  const queriesObj = (row.queries ?? {}) as Record<string, { sql?: string }>
+  const jsonArg = (v: unknown, empty: string) => {
+    const s = JSON.stringify(v ?? JSON.parse(empty), null, 2)
+    return `${dollarQuote(s)}::jsonb`
+  }
+  const textArg = (v: unknown) => (v == null || v === "" ? "NULL" : dollarQuote(String(v)))
+  const lines = [
+    `SELECT rvbbit.upsert_plate(`,
+    `  ${sqlLit(plateId)},`,
+    `  ${dollarQuote(String(row.title ?? plateId))},`,
+    `  ${dollarQuote(String(row.template ?? ""))},`,
+    `  ${jsonArg(row.queries, "{}")},`,
+    `  ${jsonArg(row.actions, "{}")},`,
+    `  ${jsonArg(row.params, "[]")},`,
+    `  ${textArg(row.kit)},`,
+    `  ${textArg(row.description)},`,
+    `  ${Number(row.template_version) || 1}`,
+    `);`,
+  ]
+  // module / listens / requires_role live outside the upsert signature;
+  // emit the companion UPDATE so the statement round-trips the whole row.
+  const extras: string[] = []
+  if (row.module != null) extras.push(`module = ${sqlLit(String(row.module))}`)
+  if (row.requires_role != null) extras.push(`requires_role = ${sqlLit(String(row.requires_role))}`)
+  if (row.listens != null) extras.push(`listens = ${dollarQuote(JSON.stringify(row.listens))}::jsonb`)
+  if (extras.length > 0) {
+    lines.push(``, `UPDATE rvbbit.plates SET ${extras.join(", ")} WHERE plate_id = ${sqlLit(plateId)};`)
+  }
+
+  let revisions: PlateSourceInfo["revisions"] = []
+  try {
+    const rev = await executeQuery(
+      connectionId,
+      `SELECT rev, reason, captured_at::text AS captured_at, snapshot->>'title' AS title
+       FROM rvbbit.plate_revisions WHERE plate_id = ${sqlLit(plateId)}
+       ORDER BY rev DESC LIMIT 12`,
+      { readOnly: true, rowLimit: 12 },
+    )
+    revisions = (rev.rows ?? []) as unknown as PlateSourceInfo["revisions"]
+  } catch {
+    // pre-0182 server — the menu just shows no history
+  }
+
+  return {
+    plateId,
+    title: String(row.title ?? plateId),
+    kit: row.kit == null ? null : String(row.kit),
+    upsertSql: lines.join("\n"),
+    queries: Object.entries(queriesObj).map(([name, q]) => ({ name, sql: q?.sql ?? "" })),
+    revisions,
+  }
 }
 
 async function loadPlate(connectionId: string, plateId: string): Promise<PlateRow | null> {

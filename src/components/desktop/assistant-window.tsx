@@ -63,6 +63,8 @@ interface AssistantWindowProps {
   activeConnectionId: string | null
   schema: SchemaSnapshot | null
   allWindows: DesktopWindowState[]
+  /** The focused window — a hint for ambiguous targets, not a scope. */
+  focusedWindowId: string | null
   params: DesktopParamValue[]
   getExecutionObservations: () => Record<string, AssistantBlockExecutionObservation>
   queuedAttachments: AssistantImageAttachment[]
@@ -407,6 +409,7 @@ export function AssistantWindow({
   activeConnectionId,
   schema,
   allWindows,
+  focusedWindowId,
   params,
   getExecutionObservations,
   queuedAttachments,
@@ -648,6 +651,8 @@ export function AssistantWindow({
   // Latest desktop state without re-rendering the chat on every canvas change.
   const windowsRef = useRef(allWindows)
   windowsRef.current = allWindows
+  const focusedRef = useRef(focusedWindowId)
+  focusedRef.current = focusedWindowId
   const paramsRef = useRef(params)
   paramsRef.current = params
   const schemaRef = useRef(schema)
@@ -719,6 +724,7 @@ export function AssistantWindow({
           schemaRef.current,
           lastReportRef.current,
           getExecutionObservations(),
+          focusedRef.current,
         )
         const turn = await runAssistantTurn(
           activeConnectionId,

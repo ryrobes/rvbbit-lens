@@ -195,6 +195,7 @@ export function buildAssistantDesktopContext(
   schema: SchemaSnapshot | null,
   applyReport: AssistantApplyResult[] | null,
   executionObservations: Record<string, AssistantBlockExecutionObservation> = {},
+  focusedWindowId: string | null = null,
 ): Record<string, unknown> {
   // Resolved SQL (post reactive-rewrite) is what actually executes; raw
   // payload.sql may contain block./param. refs. Compile defensively — a broken
@@ -217,6 +218,10 @@ export function buildAssistantDesktopContext(
       title: w.title,
       rect: { x: w.x, y: w.y, width: w.width, height: w.height },
       minimized: w.minimized,
+      // Chatting doesn't steal window focus, so the focused window is a
+      // live signal of what the user is looking at — a disambiguation
+      // hint ("this chart", "make it wider"), never a scope restriction.
+      ...(w.id === focusedWindowId ? { focused: true } : {}),
     }
     if (w.kind === "data") {
       const payload = w.payload as DataPayload | undefined
@@ -269,6 +274,12 @@ export function buildAssistantDesktopContext(
         }
       : {}),
     spend_threshold_usd: loadSpendThreshold(),
+    ...(focusedWindowId && windows.some((w) => w.id === focusedWindowId)
+      ? {
+          focused_block_note:
+            "One block carries focused:true — the window the user currently has focused. When a request is ambiguous about its target ('this one', 'the chart', bare restyle asks), prefer the focused block; every other block remains fully addressable.",
+        }
+      : {}),
     blocks,
     params: params.map((p) => ({
       key: p.key,
