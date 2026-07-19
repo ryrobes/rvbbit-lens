@@ -39,6 +39,7 @@ export {
   BookOpen,
   Bookmark,
   Brain,
+  Broom,
   Bug,
   Calculator,
   Calendar,

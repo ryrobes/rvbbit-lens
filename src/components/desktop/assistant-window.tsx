@@ -43,6 +43,8 @@ import {
 } from "@/lib/desktop/assistant"
 import { useAssistantIdentity } from "@/lib/desktop/assistant-identity"
 import type { AssistantBlockExecutionObservation } from "@/lib/desktop/assistant-execution"
+import type { ReactCodeMirrorRef } from "@uiw/react-codemirror"
+import { AssistantChatInput } from "./assistant-chat-input"
 import { AssistantIdentityMark } from "./assistant-identity-mark"
 import { VoiceOrb } from "./voice-orb"
 import {
@@ -56,7 +58,7 @@ import {
   getVoicePlayer,
   type VoiceSettings,
 } from "@/lib/desktop/assistant-voice"
-import { Mic, Pencil, Quote, Volume2, VolumeX, Loader2 } from "@/lib/icons"
+import { Broom, Mic, Pencil, Quote, Volume2, VolumeX, Loader2 } from "@/lib/icons"
 import { MarkupEditor } from "./markup-editor"
 import { cn } from "@/lib/utils"
 
@@ -601,7 +603,7 @@ export function AssistantWindow({
             if (wantSend) void sendRef.current(text)
             else {
               setDraft((d) => (d ? `${d} ${text}` : text))
-              inputRef.current?.focus()
+              inputRef.current?.view?.focus()
             }
           }
         } catch {
@@ -647,7 +649,11 @@ export function AssistantWindow({
   }, [recording, finishRecording, cancelRecording])
   const lastReportRef = useRef<AssistantApplyResult[] | null>(null)
   const scrollRef = useRef<HTMLDivElement | null>(null)
-  const inputRef = useRef<HTMLTextAreaElement | null>(null)
+  const inputRef = useRef<ReactCodeMirrorRef | null>(null)
+  // Fresh slate: hide everything at or before this timestamp from the
+  // TRANSCRIPT only — the thread (and the model's rolling context) is
+  // untouched, and a reload brings everything back. Purely visual relief.
+  const [slateAt, setSlateAt] = useState<number | null>(null)
 
   // Latest desktop state without re-rendering the chat on every canvas change.
   const windowsRef = useRef(allWindows)
@@ -838,7 +844,7 @@ export function AssistantWindow({
       })
     } finally {
       setBusy(false)
-      inputRef.current?.focus()
+      inputRef.current?.view?.focus()
     }
   }, [draft, queuedAttachments, busy, activeConnectionId, applyCommands, getExecutionObservations, onConsumeQueuedAttachments])
 
@@ -855,6 +861,16 @@ export function AssistantWindow({
 
   return (
     <div className="relative flex h-full flex-col">
+      {messages.some((m) => slateAt == null || m.at > slateAt) ? (
+        <button
+          type="button"
+          onClick={() => setSlateAt(Date.now())}
+          title="Fresh slate — hide the messages above (display only; the thread and context are kept, reload restores)"
+          className="absolute right-2 top-1 z-20 grid h-5 w-5 place-items-center rounded-full text-chrome-text/35 transition-colors hover:text-main"
+        >
+          <Broom className="h-3.5 w-3.5" />
+        </button>
+      ) : null}
       {recording ? (
         <div
           className="absolute inset-0 z-30 flex flex-col items-center justify-center gap-4"
@@ -929,8 +945,18 @@ export function AssistantWindow({
           </div>
         ) : null}
         <div className="flex flex-col gap-4">
+          {slateAt != null && messages.some((m) => m.at <= slateAt) ? (
+            <button
+              type="button"
+              onClick={() => setSlateAt(null)}
+              className="mx-auto rounded-full border border-chrome-border/60 px-2.5 py-0.5 text-[10px] text-chrome-text/45 transition-colors hover:text-foreground"
+              title="Show the swept messages again"
+            >
+              {messages.filter((m) => m.at <= slateAt).length} swept · show
+            </button>
+          ) : null}
           {messages.map((m, messageIndex) =>
-            m.role === "user" ? (
+            slateAt != null && m.at <= slateAt ? null : m.role === "user" ? (
               <div key={m.id} className="flex justify-end">
                 <div
                   className="max-w-[82%] rounded-2xl rounded-br-sm px-3.5 py-2 text-[13px] leading-relaxed"
@@ -1244,35 +1270,34 @@ export function AssistantWindow({
               onCancel={() => setMarkupTarget(null)}
             />
           ) : null}
-          <div className="flex items-end gap-1.5">
-            <textarea
-              ref={inputRef}
+          <div
+            className="flex items-end gap-1.5"
+            // Capture phase so image pastes are intercepted BEFORE CodeMirror
+            // sees the event; text pastes fall through untouched.
+            onPasteCapture={(e) => {
+              if (!onQueueAttachment) return
+              const images = Array.from(e.clipboardData?.items ?? []).filter(
+                (it) => it.kind === "file" && it.type.startsWith("image/"),
+              )
+              if (images.length === 0) return
+              e.preventDefault()
+              e.stopPropagation()
+              for (const item of images) {
+                const file = item.getAsFile()
+                if (file) {
+                  void imageAttachmentFromBlob(file)
+                    .then(onQueueAttachment)
+                    .catch(() => {})
+                }
+              }
+            }}
+          >
+            <AssistantChatInput
+              editorRef={inputRef}
               value={draft}
+              onChange={setDraft}
+              onSend={() => void send()}
               disabled={busy || !activeConnectionId}
-              onChange={(e) => setDraft(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" && !e.shiftKey) {
-                  e.preventDefault()
-                  void send()
-                }
-              }}
-              onPaste={(e) => {
-                if (!onQueueAttachment) return
-                const images = Array.from(e.clipboardData?.items ?? []).filter(
-                  (it) => it.kind === "file" && it.type.startsWith("image/"),
-                )
-                if (images.length === 0) return
-                e.preventDefault()
-                for (const item of images) {
-                  const file = item.getAsFile()
-                  if (file) {
-                    void imageAttachmentFromBlob(file)
-                      .then(onQueueAttachment)
-                      .catch(() => {})
-                  }
-                }
-              }}
-              rows={2}
               placeholder={
                 recording
                   ? "listening…"
@@ -1280,11 +1305,6 @@ export function AssistantWindow({
                     ? "ask the desktop…"
                     : "connect to a database first"
               }
-              className="w-full flex-1 resize-none bg-transparent text-[13px] leading-relaxed outline-none"
-              style={{
-                color: "var(--foreground)",
-                caretColor: "var(--main)",
-              }}
             />
             {sttReady(voice) ? (
               <button
