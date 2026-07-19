@@ -9,6 +9,8 @@ import { PresentToggle } from "./present-toggle"
 import { SchedulerTray } from "./scheduler-tray"
 import { GqeTray } from "./gqe-tray"
 import { SceneTray } from "./scene-tray"
+import { PlatesTray } from "./plates-tray"
+import type { ShelfLayout } from "./plate-window"
 import { APP_NAME, APP_VERSION } from "@/lib/version"
 import {
   FONT_SCALE_LABELS,
@@ -113,6 +115,14 @@ interface DesktopMenuBarProps {
   onRenameScene: (id: string, name: string) => void
   onDeleteScene: (id: string) => void
   onSceneNameExists: (name: string, exceptId?: string) => boolean
+  // ── Plates tray (layouts & surfaces, reachable above any window pile) ──
+  onOpenPlateFromBar: (plateId: string, title?: string) => void
+  onOpenWallFromBar: (layoutId: string) => void
+  onStampLayoutFromBar: (layout: ShelfLayout) => void
+  onSaveArrangementFromBar: (input: { layout_id: string; title: string; kit: string | null }) => Promise<{ ok: boolean; error?: string; count?: number }>
+  onAddPlateShortcut: (plateId: string, title: string) => void
+  onAddLayoutShortcut: (layoutId: string, title: string) => void
+  onOpenPlatesShelf: () => void
 }
 
 // ── Entry / Submenu shape ───────────────────────────────────────────
@@ -220,6 +230,13 @@ export function DesktopMenuBar({
   onRenameScene,
   onDeleteScene,
   onSceneNameExists,
+  onOpenPlateFromBar,
+  onOpenWallFromBar,
+  onStampLayoutFromBar,
+  onSaveArrangementFromBar,
+  onAddPlateShortcut,
+  onAddLayoutShortcut,
+  onOpenPlatesShelf,
 }: DesktopMenuBarProps) {
   const assistantIdentity = useAssistantIdentity()
   const active = connections.find((c) => c.id === activeConnectionId) ?? null
@@ -395,6 +412,18 @@ export function DesktopMenuBar({
           onDelete={onDeleteScene}
           nameExists={onSceneNameExists}
         />
+        {hasRvbbit ? (
+          <PlatesTray
+            activeConnectionId={activeConnectionId}
+            onOpenPlate={onOpenPlateFromBar}
+            onOpenWall={onOpenWallFromBar}
+            onStampLayout={onStampLayoutFromBar}
+            onSaveArrangement={onSaveArrangementFromBar}
+            onAddPlateShortcut={onAddPlateShortcut}
+            onAddLayoutShortcut={onAddLayoutShortcut}
+            onOpenShelf={onOpenPlatesShelf}
+          />
+        ) : null}
       </div>
 
       {/* Right cluster: desktop picker → present → scheduler → clock (far right). */}

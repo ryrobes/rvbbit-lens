@@ -26,6 +26,7 @@ import {
   GitBranch,
   Globe,
   Layers,
+  Maximize2,
   Package,
   Palette as PaletteIcon,
   Plug,
@@ -409,7 +410,7 @@ const MIN_WORLD = -20000
 const DESKTOP_SHORTCUTS_KEY = "rvbbit-lens:desktop-shortcuts:v1"
 const DESKTOP_SHORTCUTS_CHANGED_EVENT = "rvbbit-lens:desktop-shortcuts-changed"
 
-type DesktopShortcutKind = "launcher" | "view-app" | "dashboard"
+type DesktopShortcutKind = "launcher" | "view-app" | "dashboard" | "plate" | "layout"
 
 interface DesktopShortcut {
   id: string
@@ -430,7 +431,7 @@ function isDesktopShortcut(value: unknown): value is DesktopShortcut {
   const v = value as Partial<DesktopShortcut> | null
   return !!v
     && typeof v.id === "string"
-    && (v.kind === "launcher" || v.kind === "view-app" || v.kind === "dashboard")
+    && (v.kind === "launcher" || v.kind === "view-app" || v.kind === "dashboard" || v.kind === "plate" || v.kind === "layout")
     && typeof v.targetId === "string"
     && typeof v.label === "string"
 }
@@ -5546,6 +5547,31 @@ export function DesktopShell() {
     })
   }, [upsertDesktopShortcut])
 
+  // Plates & layouts as desktop icons — the "these are real apps" conduit.
+  const addPlateShortcut = useCallback((plateId: string, title: string) => {
+    upsertDesktopShortcut({
+      id: shortcutId("plate", plateId),
+      kind: "plate",
+      targetId: plateId,
+      label: title || plateId,
+      sublabel: "Plate",
+      iconColor: "var(--brand-view-apps)",
+      createdAt: new Date().toISOString(),
+    })
+  }, [upsertDesktopShortcut])
+
+  const addLayoutShortcut = useCallback((layoutId: string, title: string) => {
+    upsertDesktopShortcut({
+      id: shortcutId("layout", layoutId),
+      kind: "layout",
+      targetId: layoutId,
+      label: title || layoutId,
+      sublabel: "Layout",
+      iconColor: "var(--main)",
+      createdAt: new Date().toISOString(),
+    })
+  }, [upsertDesktopShortcut])
+
   const viewAppsById = useMemo(() => new Map(listViewApps().map((app) => [app.id, app])), [viewAppCount])
 
   const desktopShortcutItems = useMemo(() => {
@@ -5591,9 +5617,33 @@ export function DesktopShell() {
           activate: () => openDashboardApp(shortcut.targetId, shortcut.label),
         }]
       }
+      if (shortcut.kind === "plate") {
+        if (!hasRvbbit) return []
+        return [{
+          shortcut,
+          label: shortcut.label,
+          sublabel: "Plate",
+          description: undefined as string | undefined,
+          icon: Layers,
+          color: shortcut.iconColor ?? "var(--brand-view-apps)",
+          activate: () => openPlate(shortcut.targetId, shortcut.label),
+        }]
+      }
+      if (shortcut.kind === "layout") {
+        if (!hasRvbbit) return []
+        return [{
+          shortcut,
+          label: shortcut.label,
+          sublabel: "Layout",
+          description: undefined as string | undefined,
+          icon: Maximize2,
+          color: shortcut.iconColor ?? "var(--main)",
+          activate: () => setActiveWallId(shortcut.targetId),
+        }]
+      }
       return []
     })
-  }, [desktopShortcuts, launchers, hasRvbbit, viewAppsById, openViewApp, openDashboardApp])
+  }, [desktopShortcuts, launchers, hasRvbbit, viewAppsById, openViewApp, openDashboardApp, openPlate])
 
   const openShortcutMenu = useCallback(
     (event: React.MouseEvent, item: (typeof desktopShortcutItems)[number]) => {
@@ -5996,6 +6046,13 @@ export function DesktopShell() {
         onRenameScene={renameSceneById}
         onDeleteScene={deleteSceneById}
         onSceneNameExists={sceneNameExists}
+        onOpenPlateFromBar={openPlate}
+        onOpenWallFromBar={setActiveWallId}
+        onStampLayoutFromBar={stampLayout}
+        onSaveArrangementFromBar={saveArrangementAsLayout}
+        onAddPlateShortcut={addPlateShortcut}
+        onAddLayoutShortcut={addLayoutShortcut}
+        onOpenPlatesShelf={openPlatesBrowser}
       />
 
       <DesktopParamsSurface params={desktopParams} onClear={removeParam} onSetBroadcast={setParamBroadcast} broadcastCountFor={broadcastCountFor} />
