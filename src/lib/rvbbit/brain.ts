@@ -1035,6 +1035,10 @@ export interface ExtractionStatus {
    *  errored (not running / unreachable); null = probe not attempted. */
   reachable: boolean | null
   connectorEndpoint: string | null
+  /** The default embedder backend + transport — local_embed means in-process
+   *  CPU embeddings, i.e. brain search works with the extension ALONE. */
+  embedBackend: string | null
+  embedTransport: string | null
 }
 
 /** Is the brain able to EAT DOCUMENTS right now? Registration facts plus a
@@ -1047,7 +1051,10 @@ export async function fetchExtractionStatus(connectionId: string): Promise<Extra
     `SELECT (SELECT endpoint_url FROM rvbbit.backends WHERE name='extract_doc') AS extract_endpoint,
             (SELECT endpoint_url FROM rvbbit.backends WHERE name='gdrive_connector') AS connector_endpoint,
             EXISTS(SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
-                   WHERE n.nspname='rvbbit' AND p.proname='extract_doc') AS op_installed`,
+                   WHERE n.nspname='rvbbit' AND p.proname='extract_doc') AS op_installed,
+            coalesce((SELECT value->>'backend' FROM rvbbit.settings WHERE key='default_embedder'), 'embed') AS embed_backend,
+            (SELECT b2.transport FROM rvbbit.backends b2
+             WHERE b2.name = coalesce((SELECT value->>'backend' FROM rvbbit.settings WHERE key='default_embedder'), 'embed')) AS embed_transport`,
   )
   const row = (r.ok ? (r.rows[0] ?? {}) : {}) as Record<string, unknown>
   const status: ExtractionStatus = {
@@ -1055,6 +1062,8 @@ export async function fetchExtractionStatus(connectionId: string): Promise<Extra
     extractEndpoint: row.extract_endpoint ? String(row.extract_endpoint) : null,
     reachable: null,
     connectorEndpoint: row.connector_endpoint ? String(row.connector_endpoint) : null,
+    embedBackend: row.embed_backend ? String(row.embed_backend) : null,
+    embedTransport: row.embed_transport ? String(row.embed_transport) : null,
   }
   if (status.opInstalled && status.extractEndpoint) {
     const probe = await run(
@@ -1065,6 +1074,37 @@ export async function fetchExtractionStatus(connectionId: string): Promise<Extra
     status.reachable = probe.ok
   }
   return status
+}
+
+/** Live corpus size (all sources, undeleted) — drives the empty-brain
+ *  first-touch behavior. */
+export async function fetchCorpusCount(connectionId: string): Promise<number> {
+  const r = await runRead(connectionId, "SELECT count(*)::int AS n FROM rvbbit.brain_documents WHERE deleted_at IS NULL")
+  if (!r.ok) return -1
+  return Number(r.rows[0]?.n ?? 0)
+}
+
+/** One-call local ingestion: rvbbit.brain_ingest_folder (0197). Text formats
+ *  need nothing beyond the extension; binaries route through extract_doc
+ *  when the sidecar is up. Idempotent per file path. */
+export async function ingestFolder(
+  connectionId: string,
+  dir: string,
+  source?: string,
+  roles?: string[],
+): Promise<{ result: Record<string, unknown> | null; error: string | null }> {
+  const lit = (v: string) => `'${v.replace(/'/g, "''")}'`
+  const rolesSql = roles && roles.length > 0 ? `ARRAY[${roles.map(lit).join(", ")}]::text[]` : "NULL"
+  const r = await run(
+    connectionId,
+    `SELECT rvbbit.brain_ingest_folder(${lit(dir)}, ${source ? lit(source) : "NULL"}, ${rolesSql}) AS r`,
+    1,
+    { statementTimeout: 600000 },
+  )
+  if (!r.ok) return { result: null, error: r.error }
+  const raw = r.rows[0]?.r
+  const result = (typeof raw === "string" ? JSON.parse(raw) : raw) as Record<string, unknown> | null
+  return { result, error: null }
 }
 
 /** Delete a source. purgeDocs=true wipes its docs + KG nodes + synthetic roles; false keeps docs

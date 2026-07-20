@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { Brain, Folder, FolderOpen, FileText, Eye, Lock, Users, Search, RefreshCw, ChevronRight, ChevronDown, X, Database } from "@/lib/icons"
 import { cn } from "@/lib/utils"
 import {
@@ -20,6 +20,7 @@ import {
   type BrainFacets,
 } from "@/lib/rvbbit/brain"
 import { SourcesPanel, DocGraph } from "./brain-sources-panel"
+import { fetchCorpusCount } from "@/lib/rvbbit/brain"
 import type { BrainPayload } from "@/lib/desktop/types"
 
 interface BrainExplorerWindowProps {
@@ -237,6 +238,7 @@ export function BrainExplorerWindow({ payload, activeConnectionId, hasRvbbit, on
   // access management
   const [adminMode, setAdminMode] = useState(false) // "All docs" (unfiltered triage) vs "View as"
   const [showSources, setShowSources] = useState(false) // remote-source admin panel
+  const autoSourcesRef = useRef(false)
   const [knownRoles, setKnownRoles] = useState<string[]>([])
   const [docMembers, setDocMembers] = useState<{ role: string; principal: string }[]>([])
   const [addRole, setAddRole] = useState("")
@@ -267,6 +269,18 @@ export function BrainExplorerWindow({ payload, activeConnectionId, hasRvbbit, on
     setError(res.error)
     setLoading(false)
   }, [conn, viewAs, adminMode])
+
+  // First-touch: a genuinely EMPTY brain opens on Sources — the useful view
+  // is "how do I feed this?", not a blank corpus. Checks the real corpus
+  // count (the browse fetch returns [] whenever no identity is picked, which
+  // is not the same thing). One-shot; never fights a user's own toggling.
+  useEffect(() => {
+    if (!conn || autoSourcesRef.current) return
+    autoSourcesRef.current = true
+    void fetchCorpusCount(conn).then((n) => {
+      if (n === 0) setShowSources(true)
+    })
+  }, [conn])
 
   useEffect(() => {
     setDetail(null)

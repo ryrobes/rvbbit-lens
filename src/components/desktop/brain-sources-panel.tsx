@@ -21,6 +21,7 @@ import {
   enrichDocNow,
   fetchNerStatus,
   fetchExtractionStatus,
+  ingestFolder,
   type ExtractionStatus,
   type BrainSource,
   type BrainSyncRun,
@@ -73,6 +74,12 @@ export function SourcesPanel({
   const [enrichBusy, setEnrichBusy] = useState<number | null>(null)
   const [confirmDel, setConfirmDel] = useState<{ sourceId: number; purge: boolean } | null>(null)
 
+  // local-folder ingest form
+  const [localDir, setLocalDir] = useState("/staging")
+  const [localSource, setLocalSource] = useState("")
+  const [localRoles, setLocalRoles] = useState("")
+  const [localBusy, setLocalBusy] = useState(false)
+
   // add-source form
   const [label, setLabel] = useState("")
   const [endpoint, setEndpoint] = useState("http://rvbbit-gdrive-connector:8080/sync")
@@ -117,6 +124,21 @@ export function SourcesPanel({
       cancelled = true
     }
   }, [conn])
+
+  const runLocalIngest = useCallback(async () => {
+    if (!conn || !localDir.trim() || localBusy) return
+    setLocalBusy(true)
+    const roles = localRoles.split(",").map((r) => r.trim()).filter(Boolean)
+    const { result, error } = await ingestFolder(conn, localDir.trim(), localSource.trim() || undefined, roles.length ? roles : undefined)
+    setLocalBusy(false)
+    if (error) setToast({ ok: false, msg: error })
+    else {
+      const r = result ?? {}
+      const errs = Array.isArray(r.errors) ? r.errors.length : 0
+      setToast({ ok: true, msg: `ingested ${r.ingested ?? 0} (${r.extracted ?? 0} extracted, ${r.skipped ?? 0} skipped${errs ? `, ${errs} errors` : ""}) from ${localDir.trim()}` })
+      void reload()
+    }
+  }, [conn, localDir, localSource, localRoles, localBusy, reload])
 
   const addSource = useCallback(async () => {
     if (!conn || !label.trim()) return
@@ -249,6 +271,15 @@ export function SourcesPanel({
             )}
           </div>
           <div className="flex items-center gap-2 pl-5 opacity-70">
+            {extraction.embedTransport === "local_embed" ? (
+              <span>Embeddings: in-process CPU ({extraction.embedBackend}) — search works with the extension alone.</span>
+            ) : extraction.embedTransport ? (
+              <span>Embeddings: {extraction.embedBackend} via {extraction.embedTransport}.</span>
+            ) : (
+              <span style={{ color: "var(--warning)" }}>No embedding backend — brain search is disabled until one is registered.</span>
+            )}
+          </div>
+          <div className="flex items-center gap-2 pl-5 opacity-70">
             {extraction.connectorEndpoint ? (
               <span>
                 Drive connector registered ({extraction.connectorEndpoint}) — run the “gdrive” compose profile
@@ -289,7 +320,40 @@ export function SourcesPanel({
         </div>
       )}
 
-      {/* add source */}
+      {/* local folder — the zero-capability path: text needs the extension
+          alone, binaries ride the (compose-default) extract sidecar */}
+      <div className="rounded p-2 flex flex-col gap-1.5" style={{ background: SOFTER }}>
+        <div className="flex items-center gap-1 text-[11px] opacity-70">
+          <Plus size={12} /> Ingest a local folder — drop files in the shared /staging volume, one click eats them
+        </div>
+        <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
+          <input value={localDir} onChange={(e) => setLocalDir(e.target.value)} placeholder="/staging/mydocs"
+            className="px-1.5 py-0.5 rounded outline-none" style={{ background: SOFT, width: 190 }}
+            title="A directory the DATABASE can read; binaries also need it under the volume the doc-extract sidecar shares (/staging in the shipped compose)" />
+          <input value={localSource} onChange={(e) => setLocalSource(e.target.value)} placeholder="source label (folder name)"
+            className="px-1.5 py-0.5 rounded outline-none" style={{ background: SOFT, width: 170 }} />
+          <input value={localRoles} onChange={(e) => setLocalRoles(e.target.value)} placeholder="roles, comma separated (default-deny)"
+            className="px-1.5 py-0.5 rounded outline-none flex-1" style={{ background: SOFT, minWidth: 180 }}
+            title="Access roles applied to every ingested doc; empty = source defaults (nobody sees them until granted)" />
+          <button onClick={() => void runLocalIngest()} disabled={!localDir.trim() || localBusy}
+            className="px-2 py-0.5 rounded disabled:opacity-40" style={{ background: "color-mix(in oklch, var(--chrome-text) 14%, transparent)" }}>
+            {localBusy ? "ingesting…" : "Ingest"}
+          </button>
+        </div>
+        <div className="text-[10.5px] opacity-50 pl-4">
+          md / txt / csv / json / html ingest with the extension alone; pdf / docx / xlsx / pptx / images via the
+          doc-extract service (status above). Re-runs are idempotent per file.
+        </div>
+      </div>
+
+      {/* add source — gated on the connector actually being registered */}
+      {extraction && !extraction.connectorEndpoint ? (
+        <div className="rounded p-2 text-[11px] opacity-60" style={{ background: SOFTER }}>
+          <Plus size={12} className="inline mr-1" /> Remote sources (Google Drive): the connector backend isn&apos;t
+          registered on this database — run migrations (0196 ships it), then enable the sidecar with the
+          &ldquo;gdrive&rdquo; compose profile and GDRIVE_SA_KEY.
+        </div>
+      ) : (
       <div className="rounded p-2 flex flex-col gap-1.5" style={{ background: SOFTER }}>
         <div className="flex items-center gap-1 text-[11px] opacity-70">
           <Plus size={12} /> Add a remote source (Google Drive docs or folders)
@@ -312,6 +376,7 @@ export function SourcesPanel({
           </button>
         </div>
       </div>
+      )}
 
       {/* providers & query sources (MCP / SQL-backed document types) */}
       <ProvidersSection conn={conn} providers={providers} reload={reload} setToast={setToast} />
