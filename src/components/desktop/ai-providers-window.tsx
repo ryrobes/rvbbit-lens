@@ -1,6 +1,6 @@
 "use client"
 
-import { useCallback, useEffect, useMemo, useState } from "react"
+import { useCallback, useEffect, useId, useMemo, useState } from "react"
 import { Check, ChevronDown, Loader2, Plug, RefreshCw, Sparkles, Trash2, X } from "@/lib/icons"
 import { cn } from "@/lib/utils"
 
@@ -47,6 +47,9 @@ interface ProviderRow {
   description: string
   is_default: boolean
   has_secret: boolean
+  /** Where the credential resolves TODAY, per the engine's own precedence:
+   *  env | secret | missing | none (empty name). Pre-0194 servers: unknown. */
+  key_state: "env" | "secret" | "missing" | "none" | "unknown"
   model_count: number
   models_fetched_at: string | null
 }
@@ -98,6 +101,10 @@ export function AiProvidersWindow({ activeConnectionId }: { activeConnectionId: 
   const [modelProvider, setModelProvider] = useState("")
   const [models, setModels] = useState<ModelRow[]>([])
   const [modelsOpen, setModelsOpen] = useState(false)
+  // Per-provider model ids for the test-input datalists (combobox: pick
+  // from the cached catalog, or type any id).
+  const [modelIds, setModelIds] = useState<Record<string, string[]>>({})
+  const listId = useId()
 
   const applyPreset = useCallback((id: (typeof PRESETS)[number]["id"]) => {
     const p = PRESETS.find((x) => x.id === id)!
@@ -112,19 +119,32 @@ export function AiProvidersWindow({ activeConnectionId }: { activeConnectionId: 
     if (!activeConnectionId) return
     let cancelled = false
     setLoading(true)
-    void dbQuery(
-      activeConnectionId,
-      `SELECT b.name, b.transport, b.endpoint_url, b.auth_header_env,
-              coalesce(b.max_concurrent, 4) AS max_concurrent,
-              coalesce(b.description, '') AS description,
-              (b.name = rvbbit.default_provider()) AS is_default,
-              EXISTS (SELECT 1 FROM rvbbit.list_secrets() s WHERE s.name = b.auth_header_env) AS has_secret,
-              (SELECT count(*) FROM rvbbit.provider_models m WHERE m.provider = b.name)::int AS model_count,
-              (SELECT max(fetched_at) FROM rvbbit.provider_models m WHERE m.provider = b.name)::text AS models_fetched_at
-       FROM rvbbit.backends b
-       WHERE b.transport IN ('openai_chat', 'anthropic', 'gemini', 'openai')
-       ORDER BY (b.name = rvbbit.default_provider()) DESC, b.name`,
-    ).then((res) => {
+    const load = async () => {
+      // A missing function fails at PARSE time even in an un-taken CASE
+      // branch, so probe for 0194's credential_state before referencing it
+      // (older engine + newer lens must still render).
+      const probe = await dbQuery(
+        activeConnectionId,
+        "SELECT to_regprocedure('rvbbit.credential_state(text)') IS NOT NULL AS ok",
+      )
+      const hasCredFn = probe.rows?.[0]?.ok === true
+      const keyStateExpr = hasCredFn
+        ? `CASE WHEN b.auth_header_env IS NULL THEN 'none' ELSE rvbbit.credential_state(b.auth_header_env) END`
+        : `CASE WHEN b.auth_header_env IS NULL THEN 'none' ELSE 'unknown' END`
+      const res = await dbQuery(
+        activeConnectionId,
+        `SELECT b.name, b.transport, b.endpoint_url, b.auth_header_env,
+                coalesce(b.max_concurrent, 4) AS max_concurrent,
+                coalesce(b.description, '') AS description,
+                (b.name = rvbbit.default_provider()) AS is_default,
+                EXISTS (SELECT 1 FROM rvbbit.list_secrets() s WHERE s.name = b.auth_header_env) AS has_secret,
+                ${keyStateExpr} AS key_state,
+                (SELECT count(*) FROM rvbbit.provider_models m WHERE m.provider = b.name)::int AS model_count,
+                (SELECT max(fetched_at) FROM rvbbit.provider_models m WHERE m.provider = b.name)::text AS models_fetched_at
+         FROM rvbbit.backends b
+         WHERE b.transport IN ('openai_chat', 'anthropic', 'gemini', 'openai')
+         ORDER BY (b.name = rvbbit.default_provider()) DESC, b.name`,
+      )
       if (cancelled) return
       if (res.error) setError(res.error)
       else {
@@ -132,11 +152,37 @@ export function AiProvidersWindow({ activeConnectionId }: { activeConnectionId: 
         setProviders((res.rows ?? []) as unknown as ProviderRow[])
       }
       setLoading(false)
-    })
+    }
+    void load()
     return () => {
       cancelled = true
     }
   }, [activeConnectionId, reloadTick])
+
+  // Catalog ids for the listed providers → test-input datalists.
+  useEffect(() => {
+    if (!activeConnectionId || providers.length === 0) return
+    let cancelled = false
+    const names = providers.map((p) => sqlLit(p.name)).join(", ")
+    void dbQuery(
+      activeConnectionId,
+      `SELECT provider, model FROM rvbbit.provider_models
+       WHERE provider IN (${names}) AND available
+       ORDER BY provider, model LIMIT 1500`,
+      1500,
+    ).then((res) => {
+      if (cancelled || res.error) return
+      const map: Record<string, string[]> = {}
+      for (const r of res.rows ?? []) {
+        const prov = String(r.provider)
+        ;(map[prov] ??= []).push(String(r.model))
+      }
+      setModelIds(map)
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [activeConnectionId, providers])
 
   useEffect(() => {
     if (!activeConnectionId || !modelsOpen) return
@@ -302,10 +348,14 @@ export function AiProvidersWindow({ activeConnectionId }: { activeConnectionId: 
               {providers.map((p) => {
                 const test = testResults[p.name]
                 const keyState = !p.auth_header_env
-                  ? "no key needed"
-                  : p.has_secret
-                    ? `${p.auth_header_env} · stored secret`
-                    : `${p.auth_header_env} · env or missing`
+                  ? { label: "no key needed", ok: true }
+                  : p.key_state === "env"
+                    ? { label: `${p.auth_header_env} · via env ✓${p.has_secret ? " (secret also stored)" : ""}`, ok: true }
+                    : p.key_state === "secret"
+                      ? { label: `${p.auth_header_env} · stored secret ✓`, ok: true }
+                      : p.key_state === "missing"
+                        ? { label: `${p.auth_header_env} · MISSING`, ok: false }
+                        : { label: `${p.auth_header_env} · ${p.has_secret ? "stored secret" : "state unknown (older engine)"}`, ok: p.has_secret }
                 return (
                   <div key={p.name} className="rounded-md border border-chrome-border/60 bg-chrome-bg/20 px-2.5 py-2">
                     <div className="flex items-center gap-2">
@@ -330,7 +380,7 @@ export function AiProvidersWindow({ activeConnectionId }: { activeConnectionId: 
                       )}
                       <span className="truncate text-[10.5px] text-chrome-text/45">{p.transport} · {p.endpoint_url}</span>
                       <div className="flex-1" />
-                      <span className="shrink-0 text-[10px] text-chrome-text/45">{keyState}</span>
+                      <span className={cn("shrink-0 text-[10px]", keyState.ok ? "text-chrome-text/45" : "text-warning")}>{keyState.label}</span>
                       <button
                         type="button"
                         title="Remove this provider (backends row only — the stored secret stays)"
@@ -350,10 +400,21 @@ export function AiProvidersWindow({ activeConnectionId }: { activeConnectionId: 
                       <input
                         value={testModels[p.name] ?? ""}
                         onChange={(e) => setTestModels((m) => ({ ...m, [p.name]: e.target.value }))}
-                        placeholder={PRESETS.find((x) => x.id === p.name)?.testModel || "model id to test"}
+                        list={modelIds[p.name]?.length ? `${listId}-${p.name}` : undefined}
+                        placeholder={
+                          PRESETS.find((x) => x.id === p.name)?.testModel ||
+                          (modelIds[p.name]?.length ? `pick a model (${modelIds[p.name].length} cached)` : "model id to test")
+                        }
                         spellCheck={false}
                         className={cn(input, "w-56")}
                       />
+                      {modelIds[p.name]?.length ? (
+                        <datalist id={`${listId}-${p.name}`}>
+                          {modelIds[p.name].map((m) => (
+                            <option key={m} value={m} />
+                          ))}
+                        </datalist>
+                      ) : null}
                       <button
                         type="button"
                         onClick={() => void testProvider(p)}
