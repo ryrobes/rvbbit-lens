@@ -83,6 +83,7 @@ import { CommandPalette, type PaletteGroup, type PaletteItem } from "./command-p
 import { PgMonitorWindow } from "./pg-monitor-window"
 import { SystemHealthWindow } from "./system-health-window"
 import { PlateWindow, PlatesWindow, type ShelfLayout } from "./plate-window"
+import { AiProvidersWindow } from "./ai-providers-window"
 import { LayoutWall } from "./layout-wall"
 import { PANEL_EXTRAS } from "@/lib/desktop/panel-extras"
 import { FittingRoomWindow } from "./fitting-room-window"
@@ -2286,6 +2287,18 @@ export function DesktopShell() {
       payload: { kind: "view-app-builder", ...seed },
     })
   }, [openWindow])
+
+  const openAiProviders = useCallback(() => {
+    const existing = liveWindows().find((w) => w.kind === "ai-providers")
+    if (existing) return focus(existing.id)
+    openWindow({
+      id: randomUUID(),
+      kind: "ai-providers",
+      title: "AI Providers",
+      x: 170, y: 90, width: 1000, height: 680,
+      payload: undefined,
+    })
+  }, [liveWindows, focus, openWindow])
 
   const openSystemObjects = useCallback((initial?: SystemObjectsPayload["initialCategory"]) => {
     openWindow({
@@ -5538,6 +5551,7 @@ export function DesktopShell() {
     { id: "sync-mirror", label: "Temporal Mirror", icon: Database, color: "var(--brand-cache)", description: "Sync Postgres sources into time-travel tables", activate: openSyncMirror, folder: "system", rvbbit: true },
     // Semantic
     { id: "operators", label: "Operators", icon: FlowArrow, color: "var(--brand-operators)", description: "Semantic SQL operators", activate: openOperators, folder: "semantic", rvbbit: true },
+    { id: "ai-providers", label: "AI Providers", icon: Plug, color: "var(--brand-routing)", description: "LLM providers — keys, endpoints, default & model catalogs", activate: openAiProviders, folder: "semantic", rvbbit: true },
     { id: "model-settings", label: "Model Settings", icon: Settings2, color: "var(--brand-routing)", description: "LLM defaults, operator models & spend", activate: openModelSettings, folder: "semantic", rvbbit: true },
     { id: "assistant", label: assistantIdentity.name, icon: Rabbit, color: "var(--main)", description: `Model, personality & voice for ${assistantIdentity.name} (summon from the identity control in the bar)`, activate: openAssistantSettings, folder: "semantic", rvbbit: true },
     { id: "agent-messages", label: "Messages", icon: Quote, color: "var(--viz-op-agent, var(--brand-warren))", description: "Agent transcripts — by run, with cost", activate: () => openAgentMessages(), folder: "semantic", rvbbit: true },
@@ -5574,7 +5588,7 @@ export function DesktopShell() {
     viewAppCount, schema, rvbbitVersion, assistantIdentity.name,
     openFinder, openSqlScratch, openViewApps, openConnections, openDataSearch, openSystemLearning, openMcpIncoming,
     openSystemObjects, openExtensions, openPgMonitor, openPgQueryExplorer, openLockExplorer, openMvccExplorer, openFleet, openPostgresAdmin, openCache, openRvbbitCache,
-    openCosts, openAgentMessages, openAssistantSettings, openDataMover, dataMoverDetected, openSyncMirror, openOperators, openModelSettings, openSpecialists, openRouting,
+    openCosts, openAgentMessages, openAssistantSettings, openDataMover, dataMoverDetected, openSyncMirror, openOperators, openAiProviders, openModelSettings, openSpecialists, openRouting,
     openMcpServers, openCapabilities, openHfDeploy, openWarren, openModelStudio,
     openDuck, openDagster, dagsterDetected, openMetricCatalog, openMetricCreator, openMetricInspector, openVizBlocks, openMetricBoard, openDashboards, openApps, openDashboardApp, openAlerts, openBrain,
     openCubeCatalog, openCubeCreator, openCubeInspector, openCubeProposals,
@@ -6912,6 +6926,8 @@ function renderWindowContent(
           }
         />
       )
+    case "ai-providers":
+      return <AiProvidersWindow activeConnectionId={ctx.activeConnectionId} />
     case "plates":
       return (
         <PlatesWindow

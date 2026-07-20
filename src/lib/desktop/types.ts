@@ -27,6 +27,7 @@ export type DesktopWindowKind =
   | "appearance"
   | "pg-monitor"
   | "system-health"
+  | "ai-providers"
   | "plate"
   | "plates"
   | "fitting"

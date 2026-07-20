@@ -33,4 +33,8 @@ export const PANEL_EXTRAS: Record<string, { hints?: string[]; notes?: string }> 
   "system-health": {
     notes: "maintenance X-ray: tombstones, bloat, cron coverage — remedies are built as SQL, never auto-run",
   },
+  "ai-providers": {
+    notes:
+      "LLM credentials & endpoints: add providers (OpenRouter/OpenAI/Anthropic/Gemini/Clover/Ollama/custom), paste keys (stored as secrets, env wins), set the default, test with one real completion, refresh + browse model catalogs",
+  },
 }
