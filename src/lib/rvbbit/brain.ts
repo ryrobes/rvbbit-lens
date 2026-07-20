@@ -1027,6 +1027,46 @@ export async function fetchNerStatus(connectionId: string): Promise<NerStatus> {
   }
 }
 
+export interface ExtractionStatus {
+  opInstalled: boolean
+  extractEndpoint: string | null
+  /** Live probe verdict: true = the doc-extract sidecar answered (a probe on
+   *  a nonexistent staged file returns "" by contract); false = the call
+   *  errored (not running / unreachable); null = probe not attempted. */
+  reachable: boolean | null
+  connectorEndpoint: string | null
+}
+
+/** Is the brain able to EAT DOCUMENTS right now? Registration facts plus a
+ *  live reachability probe through the real extract_doc operator path —
+ *  per-item failures return "", so probing a nonexistent staged path proves
+ *  the sidecar is up without side effects. */
+export async function fetchExtractionStatus(connectionId: string): Promise<ExtractionStatus> {
+  const r = await runRead(
+    connectionId,
+    `SELECT (SELECT endpoint_url FROM rvbbit.backends WHERE name='extract_doc') AS extract_endpoint,
+            (SELECT endpoint_url FROM rvbbit.backends WHERE name='gdrive_connector') AS connector_endpoint,
+            EXISTS(SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+                   WHERE n.nspname='rvbbit' AND p.proname='extract_doc') AS op_installed`,
+  )
+  const row = (r.ok ? (r.rows[0] ?? {}) : {}) as Record<string, unknown>
+  const status: ExtractionStatus = {
+    opInstalled: row.op_installed === true || row.op_installed === "t",
+    extractEndpoint: row.extract_endpoint ? String(row.extract_endpoint) : null,
+    reachable: null,
+    connectorEndpoint: row.connector_endpoint ? String(row.connector_endpoint) : null,
+  }
+  if (status.opInstalled && status.extractEndpoint) {
+    const probe = await run(
+      connectionId,
+      `SELECT coalesce(rvbbit.extract_doc('/staging/__rvbbit_probe__.txt', 'text/plain'), '') AS x`,
+      1,
+    )
+    status.reachable = probe.ok
+  }
+  return status
+}
+
 /** Delete a source. purgeDocs=true wipes its docs + KG nodes + synthetic roles; false keeps docs
  *  (reassigned to a "<label> (archived)" manual source). Returns the summary. */
 export async function deleteSource(

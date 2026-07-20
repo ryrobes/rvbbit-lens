@@ -20,6 +20,8 @@ import {
   fetchDocRelations,
   enrichDocNow,
   fetchNerStatus,
+  fetchExtractionStatus,
+  type ExtractionStatus,
   type BrainSource,
   type BrainSyncRun,
   type BrainPendingGrant,
@@ -62,6 +64,7 @@ export function SourcesPanel({
   const [grants, setGrants] = useState<BrainPendingGrant[]>([])
   const [providers, setProviders] = useState<BrainProvider[]>([])
   const [ner, setNer] = useState<NerStatus | null>(null)
+  const [extraction, setExtraction] = useState<ExtractionStatus | null>(null)
   const [learning, setLearning] = useState<SystemLearningBrainStatus | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [toast, setToast] = useState<{ ok: boolean; msg: string } | null>(null)
@@ -101,6 +104,19 @@ export function SourcesPanel({
       cancelled = true
     }
   }, [reload])
+
+  // Readiness probe — separate from reload() so a slow/absent sidecar never
+  // delays the sources list. Fires once per connection.
+  useEffect(() => {
+    let cancelled = false
+    if (!conn) return
+    void fetchExtractionStatus(conn).then((x) => {
+      if (!cancelled) setExtraction(x)
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [conn])
 
   const addSource = useCallback(async () => {
     if (!conn || !label.trim()) return
@@ -206,6 +222,44 @@ export function SourcesPanel({
       )}
 
       <SystemLearningStrip status={learning} busy={learningBusy} onSync={() => void syncLearningNow()} />
+
+      {/* document-eating readiness: extraction sidecar + drive connector */}
+      {extraction && (
+        <div className="rounded p-2 flex flex-col gap-1 text-[11px]" style={{ background: SOFTER }}>
+          <div className="flex items-center gap-2">
+            <FileCode2 size={12} className="opacity-70" />
+            {!extraction.opInstalled ? (
+              <span className="flex items-center gap-1.5">
+                <span className="h-1.5 w-1.5 rounded-full" style={{ background: "var(--danger)" }} />
+                extract_doc operator missing — run migrations (0047+) to enable document ingestion.
+              </span>
+            ) : extraction.reachable === true ? (
+              <span className="flex items-center gap-1.5">
+                <span className="h-1.5 w-1.5 rounded-full" style={{ background: "var(--success)" }} />
+                Document extraction ready — pdf / docx / xlsx / pptx / images ingest via the doc-extract sidecar.
+              </span>
+            ) : extraction.reachable === false ? (
+              <span className="flex items-center gap-1.5">
+                <span className="h-1.5 w-1.5 rounded-full" style={{ background: "var(--warning)" }} />
+                doc-extract sidecar not reachable at {extraction.extractEndpoint} — it ships in the compose
+                (service “doc-extract”); start it and PDFs ingest automatically. Text/markdown still works.
+              </span>
+            ) : (
+              <span className="opacity-60">checking document extraction…</span>
+            )}
+          </div>
+          <div className="flex items-center gap-2 pl-5 opacity-70">
+            {extraction.connectorEndpoint ? (
+              <span>
+                Drive connector registered ({extraction.connectorEndpoint}) — run the “gdrive” compose profile
+                with GDRIVE_SA_KEY set, then add a source below.
+              </span>
+            ) : (
+              <span>Drive connector not registered — run migrations (0196) or set config.endpoint per source.</span>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* enrichment / NER capability status */}
       {ner && (
