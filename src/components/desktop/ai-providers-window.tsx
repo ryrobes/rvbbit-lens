@@ -50,6 +50,13 @@ interface ProviderRow {
   /** Where the credential resolves TODAY, per the engine's own precedence:
    *  env | secret | missing | none (empty name). Pre-0194 servers: unknown. */
   key_state: "env" | "secret" | "missing" | "none" | "unknown"
+  /** Installed by a capability (install_manifest present) — the capability
+   *  owns endpoint/key/lifecycle; the panel shows, tests, but never edits. */
+  managed: boolean
+  capability: string
+  /** The backend's default model (transport_opts.model) — managed backends
+   *  serve a fixed alias; empty test input falls back to it. */
+  default_model: string
   model_count: number
   models_fetched_at: string | null
 }
@@ -128,6 +135,15 @@ export function AiProvidersWindow({ activeConnectionId }: { activeConnectionId: 
         "SELECT to_regprocedure('rvbbit.credential_state(text)') IS NOT NULL AS ok",
       )
       const hasCredFn = probe.rows?.[0]?.ok === true
+      // Keep managed (capability-installed) models mirrored into
+      // provider_models — cheap, idempotent, and older engines just skip.
+      const syncProbe = await dbQuery(
+        activeConnectionId,
+        "SELECT to_regprocedure('rvbbit.sync_managed_provider_models()') IS NOT NULL AS ok",
+      )
+      if (syncProbe.rows?.[0]?.ok === true) {
+        await dbQuery(activeConnectionId, "SELECT rvbbit.sync_managed_provider_models()")
+      }
       const keyStateExpr = hasCredFn
         ? `CASE WHEN b.auth_header_env IS NULL THEN 'none' ELSE rvbbit.credential_state(b.auth_header_env) END`
         : `CASE WHEN b.auth_header_env IS NULL THEN 'none' ELSE 'unknown' END`
@@ -139,6 +155,9 @@ export function AiProvidersWindow({ activeConnectionId }: { activeConnectionId: 
                 (b.name = rvbbit.default_provider()) AS is_default,
                 EXISTS (SELECT 1 FROM rvbbit.list_secrets() s WHERE s.name = b.auth_header_env) AS has_secret,
                 ${keyStateExpr} AS key_state,
+                (b.install_manifest IS NOT NULL) AS managed,
+                coalesce(b.install_manifest->>'capability', '') AS capability,
+                coalesce(nullif(b.transport_opts->>'model', ''), '') AS default_model,
                 (SELECT count(*) FROM rvbbit.provider_models m WHERE m.provider = b.name)::int AS model_count,
                 (SELECT max(fetched_at) FROM rvbbit.provider_models m WHERE m.provider = b.name)::text AS models_fetched_at
          FROM rvbbit.backends b
@@ -264,6 +283,7 @@ export function AiProvidersWindow({ activeConnectionId }: { activeConnectionId: 
       if (!activeConnectionId) return
       const model =
         testModels[p.name]?.trim() ||
+        p.default_model ||
         PRESETS.find((x) => x.id === p.name)?.testModel ||
         ""
       if (!model) {
@@ -361,6 +381,14 @@ export function AiProvidersWindow({ activeConnectionId }: { activeConnectionId: 
                     <div className="flex items-center gap-2">
                       <Plug className={cn("h-3.5 w-3.5 shrink-0", p.is_default ? "text-main" : "text-chrome-text/40")} />
                       <span className="font-medium text-foreground">{p.name}</span>
+                      {p.managed ? (
+                        <span
+                          className="rounded-full border border-chrome-border px-1.5 text-[9px] uppercase tracking-wider text-chrome-text/55"
+                          title={`Installed by the ${p.capability || "capability"} capability — endpoint, key & lifecycle are managed there (Capabilities panel), not here.`}
+                        >
+                          managed · {p.capability.replace(/^managed\//, "") || "capability"}
+                        </span>
+                      ) : null}
                       {p.is_default ? (
                         <span className="rounded-full border border-main/40 px-1.5 text-[9px] uppercase tracking-wider text-main">default</span>
                       ) : (
@@ -381,20 +409,22 @@ export function AiProvidersWindow({ activeConnectionId }: { activeConnectionId: 
                       <span className="truncate text-[10.5px] text-chrome-text/45">{p.transport} · {p.endpoint_url}</span>
                       <div className="flex-1" />
                       <span className={cn("shrink-0 text-[10px]", keyState.ok ? "text-chrome-text/45" : "text-warning")}>{keyState.label}</span>
-                      <button
-                        type="button"
-                        title="Remove this provider (backends row only — the stored secret stays)"
-                        onClick={() =>
-                          void run(
-                            `rm:${p.name}`,
-                            [`DELETE FROM rvbbit.backends WHERE name = ${sqlLit(p.name)}`, "SELECT rvbbit.reload_backends()"],
-                            `${p.name} removed`,
-                          )
-                        }
-                        className="text-chrome-text/35 hover:text-destructive"
-                      >
-                        <Trash2 className="h-3 w-3" />
-                      </button>
+                      {p.managed ? null : (
+                        <button
+                          type="button"
+                          title="Remove this provider (backends row only — the stored secret stays)"
+                          onClick={() =>
+                            void run(
+                              `rm:${p.name}`,
+                              [`DELETE FROM rvbbit.backends WHERE name = ${sqlLit(p.name)}`, "SELECT rvbbit.reload_backends()"],
+                              `${p.name} removed`,
+                            )
+                          }
+                          className="text-chrome-text/35 hover:text-destructive"
+                        >
+                          <Trash2 className="h-3 w-3" />
+                        </button>
+                      )}
                     </div>
                     <div className="mt-1.5 flex items-center gap-2">
                       <input
@@ -402,6 +432,7 @@ export function AiProvidersWindow({ activeConnectionId }: { activeConnectionId: 
                         onChange={(e) => setTestModels((m) => ({ ...m, [p.name]: e.target.value }))}
                         list={modelIds[p.name]?.length ? `${listId}-${p.name}` : undefined}
                         placeholder={
+                          (p.default_model ? `${p.default_model} (backend default)` : "") ||
                           PRESETS.find((x) => x.id === p.name)?.testModel ||
                           (modelIds[p.name]?.length ? `pick a model (${modelIds[p.name].length} cached)` : "model id to test")
                         }
