@@ -20,7 +20,6 @@ import {
   type BrainFacets,
 } from "@/lib/rvbbit/brain"
 import { SourcesPanel, DocGraph } from "./brain-sources-panel"
-import { fetchCorpusCount } from "@/lib/rvbbit/brain"
 import type { BrainPayload } from "@/lib/desktop/types"
 
 interface BrainExplorerWindowProps {
@@ -237,8 +236,9 @@ export function BrainExplorerWindow({ payload, activeConnectionId, hasRvbbit, on
   const [dropMsg, setDropMsg] = useState<string | null>(null)
   // access management
   const [adminMode, setAdminMode] = useState(false) // "All docs" (unfiltered triage) vs "View as"
-  const [showSources, setShowSources] = useState(false) // remote-source admin panel
-  const autoSourcesRef = useRef(false)
+  // Fresh opens start on Sources — the new-user question is "how do I feed
+  // this?"; View-as first was confusing (an identity-scoped EMPTY list).
+  const [showSources, setShowSources] = useState(true)
   const [knownRoles, setKnownRoles] = useState<string[]>([])
   const [docMembers, setDocMembers] = useState<{ role: string; principal: string }[]>([])
   const [addRole, setAddRole] = useState("")
@@ -270,17 +270,6 @@ export function BrainExplorerWindow({ payload, activeConnectionId, hasRvbbit, on
     setLoading(false)
   }, [conn, viewAs, adminMode])
 
-  // First-touch: a genuinely EMPTY brain opens on Sources — the useful view
-  // is "how do I feed this?", not a blank corpus. Checks the real corpus
-  // count (the browse fetch returns [] whenever no identity is picked, which
-  // is not the same thing). One-shot; never fights a user's own toggling.
-  useEffect(() => {
-    if (!conn || autoSourcesRef.current) return
-    autoSourcesRef.current = true
-    void fetchCorpusCount(conn).then((n) => {
-      if (n === 0) setShowSources(true)
-    })
-  }, [conn])
 
   useEffect(() => {
     setDetail(null)
@@ -459,31 +448,31 @@ export function BrainExplorerWindow({ payload, activeConnectionId, hasRvbbit, on
         <div className="ml-auto flex items-center gap-2">
           <div className="flex rounded overflow-hidden text-[11px]" style={{ border: "1px solid color-mix(in oklch, var(--chrome-text) 20%, transparent)" }}>
             <button
-              onClick={() => setAdminMode(false)}
+              onClick={() => setShowSources(true)}
               className="px-2 py-0.5"
-              style={{ background: !adminMode ? "color-mix(in oklch, var(--chrome-text) 16%, transparent)" : undefined }}
-              title="See the warehouse exactly as one identity sees it"
+              style={{ background: showSources ? "color-mix(in oklch, var(--chrome-text) 16%, transparent)" : undefined }}
+              title="Feed the brain: local folders, Google Drive, query sources; sync runs & pending grants"
             >
-              View as
+              Sources
             </button>
             <button
-              onClick={() => setAdminMode(true)}
+              onClick={() => { setShowSources(false); setAdminMode(true) }}
               className="px-2 py-0.5"
-              style={{ background: adminMode ? "color-mix(in oklch, var(--chrome-text) 16%, transparent)" : undefined }}
+              style={{ background: !showSources && adminMode ? "color-mix(in oklch, var(--chrome-text) 16%, transparent)" : undefined }}
               title="All documents (admin) — incl. unassigned/invisible ones, for triage"
             >
               All docs
             </button>
+            <button
+              onClick={() => { setShowSources(false); setAdminMode(false) }}
+              className="px-2 py-0.5"
+              style={{ background: !showSources && !adminMode ? "color-mix(in oklch, var(--chrome-text) 16%, transparent)" : undefined }}
+              title="See the corpus exactly as one identity sees it (ACL check)"
+            >
+              View as
+            </button>
           </div>
-          <button
-            onClick={() => setShowSources((v) => !v)}
-            className="px-2 py-0.5 rounded text-[11px]"
-            style={{ background: showSources ? "color-mix(in oklch, var(--chrome-text) 16%, transparent)" : "color-mix(in oklch, var(--chrome-text) 6%, transparent)" }}
-            title="Configure remote sources (Google Drive, …), sync, approve grants"
-          >
-            Sources
-          </button>
-          {adminMode ? (
+          {showSources ? null : adminMode ? (
             <span className="flex items-center gap-1 text-xs opacity-60">
               <Lock size={12} /> admin · all documents
             </span>

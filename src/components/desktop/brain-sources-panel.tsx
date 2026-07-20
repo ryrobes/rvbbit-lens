@@ -35,6 +35,11 @@ import {
 
 const GLINER_CATALOG_ID = "extract/gliner-medium-v2.1"
 
+// Built-in providers with dedicated UI (System Learning has its own strip) —
+// hidden from the generic Document Providers list: nothing there is
+// user-editable, and a new user shouldn't wonder whether to touch it.
+const BUILTIN_PROVIDERS = new Set(["rvbbit-system-learning"])
+
 const SOFT = "color-mix(in oklch, var(--chrome-text) 8%, transparent)"
 const SOFTER = "color-mix(in oklch, var(--chrome-text) 4%, transparent)"
 const LINE = "color-mix(in oklch, var(--chrome-text) 12%, transparent)"
@@ -675,7 +680,7 @@ function ProvidersSection({
         </div>
       )}
 
-      {providers.map((p) => (
+      {providers.filter((p) => !BUILTIN_PROVIDERS.has(p.provider)).map((p) => (
         <ProviderCard key={p.provider} conn={conn} p={p} onEdit={() => loadInto(p)} onDelete={() => void remove(p.provider)}
           reload={reload} setToast={setToast} />
       ))}
