@@ -370,10 +370,13 @@ function MetricIsland({ island }: { island: PlateIsland }) {
 function ShotIsland({ island }: { island: PlateIsland }) {
   const [failed, setFailed] = useState(false)
   const title = island.props.title ?? island.props.slug ?? ""
+  // pointer-events-none throughout: a shot is decoration inside a clickable
+  // card, and portal content doesn't bubble React events to the plate body's
+  // delegation — an interactive thumbnail would eat the card's click.
   if (failed || !island.props.src) {
     return (
       <div
-        className="flex h-full min-h-24 w-full items-center justify-center rounded-md border border-chrome-border/40 bg-chrome-bg/60"
+        className="pointer-events-none flex h-full min-h-24 w-full items-center justify-center rounded-md border border-chrome-border/40 bg-chrome-bg/60"
         title={title}
       >
         <span className="select-none font-mono text-2xl text-chrome-text/25">
@@ -388,7 +391,7 @@ function ShotIsland({ island }: { island: PlateIsland }) {
       src={island.props.src}
       alt={title}
       loading="lazy"
-      className="h-full w-full rounded-md object-cover object-top"
+      className="pointer-events-none h-full w-full rounded-md object-cover object-top"
       onError={() => setFailed(true)}
     />
   )
@@ -396,18 +399,31 @@ function ShotIsland({ island }: { island: PlateIsland }) {
 
 /** Live artifact iframe (the Hub peek). Src is server-resolved to the
  *  warehouse origin from a kind+slug handle; sandboxed — the embedded app
- *  talks to ITS origin (rvbbitQuery), never to lens. */
+ *  talks to ITS origin (rvbbitQuery), never to lens. A hover pill offers
+ *  the artifact's own external URL — the same link chat hands out. */
 function FrameIsland({ island }: { island: PlateIsland }) {
   const h = Number(island.props.height)
   return (
-    <iframe
-      src={island.props.src}
-      title={island.props.title ?? island.props.slug ?? "artifact"}
-      sandbox="allow-scripts allow-same-origin allow-downloads"
-      className="w-full rounded-md border border-chrome-border/40 bg-black/20"
+    <div
+      className="group/frame relative w-full"
       style={{ height: Number.isFinite(h) && h > 0 ? Math.min(Math.max(h, 160), 4000) : "100%" }}
-      loading="lazy"
-    />
+    >
+      <iframe
+        src={island.props.src}
+        title={island.props.title ?? island.props.slug ?? "artifact"}
+        sandbox="allow-scripts allow-same-origin allow-downloads"
+        className="h-full w-full rounded-md border border-chrome-border/40 bg-black/20"
+        loading="lazy"
+      />
+      <button
+        type="button"
+        onClick={() => window.open(island.props.src, "_blank", "noopener")}
+        className="absolute right-2 top-2 rounded-full border border-chrome-border/60 bg-chrome-bg/85 px-2 py-0.5 text-[10px] text-chrome-text/70 opacity-0 backdrop-blur transition-opacity hover:text-foreground group-hover/frame:opacity-100"
+        title="Open the live URL in a new tab"
+      >
+        open ↗
+      </button>
+    </div>
   )
 }
 
@@ -790,9 +806,72 @@ export function PlateWindow({
     emitRef.current = handleEmit
   }, [handleEmit])
 
+  /** Dispatch an open target — the shared tail of rv-open (click) and
+   *  rv-open-dbl (double-click). plate: opens a sibling plate; app: opens a
+   *  native desktop app with query-ish params (app:fitting?kit=field-kit,
+   *  app:live?slug=x&kind=app). */
+  const dispatchOpen = useCallback(
+    (open: string, title?: string) => {
+      if (open.startsWith("plate:") && onOpenPlate) {
+        onOpenPlate(open.slice(6), title)
+      } else if (open.startsWith("app:") && onOpenApp) {
+        const rest = open.slice(4)
+        const q = rest.indexOf("?")
+        const appId = q >= 0 ? rest.slice(0, q) : rest
+        const params: Record<string, string> = {}
+        if (q >= 0) {
+          for (const pair of rest.slice(q + 1).split("&")) {
+            const eq = pair.indexOf("=")
+            if (eq > 0) params[decodeURIComponent(pair.slice(0, eq))] = decodeURIComponent(pair.slice(eq + 1))
+          }
+        }
+        onOpenApp(appId, params)
+      }
+    },
+    [onOpenPlate, onOpenApp],
+  )
+
+  // Double-click verb state: rv-open-dbl can't ride the native dblclick
+  // event — the first click's emit refetches the plate, unmounting the DOM
+  // between clicks. So for dbl-carrying elements the single-click pair is
+  // DELAYED a beat (nothing re-renders during the decision window); a
+  // second click inside it cancels the pending single and escalates,
+  // keyed on the attribute VALUE, which is stable across re-renders.
+  const dblPendingRef = useRef<{ key: string; timer: ReturnType<typeof setTimeout> } | null>(null)
+  useEffect(() => () => {
+    if (dblPendingRef.current) clearTimeout(dblPendingRef.current.timer)
+  }, [])
+
   // Event delegation for the vocabulary.
   const onClick = useCallback(
     (e: React.MouseEvent) => {
+      // The escalation gesture ("open it for real" — Hub cards → the app's
+      // own desktop window).
+      const dblEl = (e.target as HTMLElement).closest<HTMLElement>("[rv-open-dbl]")
+      if (dblEl) {
+        e.preventDefault()
+        const key = dblEl.getAttribute("rv-open-dbl") ?? ""
+        if (dblPendingRef.current?.key === key) {
+          clearTimeout(dblPendingRef.current.timer)
+          dblPendingRef.current = null
+          dispatchOpen(key, dblEl.getAttribute("rv-open-title") ?? undefined)
+          return
+        }
+        if (dblPendingRef.current) clearTimeout(dblPendingRef.current.timer)
+        const emit = dblEl.getAttribute("rv-emit")
+        const value = dblEl.getAttribute("rv-value") ?? ""
+        const open = dblEl.getAttribute("rv-open")
+        const title = dblEl.getAttribute("rv-open-title") ?? undefined
+        dblPendingRef.current = {
+          key,
+          timer: setTimeout(() => {
+            dblPendingRef.current = null
+            if (emit) handleEmit(emit, value, { toggle: false })
+            if (open) dispatchOpen(open, title)
+          }, 280),
+        }
+        return
+      }
       const target = (e.target as HTMLElement).closest<HTMLElement>("[rv-open-sql],[rv-open],[rv-emit]")
       if (!target) return
       const sql = target.getAttribute("rv-open-sql")
@@ -809,23 +888,7 @@ export function PlateWindow({
         // the opened plate reads the emitted param off the bus.
         const emitFirst = target.getAttribute("rv-emit")
         if (emitFirst) handleEmit(emitFirst, target.getAttribute("rv-value") ?? "", { toggle: false })
-        // Desktop verbs. plate: opens a sibling plate; app: opens a native
-        // desktop app with query-ish params (app:fitting?kit=field-kit).
-        if (open.startsWith("plate:") && onOpenPlate) {
-          onOpenPlate(open.slice(6), target.getAttribute("rv-open-title") ?? undefined)
-        } else if (open.startsWith("app:") && onOpenApp) {
-          const rest = open.slice(4)
-          const q = rest.indexOf("?")
-          const appId = q >= 0 ? rest.slice(0, q) : rest
-          const params: Record<string, string> = {}
-          if (q >= 0) {
-            for (const pair of rest.slice(q + 1).split("&")) {
-              const eq = pair.indexOf("=")
-              if (eq > 0) params[decodeURIComponent(pair.slice(0, eq))] = decodeURIComponent(pair.slice(eq + 1))
-            }
-          }
-          onOpenApp(appId, params)
-        }
+        dispatchOpen(open, target.getAttribute("rv-open-title") ?? undefined)
         return
       }
       const emit = target.getAttribute("rv-emit")
@@ -840,8 +903,9 @@ export function PlateWindow({
         handleEmit(emit, target.getAttribute("rv-value") ?? "", { toggle: true })
       }
     },
-    [onOpenSql, onOpenPlate, onOpenApp, handleEmit, plate],
+    [onOpenSql, dispatchOpen, handleEmit, plate],
   )
+
 
   /** Shared write path: forms and interactive islands both land here.
    *  Returns true on success so callers can reset local state. */

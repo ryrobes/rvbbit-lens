@@ -196,7 +196,7 @@ const SANITIZE_OPTS: sanitizeHtml.IOptions = {
       // the vocabulary — everything else is stripped
       "rv-each", "rv-group", "rv-if", "rv-action", "rv-emit", "rv-value",
       "rv-open-sql", "rv-open-sql-title", "rv-open", "rv-open-title",
-      "rv-confirm", "rv-live",
+      "rv-open-dbl", "rv-confirm", "rv-live",
       "query", "spec", "value", "label", "x", "y", "mark", "unit",
     ],
     input: ["class", "title", "name", "value", "type", "placeholder", "required", "min", "max", "step", "checked", "rv-emit", "rv-value"],

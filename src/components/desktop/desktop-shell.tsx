@@ -6044,9 +6044,25 @@ export function DesktopShell() {
           layoutId={activeWallId}
           activeConnectionId={activeConnectionId}
           onClose={() => setActiveWallId(null)}
-          onOpenSql={openSqlInWindow}
+          onOpenSql={(title, sql, run) => {
+            // "Open in DataRabbit" means GO there: a wall handing you a SQL
+            // window drops you on the desktop where that window lives.
+            openSqlInWindow(title, sql, run)
+            setActiveWallId(null)
+          }}
           onOpenApp={(appId, params) => {
             if (appId === "fitting") openFittingRoom(params.kit)
+            // app:live?slug=x&kind=app — the Hub's open-in-DataRabbit verb:
+            // apps/dashboards open as their native standalone window; other
+            // artifact kinds open the peek plate (it follows the bus sel).
+            if (appId === "live" && params.slug) {
+              if (params.kind === "app" || params.kind === "dashboard") {
+                openDashboardApp(params.slug, params.name)
+              } else {
+                openPlate("hub/peek")
+              }
+              setActiveWallId(null)
+            }
           }}
           onEmitParam={(paneId, field, value) =>
             emitParam({
@@ -6946,6 +6962,9 @@ function renderWindowContent(
           onOpenPlate={ctx.openPlate}
           onOpenApp={(appId, params) => {
             if (appId === "fitting") ctx.openFittingRoom(params.kit)
+            if (appId === "live" && params.slug && (params.kind === "app" || params.kind === "dashboard")) {
+              ctx.openDashboardApp(params.slug, params.name)
+            }
           }}
           onEmitParam={(field, value) =>
             ctx.emitParam({
