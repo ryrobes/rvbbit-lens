@@ -66,6 +66,7 @@ export function LayoutWall({
 }) {
   const [layout, setLayout] = useState<WallLayout | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [linkCopied, setLinkCopied] = useState(false)
   // Slot targeting: rv-open="plate:x@pane" replaces the pane's occupant.
   const [occupants, setOccupants] = useState<Record<string, string>>({})
   // Wall-local windows — the modal layer for transient plates (edit/create).
@@ -157,6 +158,22 @@ export function LayoutWall({
       {/* Identity pill — the only wall chrome. */}
       <div className="absolute right-3 top-2 z-[75] flex items-center gap-2 rounded-full border border-chrome-border/60 bg-chrome-bg/80 px-2.5 py-0.5 text-[11px] text-chrome-text/70 backdrop-blur">
         <span className="text-foreground">{layout?.title ?? layoutId}</span>
+        <button
+          type="button"
+          onClick={() => {
+            // The hand-out link: /hub for the Hub, /wall/<id> for any
+            // other layout — the pretty redirect paths, stable to share.
+            const url = `${window.location.origin}${layoutId === "hub" ? "/hub" : `/wall/${encodeURIComponent(layoutId)}`}`
+            void navigator.clipboard.writeText(url).then(() => {
+              setLinkCopied(true)
+              setTimeout(() => setLinkCopied(false), 1600)
+            })
+          }}
+          className="text-chrome-text/60 hover:text-foreground"
+          title="Copy a link straight to this wall"
+        >
+          {linkCopied ? "✓" : "⧉"}
+        </button>
         {onAssistant ? (
           <button type="button" onClick={onAssistant} className="text-chrome-text/60 hover:text-foreground" title="Summon Assistant">
             ✦

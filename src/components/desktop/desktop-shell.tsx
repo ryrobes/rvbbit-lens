@@ -2449,24 +2449,24 @@ export function DesktopShell() {
 
   // Front-door entry (docs/HUB_PLAN.md): /?hub opens the Hub wall — the
   // artifact browser for MCP-first users arriving from a chat link —
-  // and /?wall=<layout_id> deep-links any layout wall. Param handled once
-  // and stripped, same contract as /?scene.
+  // and /?wall=<layout_id> deep-links any layout wall (/hub and
+  // /wall/<id> are the pretty hand-out paths; they redirect here).
+  // Unlike /?scene, the param is NOT stripped on entry: the sync effect
+  // below keeps it in the address bar for the wall's whole lifetime, so
+  // refresh stays in the wall and the address bar IS the share link.
   const wallLinkHandledRef = useRef(false)
   useEffect(() => {
     if (wallLinkHandledRef.current) return
+    wallLinkHandledRef.current = true
     const params = new URLSearchParams(window.location.search)
     const wallId = params.get("hub") != null ? "hub" : params.get("wall")
     if (!wallId) return
-    wallLinkHandledRef.current = true
+    setActiveWallId(wallId)
     // /?hub&sel=app:my-dash — the per-artifact deep link MCP tools hand
     // out (hub_url): seed the bus so the peek pane renders that artifact
-    // the moment the wall opens.
+    // the moment the wall opens. Kept in the URL so refresh restores the
+    // exact shared view.
     const sel = params.get("sel")
-    params.delete("hub")
-    params.delete("wall")
-    params.delete("sel")
-    window.history.replaceState(null, "", `${window.location.pathname}${params.size ? `?${params}` : ""}`)
-    setActiveWallId(wallId)
     if (sel) {
       emitParam({
         sourceWindowId: `wall:${wallId}:link`,
@@ -2479,6 +2479,29 @@ export function DesktopShell() {
       })
     }
   }, [emitParam])
+
+  // URL ⟷ wall sync: while a wall is open the address bar carries its
+  // link (?hub for the Hub, ?wall=<id> otherwise — plus the entry sel, so
+  // refresh restores the exact shared view); closing the wall cleans it
+  // all back off. replaceState only — no navigation, no history spam.
+  // The cleanup branch waits for a wall to have actually opened: the
+  // effect's mount run fires before the entry effect's setState lands,
+  // and must not scrub the entry params out from under it.
+  const wallWasOpenRef = useRef(false)
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search)
+    params.delete("hub")
+    params.delete("wall")
+    if (activeWallId === "hub") params.set("hub", "")
+    else if (activeWallId) params.set("wall", activeWallId)
+    else {
+      if (!wallWasOpenRef.current) return
+      params.delete("sel")
+    }
+    if (activeWallId) wallWasOpenRef.current = true
+    const qs = params.toString().replace(/^hub=(&|$)/, "hub$1").replace(/&hub=(&|$)/, "&hub$1")
+    window.history.replaceState(null, "", `${window.location.pathname}${qs ? `?${qs}` : ""}`)
+  }, [activeWallId])
 
   /** The world-coordinate rect currently visible — the canvas both stamp
    *  and save-arrangement normalize against. */
