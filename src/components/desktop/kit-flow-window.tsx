@@ -52,6 +52,20 @@ export function KitFlowWindow({
   const [kit, setKit] = useState<string>(initialKit ?? "")
   const [edges, setEdges] = useState<FlowEdge[]>([])
   const [error, setError] = useState<string | null>(null)
+  const [view, setView] = useState<"graph" | "brief">("graph")
+  const [brief, setBrief] = useState<string>("")
+
+  // The Briefing: rvbbit.kit_brief() — deterministic, compiled at read
+  // time, and THE SAME document agents receive. Fetched per kit/tab so
+  // the live check statuses inside it are current when you look.
+  useEffect(() => {
+    if (!activeConnectionId || !kit || view !== "brief") return
+    setBrief("")
+    void q(activeConnectionId,
+      `SELECT rvbbit.kit_brief('${kit.replace(/'/g, "''")}') AS brief`)
+      .then((rows) => setBrief(String(rows[0]?.brief ?? "")))
+      .catch((e) => setBrief(`(brief failed: ${e instanceof Error ? e.message : String(e)})`))
+  }, [activeConnectionId, kit, view])
 
   useEffect(() => {
     if (!activeConnectionId) return
@@ -112,6 +126,22 @@ export function KitFlowWindow({
     <div className="flex h-full flex-col bg-doc-bg text-foreground">
       <div className="flex shrink-0 items-center gap-3 border-b border-chrome-border/60 px-3 py-2">
         <span className="text-[13px] font-semibold">Kit Flow</span>
+        <div className="flex overflow-hidden rounded-md border border-chrome-border text-[11px]">
+          {(["graph", "brief"] as const).map((v) => (
+            <button
+              key={v}
+              type="button"
+              onClick={() => setView(v)}
+              className={
+                view === v
+                  ? "bg-foreground/10 px-2.5 py-1 text-foreground"
+                  : "px-2.5 py-1 text-chrome-text/60 hover:text-foreground"
+              }
+            >
+              {v === "graph" ? "Graph" : "Briefing"}
+            </button>
+          ))}
+        </div>
         <select
           value={kit}
           onChange={(e) => setKit(e.target.value)}
@@ -133,6 +163,10 @@ export function KitFlowWindow({
       <div className="min-h-0 flex-1 overflow-auto p-2">
         {error ? (
           <div className="p-4 text-[12px] text-destructive">{error}</div>
+        ) : view === "brief" ? (
+          <div className="mx-auto max-w-3xl px-4 py-3">
+            <MdLite text={brief || "…compiling briefing"} />
+          </div>
         ) : (
           <svg width="100%" viewBox={`0 0 ${scene.W} ${scene.H}`} style={{ minHeight: scene.H }}>
             {edges.map((e, i) => {
@@ -183,4 +217,56 @@ export function KitFlowWindow({
       </div>
     </div>
   )
+}
+
+
+/** Tiny renderer for kit_brief's own markdown grammar — headers, lists,
+ *  bold, code spans, italics, hr. The input is machine-compiled by
+ *  rvbbit.kit_brief(), so the grammar is closed; no library needed. */
+function MdLite({ text }: { text: string }) {
+  const inline = (s: string, key: number) => {
+    const parts: React.ReactNode[] = []
+    const re = /(\*\*[^*]+\*\*|`[^`]+`|_[^_]+_)/g
+    let last = 0
+    let m: RegExpExecArray | null
+    let i = 0
+    while ((m = re.exec(s)) !== null) {
+      if (m.index > last) parts.push(s.slice(last, m.index))
+      const tok = m[0]
+      if (tok.startsWith("**")) parts.push(<strong key={`${key}-${i++}`}>{tok.slice(2, -2)}</strong>)
+      else if (tok.startsWith("`"))
+        parts.push(
+          <code key={`${key}-${i++}`} className="rounded bg-foreground/[0.08] px-1 py-0.5 text-[11px]">
+            {tok.slice(1, -1)}
+          </code>,
+        )
+      else parts.push(<em key={`${key}-${i++}`} className="text-chrome-text/70">{tok.slice(1, -1)}</em>)
+      last = m.index + tok.length
+    }
+    if (last < s.length) parts.push(s.slice(last))
+    return parts
+  }
+  const blocks: React.ReactNode[] = []
+  let list: React.ReactNode[] = []
+  const flushList = (k: string) => {
+    if (list.length) {
+      blocks.push(<ul key={k} className="my-2 ml-4 list-disc space-y-1">{list}</ul>)
+      list = []
+    }
+  }
+  text.split("\n").forEach((line, n) => {
+    if (line.startsWith("- ")) {
+      list.push(<li key={n} className="text-[12.5px] leading-relaxed">{inline(line.slice(2), n)}</li>)
+      return
+    }
+    flushList(`ul-${n}`)
+    if (line.startsWith("### ")) blocks.push(<h4 key={n} className="mt-4 mb-1 text-[12px] font-semibold uppercase tracking-wide text-chrome-text/70">{inline(line.slice(4), n)}</h4>)
+    else if (line.startsWith("## ")) blocks.push(<h3 key={n} className="mt-5 mb-1.5 text-[14px] font-semibold text-foreground">{inline(line.slice(3), n)}</h3>)
+    else if (line.startsWith("# ")) blocks.push(<h2 key={n} className="mb-2 text-[17px] font-bold text-foreground">{inline(line.slice(2), n)}</h2>)
+    else if (line.trim() === "---") blocks.push(<hr key={n} className="my-4 border-chrome-border/60" />)
+    else if (line.trim() === "") blocks.push(<div key={n} className="h-1.5" />)
+    else blocks.push(<p key={n} className="text-[12.5px] leading-relaxed text-chrome-text/90">{inline(line, n)}</p>)
+  })
+  flushList("ul-end")
+  return <div>{blocks}</div>
 }
