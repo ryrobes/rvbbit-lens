@@ -399,6 +399,8 @@ export async function renderPlate(
   connectionId: string,
   plateId: string,
   callerParams: Record<string, unknown> = {},
+  /** Burrow mode: run every plate query as this PG role (SET LOCAL ROLE). */
+  role?: string,
 ): Promise<RenderedPlate> {
   const renderStart = Date.now()
   const plate = await loadPlate(connectionId, plateId)
@@ -449,6 +451,7 @@ export async function renderPlate(
         readOnly: true,
         rowLimit: EACH_ROW_CAP,
         database: q.database,
+        role,
       })
       results.set(name, {
         columns: (res.columns ?? []) as QueryResultColumn[],
@@ -704,7 +707,7 @@ export async function renderPlate(
       const rowLimit = Number.isFinite(limitAttr) && limitAttr > 0 ? Math.min(limitAttr, 200) : 50
       const t0 = Date.now()
       try {
-        const r = await executeQuery(connectionId, sql, { readOnly: true, rowLimit })
+        const r = await executeQuery(connectionId, sql, { readOnly: true, rowLimit, role })
         queryTimings.push({ name: `grid:${ref}`, ms: Date.now() - t0, rows: r.rows?.length ?? 0 })
         sqlFromData.set(String(i), {
           columns: (r.columns ?? []) as QueryResultColumn[],
@@ -907,6 +910,9 @@ export async function runPlateAction(
   plateId: string,
   actionName: string,
   args: Record<string, unknown>,
+  /** Burrow mode: the write executes as this PG role — plate_action_log
+   *  finally records a real principal, and GRANTs decide the write. */
+  role?: string,
 ): Promise<{ ok: boolean; error?: string }> {
   const plate = await loadPlate(connectionId, plateId)
   if (!plate) return { ok: false, error: `plate ${plateId} not found` }
@@ -944,11 +950,11 @@ export async function runPlateAction(
   if (/\{\{[^}]*\}\}/.test(sql)) return { ok: false, error: "action sql has unbound tokens" }
 
   try {
-    await executeQuery(connectionId, sql, { rowLimit: 1 })
+    await executeQuery(connectionId, sql, { rowLimit: 1, role })
     await executeQuery(
       connectionId,
       `INSERT INTO rvbbit.plate_action_log (plate_id, action, args)
-       VALUES (${sqlLit(plateId)}, ${sqlLit(actionName)}, ${sqlLit(JSON.stringify(args))}::jsonb)`,
+       VALUES (${sqlLit(plateId)}, ${sqlLit(actionName)}, ${sqlLit(JSON.stringify(role ? { ...args, __role: role } : args))}::jsonb)`,
       { rowLimit: 1 },
     ).catch(() => {})
     return { ok: true }
@@ -957,7 +963,7 @@ export async function runPlateAction(
     await executeQuery(
       connectionId,
       `INSERT INTO rvbbit.plate_action_log (plate_id, action, args, error)
-       VALUES (${sqlLit(plateId)}, ${sqlLit(actionName)}, ${sqlLit(JSON.stringify(args))}::jsonb, ${sqlLit(msg)})`,
+       VALUES (${sqlLit(plateId)}, ${sqlLit(actionName)}, ${sqlLit(JSON.stringify(role ? { ...args, __role: role } : args))}::jsonb, ${sqlLit(msg)})`,
       { rowLimit: 1 },
     ).catch(() => {})
     return { ok: false, error: msg }

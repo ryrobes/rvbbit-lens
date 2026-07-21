@@ -146,6 +146,12 @@ export interface ExecuteOpts {
   rowLimit?: number
   /** If true, wrap the query in a read-only transaction. */
   readOnly?: boolean
+  /** Burrow mode (rvbbit-sql/docs/BURROW_PLAN.md): execute as this PG role.
+   *  Wraps the statement in a transaction and SET LOCAL ROLEs into it, so
+   *  the DBA's GRANTs/RLS govern the query and the pooled connection
+   *  reverts on txn end. The service role stays least-privilege — that is
+   *  the real backstop for SQL that ends the transaction itself. */
+  role?: string
   /** Run against a different database on the same server (e.g. pg_cron's home db). */
   database?: string
   /**
@@ -353,8 +359,17 @@ export async function executeQuery(
     if (overrideTimeout) {
       await client.query(`SET statement_timeout = ${Math.floor(opts.statementTimeout!)}`)
     }
-    if (opts.readOnly) {
-      await client.query("BEGIN READ ONLY")
+    const asRole = typeof opts.role === "string" && /^[a-zA-Z_][a-zA-Z0-9_$]{0,62}$/.test(opts.role)
+      ? opts.role
+      : null
+    if (opts.role && !asRole) {
+      throw new Error(`invalid session role name: ${JSON.stringify(opts.role)}`)
+    }
+    if (opts.readOnly || asRole) {
+      await client.query(opts.readOnly ? "BEGIN READ ONLY" : "BEGIN")
+    }
+    if (asRole) {
+      await client.query(`SET LOCAL ROLE "${asRole.replace(/"/g, '""')}"`)
     }
     // Register the backend PID for cancellation — but ONLY for the duration of the
     // user statement. pg_cancel_backend has no statement identity, so the token
@@ -404,7 +419,7 @@ export async function executeQuery(
     )
     const columns = buildColumns((result.fields ?? []) as PgFieldLike[], typeNames, sources)
 
-    if (opts.readOnly) {
+    if (opts.readOnly || asRole) {
       await client.query("COMMIT")
     }
 
@@ -428,7 +443,7 @@ export async function executeQuery(
       results,
     }
   } catch (err) {
-    if (opts.readOnly) {
+    if (opts.readOnly || opts.role) {
       try { await client.query("ROLLBACK") } catch { /* ignore */ }
     }
     throw err

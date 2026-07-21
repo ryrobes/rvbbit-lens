@@ -2448,6 +2448,18 @@ export function DesktopShell() {
     [focus, openWindow, liveWindows],
   )
 
+  // ── Burrow mode (rvbbit-sql/docs/BURROW_PLAN.md) ─────────────────────
+  // One database, one door: the deployment is pinned to a single DSN and
+  // the session's PG role is the identity. The shell hides the connection
+  // picker; the server enforces (middleware gate + SET LOCAL ROLE).
+  const [burrowMode, setBurrowMode] = useState<{ burrow: boolean; sub?: string | null }>({ burrow: false })
+  useEffect(() => {
+    void fetch("/api/lens/mode")
+      .then((r) => r.json())
+      .then((j: { burrow?: boolean; sub?: string | null }) => setBurrowMode({ burrow: !!j.burrow, sub: j.sub }))
+      .catch(() => {})
+  }, [])
+
   // ── Layouts (the compose layer — docs/PLATE_COMPOSE_PLAN.md) ────────
   const [activeWallId, setActiveWallId] = useState<string | null>(null)
 
@@ -5587,7 +5599,7 @@ export function DesktopShell() {
     { id: "scenes", label: "Scenes", icon: Layers, color: "var(--brand-view-apps)", description: "Saved desktops — browse, search & load", activate: openScenesWindow },
     { id: "sql-scratch", label: "SQL Scratch", icon: FileCode2, color: "var(--brand-sql-scratch)", description: "A scratch editor — write SQL, run it, chart the result", activate: openSqlScratch },
     { id: "view-apps", label: "Saved Views", icon: Boxes, color: "var(--brand-view-apps)", sublabel: viewAppCount ? `${viewAppCount} saved` : undefined, description: "Your saved queries, charts & HTML app blocks", activate: openViewApps },
-    { id: "connections", label: "Connections", icon: Plug, color: "var(--brand-connections)", description: "Manage Postgres connections", activate: openConnections },
+    { id: "connections", label: "Connections", icon: Plug, color: "var(--brand-connections)", description: "Manage Postgres connections", activate: openConnections, visible: !burrowMode.burrow },
     { id: "data-search", label: "Data Search", icon: Search, color: "var(--brand-kg)", description: "Semantic search across data", activate: () => openDataSearch(), rvbbit: true },
     { id: "system-learning", label: "System Learning", icon: Brain, color: "var(--rvbbit-accent)", description: "Learned routing, acceleration & operator state", activate: openSystemLearning, rvbbit: true },
     { id: "mcp-incoming", label: "MCP Incoming", icon: Activity, color: "oklch(71% 0.17 205)", description: "Warehouse MCP usage", activate: openMcpIncoming, rvbbit: true },
@@ -5646,7 +5658,7 @@ export function DesktopShell() {
     { id: "query-lens", label: "Query Lens", icon: Eye, color: "var(--brand-query-lens)", description: "Trace a query's execution", activate: () => openQueryLens(), folder: "knowledge", rvbbit: true },
     { id: "drift", label: "Drift", icon: LineChart, color: "var(--brand-kg)", description: "Compare extraction runs", activate: () => openDrift(), folder: "knowledge", rvbbit: true },
   ], [
-    viewAppCount, schema, rvbbitVersion, assistantIdentity.name,
+    viewAppCount, schema, rvbbitVersion, assistantIdentity.name, burrowMode.burrow,
     openFinder, openSqlScratch, openViewApps, openConnections, openDataSearch, openSystemLearning, openMcpIncoming,
     openSystemObjects, openExtensions, openPgMonitor, openPgQueryExplorer, openLockExplorer, openMvccExplorer, openFleet, openPostgresAdmin, openCache, openRvbbitCache,
     openCosts, openAgentMessages, openAssistantSettings, openDataMover, dataMoverDetected, openSyncMirror, openOperators, openAiProviders, openModelSettings, openSpecialists, openRouting,

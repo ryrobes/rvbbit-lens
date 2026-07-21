@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server"
 import { executeQuery } from "@/lib/db/query"
+import { isBurrow, sessionRole } from "@/lib/server/burrow"
 
 export const runtime = "nodejs"
 
@@ -26,6 +27,14 @@ export async function POST(req: Request) {
     return NextResponse.json({ ok: false, error: "connectionId and sql required" }, { status: 400 })
   }
   try {
+    // Burrow mode: SQL executes as the session's PG role — the GRANT wall
+    // becomes real per-user enforcement. No session = no SQL.
+    let role: string | undefined
+    if (isBurrow()) {
+      const sub = await sessionRole(req.headers.get("cookie"))
+      if (!sub) return NextResponse.json({ ok: false, error: "not signed in" }, { status: 401 })
+      role = sub
+    }
     const result = await executeQuery(body.connectionId, body.sql, {
       rowLimit: body.rowLimit,
       readOnly: body.readOnly,
@@ -33,6 +42,7 @@ export async function POST(req: Request) {
       statementTimeout: body.statementTimeout,
       poolLane: body.poolLane,
       cancelToken: body.cancelToken,
+      role,
     })
     return NextResponse.json({ ok: true, ...result })
   } catch (err) {
