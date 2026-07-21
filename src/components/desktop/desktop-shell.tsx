@@ -124,6 +124,7 @@ import {
 import { SyncMirrorWindow } from "./sync-mirror-window"
 import { DASHBOARD_SELECT_EVENT, DashboardsWindow } from "./dashboards-window"
 import { AppsWindow } from "./apps-window"
+import { KitFlowWindow } from "./kit-flow-window"
 import { DuckWindow } from "./duck-window"
 import { OperatorFlowWindow } from "./operator-flow-window"
 import { SpecialistsWindow } from "./specialists-window"
@@ -197,6 +198,7 @@ import type {
   DashboardsPayload,
   AppsPayload,
   DashboardAppPayload,
+  KitFlowPayload,
   DataSearchPayload,
   DriftPayload,
   RowInspectorPayload,
@@ -3836,6 +3838,18 @@ export function DesktopShell() {
     })
   }, [focus, openWindow, liveWindows])
 
+  const openKitFlow = useCallback((kitName?: string) => {
+    const existing = liveWindows().find((w) => w.kind === "kit-flow")
+    if (existing) return focus(existing.id)
+    openWindow({
+      id: randomUUID(),
+      kind: "kit-flow",
+      title: "Kit Flow",
+      x: 150, y: 90, width: 1240, height: 720,
+      payload: { kind: "kit-flow", kit: kitName } satisfies KitFlowPayload,
+    })
+  }, [focus, openWindow, liveWindows])
+
   const openDuck = useCallback(() => {
     const existing = liveWindows().find((w) => w.kind === "duck")
     if (existing) return focus(existing.id)
@@ -5644,6 +5658,7 @@ export function DesktopShell() {
     { id: "metric-board", label: "KPI Board", icon: Table2, color: "oklch(78% 0.13 95)", description: "Matrix of metric values & KPI verdicts over time", activate: () => openMetricBoard(), folder: "metrics", rvbbit: true },
     { id: "dashboards", label: "Dashboards", icon: LayoutDashboard, color: "oklch(78% 0.13 95)", description: "Agent-built dashboards and live apps — inspectable, versioned", activate: () => openDashboards(), folder: "metrics", rvbbit: true },
     { id: "apps", label: "Apps", icon: AppWindow, color: "oklch(78% 0.13 95)", description: "Published live apps — folders by team, each opens as its own window", activate: () => openApps(), rvbbit: true },
+    { id: "kit-flow", label: "Kit Flow", icon: Layers, color: "oklch(75% 0.14 70)", description: "The switchboard, drawn — how a kit's plates, layouts, params, tables and contracts relate (derived, never declared)", activate: () => openKitFlow(), rvbbit: true },
     // Cubes — the curated subject-area mart layer (metrics → cubes → raw)
     { id: "cube-catalog", label: "Cube Catalog", icon: Boxes, color: "oklch(76% 0.15 100)", description: "Browse curated subject-area cubes", activate: () => openCubeCatalog(), folder: "cubes", rvbbit: true },
     { id: "cube-creator", label: "Cube Creator", icon: Calculator, color: "oklch(76% 0.15 100)", description: "Author cubes — manual, AI-propose, or from a pack", activate: () => openCubeCreator(), folder: "cubes", rvbbit: true },
@@ -5663,7 +5678,7 @@ export function DesktopShell() {
     openSystemObjects, openExtensions, openPgMonitor, openPgQueryExplorer, openLockExplorer, openMvccExplorer, openFleet, openPostgresAdmin, openCache, openRvbbitCache,
     openCosts, openAgentMessages, openAssistantSettings, openDataMover, dataMoverDetected, openSyncMirror, openOperators, openAiProviders, openModelSettings, openSpecialists, openRouting,
     openMcpServers, openCapabilities, openHfDeploy, openWarren, openModelStudio,
-    openDuck, openDagster, dagsterDetected, openMetricCatalog, openMetricCreator, openMetricInspector, openVizBlocks, openMetricBoard, openDashboards, openApps, openDashboardApp, openAlerts, openBrain,
+    openKitFlow, openDuck, openDagster, dagsterDetected, openMetricCatalog, openMetricCreator, openMetricInspector, openVizBlocks, openMetricBoard, openDashboards, openApps, openDashboardApp, openAlerts, openBrain,
     openCubeCatalog, openCubeCreator, openCubeInspector, openCubeProposals,
     openKgBrowser, openKgExplorer, openHindsightMemory, hindsightDetected, openQueryLens, openDrift,
   ])
@@ -6992,6 +7007,15 @@ function renderWindowContent(
           onOpenSql={ctx.openSqlInWindow}
         />
       )
+    case "kit-flow":
+      return (
+        <KitFlowWindow
+          activeConnectionId={ctx.activeConnectionId}
+          initialKit={(w.payload as KitFlowPayload | undefined)?.kit}
+          onOpenPlate={ctx.openPlate}
+          onOpenWall={ctx.openLayoutWall}
+        />
+      )
     case "plate":
       return (
         <PlateWindow
@@ -7683,6 +7707,7 @@ function iconForKind(kind: DesktopWindowState["kind"]) {
     case "scenes": return Layers
     case "system-health": return Wrench
     case "plate": return Layers
+    case "kit-flow": return Layers
     case "plates": return Layers
     case "fitting": return Wrench
     case "pg-monitor": return Activity

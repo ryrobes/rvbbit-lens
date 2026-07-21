@@ -104,6 +104,7 @@ interface PlateRow {
   params: Array<{ name: string; type?: string; default?: unknown; from_bus?: boolean }>
   requires_role?: string | null
   listens?: string[] | null
+  surface?: string | null
 }
 
 function sqlLit(v: string): string {
@@ -328,7 +329,8 @@ async function loadPlate(connectionId: string, plateId: string): Promise<PlateRo
     `SELECT plate_id, kit, module, title, description, template_version, template,
             queries, actions, params,
             to_jsonb(p)->>'requires_role' AS requires_role,
-            to_jsonb(p)->'listens' AS listens
+            to_jsonb(p)->'listens' AS listens,
+            coalesce(to_jsonb(p)->>'surface', 'ui') AS surface
      FROM rvbbit.plates p WHERE plate_id = ${sqlLit(plateId)}`,
     { readOnly: true, rowLimit: 1 },
   )
@@ -462,6 +464,53 @@ export async function renderPlate(
       const error = e instanceof Error ? e.message : String(e)
       results.set(name, { columns: [], rows: [], error })
       queryTimings.push({ name, ms: Date.now() - qStart, rows: 0, error })
+    }
+  }
+
+  // Logic plates (0204): headless check-containers. Opening one renders the
+  // INSPECTION view — the author's explanation verbatim plus every check's
+  // live result — synthesized here (server-side, fully escaped), because
+  // their template is prose for agents, not vocabulary.
+  if ((plate.surface ?? "ui") === "logic") {
+    let body = `<div style="display:flex; flex-direction:column; gap:14px; padding:16px 18px">`
+    body += `<div style="display:flex; align-items:center; gap:8px">`
+      + `<span style="font-size:9px; text-transform:uppercase; letter-spacing:0.09em; padding:2px 8px; border-radius:99px; background:rgba(143,207,154,0.18); color:rgba(143,207,154,0.95)">logic plate</span>`
+      + `<span class="plate-muted" style="font-size:10px">checks run live · agents read this via kit_pulse</span></div>`
+    body += `<div class="plate-muted" style="font-size:12px; line-height:1.55; white-space:pre-wrap">${escapeHtml(plate.template)}</div>`
+    for (const [qname] of Object.entries(plate.queries ?? {})) {
+      const r = results.get(qname)
+      const n = r?.error ? -1 : (r?.rows?.length ?? 0)
+      const chip = r?.error
+        ? `<span style="font-size:9px; padding:2px 8px; border-radius:99px; background:rgba(220,90,70,0.25)">error</span>`
+        : n === 0
+          ? `<span style="font-size:9px; padding:2px 8px; border-radius:99px; background:rgba(143,207,154,0.2)">green</span>`
+          : `<span style="font-size:9px; padding:2px 8px; border-radius:99px; background:rgba(220,90,70,0.25)">${n} violation${n === 1 ? "" : "s"}</span>`
+      body += `<div style="border:1px solid rgba(128,128,128,0.2); border-radius:9px; padding:10px 12px">`
+        + `<div style="display:flex; align-items:center; gap:8px; margin-bottom:6px"><span style="font-size:12px; font-weight:600">${escapeHtml(qname)}</span>${chip}</div>`
+      if (r?.error) {
+        body += `<div class="plate-muted" style="font-size:11px">${escapeHtml(r.error)}</div>`
+      } else if (n > 0 && r) {
+        body += `<table style="width:100%; font-size:10.5px; border-collapse:collapse">`
+          + `<tr>${r.columns.map((c) => `<th style="text-align:left; padding:2px 6px; border-bottom:1px solid rgba(128,128,128,0.25)">${escapeHtml(c.name)}</th>`).join("")}</tr>`
+          + r.rows.slice(0, 5).map((row) =>
+              `<tr>${r.columns.map((c) => `<td style="padding:2px 6px">${escapeHtml(String(row[c.name] ?? ""))}</td>`).join("")}</tr>`).join("")
+          + `</table>`
+      }
+      body += `</div>`
+    }
+    body += `</div>`
+    return {
+      plateId: plate.plate_id,
+      title: plate.title,
+      description: plate.description,
+      kit: plate.kit,
+      html: body,
+      islands: [],
+      actions: {},
+      params,
+      busFields: [],
+      listens: [],
+      debug: { totalMs: Date.now() - renderStart, queries: queryTimings },
     }
   }
 
@@ -1099,6 +1148,8 @@ export interface PlateListEntry {
   requires_role: string | null
   /** Viewer lacks requires_role — shelf shows a lock, render refuses. */
   locked: boolean
+  /** 'ui' | 'logic' (0204) — logic plates open as the inspection view. */
+  surface?: string
 }
 
 export interface KitMeta {
@@ -1190,16 +1241,17 @@ export async function listAvailableKits(
 }
 
 /** List plates with their module-gate state for the shelf. Logic plates
- *  (surface='logic', 0204) are headless check-containers — agents read them
- *  via rvbbit.kit_pulse(); they don't belong on the launcher shelf.
+ *  (surface='logic', 0204) ride along tagged, not hidden: the tray shows
+ *  them with a distinct badge, and opening one renders the INSPECTION view
+ *  (explanation + live check results) instead of an app surface.
  *  to_jsonb keeps this tolerant of pre-0204 databases with no column. */
 export async function listPlates(connectionId: string): Promise<PlateListEntry[]> {
   const res = await executeQuery(
     connectionId,
     `SELECT plate_id, kit, module, title, description,
-            to_jsonb(p)->>'requires_role' AS requires_role
+            to_jsonb(p)->>'requires_role' AS requires_role,
+            coalesce(to_jsonb(p)->>'surface', 'ui') AS surface
      FROM rvbbit.plates p
-     WHERE coalesce(to_jsonb(p)->>'surface', 'ui') <> 'logic'
      ORDER BY kit NULLS FIRST, module NULLS FIRST, plate_id`,
     { readOnly: true, rowLimit: 200 },
   )

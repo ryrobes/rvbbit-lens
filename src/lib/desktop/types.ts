@@ -11,6 +11,7 @@ export type DesktopWindowKind =
   | "dashboards"
   | "apps"
   | "dashboard-app"
+  | "kit-flow"
   | "csv-import"
   | "query-document"
   | "row-inspector"
@@ -116,6 +117,7 @@ export type WindowPayload =
   | DataMoverPayload
   | DashboardsPayload
   | AppsPayload
+  | KitFlowPayload
   | DashboardAppPayload
   | BrainPayload
   | CsvImportPayload
@@ -812,6 +814,12 @@ export interface DataMoverPayload {
 export interface DashboardsPayload {
   kind?: "dashboards"
   selectedSlug?: string | null
+}
+
+export interface KitFlowPayload {
+  kind?: "kit-flow"
+  /** Preselect a kit in the flow view. */
+  kit?: string
 }
 
 export interface AppsPayload {

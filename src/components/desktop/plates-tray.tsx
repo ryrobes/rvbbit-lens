@@ -24,6 +24,7 @@ interface TrayPlate {
   description: string | null
   gated: boolean
   locked: boolean
+  surface?: string
 }
 
 interface TrayKitMeta {
@@ -280,6 +281,9 @@ export function PlatesTray({
                     >
                       <Layers className="h-3 w-3 shrink-0 text-chrome-text/50" />
                       <span className="min-w-0 flex-1 truncate text-chrome-text/90">{p.title}</span>
+                      {p.surface === "logic" ? (
+                        <span className="shrink-0 rounded-full bg-emerald-500/15 px-1.5 text-[8px] uppercase tracking-wider text-emerald-300/80">logic</span>
+                      ) : null}
                     </button>
                   ))}
                 </div>
