@@ -369,7 +369,19 @@ function MetricIsland({ island }: { island: PlateIsland }) {
  *  monogram tile, never a broken-image glyph. */
 function ShotIsland({ island }: { island: PlateIsland }) {
   const [failed, setFailed] = useState(false)
+  const [retryKey, setRetryKey] = useState(0)
   const title = island.props.title ?? island.props.slug ?? ""
+  // A miss enqueues a capture server-side (the warehouse self-heals), so a
+  // couple of delayed retries usually upgrade the monogram to the real
+  // shot without the user doing anything.
+  useEffect(() => {
+    if (!failed || retryKey >= 2) return
+    const t = setTimeout(() => {
+      setFailed(false)
+      setRetryKey((k) => k + 1)
+    }, 7000 * (retryKey + 1))
+    return () => clearTimeout(t)
+  }, [failed, retryKey])
   // pointer-events-none throughout: a shot is decoration inside a clickable
   // card, and portal content doesn't bubble React events to the plate body's
   // delegation — an interactive thumbnail would eat the card's click.
@@ -388,7 +400,7 @@ function ShotIsland({ island }: { island: PlateIsland }) {
   return (
     // eslint-disable-next-line @next/next/no-img-element
     <img
-      src={island.props.src}
+      src={retryKey > 0 ? `${island.props.src}&r=${retryKey}` : island.props.src}
       alt={title}
       loading="lazy"
       className="pointer-events-none h-full w-full rounded-md object-cover object-top"

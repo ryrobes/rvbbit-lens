@@ -1852,13 +1852,17 @@ export function DesktopShell() {
     sourceSchema?: string
     sourceTable?: string
     sourceColumn?: string
+    /** Set-semantics: skip eq's click-again-toggles-off. For programmatic
+     *  emits (deep-link entry seeding the bus) that must be idempotent —
+     *  re-opening the same /hub?sel= link is a SET, not a click. */
+    force?: boolean
   }) => {
     const key = paramKey(input.sourceBlockName, input.field)
     const operator = input.operator ?? "eq"
     setDesktopParams((prev) => {
       const existing = prev.find((p) => p.key === key)
       // Clicking the same value with eq toggles the filter off.
-      if (operator === "eq" && existing && existing.operator !== "in" && sameParamValue(existing.value, input.value)) {
+      if (!input.force && operator === "eq" && existing && existing.operator !== "in" && sameParamValue(existing.value, input.value)) {
         return prev.filter((p) => p.key !== key)
       }
       // gte/lte threshold (slider / datepicker): a null value clears it; a real
@@ -2476,6 +2480,7 @@ export function DesktopShell() {
         value: sel,
         operator: "eq",
         cascade: true,
+        force: true,
       })
     }
   }, [emitParam])

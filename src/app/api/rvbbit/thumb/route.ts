@@ -23,11 +23,13 @@ export async function GET(req: NextRequest) {
     // The warehouse gates /thumbs behind its static key when one is set —
     // this proxy authenticates server-side so the browser never needs it.
     const key = process.env.WAREHOUSE_MCP_KEY ?? ""
+    // no-store: the warehouse self-heals missing/stale captures on each
+    // request, so a data-cached 404 here would pin the monogram for the
+    // cache window and defeat the lazy regeneration. Browsers still get
+    // max-age on 200s below.
     const upstream = await fetch(`${base}/thumbs/${kind}/${slug}.png`, {
       headers: key ? { authorization: `Bearer ${key}` } : undefined,
-      // Thumbnails change on republish; a short shared cache keeps the
-      // gallery snappy without pinning stale shots for long.
-      next: { revalidate: 60 },
+      cache: "no-store",
     })
     if (!upstream.ok || !upstream.body) {
       return NextResponse.json({ ok: false }, { status: 404 })

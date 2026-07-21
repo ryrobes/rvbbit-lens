@@ -216,8 +216,9 @@ const SANITIZE_OPTS: sanitizeHtml.IOptions = {
     "rv-chart": ["query", "spec", "x", "y", "mark", "color", "stack", "x-format", "y-format", "height", "rv-emit"],
     // grid island: spreadsheet editing rides the action wall — a cell
     // commit fires edit-action with {id, column, value}; the action's SQL
-    // (CASE per column) decides what actually persists.
-    "rv-grid": ["query", "edit-action", "edit", "id"],
+    // (CASE per column) decides what actually persists. sql-from renders a
+    // grid over SQL held in another query's first row (read-only, capped).
+    "rv-grid": ["query", "edit-action", "edit", "id", "sql-from", "limit"],
     // artifact islands (the Hub): handles only — kind + slug, never URLs.
     // shot = thumbnail via the lens proxy; frame = live iframe of the
     // warehouse-served app/dashboard. Src is resolved server-side.
@@ -674,6 +675,49 @@ export async function renderPlate(
     if (!keep) $el.remove()
   })
 
+  // 3b. sql-from grids: <rv-grid sql-from="query.column" limit="50"> renders
+  // a grid over SQL that CAME FROM SQL — the named query's first row holds
+  // the statement (how the Hub peek shows a cube's rows when the table name
+  // is only known per-selection). Same wall as everything else: SELECT-shaped
+  // only, read-only execution, hard row cap. Timed into debug like any query.
+  const sqlFromData = new Map<string, { columns: QueryResultColumn[]; rows: Array<Record<string, unknown>> } | { error: string }>()
+  {
+    const els = $("rv-grid[sql-from]").toArray()
+    for (let i = 0; i < els.length; i++) {
+      const $el = $(els[i])
+      $el.attr("data-rv-sqlfrom", String(i))
+      const ref = String($el.attr("sql-from") ?? "")
+      const dot = ref.indexOf(".")
+      const qname = dot > 0 ? ref.slice(0, dot) : ref
+      const col = dot > 0 ? ref.slice(dot + 1) : ""
+      const src = results.get(qname)
+      const sql = String(src?.rows?.[0]?.[col] ?? "").trim()
+      if (!src || src.error || !sql) {
+        sqlFromData.set(String(i), { error: src?.error ? `source query “${qname}” failed` : "" })
+        continue
+      }
+      if (!/^\s*(select|with)\b/i.test(sql)) {
+        sqlFromData.set(String(i), { error: "sql-from statements must be SELECT-shaped" })
+        continue
+      }
+      const limitAttr = Number($el.attr("limit"))
+      const rowLimit = Number.isFinite(limitAttr) && limitAttr > 0 ? Math.min(limitAttr, 200) : 50
+      const t0 = Date.now()
+      try {
+        const r = await executeQuery(connectionId, sql, { readOnly: true, rowLimit })
+        queryTimings.push({ name: `grid:${ref}`, ms: Date.now() - t0, rows: r.rows?.length ?? 0 })
+        sqlFromData.set(String(i), {
+          columns: (r.columns ?? []) as QueryResultColumn[],
+          rows: (r.rows ?? []) as Array<Record<string, unknown>>,
+        })
+      } catch (e) {
+        const error = e instanceof Error ? e.message : String(e)
+        queryTimings.push({ name: `grid:${ref}`, ms: Date.now() - t0, rows: 0, error })
+        sqlFromData.set(String(i), { error })
+      }
+    }
+  }
+
   // 4. Islands → placeholders + manifest (query results ride along).
   const islands: PlateIsland[] = []
   $("rv-grid,rv-chart,rv-metric,rv-board,rv-shot,rv-frame").each((i, el) => {
@@ -704,6 +748,25 @@ export async function renderPlate(
       }
       const id = `island-${i}`
       islands.push({ id, kind, query: "", props, columns: [], rows: [] })
+      $el.replaceWith(`<div class="plate-island" data-rv-island="${id}"></div>`)
+      return
+    }
+
+    // sql-from grids resolved in the 3b pre-pass.
+    const sqlFromIdx = $el.attr("data-rv-sqlfrom")
+    if (kind === "grid" && sqlFromIdx != null) {
+      const data = sqlFromData.get(sqlFromIdx)
+      if (!data || "error" in data) {
+        const msg = data?.error ?? ""
+        $el.replaceWith(msg ? `<div class="plate-error">grid: ${escapeHtml(msg)}</div>` : "")
+        return
+      }
+      const id = `island-${i}`
+      const props: Record<string, string> = {}
+      for (const [k, v] of Object.entries($el.attr() ?? {})) {
+        if (k !== "data-rv-sqlfrom") props[k] = String(v)
+      }
+      islands.push({ id, kind, query: "", props, columns: data.columns, rows: data.rows })
       $el.replaceWith(`<div class="plate-island" data-rv-island="${id}"></div>`)
       return
     }
