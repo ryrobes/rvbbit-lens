@@ -21,7 +21,7 @@ import type { DesktopParamValue } from "@/lib/desktop/types"
 
 interface PlateIsland {
   id: string
-  kind: "grid" | "chart" | "metric" | "board"
+  kind: "grid" | "chart" | "metric" | "board" | "shot" | "frame"
   query: string
   props: Record<string, string>
   columns: QueryResultColumn[]
@@ -361,6 +361,53 @@ function MetricIsland({ island }: { island: PlateIsland }) {
       </div>
       <div className="plate-metric-label">{label}</div>
     </div>
+  )
+}
+
+/** Artifact thumbnail (the Hub). Src is server-resolved from a kind+slug
+ *  handle (lens thumb proxy); a missing capture degrades to a quiet
+ *  monogram tile, never a broken-image glyph. */
+function ShotIsland({ island }: { island: PlateIsland }) {
+  const [failed, setFailed] = useState(false)
+  const title = island.props.title ?? island.props.slug ?? ""
+  if (failed || !island.props.src) {
+    return (
+      <div
+        className="flex h-full min-h-24 w-full items-center justify-center rounded-md border border-chrome-border/40 bg-chrome-bg/60"
+        title={title}
+      >
+        <span className="select-none font-mono text-2xl text-chrome-text/25">
+          {(title || "?").slice(0, 2).toUpperCase()}
+        </span>
+      </div>
+    )
+  }
+  return (
+    // eslint-disable-next-line @next/next/no-img-element
+    <img
+      src={island.props.src}
+      alt={title}
+      loading="lazy"
+      className="h-full w-full rounded-md object-cover object-top"
+      onError={() => setFailed(true)}
+    />
+  )
+}
+
+/** Live artifact iframe (the Hub peek). Src is server-resolved to the
+ *  warehouse origin from a kind+slug handle; sandboxed — the embedded app
+ *  talks to ITS origin (rvbbitQuery), never to lens. */
+function FrameIsland({ island }: { island: PlateIsland }) {
+  const h = Number(island.props.height)
+  return (
+    <iframe
+      src={island.props.src}
+      title={island.props.title ?? island.props.slug ?? "artifact"}
+      sandbox="allow-scripts allow-same-origin allow-downloads"
+      className="w-full rounded-md border border-chrome-border/40 bg-black/20"
+      style={{ height: Number.isFinite(h) && h > 0 ? Math.min(Math.max(h, 160), 4000) : "100%" }}
+      loading="lazy"
+    />
   )
 }
 
@@ -757,6 +804,11 @@ export function PlateWindow({
       const open = target.getAttribute("rv-open")
       if (open) {
         e.preventDefault()
+        // The card gesture (the board idiom, button edition): an element
+        // carrying BOTH rv-emit and rv-open publishes first, then opens —
+        // the opened plate reads the emitted param off the bus.
+        const emitFirst = target.getAttribute("rv-emit")
+        if (emitFirst) handleEmit(emitFirst, target.getAttribute("rv-value") ?? "", { toggle: false })
         // Desktop verbs. plate: opens a sibling plate; app: opens a native
         // desktop app with query-ish params (app:fitting?kit=field-kit).
         if (open.startsWith("plate:") && onOpenPlate) {
@@ -930,6 +982,10 @@ export function PlateWindow({
                   <ChartIsland island={island} onEmit={handleEmit} />
                 ) : island.kind === "board" ? (
                   <BoardIsland island={island} runAction={runAction} onEmit={handleEmit} onOpenPlate={onOpenPlate} />
+                ) : island.kind === "shot" ? (
+                  <ShotIsland island={island} />
+                ) : island.kind === "frame" ? (
+                  <FrameIsland island={island} />
                 ) : (
                   <MetricIsland island={island} />
                 ),

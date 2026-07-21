@@ -22,11 +22,28 @@ const EACH_ROW_CAP = 500
 
 export interface PlateIsland {
   id: string
-  kind: "grid" | "chart" | "metric" | "board"
+  kind: "grid" | "chart" | "metric" | "board" | "shot" | "frame"
   query: string
   props: Record<string, string>
   columns: QueryResultColumn[]
   rows: Array<Record<string, unknown>>
+}
+
+// ── Artifact islands (the Hub, docs/HUB_PLAN.md) ─────────────────────────
+// rv-shot (thumbnail img) and rv-frame (live iframe) take HANDLES — a kind
+// + slug — never URLs. The server resolves the src here: thumbnails go
+// through the lens proxy (/api/rvbbit/thumb), live frames point at the
+// warehouse-mcp origin that already serves /apps/<slug> and /d/<slug>.
+// Scoping by construction: plate content cannot name an arbitrary origin.
+const ARTIFACT_SLUG = /^[a-z0-9][a-z0-9_-]{0,127}$/i
+const ARTIFACT_FRAME_KINDS = new Set(["app", "dashboard"])
+/** Browser-reachable base for live app/dashboard iframes. */
+export function artifactFrameBase(): string {
+  return (process.env.RVBBIT_APP_BASE ?? process.env.WAREHOUSE_PUBLIC_URL ?? "").replace(/\/+$/, "")
+}
+/** Server-side base the thumb proxy fetches from (compose-internal DNS). */
+export function artifactInternalBase(): string {
+  return (process.env.RVBBIT_APP_BASE_INTERNAL ?? "").replace(/\/+$/, "") || artifactFrameBase()
 }
 
 export interface PlateActionMeta {
@@ -168,7 +185,7 @@ const SANITIZE_OPTS: sanitizeHtml.IOptions = {
     "caption", "form", "label", "input", "select", "option", "textarea",
     "button", "fieldset", "legend",
     // islands (replaced before serialization, but must survive sanitation)
-    "rv-grid", "rv-chart", "rv-metric", "rv-board",
+    "rv-grid", "rv-chart", "rv-metric", "rv-board", "rv-shot", "rv-frame",
   ],
   allowedAttributes: {
     "*": [
@@ -201,6 +218,11 @@ const SANITIZE_OPTS: sanitizeHtml.IOptions = {
     // commit fires edit-action with {id, column, value}; the action's SQL
     // (CASE per column) decides what actually persists.
     "rv-grid": ["query", "edit-action", "edit", "id"],
+    // artifact islands (the Hub): handles only — kind + slug, never URLs.
+    // shot = thumbnail via the lens proxy; frame = live iframe of the
+    // warehouse-served app/dashboard. Src is resolved server-side.
+    "rv-shot": ["kind", "slug", "title"],
+    "rv-frame": ["kind", "slug", "title", "height"],
   },
   disallowedTagsMode: "discard",
   allowedSchemes: [], // no URLs anywhere in v1
@@ -654,10 +676,38 @@ export async function renderPlate(
 
   // 4. Islands → placeholders + manifest (query results ride along).
   const islands: PlateIsland[] = []
-  $("rv-grid,rv-chart,rv-metric,rv-board").each((i, el) => {
+  $("rv-grid,rv-chart,rv-metric,rv-board,rv-shot,rv-frame").each((i, el) => {
     const $el = $(el)
     const tag = (el as unknown as { tagName: string }).tagName.toLowerCase()
     const kind = tag.replace("rv-", "") as PlateIsland["kind"]
+
+    // Artifact islands are QUERYLESS: a validated handle becomes a
+    // server-resolved src. Bad handles render an inline error, not a hole.
+    if (kind === "shot" || kind === "frame") {
+      const akind = String($el.attr("kind") ?? "app").toLowerCase()
+      const slug = String($el.attr("slug") ?? "")
+      if (!ARTIFACT_FRAME_KINDS.has(akind) || !ARTIFACT_SLUG.test(slug)) {
+        $el.replaceWith(`<div class="plate-error">rv-${kind}: bad artifact handle</div>`)
+        return
+      }
+      const props: Record<string, string> = {}
+      for (const [k, v] of Object.entries($el.attr() ?? {})) props[k] = String(v)
+      if (kind === "frame") {
+        const base = artifactFrameBase()
+        if (!base) {
+          $el.replaceWith(`<div class="plate-error">rv-frame: RVBBIT_APP_BASE is not configured</div>`)
+          return
+        }
+        props.src = `${base}${akind === "dashboard" ? "/d/" : "/apps/"}${slug}`
+      } else {
+        props.src = `/api/rvbbit/thumb?kind=${encodeURIComponent(akind)}&slug=${encodeURIComponent(slug)}`
+      }
+      const id = `island-${i}`
+      islands.push({ id, kind, query: "", props, columns: [], rows: [] })
+      $el.replaceWith(`<div class="plate-island" data-rv-island="${id}"></div>`)
+      return
+    }
+
     const qname = String($el.attr("query") ?? "")
     const result = results.get(qname)
     if (!result || result.error) {

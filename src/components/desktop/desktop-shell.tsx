@@ -2447,6 +2447,39 @@ export function DesktopShell() {
   // ── Layouts (the compose layer — docs/PLATE_COMPOSE_PLAN.md) ────────
   const [activeWallId, setActiveWallId] = useState<string | null>(null)
 
+  // Front-door entry (docs/HUB_PLAN.md): /?hub opens the Hub wall — the
+  // artifact browser for MCP-first users arriving from a chat link —
+  // and /?wall=<layout_id> deep-links any layout wall. Param handled once
+  // and stripped, same contract as /?scene.
+  const wallLinkHandledRef = useRef(false)
+  useEffect(() => {
+    if (wallLinkHandledRef.current) return
+    const params = new URLSearchParams(window.location.search)
+    const wallId = params.get("hub") != null ? "hub" : params.get("wall")
+    if (!wallId) return
+    wallLinkHandledRef.current = true
+    // /?hub&sel=app:my-dash — the per-artifact deep link MCP tools hand
+    // out (hub_url): seed the bus so the peek pane renders that artifact
+    // the moment the wall opens.
+    const sel = params.get("sel")
+    params.delete("hub")
+    params.delete("wall")
+    params.delete("sel")
+    window.history.replaceState(null, "", `${window.location.pathname}${params.size ? `?${params}` : ""}`)
+    setActiveWallId(wallId)
+    if (sel) {
+      emitParam({
+        sourceWindowId: `wall:${wallId}:link`,
+        sourceBlockName: "wall:link",
+        sourceTitle: "hub link",
+        field: "sel",
+        value: sel,
+        operator: "eq",
+        cascade: true,
+      })
+    }
+  }, [emitParam])
+
   /** The world-coordinate rect currently visible — the canvas both stamp
    *  and save-arrangement normalize against. */
   const visibleWorldRect = useCallback(() => {
@@ -6027,6 +6060,7 @@ export function DesktopShell() {
             })
           }
           onPopOut={(plateId) => openPlate(plateId)}
+          onAssistant={hasRvbbit ? () => setAssistantOpen(true) : undefined}
           busParams={desktopParams}
         />
       ) : null}

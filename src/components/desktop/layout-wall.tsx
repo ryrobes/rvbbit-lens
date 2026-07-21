@@ -47,6 +47,7 @@ export function LayoutWall({
   onOpenApp,
   onEmitParam,
   onPopOut,
+  onAssistant,
   busParams,
 }: {
   layoutId: string
@@ -58,6 +59,9 @@ export function LayoutWall({
   onEmitParam?: (paneId: string, field: string, value: unknown) => void
   /** Hover-pill escape hatch: open this pane's plate as a real desktop window. */
   onPopOut?: (plateId: string) => void
+  /** Summon the assistant OVER the wall (the dock renders at z-80) — the
+   *  same brain chat-first users already know, one click from the Hub. */
+  onAssistant?: () => void
   busParams?: DesktopParamValue[]
 }) {
   const [layout, setLayout] = useState<WallLayout | null>(null)
@@ -153,6 +157,11 @@ export function LayoutWall({
       {/* Identity pill — the only wall chrome. */}
       <div className="absolute right-3 top-2 z-[75] flex items-center gap-2 rounded-full border border-chrome-border/60 bg-chrome-bg/80 px-2.5 py-0.5 text-[11px] text-chrome-text/70 backdrop-blur">
         <span className="text-foreground">{layout?.title ?? layoutId}</span>
+        {onAssistant ? (
+          <button type="button" onClick={onAssistant} className="text-chrome-text/60 hover:text-foreground" title="Summon Assistant">
+            ✦
+          </button>
+        ) : null}
         <span className="text-chrome-text/40">esc</span>
         <button type="button" onClick={onClose} className="text-chrome-text/50 hover:text-foreground" title="Back to the desktop">
           <X className="h-3 w-3" />
@@ -234,14 +243,30 @@ export function LayoutWall({
           >
             <div className="flex shrink-0 items-center justify-between border-b border-chrome-border bg-chrome-bg/60 px-3 py-1.5 text-[12px]">
               <span className="truncate text-foreground">{modal.plateId}</span>
-              <button
-                type="button"
-                onClick={() => setModals((m) => m.filter((x) => x.key !== modal.key))}
-                className="text-chrome-text/50 hover:text-foreground"
-                title="Close"
-              >
-                <X className="h-3.5 w-3.5" />
-              </button>
+              <div className="flex items-center gap-2">
+                {onPopOut ? (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      // The breadcrumb rung: same plate, real desktop window.
+                      onPopOut(modal.plateId)
+                      setModals((m) => m.filter((x) => x.key !== modal.key))
+                    }}
+                    className="text-chrome-text/50 hover:text-foreground"
+                    title="Open as a desktop window"
+                  >
+                    <AppWindow className="h-3.5 w-3.5" />
+                  </button>
+                ) : null}
+                <button
+                  type="button"
+                  onClick={() => setModals((m) => m.filter((x) => x.key !== modal.key))}
+                  className="text-chrome-text/50 hover:text-foreground"
+                  title="Close"
+                >
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              </div>
             </div>
             <div className="min-h-0 flex-1 overflow-hidden">
               <PlateWindow
