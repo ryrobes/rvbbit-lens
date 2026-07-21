@@ -1189,13 +1189,18 @@ export async function listAvailableKits(
   }
 }
 
-/** List plates with their module-gate state for the shelf. */
+/** List plates with their module-gate state for the shelf. Logic plates
+ *  (surface='logic', 0204) are headless check-containers — agents read them
+ *  via rvbbit.kit_pulse(); they don't belong on the launcher shelf.
+ *  to_jsonb keeps this tolerant of pre-0204 databases with no column. */
 export async function listPlates(connectionId: string): Promise<PlateListEntry[]> {
   const res = await executeQuery(
     connectionId,
     `SELECT plate_id, kit, module, title, description,
             to_jsonb(p)->>'requires_role' AS requires_role
-     FROM rvbbit.plates p ORDER BY kit NULLS FIRST, module NULLS FIRST, plate_id`,
+     FROM rvbbit.plates p
+     WHERE coalesce(to_jsonb(p)->>'surface', 'ui') <> 'logic'
+     ORDER BY kit NULLS FIRST, module NULLS FIRST, plate_id`,
     { readOnly: true, rowLimit: 200 },
   )
   const rows = (res.rows ?? []) as Array<Omit<PlateListEntry, "gated" | "violations" | "gate_detail" | "locked">>
