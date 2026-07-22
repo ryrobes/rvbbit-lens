@@ -683,8 +683,13 @@ export function ScryCanvas({
 
   return (
     <>
-      <div className="pointer-events-auto fixed inset-0 z-[118] bg-[#05070b]/90 backdrop-blur-sm" />
-      <div className="pointer-events-auto fixed inset-0 z-[120] overflow-hidden bg-[#060911]">
+      {/* Dark glass over the desktop, not a blackout: the scrim carries the
+          blur + most of the tint, the canvas layer adds a whisper more. The
+          wallpaper ghosting through keeps Scry feeling like a MODE of the
+          desktop rather than a separate app. Sigma's WebGL canvas is
+          transparent, so these two layers are the whole background. */}
+      <div className="pointer-events-auto fixed inset-0 z-[118] bg-[#05070b]/60 backdrop-blur-2xl" />
+      <div className="pointer-events-auto fixed inset-0 z-[120] overflow-hidden bg-[#060911]/45">
         <div ref={containerRef} className="h-full w-full" />
 
         {!graphReady ? (
