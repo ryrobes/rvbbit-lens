@@ -688,8 +688,8 @@ export function ScryCanvas({
           wallpaper ghosting through keeps Scry feeling like a MODE of the
           desktop rather than a separate app. Sigma's WebGL canvas is
           transparent, so these two layers are the whole background. */}
-      <div className="pointer-events-auto fixed inset-0 z-[118] bg-[#05070b]/60 backdrop-blur-2xl" />
-      <div className="pointer-events-auto fixed inset-0 z-[120] overflow-hidden bg-[#060911]/45">
+      <div className="pointer-events-auto fixed inset-0 z-[118] bg-[#05070b]/45 backdrop-blur-2xl" />
+      <div className="pointer-events-auto fixed inset-0 z-[120] overflow-hidden bg-[#060911]/30">
         <div ref={containerRef} className="h-full w-full" />
 
         {!graphReady ? (
