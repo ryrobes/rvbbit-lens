@@ -83,6 +83,8 @@ interface DesktopMenuBarProps {
   themeMode: "dark" | "light"
   onToggleLineage: () => void
   lineageVisible: boolean
+  tileMode: boolean
+  onToggleTileMode: () => void
   onUndo: () => void
   onRedo: () => void
   canUndo: boolean
@@ -200,6 +202,8 @@ export function DesktopMenuBar({
   themeMode,
   onToggleLineage,
   lineageVisible,
+  tileMode,
+  onToggleTileMode,
   onUndo,
   onRedo,
   canUndo,
@@ -327,6 +331,11 @@ export function DesktopMenuBar({
     {
       label: lineageVisible ? "Hide dependency lines" : "Show dependency lines",
       onClick: onToggleLineage,
+    },
+    {
+      label: tileMode ? "Exit tile mode" : "Tile windows",
+      onClick: onToggleTileMode,
+      shortcut: "⌥T",
     },
     { kind: "separator" },
     {

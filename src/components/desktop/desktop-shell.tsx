@@ -146,6 +146,7 @@ import { ScryCanvas } from "./scry-canvas"
 import { ScryResultsWindow } from "./scry-results-window"
 import { fetchFieldFocusSql } from "@/lib/desktop/scry-field"
 import type { ScryResultsPayload } from "@/lib/desktop/types"
+import { computeTileLayout, tileCycleOrder, type TileRect } from "@/lib/desktop/tile-layout"
 import type { DataSearchHit } from "@/lib/rvbbit/data-search"
 import { DriftWindow } from "./drift-window"
 import { ModelStudioWindow } from "./model-studio-window"
@@ -586,6 +587,25 @@ export function DesktopShell() {
   // never persisted — so it can't leak into saved desktops/scenes.
   const present = usePresentMode()
   const [presentFit, setPresentFit] = useState<PresentFit | null>(null)
+  // Tile mode (Exposé): Alt+T toggles a render-time justified-rows tiling
+  // of the active workspace's windows. Stored geometry is NEVER mutated —
+  // the rects live only in this state, so toggling off restores the real
+  // layout by construction. `tileAnim` keeps the geometry transition class
+  // on briefly after exit so windows glide home instead of snapping.
+  const [tileMode, setTileMode] = useState(false)
+  const [tileAnim, setTileAnim] = useState(false)
+  const [tileViewportTick, setTileViewportTick] = useState(0)
+  useEffect(() => {
+    if (tileMode) {
+      setTileAnim(true)
+      const onWinResize = () => setTileViewportTick((t) => t + 1)
+      window.addEventListener("resize", onWinResize)
+      return () => window.removeEventListener("resize", onWinResize)
+    }
+    // leaving tile mode: keep animating through the glide home
+    const t = window.setTimeout(() => setTileAnim(false), 380)
+    return () => window.clearTimeout(t)
+  }, [tileMode])
 
   useEffect(() => {
     const timer = window.setTimeout(() => setBootOverlayVisible(false), 1450)
@@ -5435,6 +5455,9 @@ export function DesktopShell() {
 
   // ── Keyboard shortcuts ─────────────────────────────────────────────
 
+  const tileModeRef = useRef(tileMode)
+  tileModeRef.current = tileMode
+
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
       const cmd = e.metaKey || e.ctrlKey
@@ -5445,6 +5468,37 @@ export function DesktopShell() {
         const tag = t.tagName
         return tag === "INPUT" || tag === "TEXTAREA"
       })()
+
+      // Alt+T — tile mode (Exposé): render-time tiling of the current
+      // workspace. Alt matches the existing Alt+1..6 desktop shortcuts.
+      if (e.altKey && !cmd && (e.key === "t" || e.key === "T" || e.code === "KeyT")) {
+        e.preventDefault()
+        setTileMode((o) => !o)
+        return
+      }
+      // Escape leaves tile mode (when not typing in an editor).
+      if (e.key === "Escape" && tileModeRef.current && !isEditable) {
+        e.preventDefault()
+        setTileMode(false)
+        return
+      }
+      // Tab / Shift+Tab — cycle window focus in spatial (tile) order.
+      // Works tiled or not ("reflow or not"), but never steals Tab from
+      // an editor/input, and never fights cmd/alt browser shortcuts.
+      if (e.key === "Tab" && !isEditable && !cmd && !e.altKey) {
+        const ws = activeWorkspaceRef.current
+        const canvas = workspacesRef.current[ws]
+        const order = tileCycleOrder(canvas.windows.filter((w) => !w.minimized))
+        if (order.length > 1) {
+          e.preventDefault()
+          const cur = canvas.focusedWindowId
+          const idx = cur ? order.indexOf(cur) : -1
+          const next =
+            order[(idx + (e.shiftKey ? -1 : 1) + order.length) % order.length]
+          focus(next)
+          return
+        }
+      }
 
       // Undo / Redo. We skip when an editable target has focus so the
       // editor (CodeMirror, native inputs) handles its own per-character
@@ -5499,7 +5553,21 @@ export function DesktopShell() {
     }
     window.addEventListener("keydown", onKey)
     return () => window.removeEventListener("keydown", onKey)
-  }, [openFinder, openSqlScratch, undo, redo, switchWorkspace])
+  }, [openFinder, openSqlScratch, undo, redo, switchWorkspace, focus])
+
+  // Tile-mode rects for the ACTIVE workspace. Ephemeral by design: never
+  // persisted, never written back to window state.
+  const tileRects = useMemo(() => {
+    if (!tileMode) return null
+    void tileViewportTick // recompute on browser resize while tiled
+    const wins = workspaces[activeWorkspace].windows.filter((w) => !w.minimized)
+    if (wins.length === 0) return null
+    return computeTileLayout(wins, {
+      width: window.innerWidth,
+      height: window.innerHeight - 44,
+      top: 40,
+    })
+  }, [tileMode, tileViewportTick, workspaces, activeWorkspace])
 
   // ── Render ──────────────────────────────────────────────────────────
 
@@ -6251,6 +6319,8 @@ export function DesktopShell() {
         themeMode={themeMode}
         onToggleLineage={() => setLineage(!lineageVisible)}
         lineageVisible={lineageVisible}
+        tileMode={tileMode}
+        onToggleTileMode={() => setTileMode((o) => !o)}
         onUndo={undo}
         onRedo={redo}
         canUndo={canUndo}
@@ -6467,6 +6537,8 @@ export function DesktopShell() {
                   workspaceActive={isActive}
                   focused={isActive && w.id === canvas.focusedWindowId}
                   viewportScale={viewport.scale}
+                  tileRect={isActive && tileRects ? tileRects.get(w.id) ?? null : null}
+                  geometryAnimated={tileAnim}
                   onFocus={focus}
                   onClose={close}
                   onMinimize={minimize}
@@ -6776,6 +6848,8 @@ const WindowFrame = memo(function WindowFrame({
   workspaceActive,
   focused,
   viewportScale,
+  tileRect,
+  geometryAnimated,
   onFocus,
   onClose,
   onMinimize,
@@ -6796,6 +6870,8 @@ const WindowFrame = memo(function WindowFrame({
   workspaceActive: boolean
   focused: boolean
   viewportScale: number
+  tileRect: TileRect | null
+  geometryAnimated: boolean
   onFocus: (id: string) => void
   onClose: (id: string) => void
   onMinimize: (id: string) => void
@@ -6845,6 +6921,8 @@ const WindowFrame = memo(function WindowFrame({
       onMove={onMove}
       onResize={onResize}
       viewportScale={viewportScale}
+      tileRect={tileRect}
+      geometryAnimated={geometryAnimated}
       columnDropAcceptsFrom={columnDropAcceptsFrom}
       onColumnMerge={onColumnMerge}
       semanticOps={semanticOps}

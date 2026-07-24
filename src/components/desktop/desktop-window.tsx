@@ -154,6 +154,16 @@ interface DesktopWindowProps {
     op: SemanticOpMeta,
     at: { x: number; y: number },
   ) => void
+  /**
+   * Tile mode: an EPHEMERAL rect this window renders at instead of its
+   * stored geometry. Stored x/y/width/height are untouched — toggling
+   * tile mode off restores the real layout because nothing ever moved.
+   * While set, header-drag and the resize grip are inert (the window
+   * itself stays fully interactive).
+   */
+  tileRect?: { x: number; y: number; width: number; height: number } | null
+  /** Animate geometry changes (tile enter/exit) with a CSS transition. */
+  geometryAnimated?: boolean
 }
 
 const MIN_WIDTH = 320
@@ -181,6 +191,8 @@ export function DesktopWindow({
   semanticOps,
   onSemanticDrop,
   onRowsetChain,
+  tileRect,
+  geometryAnimated,
 }: DesktopWindowProps) {
   const chrome = windowChrome(w.kind)
   // Present (read-only) mode: drop the editor chrome (title-bar buttons, drag,
@@ -702,16 +714,19 @@ export function DesktopWindow({
         // `group/window` lets content surfaces (datagrids, editors) react to
         // this window's focus state via `group-data-[focused=…]/window:` —
         // e.g. a grid stays opaque when focused but glass-tints when not.
-        "group/window pointer-events-auto absolute overflow-hidden rounded-md border transition-[background-color,backdrop-filter,box-shadow] duration-150",
+        "group/window pointer-events-auto absolute overflow-hidden rounded-md border",
+        geometryAnimated
+          ? "transition-[left,top,width,height,background-color,backdrop-filter,box-shadow] duration-300 ease-[cubic-bezier(0.22,1,0.36,1)]"
+          : "transition-[background-color,backdrop-filter,box-shadow] duration-150",
         focused
           ? "bg-block-bg/95"
           : "bg-block-bg/55 backdrop-blur-[6px] saturate-[0.85]",
       )}
       style={{
-        left: livePos ? livePos.x : w.x,
-        top: livePos ? livePos.y : w.y,
-        width: liveSize ? liveSize.width : w.width,
-        height: liveSize ? liveSize.height : w.height,
+        left: tileRect ? tileRect.x : livePos ? livePos.x : w.x,
+        top: tileRect ? tileRect.y : livePos ? livePos.y : w.y,
+        width: tileRect ? tileRect.width : liveSize ? liveSize.width : w.width,
+        height: tileRect ? tileRect.height : liveSize ? liveSize.height : w.height,
         zIndex: w.zIndex,
         borderColor: chrome.border,
         // Unfocused windows get a shallower drop shadow and a half-strength
@@ -732,14 +747,14 @@ export function DesktopWindow({
       <div
         className={cn(
           "flex select-none items-center border-b transition-colors duration-150",
-          present ? "h-7 px-2.5" : "h-9 cursor-grab px-2 active:cursor-grabbing",
+          present ? "h-7 px-2.5" : tileRect ? "h-9 px-2" : "h-9 cursor-grab px-2 active:cursor-grabbing",
           focused ? "bg-chrome-bg/85" : "bg-chrome-bg/55",
         )}
         style={{ borderColor: chrome.headerBorder }}
-        onPointerDown={present ? undefined : onHeaderDown}
-        onPointerMove={present ? undefined : onHeaderMove}
-        onPointerUp={present ? undefined : onHeaderUp}
-        onPointerCancel={present ? undefined : onHeaderUp}
+        onPointerDown={present || tileRect ? undefined : onHeaderDown}
+        onPointerMove={present || tileRect ? undefined : onHeaderMove}
+        onPointerUp={present || tileRect ? undefined : onHeaderUp}
+        onPointerCancel={present || tileRect ? undefined : onHeaderUp}
       >
         <div className="flex min-w-0 flex-1 items-center gap-2">
           <Icon className="h-4 w-4 shrink-0" style={{ color: chrome.icon }} />
@@ -982,7 +997,7 @@ export function DesktopWindow({
         />
       ) : null}
 
-      {present ? null : (
+      {present || tileRect ? null : (
         <button
           type="button"
           aria-label="Resize"
