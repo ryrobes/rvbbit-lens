@@ -163,6 +163,23 @@ export type AssistantCommand =
       hint?: string
     }
   | {
+      /** Publish a deck — a paged slide narrative rendered by the vendored
+       *  deck runtime (docs/DECKS_PLAN.md). Slides may carry data.sql; the
+       *  DESKTOP runs those queries at publish time and pins the rows (the
+       *  assistant never types numbers). Lands in rvbbit.dashboards with
+       *  app_kind='deck' and opens in a dashboard-app window. */
+      op: "publish_deck"
+      name: string
+      description?: string
+      spec: {
+        deck: {
+          title?: string
+          theme?: Record<string, string>
+          slides: Array<Record<string, unknown>>
+        }
+      }
+    }
+  | {
       /** Register/re-register a kit's metadata (title/version/description).
        *  Downgrades refused engine-side; the error lands in apply_report. */
       op: "register_kit"

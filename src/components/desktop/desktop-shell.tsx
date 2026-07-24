@@ -3132,6 +3132,23 @@ export function DesktopShell() {
    * locally — liveWindows() reads a ref that is stale inside this batch.
    * commitSnapshotNow() first makes the whole turn one undo step.
    */
+  // One standalone window per app (focus if that slug is already open) — many
+  // apps can sit on the canvas together and cross-filter via desktop params.
+  const openDashboardApp = useCallback((slug: string, name?: string) => {
+    const existing = liveWindows().find(
+      (w) => w.kind === "dashboard-app" && (w.payload as DashboardAppPayload | undefined)?.slug === slug,
+    )
+    if (existing) return focus(existing.id)
+    const offset = (liveWindows().filter((w) => w.kind === "dashboard-app").length % 6) * 28
+    openWindow({
+      id: randomUUID(),
+      kind: "dashboard-app",
+      title: name || slug,
+      x: 200 + offset, y: 110 + offset, width: 920, height: 640,
+      payload: { kind: "dashboard-app", slug, name } satisfies DashboardAppPayload,
+    })
+  }, [focus, openWindow, liveWindows])
+
   const applyAssistantCommands = useCallback(
     async (
       commands: AssistantCommand[],
@@ -3630,6 +3647,53 @@ export function DesktopShell() {
               })
               return
             }
+            case "publish_deck": {
+              const idx = report.length
+              report.push({ op: cmd.op, target: cmd.name, status: "skipped", detail: "pending" })
+              const deckCmd = cmd
+              pendingAsync.push(async () => {
+                if (!activeConnectionId) {
+                  report[idx] = { op: deckCmd.op, target: deckCmd.name, status: "skipped", detail: "no active connection" }
+                  return
+                }
+                try {
+                  const res = await fetch("/api/deck/publish", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                      connectionId: activeConnectionId,
+                      name: deckCmd.name,
+                      description: deckCmd.description,
+                      spec: deckCmd.spec,
+                    }),
+                  })
+                  const body = (await res.json()) as {
+                    ok: boolean
+                    slug?: string
+                    version?: number
+                    pinned?: number
+                    pin_errors?: string[]
+                    error?: string
+                  }
+                  if (!body.ok || !body.slug) {
+                    report[idx] = { op: deckCmd.op, target: deckCmd.name, status: "skipped", detail: body.error ?? "publish failed" }
+                    return
+                  }
+                  openDashboardApp(body.slug, deckCmd.name)
+                  report[idx] = {
+                    op: deckCmd.op,
+                    target: body.slug,
+                    status: "applied",
+                    detail:
+                      `v${body.version} · ${body.pinned ?? 0} slide queries pinned` +
+                      (body.pin_errors?.length ? ` · PIN FAILURES: ${body.pin_errors.join("; ")}` : ""),
+                  }
+                } catch (e) {
+                  report[idx] = { op: deckCmd.op, target: deckCmd.name, status: "skipped", detail: e instanceof Error ? e.message : String(e) }
+                }
+              })
+              return
+            }
             case "register_kit": {
               const idx = report.length
               report.push({ op: cmd.op, target: cmd.kit, status: "skipped", detail: "pending" })
@@ -3785,7 +3849,7 @@ export function DesktopShell() {
       }
       return report
     },
-    [commitSnapshotNow, liveWindows, openWindow, updatePayload, emitParam, calloutWindow, close, setWindows, setRunSignals, activeConnectionId, openPlate, focus],
+    [commitSnapshotNow, liveWindows, openWindow, updatePayload, emitParam, calloutWindow, close, setWindows, setRunSignals, activeConnectionId, openPlate, focus, openDashboardApp],
   )
 
   const openSyncMirror = useCallback(() => {
@@ -3841,22 +3905,6 @@ export function DesktopShell() {
     })
   }, [focus, openWindow, liveWindows])
 
-  // One standalone window per app (focus if that slug is already open) — many
-  // apps can sit on the canvas together and cross-filter via desktop params.
-  const openDashboardApp = useCallback((slug: string, name?: string) => {
-    const existing = liveWindows().find(
-      (w) => w.kind === "dashboard-app" && (w.payload as DashboardAppPayload | undefined)?.slug === slug,
-    )
-    if (existing) return focus(existing.id)
-    const offset = (liveWindows().filter((w) => w.kind === "dashboard-app").length % 6) * 28
-    openWindow({
-      id: randomUUID(),
-      kind: "dashboard-app",
-      title: name || slug,
-      x: 200 + offset, y: 110 + offset, width: 920, height: 640,
-      payload: { kind: "dashboard-app", slug, name } satisfies DashboardAppPayload,
-    })
-  }, [focus, openWindow, liveWindows])
 
   const openKitFlow = useCallback((kitName?: string) => {
     const existing = liveWindows().find((w) => w.kind === "kit-flow")
