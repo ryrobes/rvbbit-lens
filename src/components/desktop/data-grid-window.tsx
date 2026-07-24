@@ -35,6 +35,9 @@ import {
 } from "@/lib/icons"
 import { format as formatSql } from "sql-formatter"
 import { ThinkingOrb } from "thinking-orbs"
+
+// Query-run orb flavors — one is picked at random per run.
+const ORB_STATES = ["working", "composing", "solving"] as const
 import { ChartView } from "./chart-view"
 import { ControlView } from "./control-view"
 import { ModelField } from "./operator-inspector"
@@ -4591,11 +4594,18 @@ function EmptyResult({
   filterCount?: number
   onClearFilters?: () => void
 }) {
+  // One orb flavor per run: re-rolled when `running` flips, stable while
+  // the query is in flight (no mid-run shapeshifting).
+  const orbState = useMemo(
+    () => ORB_STATES[Math.floor(Math.random() * ORB_STATES.length)],
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [running],
+  )
   if (running) {
     return (
       <div className="grid h-full place-items-center text-xs text-chrome-text">
         <div className="text-center">
-          <ThinkingOrb state="solving" size={64} style={{ margin: "0 auto 8px" }} />
+          <ThinkingOrb state={orbState} size={64} style={{ margin: "0 auto 8px" }} />
           <div>
             Running query
             {progress?.elapsedMs != null ? <span className="tabular-nums"> · {fmtDur(progress.elapsedMs)}</span> : "…"}
