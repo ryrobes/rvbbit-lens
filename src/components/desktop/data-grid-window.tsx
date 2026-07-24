@@ -34,6 +34,7 @@ import {
   X,
 } from "@/lib/icons"
 import { format as formatSql } from "sql-formatter"
+import { ThinkingOrb } from "thinking-orbs"
 import { ChartView } from "./chart-view"
 import { ControlView } from "./control-view"
 import { ModelField } from "./operator-inspector"
@@ -1317,6 +1318,11 @@ export function DataGridWindow({
     if (txnSessionId && !userInitiated) return
     const myNonce = ++runNonceRef.current
     setRunEpoch(myNonce)
+    // Show the run immediately: a fresh block sits on the SQL tab, where a
+    // running query is invisible. Flip to Rows AT START (not on completion)
+    // so the "Running query" panel is the feedback. Quiet runs (literal
+    // scrubs) keep the editor — yanking it mid-drag kills the gesture.
+    if (userInitiated && !options?.quiet && activeTab === "sql") setActiveTab("rows")
     // DEV instrumentation: record every runSql so a test harness can detect a
     // re-run storm (a block whose count climbs without user action). No-op in prod.
     if (process.env.NODE_ENV !== "production") {
@@ -4589,7 +4595,7 @@ function EmptyResult({
     return (
       <div className="grid h-full place-items-center text-xs text-chrome-text">
         <div className="text-center">
-          <Clock className="mx-auto mb-2 h-5 w-5 animate-pulse" />
+          <ThinkingOrb state="solving" size={64} style={{ margin: "0 auto 8px" }} />
           <div>
             Running query
             {progress?.elapsedMs != null ? <span className="tabular-nums"> · {fmtDur(progress.elapsedMs)}</span> : "…"}
